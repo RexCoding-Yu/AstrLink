@@ -6,7 +6,6 @@
 .env
 .env.*
 !.env.example
-private.env
 *.key
 *.pem
 
@@ -82,7 +81,6 @@ flax_model*.msgpack
 
 # Local editor rules and internal project documents
 /.cursor/
-/.claude/settings.json
 /ARCHITECTURE.md
 /PROJECT_PLAN.md
 /PROJECT_ROADMAP.md
