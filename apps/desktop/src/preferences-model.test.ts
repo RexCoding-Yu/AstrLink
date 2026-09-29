@@ -1,3 +1,4 @@
+import { defaultUpdatePreferences } from "./update-model";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -20,6 +21,7 @@ const valid = {
     quota_display_mode: "remaining" as const,
     locale: "zh-CN",
     tray: defaultTrayPreferences(),
+    updates: defaultUpdatePreferences(),
   },
   load_warning: null,
   autostart_actual: false,

@@ -110,7 +110,7 @@ func New(roundTripper http.RoundTripper) *Forwarder {
 // so slow non-stream generations are not cut off before the first byte.
 func NewWithResponseHeaderTimeout(roundTripper http.RoundTripper, headerTimeout time.Duration) *Forwarder {
 	if roundTripper == nil {
-		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		if defaultTransport, ok := networkproxy.BaseTransport(http.DefaultTransport); ok {
 			configured := defaultTransport.Clone()
 			configured.DisableCompression = true
 			configured.ResponseHeaderTimeout = headerTimeout

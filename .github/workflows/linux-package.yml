@@ -1,8 +1,11 @@
 name: Linux package
 
 on:
-  push:
-    tags: ["**"]
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
   workflow_dispatch:
 
 permissions:
@@ -17,6 +20,7 @@ env:
   ASTRLINK_CI_SYNTHETIC_MODELS_ONLY: "1"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
 
 jobs:
   package:
@@ -35,7 +39,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-            librsvg2-dev patchelf build-essential
+            librsvg2-dev patchelf build-essential libfuse2
       - uses: actions/setup-go@v6
         with:
           go-version-file: core/go.mod
@@ -68,6 +72,16 @@ jobs:
           cache-directories: apps/privacy-worker/target/onnxruntime
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+      - name: Stamp release version
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bun scripts/release-updates.mjs stamp "$RELEASE_TAG"
+      - name: Validate update signing configuration
+        if: inputs.release_tag != ''
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun scripts/release-updates.mjs preflight
       - name: Check frontend and Core in parallel
         run: |
           (bun run branding:sync && bun run typecheck && bun run test) &
@@ -82,8 +96,28 @@ jobs:
         run: bun ../../scripts/check-no-production-models.mjs
       - name: Stage Core and worker sidecars
         run: bun run sidecar:build
-      - name: Build Debian package
-        run: bun run tauri build --ci --bundles deb
+      - name: Build Debian package and AppImage
+        run: bun run tauri build --ci --bundles deb,appimage
+      - name: Extract and verify AppImage
+        run: |
+          image=$(realpath src-tauri/target/release/bundle/appimage/*.AppImage)
+          scan_dir="$RUNNER_TEMP/astrlink-appimage-scan"
+          mkdir -p "$scan_dir"
+          (cd "$scan_dir" && "$image" --appimage-extract > /dev/null)
+          bun ../../scripts/check-no-production-models.mjs --packaged "$scan_dir/squashfs-root"
+          mkdir -p "$RUNNER_TEMP/astrlink-appimage-smoke"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$scan_dir/squashfs-root:/appimage:ro" \
+            --volume "$RUNNER_TEMP/astrlink-appimage-smoke:/smoke" \
+            --env DEBIAN_FRONTEND=noninteractive \
+            debian:12-slim bash -euc '
+              apt-get update
+              apt-get install -y --no-install-recommends python3 binutils ca-certificates \
+                /workspace/apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+              python3 /workspace/apps/desktop/scripts/verify-unix-package.py \
+                --platform linux --arch x86_64 --root /appimage --logs /smoke
+            '
       - name: Inspect Debian package contents and dependencies
         run: |
           shopt -s nullglob
@@ -120,9 +154,16 @@ jobs:
       - name: Prepare downloads and checksums
         run: |
           mkdir -p package
-          cp src-tauri/target/release/bundle/deb/*.deb package/
+          cp src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/appimage/*.AppImage package/
           cd package
-          sha256sum ./*.deb > SHA256SUMS
+          sha256sum ./*.deb ./*.AppImage > SHA256SUMS
+      - name: Sign and verify AppImage update
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun scripts/release-updates.mjs stage linux-x86_64 "$RELEASE_TAG"
       - name: Upload checked Linux package
         uses: actions/upload-artifact@v7
         with:

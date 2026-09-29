@@ -1550,14 +1550,22 @@ describe("RequestRecords", () => {
         ?.querySelector('[data-testid="inspector-section"]')
         ?.getAttribute("data-chip"),
     ).toBe("POLICY");
-    expect(after?.textContent).toContain("命中");
-    expect(after?.textContent).toContain("邮箱 ×2");
-    expect(after?.textContent).toContain("电话 ×1");
+    expect(
+      after
+        ?.querySelector('[data-testid="policy-inspector"]')
+        ?.getAttribute("data-decision"),
+    ).toBe("redact");
+    expect(
+      after?.querySelector('[data-testid="policy-outcome"]')?.textContent,
+    ).toBe("已脱敏替换 4 处邮箱 ×2电话 ×1");
     expect(after?.textContent).not.toContain("客户端响应");
     expect(after?.textContent).not.toContain("上游响应");
+    // Capture is off here: the redacted request says so once, in its pane.
     expect(
-      after?.querySelector('[data-testid="redacted-request-details"]'),
-    ).toBeNull();
+      after
+        ?.querySelector('[data-testid="inspector-policy-body"]')
+        ?.querySelector('[data-testid="inspector-missing-body"]')?.textContent,
+    ).toContain("未捕获");
     expect(list.scrollTop).toBe(48);
 
     await act(async () => {
@@ -1634,13 +1642,11 @@ describe("RequestRecords", () => {
     expect(hits?.textContent).toContain("电话 ×1");
     expect(hits?.textContent).not.toContain("alice@");
     expect(hits?.querySelector('[data-testid="privacy-mark"]')).toBeNull();
-    const details = inspector?.querySelector(
-      '[data-testid="redacted-request-details"]',
-    ) as HTMLDetailsElement | null;
-    expect(details).not.toBeNull();
-    expect(details?.open).toBe(false);
-    expect(details?.textContent).toContain("脱敏后请求");
-    expect(details?.textContent).toContain("xxxxxxxx");
+    const pane = inspector?.querySelector('[aria-label="脱敏后请求"]');
+    expect(pane?.textContent).toContain("脱敏后请求");
+    expect(
+      pane?.querySelector('[data-testid="inspector-policy-body"]')?.textContent,
+    ).toContain("xxxxxxxx");
   });
 
   it("highlights captured placeholders and jumps from a recorded hit", async () => {
@@ -1683,15 +1689,14 @@ describe("RequestRecords", () => {
     const inspector = container.querySelector(
       '[data-testid="trajectory-inspector"]',
     );
-    const details = inspector?.querySelector(
-      '[data-testid="redacted-request-details"]',
-    ) as HTMLDetailsElement | null;
-    expect(details?.open).toBe(false);
-    const mark = inspector?.querySelector(
-      '[data-testid="privacy-mark"][data-kind="email"]',
+    const mark = inspector?.querySelector<HTMLElement>(
+      '[data-testid="inspector-policy-body"] [data-testid="privacy-mark"][data-kind="email"]',
     );
-    expect(mark?.textContent).toBe("<PRIVATE_EMAIL_aaaaaaaaaaaaaaaa>");
-    expect(mark?.textContent).not.toContain("alice@");
+    if (!mark) throw new Error("Missing email privacy mark");
+    expect(mark.textContent).toBe("<PRIVATE_EMAIL_aaaaaaaaaaaaaaaa>");
+    expect(mark.textContent).not.toContain("alice@");
+    const scrollIntoView = vi.fn();
+    mark.scrollIntoView = scrollIntoView;
 
     const emailHit = inspector?.querySelector<HTMLButtonElement>(
       '[data-testid="privacy-hits"] button[data-kind="email"]',
@@ -1700,7 +1705,7 @@ describe("RequestRecords", () => {
     await act(async () => {
       emailHit.click();
     });
-    expect(details?.open).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
   });
 
   // A natural stand-in is indistinguishable from a real value by eye, so this
@@ -1762,7 +1767,7 @@ describe("RequestRecords", () => {
     );
   });
 
-  it("shows 未命中 when a POLICY row has no recorded hit kinds", async () => {
+  it("counts a legacy redaction that has no recorded hit kinds", async () => {
     const legacy: RequestRecord = {
       ...firstRecord,
       privacy_restore: {
@@ -1806,8 +1811,106 @@ describe("RequestRecords", () => {
     const inspector = container.querySelector(
       '[data-testid="trajectory-inspector"]',
     );
-    expect(inspector?.textContent).toContain("未命中");
+    expect(
+      inspector?.querySelector('[data-testid="policy-outcome"]')?.textContent,
+    ).toBe("已脱敏替换 4 处");
     expect(inspector?.querySelector('[data-testid="privacy-hits"]')).toBeNull();
+  });
+
+  it("shows 未命中 without repeating the client body when the policy allowed the request", async () => {
+    const allowed: RequestRecord = {
+      ...firstRecord,
+      privacy_restore: null,
+      events: [
+        {
+          kind: "accepted",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.started_at,
+          status: "succeeded",
+          summary: "gpt-4.1 · openai.responses",
+          attempt_index: 1,
+        },
+        {
+          kind: "privacy",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.started_at,
+          status: "succeeded",
+          summary: "allow",
+          attempt_index: 1,
+        },
+        {
+          kind: "completed",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.completed_at,
+          status: "succeeded",
+          summary: "HTTP 200",
+          attempt_index: 1,
+        },
+      ],
+    };
+    const body = '{"input":"hello"}';
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      request_id: allowed.id,
+      http_meta: null,
+      request_body: {
+        media_type: "application/json",
+        content: body,
+        truncated: false,
+        captured_bytes: body.length,
+      },
+      response_content: null,
+      upstream_http_meta: null,
+      upstream_request_body: {
+        media_type: "application/json",
+        content: body,
+        truncated: false,
+        captured_bytes: body.length,
+      },
+      upstream_response_content: null,
+    });
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(allowed)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce({
+      ...sessionFromRecord(allowed),
+      turns: [allowed],
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${allowed.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="trajectory-row"][data-chip="POLICY"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    const inspector = container.querySelector(
+      '[data-testid="trajectory-inspector"]',
+    );
+    expect(
+      inspector?.querySelector('[data-testid="policy-outcome"]')?.textContent,
+    ).toBe("未命中");
+    expect(
+      inspector?.querySelector('[data-testid="policy-hint"]')?.textContent,
+    ).toContain("请求体见「客户端」");
+    expect(
+      inspector?.querySelector('[data-testid="inspector-policy-body"]'),
+    ).toBeNull();
+    expect(inspector?.textContent).not.toContain("hello");
+    expect(inspector?.textContent).not.toContain(`${body.length} B`);
   });
 
   it("explains missing capture in the inspector", async () => {
@@ -2461,6 +2564,67 @@ describe("RequestRecords", () => {
       firstRecord.id,
     );
     expect(requestAnimationFrame).toHaveBeenCalled();
+  });
+
+  it("saves MiB inputs as bytes without changing body capture", async () => {
+    await renderRecords();
+    await act(async () => exactButton("审计设置").click());
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const inputs = [
+      ...dialog.querySelectorAll<HTMLInputElement>('input[type="number"]'),
+    ];
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      for (const [index, value] of ["1.5", "64", "3650", "365"].entries()) {
+        setValue.call(inputs[index], value);
+        inputs[index].dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      dialog.querySelector<HTMLButtonElement>('[role="switch"]')!.click();
+    });
+    await act(async () => exactButton("保存", dialog).click());
+    expect(bridgeMocks.updateAuditSettings).toHaveBeenCalledWith({
+      http_meta_enabled: false,
+      request_body_max_bytes: 1_572_864,
+      response_content_max_bytes: 67_108_864,
+      metadata_retention_days: 3650,
+      content_retention_days: 365,
+    });
+    expect(dialog.textContent).toContain("审计设置已保存");
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("preserves byte-exact limits when only retention changes", async () => {
+    bridgeMocks.getAuditSettings.mockResolvedValue({
+      request_body_enabled: false,
+      response_content_enabled: false,
+      http_meta_enabled: true,
+      request_body_max_bytes: 1_048_577,
+      response_content_max_bytes: 4_194_305,
+      metadata_retention_days: 30,
+      content_retention_days: 7,
+    });
+    await renderRecords();
+    await act(async () => exactButton("审计设置").click());
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const inputs = [
+      ...dialog.querySelectorAll<HTMLInputElement>('input[type="number"]'),
+    ];
+    expect(Number(inputs[0].value) * 1_048_576).toBe(1_048_577);
+    expect(Number(inputs[1].value) * 1_048_576).toBe(4_194_305);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(inputs[2], "60");
+      inputs[2].dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => exactButton("保存", dialog).click());
+    expect(bridgeMocks.updateAuditSettings).toHaveBeenCalledWith({
+      metadata_retention_days: 60,
+    });
   });
 
   it("does not treat the capture switch as off while audit settings are loading", async () => {

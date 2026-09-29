@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { defaultUpdatePreferences } from "./update-model";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,6 +57,7 @@ const settings = {
     quota_display_mode: "remaining" as const,
     locale: "zh-CN" as const,
     tray: defaultTrayPreferences(),
+    updates: defaultUpdatePreferences(),
   },
   load_warning: null,
   autostart_actual: false,

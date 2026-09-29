@@ -21,7 +21,7 @@ import { TrajectoryInspectorWindow } from "./TrajectoryInspectorWindow";
 import { isTrajectoryInspectorWindow } from "./trajectory-inspector-window";
 import { TrayPopoverWindow } from "./TrayPopover";
 import { isTrayPopoverWindow } from "./tray-popover-window";
-import { WindowChrome } from "./WindowChrome";
+import { WindowChrome, WindowChromeProvider } from "./WindowChrome";
 import { getDesktopPlatform } from "./window-chrome";
 import { applyTheme, initializeTheme } from "./theme";
 import {
@@ -101,8 +101,10 @@ createRoot(root).render(
     <I18nextProvider i18n={i18n}>
       <LocaleGate>
         <TooltipProvider>
-          {trayPopover ? null : <WindowChrome platform={desktopPlatform} />}
-          <AppErrorBoundary>{surface}</AppErrorBoundary>
+          <WindowChromeProvider>
+            {trayPopover ? null : <WindowChrome platform={desktopPlatform} />}
+            <AppErrorBoundary>{surface}</AppErrorBoundary>
+          </WindowChromeProvider>
           {trayPopover ? null : <Toaster position="bottom-right" />}
         </TooltipProvider>
       </LocaleGate>

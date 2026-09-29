@@ -28,10 +28,14 @@ describe("Switch", () => {
     );
     await act(async () => root.render(<Switch aria-label="demo" checked />));
     const control = container.querySelector("[data-slot='switch']");
-    const thumb = container.querySelector("[data-slot='switch-thumb']");
     expect(control?.getAttribute("data-state")).toBe("checked");
     expect(control?.className.split(/\s+/)).toContain("transition-none");
-    expect(thumb?.className.split(/\s+/)).toContain("transition-none");
+    for (const slot of ["switch-on", "switch-off"]) {
+      const indicator = container.querySelector(`[data-slot='${slot}']`);
+      expect(indicator?.getAttribute("class")?.split(/\s+/)).toContain(
+        "transition-none",
+      );
+    }
   });
 
   it("animates an intentional toggle and honors reduced motion", async () => {
@@ -45,10 +49,11 @@ describe("Switch", () => {
     await act(async () => control.click());
     expect(onChange).toHaveBeenCalledWith(true);
     expect(control.className.split(/\s+/)).toContain("transition-colors");
-    const thumb = container.querySelector("[data-slot='switch-thumb']");
-    expect(thumb?.className.split(/\s+/)).toContain("transition-transform");
-    expect(thumb?.className.split(/\s+/)).toContain(
-      "motion-reduce:transition-none",
-    );
+    for (const slot of ["switch-on", "switch-off"]) {
+      const indicator = container.querySelector(`[data-slot='${slot}']`);
+      const classes = indicator?.getAttribute("class")?.split(/\s+/);
+      expect(classes).toContain("transition-opacity");
+      expect(classes).toContain("motion-reduce:transition-none");
+    }
   });
 });

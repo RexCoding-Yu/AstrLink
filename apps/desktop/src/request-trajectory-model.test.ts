@@ -14,6 +14,7 @@ import {
   inspectorPart,
   inspectorTitle,
   modelRedirectSummary,
+  policyDecision,
   callProgressAtListOffset,
   callProgressAtScrollLeft,
   listOffsetForCall,
@@ -1154,6 +1155,37 @@ describe("request trajectory model", () => {
       ["url", "URL", 1],
     ]);
     expect(recordedPrivacyHits(record.privacy_restore)).toEqual([]);
+  });
+
+  it("reads the policy decision from the phase summary Core writes", () => {
+    const decide = (
+      summary: string,
+      status: RequestRecord["status"] = "succeeded",
+    ) => policyDecision({ summary, status }, null);
+    expect(decide("allow")).toBe("allow");
+    expect(decide("warn")).toBe("warn");
+    expect(decide("block", "blocked")).toBe("block");
+    expect(decide("redact · 3")).toBe("redact");
+    expect(decide("redact · 3 · notice")).toBe("redact");
+    expect(decide("local · inspecting · 12 KB", "pending")).toBe("inspecting");
+    expect(decide("privacy_policy_unavailable", "failed")).toBe("unfinished");
+    expect(decide("local · inspecting · 12 KB", "cancelled")).toBe(
+      "unfinished",
+    );
+    // Records synthesized without events carry only the mapping.
+    expect(
+      policyDecision(
+        { summary: "allow", status: "succeeded" },
+        {
+          enabled: false,
+          mapping_count: 2,
+          restored_count: 0,
+          visible_restored_count: 0,
+          tool_argument_restored_count: 0,
+          fallback_count: 0,
+        },
+      ),
+    ).toBe("redact");
   });
 
   it("splits highlight spans so originals stay plain text", () => {

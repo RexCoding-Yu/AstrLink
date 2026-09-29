@@ -1814,6 +1814,7 @@ export function ServiceManager({
                   items={visibleServices}
                   label={t("services.orderLabel")}
                   compact
+                  showPosition={false}
                   disabled={
                     !isReady ||
                     busy ||
@@ -1896,7 +1897,7 @@ export function ServiceManager({
                                   />
                                 ) : null}
                               </div>
-                              <div className="flex min-w-0 items-baseline gap-2 @[820px]/service-list:grid @[820px]/service-list:gap-0.5">
+                              <div className="flex min-w-0 items-baseline gap-2 @[640px]/service-list:grid @[640px]/service-list:gap-0.5">
                                 <span className="shrink-0 text-micro text-muted-foreground">
                                   {serviceKindLabel(service.kind)}
                                 </span>
@@ -2019,8 +2020,9 @@ export function ServiceManager({
                           />
                         }
                         status={
-                          <>
-                            <StatusDot label={statusLabel} tone={tone} />
+                          // The switch already shows on/off; mark only states
+                          // that need attention, without moving the switch.
+                          <span className="relative inline-flex">
                             <Switch
                               aria-label={t("services.enableNamed", {
                                 name: service.name,
@@ -2032,7 +2034,12 @@ export function ServiceManager({
                               }
                               size="sm"
                             />
-                          </>
+                            {tone === "negative" || tone === "pending" ? (
+                              <span className="absolute -top-1.5 -right-1.5 flex">
+                                <StatusDot label={statusLabel} tone={tone} />
+                              </span>
+                            ) : null}
+                          </span>
                         }
                         actions={
                           <>

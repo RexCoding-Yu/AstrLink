@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TrajectoryChip } from "./request-trajectory-model";
-import { chipToneClass } from "./trajectory-chip";
+import { chipDotClass, chipToneClass } from "./trajectory-chip";
 
 const chips: TrajectoryChip[] = [
   "TURN",
@@ -42,5 +42,35 @@ describe("chipToneClass", () => {
     expect(chipToneClass("RESULT", "failed")).toBe(
       "bg-destructive text-destructive-foreground",
     );
+  });
+});
+
+describe("chipDotClass", () => {
+  // A tab matches the row that opened it, so a healthy call keeps every
+  // phase's colour rather than greying all but the result.
+  it("keeps each phase's list colour on a healthy call", () => {
+    for (const chip of chips) {
+      expect(chipDotClass(chip, "ok"), chip).toBe(
+        chipToneClass(chip, "ok")
+          .split(" ")[0]
+          .replace(/-wash$/, ""),
+      );
+    }
+    expect(chipDotClass("CLIENT", "ok")).toBe("bg-primary");
+    expect(chipDotClass("ROUTE", "ok")).toBe("bg-tide");
+    expect(chipDotClass("RESULT", "ok")).toBe("bg-success");
+  });
+
+  it("marks failures and waits only on the phases that carry them", () => {
+    expect(chipDotClass("UPSTREAM", "failed")).toBe("bg-destructive");
+    expect(chipDotClass("RESULT", "failed")).toBe("bg-destructive");
+    expect(chipDotClass("POLICY", "blocked")).toBe("bg-blocked");
+    expect(chipDotClass("RESULT", "pending")).toBe("bg-warning");
+    expect(chipDotClass("CLIENT", "cancelled")).toBe("bg-warning");
+    for (const tone of ["failed", "blocked", "cancelled", "pending"] as const) {
+      expect(chipDotClass("REDIRECT", tone), tone).toBe(
+        chipDotClass("REDIRECT", "ok"),
+      );
+    }
   });
 });

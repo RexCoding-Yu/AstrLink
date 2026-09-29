@@ -13,7 +13,14 @@ const hostMocks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: hostMocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: hostMocks.listen }));
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ label: "trajectory-inspector-2" }),
+  getCurrentWindow: () => ({
+    label: "trajectory-inspector-2",
+    isFocused: async () => true,
+    isFullscreen: async () => false,
+    isMaximized: async () => false,
+    onFocusChanged: async () => () => undefined,
+    onResized: async () => () => undefined,
+  }),
 }));
 
 const bridgeMocks = vi.hoisted(() => ({
@@ -25,6 +32,7 @@ import type { AuditContent, RequestRecord } from "./request-record-model";
 import { emptyTrajectoryFields } from "./request-record-model";
 import type { TrajectoryRow } from "./request-trajectory-model";
 import { TrajectoryInspectorWindow } from "./TrajectoryInspectorWindow";
+import { WindowChrome, WindowChromeProvider } from "./WindowChrome";
 import {
   detachedInspectorEnabled,
   isTrajectoryInspectorWindow,
@@ -175,7 +183,13 @@ describe("TrajectoryInspectorWindow", () => {
 
   const render = async () => {
     await act(async () => {
-      root.render(<TrajectoryInspectorWindow />);
+      // The pin lives in the title bar, so the window renders with its chrome.
+      root.render(
+        <WindowChromeProvider>
+          <WindowChrome platform="macos" />
+          <TrajectoryInspectorWindow />
+        </WindowChromeProvider>,
+      );
     });
     await flush();
   };
@@ -186,6 +200,276 @@ describe("TrajectoryInspectorWindow", () => {
     });
     await flush();
   };
+
+  it("marks an identical upstream response and preserves stream failure with HTTP 200", async () => {
+    const content =
+      'data: {"type":"response.output_text.delta","delta":"Client reply"}\n\n';
+    const part = {
+      content,
+      media_type: "text/event-stream",
+      captured_bytes: content.length,
+      truncated: false,
+    };
+    const failed: RequestRecord = {
+      ...record,
+      status: "failed",
+      error: {
+        category: "upstream",
+        code: "upstream_stream_interrupted",
+        message: "Stream ended early",
+        retryable: true,
+      },
+    };
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      ...auditContent,
+      response_content: part,
+      upstream_response_content: part,
+    });
+    hostState.current = {
+      selection: { record: failed, row: { ...row, chip: "RESULT" } },
+      pinned: false,
+    };
+    await render();
+    const preview = container.querySelector(
+      '[data-testid="audit-result-preview"]',
+    );
+    expect(preview?.textContent).toContain("Client reply");
+    expect(
+      container.querySelector('[data-testid="inspector-http"]')?.textContent,
+    ).toBe("HTTP 200");
+    // Without a provider error the gateway's code leads the one reason card.
+    const diagnosis = preview?.querySelector(
+      '[data-testid="inspector-diagnosis"]',
+    );
+    expect(diagnosis?.textContent).toContain("upstream_stream_interrupted");
+    expect(diagnosis?.textContent).toContain("可重试");
+    expect(diagnosis?.textContent).toContain("Stream ended early");
+    expect(diagnosis?.textContent).toContain("不代表流式输出成功完成");
+    expect(
+      container.querySelectorAll('[data-testid="inspector-diagnosis"]'),
+    ).toHaveLength(1);
+    expect(container.querySelector('[data-testid="audit-raw"]')).toBeNull();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="inspector-tab"][data-chip="UPSTREAM"]',
+        )!
+        .click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inspector-same-response"]')
+        ?.textContent,
+    ).toContain("与客户端响应一致");
+    expect(
+      container.querySelector('[data-testid="audit-result-preview"]'),
+    ).toBeNull();
+    const body = container.querySelector(
+      '[data-testid="inspector-upstream-body"]',
+    );
+    expect(body?.getAttribute("data-view")).toBe("response");
+    // Stream bodies open as events; the original stays one toggle away.
+    expect(body?.textContent).toContain("response.output_text.delta");
+    expect(container.querySelector('[data-testid="audit-raw"]')).toBeNull();
+  });
+
+  it("leads with the provider's error and keeps the gateway verdict as context", async () => {
+    const content = [
+      'data: {"type":"response.created","response":{"status":"in_progress"}}',
+      'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Token rate limit exceeded"}}}',
+      "",
+    ].join("\n\n");
+    const part = {
+      content,
+      media_type: "text/event-stream",
+      captured_bytes: content.length,
+      truncated: false,
+    };
+    const failed: RequestRecord = {
+      ...record,
+      status: "failed",
+      error: {
+        category: "upstream",
+        code: "upstream_stream_interrupted",
+        message: "Stream ended early",
+        retryable: true,
+      },
+    };
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      ...auditContent,
+      upstream_http_meta: {
+        method: "POST",
+        url: "https://api.example.test/v1/responses",
+        http_version: "HTTP/2",
+        request_headers: [],
+        response_status: 200,
+        response_headers: [],
+      },
+      upstream_request_body: {
+        content: '{"model":"gpt-4.1"}',
+        media_type: "application/json",
+        captured_bytes: 19,
+        truncated: false,
+      },
+      response_content: part,
+      upstream_response_content: part,
+    });
+    hostState.current = {
+      selection: { record: failed, row: { ...row, chip: "RESULT" } },
+      pinned: false,
+    };
+    await render();
+    const diagnosis = container.querySelector(
+      '[data-testid="inspector-diagnosis"]',
+    );
+    expect(diagnosis?.firstElementChild?.textContent).toBe(
+      "rate_limit_exceeded",
+    );
+    expect(diagnosis?.textContent).toContain("Token rate limit exceeded");
+    const verdict = diagnosis?.querySelector(
+      '[data-testid="inspector-gateway-verdict"]',
+    );
+    expect(verdict?.textContent).toContain("upstream_stream_interrupted");
+    expect(verdict?.textContent).toContain("可重试");
+    // The HTTP note already explains an interrupted stream in the UI language.
+    expect(verdict?.textContent).not.toContain("Stream ended early");
+    expect(verdict?.getAttribute("title")).toBe("Stream ended early");
+    // The reason replaces the empty-state card instead of sitting above it.
+    expect(
+      container.querySelector('[data-testid="audit-no-output"]')?.textContent,
+    ).toBe("请求在产生输出前失败");
+    expect(container.textContent).not.toContain("未捕获到回复或工具调用");
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="inspector-tab"][data-chip="UPSTREAM"]',
+        )!
+        .click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inspector-upstream-endpoint"]')
+        ?.textContent,
+    ).toBe("POST https://api.example.test/v1/responses");
+    const body = () =>
+      container.querySelector<HTMLElement>(
+        '[data-testid="inspector-upstream-body"]',
+      )!;
+    expect(
+      body().querySelector('[data-testid="inspector-diagnosis"]')?.textContent,
+    ).toContain("rate_limit_exceeded");
+    const view = (label: string) =>
+      [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[aria-label="上游内容"] button',
+        ),
+      ].find((button) => button.textContent === label)!;
+    await act(async () => view("请求").click());
+    expect(body().getAttribute("data-view")).toBe("request");
+    expect(
+      body().querySelector('[data-testid="inspector-diagnosis"]'),
+    ).toBeNull();
+    expect(body().textContent).toContain('"model": "gpt-4.1"');
+    await act(async () => view("HTTP").click());
+    expect(body().getAttribute("data-view")).toBe("http");
+    expect(body().textContent).toContain(
+      "POST https://api.example.test/v1/responses HTTP/2",
+    );
+  });
+
+  it("keeps differing upstream bytes separate from the actual client output", async () => {
+    const part = (content: string) => ({
+      content,
+      media_type: "text/plain",
+      captured_bytes: content.length,
+      truncated: false,
+    });
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      ...auditContent,
+      response_content: part("Restored client reply"),
+      upstream_response_content: part("Upstream placeholder reply"),
+    });
+    hostState.current = { selection: { record, row }, pinned: false };
+    await render();
+    expect(
+      container.querySelector('[data-testid="audit-raw"] pre')?.textContent,
+    ).toBe("Upstream placeholder reply");
+    expect(
+      container.querySelector('[data-testid="inspector-same-response"]'),
+    ).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="inspector-tab"][data-chip="RESULT"]',
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="audit-result-preview"]')
+        ?.textContent,
+    ).toBe("Restored client reply");
+    expect(container.textContent).not.toContain("Upstream placeholder reply");
+  });
+
+  it("shows the client body once, beside its request line and HTTP envelope", async () => {
+    const content = '{"model":"gpt-4.1","input":"ping"}';
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      ...auditContent,
+      http_meta: {
+        method: "POST",
+        url: "/v1/responses",
+        http_version: "HTTP/1.1",
+        request_headers: [
+          { name: "Content-Type", value: "application/json", redacted: false },
+        ],
+        response_status: 200,
+        response_headers: [],
+      },
+      request_body: {
+        content,
+        media_type: "application/json",
+        captured_bytes: content.length,
+        truncated: false,
+      },
+    });
+    hostState.current = {
+      selection: { record, row: laterRow },
+      pinned: false,
+    };
+    await render();
+
+    const section = container.querySelector<HTMLElement>(
+      '[data-testid="inspector-section"][data-chip="CLIENT"]',
+    );
+    expect(
+      section?.querySelector('[data-testid="inspector-client-endpoint"]')
+        ?.textContent,
+    ).toBe("POST /v1/responses");
+    expect(
+      section?.querySelector('[data-testid="inspector-client-size"]')
+        ?.textContent,
+    ).toBe(`${content.length} B`);
+    // One pane, no card inside a card repeating the title and size.
+    expect(section?.textContent?.split("客户端请求体")).toHaveLength(1);
+    expect(section?.textContent?.split(`${content.length} B`)).toHaveLength(2);
+    const body = () =>
+      section!.querySelector<HTMLElement>(
+        '[data-testid="inspector-client-body"]',
+      )!;
+    expect(body().getAttribute("data-view")).toBe("request");
+    expect(body().textContent).toContain('"input": "ping"');
+
+    const http = [
+      ...section!.querySelectorAll<HTMLButtonElement>(
+        '[aria-label="客户端内容"] button',
+      ),
+    ].find((button) => button.textContent === "HTTP")!;
+    await act(async () => http.click());
+    expect(body().getAttribute("data-view")).toBe("http");
+    expect(body().textContent).toContain("POST /v1/responses HTTP/1.1");
+    expect(body().textContent).toContain("Content-Type");
+  });
 
   it("never asks itself to open another inspector window", () => {
     expect(isTrajectoryInspectorWindow()).toBe(true);
@@ -218,6 +502,15 @@ describe("TrajectoryInspectorWindow", () => {
     );
     expect(inspector(container)?.getAttribute("data-pinned")).toBe("true");
     expect(pinButton(container).getAttribute("aria-pressed")).toBe("true");
+    // A window-level control: it belongs beside the traffic lights, drawn as a
+    // pushpin rather than a map marker, not inside the call's own header.
+    expect(
+      pinButton(container).closest('[data-slot="window-accessory"]'),
+    ).not.toBeNull();
+    expect(inspector(container)?.contains(pinButton(container))).toBe(false);
+    expect(
+      pinButton(container).querySelector('[data-animated-icon="pin"]'),
+    ).not.toBeNull();
   });
 
   it("shows the pushed call and decrypts its own audit content", async () => {
@@ -251,7 +544,9 @@ describe("TrajectoryInspectorWindow", () => {
         ?.querySelector('[data-testid="inspector-section"]')
         ?.getAttribute("data-chip"),
     ).toBe("UPSTREAM");
-    expect(inspector(container)?.textContent).toContain("上游响应");
+    expect(
+      inspector(container)?.querySelector('[aria-label="上游响应"]'),
+    ).not.toBeNull();
     expect(inspector(container)?.textContent).not.toContain("客户端请求体");
     expect(
       inspector(container)?.querySelector('[data-testid="inspector-http"]')
@@ -270,6 +565,11 @@ describe("TrajectoryInspectorWindow", () => {
     });
     await flush();
 
+    // A following window keeps a quiet, icon-only pin in its title bar.
+    expect(pinButton(container).getAttribute("aria-label")).toBe("置顶窗口");
+    expect(pinButton(container).getAttribute("aria-pressed")).toBe("false");
+    expect(pinButton(container).textContent).toBe("");
+
     await clickPin();
 
     expect(hostMocks.invoke).toHaveBeenCalledWith(
@@ -277,6 +577,9 @@ describe("TrajectoryInspectorWindow", () => {
       { pinned: true },
     );
     expect(inspector(container)?.getAttribute("data-pinned")).toBe("true");
+    // A floating window says so without a hover.
+    expect(pinButton(container).getAttribute("aria-pressed")).toBe("true");
+    expect(pinButton(container).textContent).toBe("已置顶");
 
     await act(async () => {
       pushSelection({ row: laterRow, record });

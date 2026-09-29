@@ -1,12 +1,15 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  createContext,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   type DesktopPlatform,
@@ -32,6 +35,36 @@ type ResizeDirection =
 
 interface WindowChromeProps {
   platform?: DesktopPlatform;
+}
+
+type AccessorySlot = [
+  HTMLElement | null,
+  (element: HTMLElement | null) => void,
+];
+
+const AccessorySlotContext = createContext<AccessorySlot | null>(null);
+
+/**
+ * Lets a surface put its own controls in the title bar. The chrome sits
+ * outside the error boundary so a crashed surface keeps its window controls;
+ * the surface portals in rather than rendering the chrome itself.
+ */
+export function WindowChromeProvider({ children }: { children: ReactNode }) {
+  const slot = useState<HTMLElement | null>(null);
+  return (
+    <AccessorySlotContext.Provider value={slot}>
+      {children}
+    </AccessorySlotContext.Provider>
+  );
+}
+
+/**
+ * Window-level controls, such as the inspector's pin, drawn in the title bar
+ * beside the native controls. Renders nothing where there is no title bar.
+ */
+export function WindowChromeAccessory({ children }: { children: ReactNode }) {
+  const slot = useContext(AccessorySlotContext)?.[0];
+  return slot ? createPortal(children, slot) : null;
 }
 
 interface WindowState {
@@ -96,6 +129,7 @@ export function WindowChrome({
   platform: platformOverride,
 }: WindowChromeProps) {
   const platform = platformOverride ?? getDesktopPlatform();
+  const setAccessorySlot = useContext(AccessorySlotContext)?.[1];
   const appWindow = useMemo(
     () => (platform === "browser" ? null : getCurrentWindow()),
     [platform],
@@ -296,10 +330,19 @@ export function WindowChrome({
       >
         {renderControls(layout.start, "start")}
         <div
-          className="col-start-2 h-full min-w-0 [app-region:drag] [-webkit-app-region:drag]"
+          className="col-start-2 row-start-1 h-full min-w-0 [app-region:drag] [-webkit-app-region:drag]"
           data-tauri-drag-region
           data-slot="window-drag-region"
         />
+        {setAccessorySlot ? (
+          // Shares the drag region's cell, so the bar stays draggable
+          // everywhere the accessory does not cover.
+          <div
+            className="col-start-2 row-start-1 flex h-full items-center gap-1.5 justify-self-end px-3 empty:hidden [app-region:no-drag] [-webkit-app-region:no-drag]"
+            data-slot="window-accessory"
+            ref={setAccessorySlot}
+          />
+        ) : null}
         {renderControls(layout.end, "end")}
       </header>
       {platform !== "macos" && !windowState.maximized && !windowState.fullscreen

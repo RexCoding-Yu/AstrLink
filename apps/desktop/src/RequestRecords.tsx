@@ -38,7 +38,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -55,6 +54,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
 import { AuditPartSection, HTTPMetaSection } from "./AuditReviewer";
+import { AuditSettingsDialog } from "./AuditSettingsDialog";
 import {
   buildRecordBundle,
   bundleFilename,
@@ -1312,7 +1312,7 @@ export function RequestRecords({
       </div>
 
       {settingsOpen && pendingConfirm === null ? (
-        <SettingsDialog
+        <AuditSettingsDialog
           busy={settingsBusy}
           draft={settingsDraft}
           error={settingsError}
@@ -2516,90 +2516,6 @@ function RecordSkeleton() {
   );
 }
 
-function SettingsDialog({
-  draft,
-  busy,
-  error,
-  notice,
-  onChange,
-  onCancel,
-  onSave,
-}: {
-  draft: AuditSettings | null;
-  busy: boolean;
-  error: string | null;
-  notice: string | null;
-  onChange: <K extends keyof AuditSettings>(
-    key: K,
-    value: AuditSettings[K],
-  ) => void;
-  onCancel: () => void;
-  onSave: () => void;
-}) {
-  const t = i18n.t.bind(i18n);
-  return (
-    <ModalDialog onCancel={onCancel} title={t("records.auditSettings")}>
-      {draft ? (
-        <div className="grid grid-cols-2 gap-3 max-[600px]:grid-cols-1">
-          <CheckField
-            checked={draft.http_meta_enabled}
-            label={t("records.httpMeta")}
-            onChange={(value) => onChange("http_meta_enabled", value)}
-          />
-          <NumberField
-            label={t("records.requestLimit")}
-            max={16_777_216}
-            min={1024}
-            onChange={(value) => onChange("request_body_max_bytes", value)}
-            value={draft.request_body_max_bytes}
-          />
-          <NumberField
-            label={t("records.responseLimit")}
-            max={67_108_864}
-            min={1024}
-            onChange={(value) => onChange("response_content_max_bytes", value)}
-            value={draft.response_content_max_bytes}
-          />
-          <NumberField
-            label={t("records.metaRetention")}
-            max={3650}
-            min={1}
-            onChange={(value) => onChange("metadata_retention_days", value)}
-            value={draft.metadata_retention_days}
-          />
-          <NumberField
-            label={t("records.contentRetention")}
-            max={365}
-            min={1}
-            onChange={(value) => onChange("content_retention_days", value)}
-            value={draft.content_retention_days}
-          />
-          <FormMessage className="col-span-full" tone="notice">
-            {t("records.settingsHint")}
-          </FormMessage>
-        </div>
-      ) : busy ? (
-        <p>{t("common.loading")}</p>
-      ) : null}
-      {error ? <FormMessage tone="error">{error}</FormMessage> : null}
-      {notice ? <FormMessage tone="success">{notice}</FormMessage> : null}
-      <DialogFooter>
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={onCancel}
-          type="button"
-        >
-          {t("common.close")}
-        </Button>
-        <Button disabled={busy || !draft} onClick={onSave} type="button">
-          {busy ? t("common.saving") : t("common.save")}
-        </Button>
-      </DialogFooter>
-    </ModalDialog>
-  );
-}
-
 function PurgeDialog({
   mode,
   before,
@@ -2681,54 +2597,6 @@ function ModalDialog({
         {children}
       </DialogContent>
     </Dialog>
-  );
-}
-
-function CheckField({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <Label className="flex items-start gap-2 rounded-lg border bg-muted px-3 py-2 text-xs leading-5">
-      <Checkbox
-        aria-label={label}
-        checked={checked}
-        onCheckedChange={(value) => onChange(value === true)}
-      />
-      <span>{label}</span>
-    </Label>
-  );
-}
-
-function NumberField({
-  label,
-  value,
-  min,
-  max,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <Label className="grid items-stretch gap-1.5 text-xs font-semibold text-text-secondary">
-      <span>{label}</span>
-      <Input
-        max={max}
-        min={min}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
-        type="number"
-        value={value}
-      />
-    </Label>
   );
 }
 

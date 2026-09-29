@@ -1255,6 +1255,9 @@ fn quit(app: &AppHandle) {
 }
 
 fn run_core(app: &AppHandle, op: CoreOp) {
+    let Ok(lifecycle) = crate::updates::lifecycle_guard(app) else {
+        return;
+    };
     let Some(manager) = app.try_state::<Arc<CoreManager>>() else {
         return;
     };
@@ -1267,6 +1270,7 @@ fn run_core(app: &AppHandle, op: CoreOp) {
         }
         CoreOp::Stop => {
             tauri::async_runtime::spawn(async move {
+                let _lifecycle = lifecycle;
                 if let Err(error) = manager.stop_and_wait().await {
                     eprintln!("unable to stop astrlink-core from the tray: {error}");
                 }
@@ -1275,6 +1279,7 @@ fn run_core(app: &AppHandle, op: CoreOp) {
         CoreOp::Restart => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
+                let _lifecycle = lifecycle;
                 if let Err(error) = manager.restart(&app).await {
                     eprintln!("unable to restart astrlink-core from the tray: {error}");
                 }

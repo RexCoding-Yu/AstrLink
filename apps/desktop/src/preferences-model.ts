@@ -1,3 +1,4 @@
+import { parseUpdatePreferences, type UpdatePreferences } from "./update-model";
 import { isQuotaDisplayMode, type QuotaDisplayMode } from "./quota-display";
 import { isLocale, type Locale } from "./i18n/locale";
 import { isThemePreference, type ThemePreference } from "./theme-model";
@@ -90,6 +91,7 @@ export interface Preferences {
   theme: ThemePreference;
   quota_display_mode: QuotaDisplayMode;
   tray: TrayPreferences;
+  updates: UpdatePreferences;
 }
 
 export interface SettingsSnapshot {
@@ -203,6 +205,7 @@ export function parseSettingsSnapshot(value: unknown): SettingsSnapshot {
       "theme",
       "quota_display_mode",
       "tray",
+      "updates",
     ],
     "$.values",
   );
@@ -210,6 +213,7 @@ export function parseSettingsSnapshot(value: unknown): SettingsSnapshot {
     invalid("$.values.quota_display_mode", "unknown quota display mode");
   }
   parseTrayPreferences(values.tray, "$.values.tray");
+  parseUpdatePreferences(values.updates);
   if (
     values.close_behavior !== "hide_to_tray" &&
     values.close_behavior !== "quit"

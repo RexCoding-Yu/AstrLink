@@ -3,6 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Activity,
+  CircleHelp,
   Bot,
   Home as House,
   Key as KeyRound,
@@ -51,6 +52,9 @@ import { RouteManager } from "./RouteManager";
 import { SafetyPolicy } from "./SafetyPolicy";
 import { AgentDebugSettings } from "./AgentDebugSettings";
 import { SettingsCenter } from "./SettingsCenter";
+import { About } from "./About";
+import { useAppUpdates } from "./use-app-updates";
+import { toast } from "sonner";
 import { ServiceManager, type ServiceManagerView } from "./ServiceManager";
 import type { Service } from "./service-model";
 import { TRAY_NAVIGATE_EVENT } from "./tray-popover-window";
@@ -69,9 +73,11 @@ type WorkspacePage =
   | { kind: "routing" }
   | { kind: "agentTools" }
   | { kind: "settings" }
+  | { kind: "about" }
   | ServiceManagerView;
 
 type IconName =
+  | "about"
   | "activity"
   | "bot"
   | "home"
@@ -115,6 +121,7 @@ export function trayNavigationTarget(kind: unknown): WorkspacePage | null {
     case "routing":
     case "agentTools":
     case "settings":
+    case "about":
     case "list":
       return { kind };
     default:
@@ -123,6 +130,7 @@ export function trayNavigationTarget(kind: unknown): WorkspacePage | null {
 }
 
 const icons: Record<IconName, AnimatedIcon> = {
+  about: CircleHelp,
   activity: Activity,
   bot: Bot,
   home: House,
@@ -147,12 +155,14 @@ function Icon({ className, name }: { className?: string; name: IconName }) {
 function NavButton({
   active = false,
   disabled = false,
+  badge,
   icon,
   label,
   onClick,
 }: {
   active?: boolean;
   disabled?: boolean;
+  badge?: string;
   icon: IconName;
   label: string;
   onClick?: () => void;
@@ -175,6 +185,14 @@ function NavButton({
       variant="ghost"
     >
       <Icon className="size-5" name={icon} />
+      {badge ? (
+        <span
+          className="absolute right-1 top-1 size-2 rounded-full bg-primary"
+          role="status"
+          aria-label={badge}
+          title={badge}
+        />
+      ) : null}
       <span className="overflow-hidden text-ellipsis whitespace-nowrap max-[960px]:hidden">
         {label}
       </span>
@@ -189,6 +207,8 @@ function NavButton({
 
 export default function App() {
   const t = useT();
+  const updates = useAppUpdates();
+  const notifiedUpdate = useRef<string | null>(null);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [isRestarting, setIsRestarting] = useState(false);
   const [catalog, setCatalog] = useState<ServiceCatalog>(emptyCatalog);
@@ -507,6 +527,23 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const version = updates.snapshot.release?.version;
+    if (
+      updates.snapshot.phase !== "ready" ||
+      !version ||
+      notifiedUpdate.current === version
+    )
+      return;
+    notifiedUpdate.current = version;
+    toast.info(t("about.readyNotification", { version }), {
+      action: {
+        label: t("about.title"),
+        onClick: () => navigateRef.current({ kind: "about" }),
+      },
+    });
+  }, [updates.snapshot, t]);
+
   const confirmPendingNavigation = () => {
     if (pendingPage === null) return;
     setPage(pendingPage);
@@ -583,7 +620,7 @@ export default function App() {
               height={32}
               aria-hidden="true"
             />
-            <span className="overflow-hidden text-xl font-semibold tracking-tight whitespace-nowrap max-[960px]:hidden">
+            <span className="overflow-hidden text-lg font-semibold tracking-tight whitespace-nowrap max-[960px]:hidden">
               AstrLink
             </span>
           </div>
@@ -648,6 +685,17 @@ export default function App() {
               label={t("nav.settings")}
               onClick={() => navigate({ kind: "settings" })}
             />
+            <NavButton
+              active={page.kind === "about"}
+              icon="about"
+              label={t("nav.about")}
+              badge={
+                updates.snapshot.phase === "ready"
+                  ? t("about.phase.ready")
+                  : undefined
+              }
+              onClick={() => navigate({ kind: "about" })}
+            />
           </nav>
 
           <div
@@ -681,6 +729,7 @@ export default function App() {
               "@container/workspace-surface h-full min-h-0 w-full min-w-0 px-8 pt-[calc(var(--window-chrome-height)+28px)] pb-8 max-[960px]:px-5 max-h-[680px]:pt-[calc(var(--window-chrome-height)+18px)] max-h-[680px]:pb-5",
               "flex flex-col",
               [
+                "about",
                 "overview",
                 "list",
                 "create",
@@ -801,6 +850,13 @@ export default function App() {
               />
             ) : page.kind === "agentTools" ? (
               <AgentDebugSettings />
+            ) : page.kind === "about" ? (
+              <About
+                snapshot={updates.snapshot}
+                onSnapshot={updates.accept}
+                loadError={updates.error}
+                hasUnsavedChanges={() => editorDirtyRef.current}
+              />
             ) : page.kind === "settings" ? (
               <SettingsCenter
                 onCoreSnapshot={setSnapshot}

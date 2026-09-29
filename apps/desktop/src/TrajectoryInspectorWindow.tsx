@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
+import { Pin } from "@/components/icons";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+
 import { getRequestAuditContent } from "./bridge";
 import { useCopyFeedback } from "./copy-feedback";
 import { i18n } from "./i18n";
@@ -13,15 +23,18 @@ import {
   trajectoryInspectorState,
   type TrajectoryInspectorSelection,
 } from "./trajectory-inspector-window";
+import { WindowChromeAccessory } from "./WindowChrome";
 
 /**
  * The whole app in a detached inspector window: one selected call, driven by
  * the main window over the event channel. The clicked chip is only a scroll
  * target; the pane always stacks that request's whole chain.
  *
- * Pinning freezes the call. The host stops routing selections here, and this
- * side ignores any that still arrive, so the two cannot disagree about what a
- * pinned window shows.
+ * Pinning floats the window above the others and freezes the call. The pin
+ * sits in the title bar, where window-level controls belong, so it reads as
+ * "keep this window on top" rather than as another control over the content.
+ * The host stops routing selections here, and this side ignores any that
+ * still arrive, so the two cannot disagree about what a pinned window shows.
  *
  * Audit content is decrypted here rather than forwarded, so captured bodies
  * never cross the channel and the main window's cache stays the main window's.
@@ -88,6 +101,11 @@ export function TrajectoryInspectorWindow() {
   return (
     <main className="flex h-dvh min-h-0 flex-col overflow-hidden pt-[var(--window-chrome-height)]">
       {selection ? (
+        <WindowChromeAccessory>
+          <PinToggle onToggle={togglePin} pinned={pinned} />
+        </WindowChromeAccessory>
+      ) : null}
+      {selection ? (
         <TrajectoryInspector
           auditContent={
             audit.content?.request_id === selection.record.id
@@ -97,7 +115,6 @@ export function TrajectoryInspectorWindow() {
           auditError={audit.error}
           auditLoading={audit.loading}
           copyFeedback={copyFeedback}
-          onTogglePin={togglePin}
           pinned={pinned}
           record={selection.record}
           row={selection.row}
@@ -115,6 +132,55 @@ export function TrajectoryInspectorWindow() {
         </div>
       )}
     </main>
+  );
+}
+
+/**
+ * A loose, tilted pin while the window follows the list; pressed upright and
+ * filled once it floats. Only the pinned state carries a label, so a floating
+ * window says so at a glance while an ordinary one keeps a quiet title bar.
+ */
+function PinToggle({
+  onToggle,
+  pinned,
+}: {
+  onToggle: (next: boolean) => void;
+  pinned: boolean;
+}) {
+  const t = i18n.t.bind(i18n);
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            aria-label={t("trajectory.pin")}
+            aria-pressed={pinned}
+            className={cn(
+              pinned
+                ? "bg-accent text-accent-foreground hover:bg-accent/70"
+                : "text-muted-foreground hover:bg-foreground/8 hover:text-foreground",
+            )}
+            data-testid="trajectory-inspector-pin"
+            onClick={() => onToggle(!pinned)}
+            size={pinned ? "xs" : "icon-xs"}
+            type="button"
+            variant="ghost"
+          >
+            <Pin
+              className={cn(
+                "size-3.5 transition-transform duration-200",
+                !pinned && "rotate-45",
+              )}
+              fill={pinned ? "currentColor" : "none"}
+            />
+            {pinned ? t("trajectory.pinned") : null}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-60" side="bottom" sideOffset={6}>
+          {pinned ? t("trajectory.unpinHint") : t("trajectory.pinHint")}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 

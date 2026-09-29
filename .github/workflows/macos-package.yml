@@ -1,8 +1,11 @@
 name: macOS package
 
 on:
-  push:
-    tags: ["**"]
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
   workflow_dispatch:
 
 permissions:
@@ -17,6 +20,7 @@ env:
   ASTRLINK_CI_SYNTHETIC_MODELS_ONLY: "1"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
   MACOSX_DEPLOYMENT_TARGET: "13.4"
 
 jobs:
@@ -125,6 +129,16 @@ jobs:
         run: test "$(uname -m)" = "$EXPECTED_ARCH"
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+      - name: Stamp release version
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bun scripts/release-updates.mjs stamp "$RELEASE_TAG"
+      - name: Validate update signing configuration
+        if: inputs.release_tag != ''
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun scripts/release-updates.mjs preflight
       - name: Check frontend and Core in parallel
         run: |
           (bun run branding:sync && bun run typecheck && bun run test) &
@@ -170,6 +184,17 @@ jobs:
             -C src-tauri/target/release/bundle/macos AstrLink.app
           cd package
           shasum -a 256 ./*.dmg ./*.tar.gz > SHA256SUMS
+      - name: Sign and verify notarized update archive
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          update_arch="$PACKAGE_ARCH"
+          if [[ "$update_arch" == arm64 ]]; then update_arch=aarch64; fi
+          bun scripts/release-updates.mjs stage "darwin-$update_arch" "$RELEASE_TAG"
       - name: Upload checked macOS package
         uses: actions/upload-artifact@v7
         with:

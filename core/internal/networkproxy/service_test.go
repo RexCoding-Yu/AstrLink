@@ -154,7 +154,7 @@ func TestHTTPSProxyForHTTPAndWebSocket(t *testing.T) {
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	previous := http.DefaultTransport
-	http.DefaultTransport = base
+	http.DefaultTransport = WrapTransport(base)
 	defer func() { http.DefaultTransport = previous; base.CloseIdleConnections() }()
 	ctx, err := BindConfig(context.Background(), "service_tls", &contract.ServiceProxy{Mode: "custom", URL: proxy.URL}, &contract.ProxyCredential{Username: "user", Password: "password"})
 	if err != nil {

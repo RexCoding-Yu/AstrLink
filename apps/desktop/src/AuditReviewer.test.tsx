@@ -4,7 +4,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AuditPartSection, HTTPMetaSection } from "./AuditReviewer";
+import {
+  AuditPartSection,
+  AuditResultSection,
+  HTTPMetaSection,
+} from "./AuditReviewer";
 import type { CopyFeedback } from "./copy-feedback";
 import type { AuditContentPart, AuditHTTPMeta } from "./request-record-model";
 
@@ -32,6 +36,116 @@ describe("AuditReviewer sections", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it("defaults the client result to merged output and keeps raw capture accessible", async () => {
+    const content =
+      'data: {"type":"response.output_text.delta","delta":"Readable reply"}\n\n';
+    await act(async () => {
+      root.render(
+        <AuditResultSection
+          part={{
+            content,
+            media_type: "text/event-stream",
+            captured_bytes: content.length,
+            truncated: false,
+          }}
+        />,
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="audit-result-preview"]')
+        ?.textContent,
+    ).toContain("Readable reply");
+    expect(container.textContent).not.toContain("response.output_text.delta");
+    expect(container.querySelector('[data-testid="audit-raw"]')).toBeNull();
+    const raw = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "原文",
+    );
+    expect(raw).toBeDefined();
+    await act(async () => raw!.click());
+    expect(
+      container.querySelector('[data-testid="audit-raw"] pre')?.textContent,
+    ).toBe(content);
+  });
+
+  it("shows an empty-output explanation for lifecycle-only streams", async () => {
+    const content =
+      'data: {"type":"response.created","response":{"output":[]}}\n\n';
+    await act(async () => {
+      root.render(
+        <AuditResultSection
+          part={{
+            content,
+            media_type: "text/event-stream",
+            captured_bytes: content.length,
+            truncated: false,
+          }}
+        />,
+      );
+    });
+    expect(container.textContent).toContain("未捕获到回复或工具调用");
+    expect(container.querySelector('[data-testid="audit-raw"]')).toBeNull();
+  });
+
+  it("bounds large reconstructed replies and lets the reader load the remainder", async () => {
+    const content = `${"a".repeat(64 * 1024)}tail-of-reply`;
+    await act(async () => {
+      root.render(
+        <AuditResultSection
+          part={{
+            content,
+            media_type: "text/plain",
+            captured_bytes: content.length,
+            truncated: false,
+          }}
+        />,
+      );
+    });
+    const preview = () =>
+      container.querySelector('[data-testid="audit-result-preview"]');
+    expect(preview()?.textContent).not.toContain("tail-of-reply");
+    const next = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "加载下一段",
+    );
+    await act(async () => next!.click());
+    expect(preview()?.textContent).toContain("tail-of-reply");
+  });
+
+  it("ignores an obsolete multi-batch parse when selecting another response", async () => {
+    const content =
+      'data: {"type":"response.output_text.delta","delta":"old"}\n\n'.repeat(
+        1200,
+      );
+    await act(async () => {
+      root.render(
+        <AuditResultSection
+          part={{
+            content,
+            media_type: "text/event-stream",
+            captured_bytes: content.length,
+            truncated: false,
+          }}
+        />,
+      );
+    });
+    await act(async () => {
+      root.render(
+        <AuditResultSection
+          part={{
+            content: "New response",
+            media_type: "text/plain",
+            captured_bytes: 12,
+            truncated: false,
+          }}
+        />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(
+      container.querySelector('[data-testid="audit-result-preview"]')
+        ?.textContent,
+    ).toBe("New response");
   });
 
   it("shows an 85KB stream as raw text by default and parses events only when the tab is opened", async () => {

@@ -1,0 +1,62 @@
+import { describe, expect, it } from "vitest";
+import {
+  browserUpdateSnapshot,
+  parseUpdatePreferences,
+  parseUpdateSnapshot,
+  updateBusy,
+} from "./update-model";
+
+describe("update IPC", () => {
+  it("accepts browser snapshots and optional download lengths", () => {
+    const value = browserUpdateSnapshot();
+    expect(parseUpdateSnapshot(value)).toEqual(value);
+    expect(updateBusy({ ...value, phase: "downloading" })).toBe(true);
+    expect(updateBusy({ ...value, phase: "ready" })).toBe(false);
+  });
+  it("rejects malformed states, preferences and external release URLs", () => {
+    for (const patch of [
+      { phase: "done" },
+      { downloaded_bytes: -1 },
+      { total_bytes: "100" },
+      { revision: NaN },
+      { configured: 1 },
+      { error_code: undefined },
+      { latest_version: 123 },
+    ]) {
+      expect(() =>
+        parseUpdateSnapshot({ ...browserUpdateSnapshot(), ...patch }),
+      ).toThrow();
+    }
+    expect(() =>
+      parseUpdatePreferences({
+        auto_check: true,
+        auto_download: true,
+        channel: "nightly",
+      }),
+    ).toThrow();
+    expect(() =>
+      parseUpdateSnapshot({
+        ...browserUpdateSnapshot(),
+        release: {
+          version: "2.0.0",
+          notes: "",
+          published_at: null,
+          url: "https://example.com/installer",
+        },
+      }),
+    ).toThrow();
+  });
+  it("keeps the checked latest version even when no installation is needed", () => {
+    const value = {
+      ...browserUpdateSnapshot(),
+      phase: "up_to_date" as const,
+      current_version: "1.2.0",
+      latest_version: "1.1.0",
+    };
+    expect(parseUpdateSnapshot(value).latest_version).toBe("1.1.0");
+    expect(
+      parseUpdateSnapshot({ ...value, latest_version: undefined })
+        .latest_version,
+    ).toBeNull();
+  });
+});

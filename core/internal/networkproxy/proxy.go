@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/net/http/httpproxy"
 )
@@ -23,9 +25,9 @@ type settings struct {
 	automatic          bool
 }
 
-// New snapshots the selected configuration. Restart the gateway to pick up
-// system changes. The CLI keeps its existing environment behavior by default;
-// the desktop explicitly selects system or direct, ignoring environment
+// New selects the outbound proxy policy. System settings are refreshed on demand
+// with a one-second cache. The CLI keeps its existing environment behavior by
+// default; the desktop explicitly selects system or direct, ignoring environment
 // overrides on macOS/Windows in system mode.
 func New(mode string) (ProxyFunc, error) {
 	return selectProxy(mode, systemSettings)
@@ -38,18 +40,38 @@ func selectProxy(mode string, readSystem func() (settings, error)) (ProxyFunc, e
 	case "environment":
 		return localBypass(http.ProxyFromEnvironment), nil
 	case "system":
-		config, err := readSystem()
-		if err == nil {
-			return fromSettings(config), nil
-		}
-		// Keep the local gateway available so Settings can still be used. Do
-		// not silently send external traffic directly if discovery failed.
-		return localBypass(func(*http.Request) (*url.URL, error) {
-			return nil, fmt.Errorf("read system proxy settings: %w", err)
-		}), nil
+		return refreshingSystemProxy(readSystem, time.Now), nil
 	default:
 		return nil, fmt.Errorf("outbound-proxy must be environment, system, or direct")
 	}
+}
+
+func refreshingSystemProxy(readSystem func() (settings, error), now func() time.Time) ProxyFunc {
+	var mu sync.Mutex
+	var nextRefresh time.Time
+	var selected ProxyFunc
+	// Bypass before discovery so even a slow or failed system query cannot
+	// block local gateway traffic. No background polling goroutine is needed.
+	return localBypass(func(request *http.Request) (*url.URL, error) {
+		mu.Lock()
+		if selected == nil || !now().Before(nextRefresh) {
+			config, err := readSystem()
+			if err != nil {
+				// Cache failures too, but retry after expiry. Never silently
+				// send external traffic directly when discovery fails.
+				selected = func(*http.Request) (*url.URL, error) {
+					return nil, fmt.Errorf("read system proxy settings: %w", err)
+				}
+			} else {
+				selected = fromSettings(config)
+			}
+			// Start the cache lifetime after the potentially slow system query.
+			nextRefresh = now().Add(time.Second)
+		}
+		proxy := selected
+		mu.Unlock()
+		return proxy(request)
+	})
 }
 
 func fromSettings(config settings) ProxyFunc {

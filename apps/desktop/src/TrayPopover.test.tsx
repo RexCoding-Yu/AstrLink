@@ -121,9 +121,6 @@ describe("TrayPopoverPanel", () => {
       expect.arrayContaining([
         "复制 API 地址",
         "设置",
-        "请求记录",
-        "API 提供商",
-        "访问令牌",
         "重启网关",
         "停止网关",
         "退出",
@@ -164,9 +161,17 @@ describe("TrayPopoverPanel", () => {
     expect(text).toContain("活跃客户端Cursor · 71%");
     expect(text).toContain("上次请求刚刚 · gpt-5 · 2.1 s");
     expect(text).toContain("本月48M tokens");
-    expect(buttons()).toEqual(
-      expect.arrayContaining(["安全策略", "路由策略", "Agent 工具"]),
-    );
+    const labels = buttons();
+    for (const label of [
+      "请求",
+      "提供商",
+      "令牌",
+      "安全",
+      "路由",
+      "Agent 工具",
+    ]) {
+      expect(labels).not.toContain(label);
+    }
   });
 
   it("routes clicks to host actions", async () => {
@@ -181,15 +186,13 @@ describe("TrayPopoverPanel", () => {
       act(() => button.click());
     };
     click("复制 API 地址");
-    click("请求记录");
-    click("API 提供商");
+    click("设置");
     click("重启网关");
     click("打开 AstrLink");
     click("退出");
     expect(actions).toEqual([
       { kind: "copy_address" },
-      { kind: "navigate", page: "records" },
-      { kind: "navigate", page: "list" },
+      { kind: "navigate", page: "settings" },
       { kind: "core", op: "restart" },
       { kind: "open" },
       { kind: "quit" },
@@ -331,7 +334,7 @@ describe("TrayPopoverPanel", () => {
     const labels = buttons();
     expect(labels).not.toContain("复制 API 地址");
     expect(labels).not.toContain("重启网关");
-    expect(labels).not.toContain("请求记录");
+    expect(labels).not.toContain("请求");
     expect(labels).toEqual(
       expect.arrayContaining(["设置", "退出", "打开 AstrLink"]),
     );

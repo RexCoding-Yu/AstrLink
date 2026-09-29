@@ -1,4 +1,14 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=TAURI_UPDATER_PUBLIC_KEY");
+    let update_key = std::env::var("TAURI_UPDATER_PUBLIC_KEY").unwrap_or_default();
+    assert!(
+        !update_key.contains(['\n', '\r']),
+        "updater public key must be a single base64 line"
+    );
+    println!(
+        "cargo:rustc-env=TAURI_UPDATER_PUBLIC_KEY={}",
+        update_key.trim()
+    );
     let attributes = tauri_build::Attributes::new();
     let attributes = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         let manifest =

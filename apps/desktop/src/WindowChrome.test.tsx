@@ -37,7 +37,11 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
-import { WindowChrome } from "./WindowChrome";
+import {
+  WindowChrome,
+  WindowChromeAccessory,
+  WindowChromeProvider,
+} from "./WindowChrome";
 
 function control(container: HTMLElement, label: string): HTMLButtonElement {
   const match = container.querySelector<HTMLButtonElement>(
@@ -166,6 +170,47 @@ describe("WindowChrome", () => {
         '[data-slot="window-controls"][data-placement="end"] button',
       ),
     ).toHaveLength(2);
+    expect(container.textContent).toBe("");
+  });
+
+  it("draws a surface's accessory in the title bar, before the controls", async () => {
+    await act(async () => {
+      root.render(
+        <WindowChromeProvider>
+          <WindowChrome platform="windows" />
+          <main>
+            <WindowChromeAccessory>
+              <button type="button">置顶</button>
+            </WindowChromeAccessory>
+          </main>
+        </WindowChromeProvider>,
+      );
+    });
+
+    const accessory = container.querySelector(
+      'header [data-slot="window-accessory"]',
+    );
+    expect(accessory?.textContent).toBe("置顶");
+    expect(container.querySelector("main")?.childElementCount).toBe(0);
+    // Its own element rather than a child of the drag region, so a click on it
+    // does not start dragging the window.
+    expect(accessory?.hasAttribute("data-tauri-drag-region")).toBe(false);
+    expect(
+      accessory?.compareDocumentPosition(
+        container.querySelector('[data-slot="window-controls"]')!,
+      ),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("drops an accessory where there is no title bar", async () => {
+    await act(async () => {
+      root.render(
+        <WindowChromeAccessory>
+          <button type="button">置顶</button>
+        </WindowChromeAccessory>,
+      );
+    });
+
     expect(container.textContent).toBe("");
   });
 

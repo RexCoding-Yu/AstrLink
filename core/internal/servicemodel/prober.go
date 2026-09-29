@@ -47,7 +47,7 @@ type Prober struct {
 func New(secrets secretstore.SecretStore, subscriptions *subscription.Manager, client *http.Client) *Prober {
 	if client == nil {
 		transportCopy := http.DefaultTransport
-		if defaults, ok := http.DefaultTransport.(*http.Transport); ok {
+		if defaults, ok := networkproxy.BaseTransport(http.DefaultTransport); ok {
 			configured := defaults.Clone()
 			configured.DisableCompression = true
 			configured.ResponseHeaderTimeout = probeTimeout

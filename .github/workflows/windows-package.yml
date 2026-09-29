@@ -1,8 +1,11 @@
 name: Windows package
 
 on:
-  push:
-    tags: ["**"]
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
   workflow_dispatch:
 
 permissions:
@@ -17,6 +20,7 @@ env:
   ASTRLINK_CI_SYNTHETIC_MODELS_ONLY: "1"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
 
 jobs:
   # Checks run alongside compilation. Only publish exposes a checked installer.
@@ -50,6 +54,16 @@ jobs:
             contracts/go.sum
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+      - name: Stamp release version
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bun scripts/release-updates.mjs stamp "$env:RELEASE_TAG"
+      - name: Validate update signing configuration
+        if: inputs.release_tag != ''
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun scripts/release-updates.mjs preflight
       - name: Check frontend and Core in parallel
         shell: bash
         run: |
@@ -130,6 +144,16 @@ jobs:
             apps/classifier-worker/target/release/DirectML.dll
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+      - name: Stamp release version
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bun scripts/release-updates.mjs stamp "$env:RELEASE_TAG"
+      - name: Validate update signing configuration
+        if: inputs.release_tag != ''
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bun scripts/release-updates.mjs preflight
       - name: Stage Core and worker sidecars
         # Match the nested Windows PowerShell Authenticode check's module environment.
         shell: powershell
@@ -152,11 +176,22 @@ jobs:
             apps/privacy-worker/target/release/DirectML.dll
             apps/classifier-worker/target/release/astrlink-classifier-worker.exe
             apps/classifier-worker/target/release/DirectML.dll
+      - name: Stage candidate files
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe package/ -Force
+      - name: Prepare release installer and update signature
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun scripts/release-updates.mjs stage windows-x86_64 "$env:RELEASE_TAG"
       - name: Upload candidate installer
         uses: actions/upload-artifact@v7
         with:
           name: windows-candidate-${{ github.sha }}
-          path: apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*
+          path: apps/desktop/package/*
           if-no-files-found: error
           retention-days: 3
       - name: Upload startup diagnostics

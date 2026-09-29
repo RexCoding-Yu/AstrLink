@@ -18,6 +18,9 @@ export function ResponseViewer({
   contentType,
   label,
   notice,
+  previewContent,
+  rawView,
+  rawHint,
   children,
 }: {
   content?: string;
@@ -26,6 +29,11 @@ export function ResponseViewer({
   contentType?: string;
   label: string;
   notice?: ReactNode;
+  /** Structured output; content remains the plain-text copy value. */
+  previewContent?: ReactNode;
+  /** Optional bounded inspector for large captured responses. */
+  rawView?: ReactNode;
+  rawHint?: string;
   children?: ReactNode;
 }) {
   const t = useT();
@@ -89,7 +97,7 @@ export function ResponseViewer({
         {view === "raw" ? (
           <>
             <p className="mb-3 break-words text-xs text-muted-foreground">
-              {t("responseViewer.rawHint")}
+              {rawHint ?? t("responseViewer.rawHint")}
               {contentType ? ` · ${contentType}` : ""}
             </p>
             {rawTruncated ? (
@@ -97,24 +105,26 @@ export function ResponseViewer({
                 {t("responseViewer.truncated")}
               </FormMessage>
             ) : null}
-            {rawContent ? (
-              <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-                {rawContent}
-              </pre>
-            ) : (
-              <FormMessage>
-                {t(
-                  rawContent === undefined
-                    ? "responseViewer.rawUnavailable"
-                    : "responseViewer.rawEmpty",
-                )}
-              </FormMessage>
-            )}
+            {rawView ??
+              (rawContent ? (
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                  {rawContent}
+                </pre>
+              ) : (
+                <FormMessage>
+                  {t(
+                    rawContent === undefined
+                      ? "responseViewer.rawUnavailable"
+                      : "responseViewer.rawEmpty",
+                  )}
+                </FormMessage>
+              ))}
           </>
         ) : (
           <>
             {notice}
-            {content ? <MarkdownContent content={content} /> : children}
+            {previewContent ??
+              (content ? <MarkdownContent content={content} /> : children)}
           </>
         )}
       </div>

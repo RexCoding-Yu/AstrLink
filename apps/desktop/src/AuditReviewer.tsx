@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,12 +12,23 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ChevronRight } from "@/components/icons";
+import { EmptyState } from "@/components/EmptyState";
+import { FormMessage } from "@/components/FormMessage";
+import { MarkdownContent } from "@/components/MarkdownContent";
+import { ResponseViewer } from "@/components/ResponseViewer";
+import { cn } from "@/lib/utils";
 
 import { buildHeadersText } from "./audit-bundle";
 import { i18n } from "./i18n";
 import { copyButtonLabel, type CopyFeedback } from "./copy-feedback";
 import type { AuditContentPart, AuditHTTPMeta } from "./request-record-model";
 import { splitPrivacyHighlights } from "./request-trajectory-model";
+import {
+  parseResponsePreview,
+  type ResponseOutput,
+  type ResponsePreview,
+} from "./response-preview-model";
 import {
   parseSSEIncremental,
   SSEParseCancelledError,
@@ -26,9 +37,241 @@ import {
 
 const RAW_SEGMENT_SIZE = 256 * 1024;
 const EVENT_RENDER_BATCH = 300;
+// Short streams read better unfiltered; the search box earns its row later.
+const EVENT_FILTER_THRESHOLD = 12;
 
 type StreamViewMode = "raw" | "events";
 type DocumentViewMode = "formatted" | "raw";
+
+export interface ResponsePreviewState {
+  ready: boolean;
+  preview: ResponsePreview | null;
+}
+
+/**
+ * Parse a captured response once. `null` skips parsing, so a caller that
+ * already holds the state can pass it down instead of parsing twice.
+ */
+export function useResponsePreview(
+  part: AuditContentPart | null,
+): ResponsePreviewState {
+  const [state, setState] = useState<{
+    part: AuditContentPart;
+    preview: ResponsePreview | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!part) return;
+    const controller = new AbortController();
+    void parseResponsePreview(part, controller.signal).then(
+      (preview) => {
+        if (!controller.signal.aborted) setState({ part, preview });
+      },
+      () => {
+        if (!controller.signal.aborted) setState({ part, preview: null });
+      },
+    );
+    return () => controller.abort();
+  }, [part]);
+  const ready = part !== null && state?.part === part;
+  return { ready, preview: ready ? state.preview : null };
+}
+
+/** Errors the response itself reported, as opposed to the gateway's verdict. */
+export function responseErrors(state: ResponsePreviewState): ResponseOutput[] {
+  return (
+    state.preview?.outputs.filter((output) => output.kind === "error") ?? []
+  );
+}
+
+/**
+ * Client outcome, reconstructed from the captured client response only.
+ * `hideErrors` is for hosts that already lead with the reported error.
+ */
+export function AuditResultSection({
+  part,
+  preview: providedState,
+  failed = false,
+  hideErrors = false,
+  lead,
+}: {
+  part: AuditContentPart;
+  preview?: ResponsePreviewState;
+  failed?: boolean;
+  hideErrors?: boolean;
+  /** Leads the preview, such as the failure reason that replaces hidden errors. */
+  lead?: ReactNode;
+}) {
+  const t = i18n.t.bind(i18n);
+  const ownState = useResponsePreview(providedState ? null : part);
+  const { ready, preview } = providedState ?? ownState;
+  const outputs =
+    preview?.outputs.filter(
+      (output) => !hideErrors || output.kind !== "error",
+    ) ?? [];
+  const copyText = outputs
+    .map((output) => [output.name, output.text].filter(Boolean).join("\n"))
+    .join("\n\n");
+  return (
+    <ResponseViewer
+      content={copyText}
+      rawContent={part.content}
+      rawTruncated={part.truncated}
+      contentType={part.media_type}
+      label={t("trajectory.clientResponse")}
+      rawView={<RawSegmentView bounded={false} content={part.content} />}
+      rawHint={t("audit.clientWireHint")}
+      previewContent={
+        <div className="space-y-3" data-testid="audit-result-preview">
+          {lead}
+          {!ready ? (
+            <p className="text-xs text-muted-foreground" role="status">
+              {t("audit.parsingPercent", { percent: 0 })}
+            </p>
+          ) : null}
+          {ready && !preview ? (
+            <FormMessage tone="warning">{t("audit.parseFailed")}</FormMessage>
+          ) : null}
+          {preview?.unparsed ? (
+            <FormMessage tone="warning">
+              {t("audit.unparsedOutput")}
+            </FormMessage>
+          ) : null}
+          {preview && outputs.length === 0 && failed && lead ? (
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="audit-no-output"
+            >
+              {t("audit.noOutputFailed")}
+            </p>
+          ) : preview && outputs.length === 0 ? (
+            <EmptyState
+              className="py-8"
+              description={
+                failed ? t("audit.noOutputFailedHint") : t("audit.noOutput")
+              }
+              title={
+                failed ? t("audit.noOutputFailed") : t("audit.noOutputTitle")
+              }
+            />
+          ) : null}
+          <ResponseOutputList outputs={outputs} />
+          {preview?.incomplete && outputs.length > 0 ? (
+            <p
+              className="border-t border-dashed pt-2 text-xs text-warning-foreground"
+              data-testid="audit-output-cut"
+            >
+              {part.truncated
+                ? t("audit.outputTruncated")
+                : t("audit.outputInterrupted")}
+            </p>
+          ) : null}
+        </div>
+      }
+    />
+  );
+}
+
+/** Reply text reads as the answer; thinking and tool calls fold beside it. */
+function ResponseOutputList({ outputs }: { outputs: ResponseOutput[] }) {
+  const t = i18n.t.bind(i18n);
+  return outputs.map((output, index) => {
+    if (output.kind === "text")
+      return <ResultText key={index} content={output.text} />;
+    if (output.kind === "error")
+      return (
+        <FormMessage className="break-words" key={index} tone="error">
+          {output.name ? (
+            <span className="block font-medium">{output.name}</span>
+          ) : null}
+          {output.text}
+        </FormMessage>
+      );
+    if (output.kind === "reasoning")
+      return (
+        <details className="group" data-output-kind="reasoning" key={index}>
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <ChevronRight className="size-3.5 group-open:rotate-90" />
+            {t("audit.outputKinds.reasoning")}
+            <span className="font-normal tabular-nums">
+              {t("audit.charCount", {
+                count: output.text.length.toLocaleString(),
+              })}
+            </span>
+          </summary>
+          <div className="mt-1.5 ml-1.5 border-l-2 pl-3 text-muted-foreground">
+            <ResultText content={output.text} />
+          </div>
+        </details>
+      );
+    const body = prettyJson(output.text);
+    return (
+      <details
+        className="group overflow-hidden rounded-md border bg-card"
+        data-output-kind={output.kind}
+        key={index}
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs [&::-webkit-details-marker]:hidden">
+          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground group-open:rotate-90" />
+          <span className="shrink-0 text-muted-foreground">
+            {t(`audit.outputKinds.${output.kind}`)}
+          </span>
+          {output.name ? (
+            <code className="min-w-0 shrink-0 truncate font-mono font-medium">
+              {output.name}
+            </code>
+          ) : null}
+          <span className="min-w-0 flex-1 truncate font-mono text-micro text-muted-foreground group-open:invisible">
+            {output.text.replace(/\s+/g, " ")}
+          </span>
+        </summary>
+        <pre className="border-t bg-muted/40 px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words">
+          {body}
+        </pre>
+      </details>
+    );
+  });
+}
+
+function prettyJson(text: string): string {
+  if (!looksLikeJson(text) || text.length > 1024 * 1024) return text;
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+function ResultText({ content }: { content: string }) {
+  // Captures can span multiple MB. Keep rich-text parsing bounded as well as
+  // the wire view; the full reconstructed output remains available to copy.
+  const [limit, setLimit] = useState(64 * 1024);
+  return (
+    <>
+      <MarkdownContent content={content.slice(0, limit)} />
+      {limit < content.length ? (
+        <Button
+          className="mt-3"
+          variant="outline"
+          onClick={() => setLimit((current) => current + 64 * 1024)}
+        >
+          {i18n.t("audit.loadNextSegment")}
+        </Button>
+      ) : null}
+    </>
+  );
+}
+
+/** The request line, status and headers, as plain text for the clipboard. */
+export function httpMetaText(meta: AuditHTTPMeta): string {
+  return [
+    `${meta.method} ${meta.url} ${meta.http_version}`.trim(),
+    "",
+    buildHeadersText(meta.request_headers),
+    "",
+    meta.response_status !== null ? `HTTP ${meta.response_status}` : "",
+    buildHeadersText(meta.response_headers),
+  ].join("\n");
+}
 
 export function HTTPMetaSection({
   meta,
@@ -41,28 +284,13 @@ export function HTTPMetaSection({
   title?: string;
   copyKey?: string;
 }) {
-  const t = i18n.t.bind(i18n);
   return (
     <DetailBlock
       actions={
         meta ? (
           <Button
             className="h-auto px-0 text-xs"
-            onClick={() =>
-              copyFeedback.copy(
-                copyKey,
-                [
-                  `${meta.method} ${meta.url} ${meta.http_version}`.trim(),
-                  "",
-                  buildHeadersText(meta.request_headers),
-                  "",
-                  meta.response_status !== null
-                    ? `HTTP ${meta.response_status}`
-                    : "",
-                  buildHeadersText(meta.response_headers),
-                ].join("\n"),
-              )
-            }
+            onClick={() => copyFeedback.copy(copyKey, httpMetaText(meta))}
             type="button"
             variant="link"
           >
@@ -72,31 +300,40 @@ export function HTTPMetaSection({
       }
       title={title}
     >
-      {meta === null ? (
-        <p className="text-xs leading-6 text-muted-foreground">
-          {t("audit.noHttpDetail")}
-        </p>
-      ) : (
-        <div className="grid gap-3">
-          <code className="[overflow-wrap:anywhere] block rounded-lg bg-muted px-2.5 py-2 text-xs leading-6 text-text-secondary">
-            {meta.method} {meta.url} {meta.http_version}
-          </code>
-          <HeaderList
-            headers={meta.request_headers}
-            title={t("audit.requestHeaders")}
-          />
-          <code className="[overflow-wrap:anywhere] block rounded-lg bg-muted px-2.5 py-2 text-xs leading-6 text-text-secondary">
-            {meta.response_status !== null
-              ? `HTTP ${meta.response_status}`
-              : t("audit.noStatus")}
-          </code>
-          <HeaderList
-            headers={meta.response_headers}
-            title={t("audit.responseHeaders")}
-          />
-        </div>
-      )}
+      <HTTPMetaDetails meta={meta} />
     </DetailBlock>
+  );
+}
+
+/** Request line, headers and status without a frame of their own. */
+export function HTTPMetaDetails({ meta }: { meta: AuditHTTPMeta | null }) {
+  const t = i18n.t.bind(i18n);
+  if (meta === null) {
+    return (
+      <p className="text-xs leading-6 text-muted-foreground">
+        {t("audit.noHttpDetail")}
+      </p>
+    );
+  }
+  return (
+    <div className="grid gap-3">
+      <code className="[overflow-wrap:anywhere] block rounded-lg bg-muted px-2.5 py-2 text-xs leading-6 text-text-secondary">
+        {meta.method} {meta.url} {meta.http_version}
+      </code>
+      <HeaderList
+        headers={meta.request_headers}
+        title={t("audit.requestHeaders")}
+      />
+      <code className="[overflow-wrap:anywhere] block rounded-lg bg-muted px-2.5 py-2 text-xs leading-6 text-text-secondary">
+        {meta.response_status !== null
+          ? `HTTP ${meta.response_status}`
+          : t("audit.noStatus")}
+      </code>
+      <HeaderList
+        headers={meta.response_headers}
+        title={t("audit.responseHeaders")}
+      />
+    </div>
   );
 }
 
@@ -125,7 +362,7 @@ function HeaderList({
       <h4 className="mb-1.5 text-xs font-medium text-text-secondary">
         {title}
       </h4>
-      <ul className="grid list-none gap-1 p-0 font-mono text-xs leading-6 text-text-secondary">
+      <ul className="grid list-none gap-1 p-0 font-mono text-xs leading-6 [overflow-wrap:anywhere] text-text-secondary">
         {headers.map((header, index) => (
           <li key={`${header.name}:${index}`}>
             <span className="font-medium text-foreground">{header.name}:</span>{" "}
@@ -525,6 +762,294 @@ function EventCard({ event }: { event: SSEEvent }) {
   );
 }
 
+export type WireViewMode = "structured" | "raw";
+
+/** Label for the structured view of a body, or null when only raw applies. */
+export function wireStructuredLabel(part: AuditContentPart): string | null {
+  if (isEventStream(part)) return i18n.t("audit.events");
+  return formattedDocument(part) === null ? null : i18n.t("audit.formatted");
+}
+
+/**
+ * One captured body inside a host that owns the only scroller: stream events
+ * as compact rows, JSON formatted, or the original text.
+ */
+export function AuditWireView({
+  part,
+  mode,
+}: {
+  part: AuditContentPart;
+  mode: WireViewMode;
+}) {
+  const t = i18n.t.bind(i18n);
+  const structured = mode === "structured";
+  const formatted = useMemo(
+    () => (structured && !isEventStream(part) ? formattedDocument(part) : null),
+    [part, structured],
+  );
+  return (
+    <div className="grid gap-2">
+      {part.truncated ? (
+        <FormMessage tone="warning">{t("audit.truncatedNote")}</FormMessage>
+      ) : null}
+      {structured && isEventStream(part) ? (
+        <StreamEventList part={part} />
+      ) : formatted !== null ? (
+        <HighlightedAuditText
+          className="rounded-lg bg-muted/40 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]"
+          content={formatted}
+        />
+      ) : (
+        <RawSegmentView bounded={false} content={part.content} />
+      )}
+    </div>
+  );
+}
+
+function StreamEventList({ part }: { part: AuditContentPart }) {
+  const [events, setEvents] = useState<SSEEvent[]>([]);
+  const [parseState, setParseState] = useState<
+    "parsing" | "ready" | "cancelled" | "error"
+  >("parsing");
+  const [parseProgress, setParseProgress] = useState(0);
+  const [parseSummary, setParseSummary] = useState({
+    invalidJsonCount: 0,
+    incompleteLastEvent: false,
+  });
+  const [query, setQuery] = useState("");
+  const [renderLimit, setRenderLimit] = useState(EVENT_RENDER_BATCH);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setParseState("parsing");
+    setParseProgress(0);
+    setEvents([]);
+    void parseSSEIncremental(part.content, {
+      signal: controller.signal,
+      truncated: part.truncated,
+      onProgress: (progress) => {
+        setEvents(progress.events);
+        setParseProgress(
+          progress.totalCharacters === 0
+            ? 1
+            : progress.processedCharacters / progress.totalCharacters,
+        );
+      },
+    })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setEvents(result.events);
+        setParseSummary({
+          invalidJsonCount: result.invalidJsonCount,
+          incompleteLastEvent: result.incompleteLastEvent,
+        });
+        setParseProgress(1);
+        setParseState("ready");
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setParseState(
+          error instanceof SSEParseCancelledError ? "cancelled" : "error",
+        );
+      });
+    return () => controller.abort();
+  }, [part.content, part.truncated]);
+
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return events;
+    return events.filter(
+      (event) =>
+        event.type.toLowerCase().includes(normalized) ||
+        event.data.toLowerCase().includes(normalized),
+    );
+  }, [events, query]);
+  useEffect(() => setRenderLimit(EVENT_RENDER_BATCH), [query]);
+
+  const t = i18n.t.bind(i18n);
+  const showStatus =
+    parseState !== "ready" ||
+    parseSummary.invalidJsonCount > 0 ||
+    parseSummary.incompleteLastEvent;
+  return (
+    <div className="grid gap-2">
+      {events.length > EVENT_FILTER_THRESHOLD ? (
+        <div className="flex items-center gap-2">
+          <Input
+            aria-label={t("audit.searchEvents")}
+            className="h-7 min-w-0 flex-1 text-xs"
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder={t("audit.filterEvents")}
+            type="search"
+            value={query}
+          />
+          <span className="shrink-0 text-micro text-muted-foreground tabular-nums">
+            {query.trim()
+              ? `${filtered.length.toLocaleString()} / ${events.length.toLocaleString()}`
+              : events.length.toLocaleString()}
+          </span>
+        </div>
+      ) : null}
+      {showStatus ? (
+        <div>
+          <ParseStatus
+            progress={parseProgress}
+            state={parseState}
+            summary={parseSummary}
+          />
+        </div>
+      ) : null}
+      {parseState === "ready" && events.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{t("audit.noEvents")}</p>
+      ) : null}
+      {filtered.length > 0 ? (
+        <ol className="divide-y overflow-hidden rounded-md border">
+          {filtered.slice(0, renderLimit).map((event) => (
+            <EventRow event={event} key={event.index} />
+          ))}
+        </ol>
+      ) : null}
+      {renderLimit < filtered.length ? (
+        <Button
+          className="w-full"
+          variant="outline"
+          onClick={() =>
+            setRenderLimit((current) => current + EVENT_RENDER_BATCH)
+          }
+          type="button"
+        >
+          {t("audit.showMoreEvents", {
+            count: Math.min(EVENT_RENDER_BATCH, filtered.length - renderLimit),
+          })}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function EventRow({ event }: { event: SSEEvent }) {
+  const t = i18n.t.bind(i18n);
+  const failure = isFailureEvent(event);
+  return (
+    <li>
+      <details className="group" data-testid="audit-event">
+        <summary
+          className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs hover:bg-muted/50 [&::-webkit-details-marker]:hidden"
+          title={event.type}
+        >
+          <span className="w-6 shrink-0 text-right text-micro text-muted-foreground tabular-nums">
+            {event.index}
+          </span>
+          <code
+            className={cn(
+              "min-w-0 max-w-[55%] shrink-0 truncate font-mono font-medium",
+              failure && "text-danger-foreground",
+            )}
+          >
+            {event.type}
+          </code>
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate text-muted-foreground",
+              failure && "text-danger-foreground",
+            )}
+          >
+            {eventPreview(event)}
+          </span>
+          {event.invalidJson || event.incomplete ? (
+            <span className="shrink-0 text-micro text-warning-foreground">
+              {event.invalidJson
+                ? t("audit.invalidJsonBadge")
+                : t("audit.incompleteEvent")}
+            </span>
+          ) : null}
+        </summary>
+        <pre className="border-t bg-muted/40 px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
+          {event.json === null
+            ? event.data || t("audit.emptyData")
+            : JSON.stringify(event.json, null, 2)}
+        </pre>
+      </details>
+    </li>
+  );
+}
+
+type JsonObject = Record<string, unknown>;
+const jsonObject = (value: unknown): JsonObject =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as JsonObject)
+    : {};
+const jsonString = (value: unknown): string =>
+  typeof value === "string" ? value : "";
+
+function eventError(event: SSEEvent): JsonObject {
+  const data = jsonObject(event.json);
+  return jsonObject(data.error ?? jsonObject(data.response).error);
+}
+
+function isFailureEvent(event: SSEEvent): boolean {
+  return (
+    /(?:^|[._])(?:error|failed)$/.test(event.type) ||
+    Object.keys(eventError(event)).length > 0
+  );
+}
+
+/** The one line of an event worth reading before expanding it. */
+function eventPreview(event: SSEEvent): string {
+  if (event.done) return "[DONE]";
+  if (event.json === null) return event.data;
+  const data = jsonObject(event.json);
+  const error = eventError(event);
+  const message = jsonString(error.message) || jsonString(data.message);
+  if (message) {
+    const code = jsonString(error.code) || jsonString(error.type);
+    return code ? `${code}: ${message}` : message;
+  }
+  const delta = data.delta;
+  const deltaObject = jsonObject(delta);
+  const choiceDelta = jsonObject(
+    jsonObject((Array.isArray(data.choices) ? data.choices : [])[0]).delta,
+  );
+  const item = jsonObject(data.item ?? data.content_block);
+  const response = jsonObject(data.response);
+  const text =
+    jsonString(delta) ||
+    jsonString(deltaObject.text) ||
+    jsonString(deltaObject.thinking) ||
+    jsonString(deltaObject.partial_json) ||
+    jsonString(choiceDelta.content) ||
+    jsonString(choiceDelta.reasoning_content) ||
+    jsonString(data.text) ||
+    jsonString(data.arguments);
+  if (text) return text.replace(/\s+/g, " ");
+  if (item.type)
+    return [jsonString(item.type), jsonString(item.name)]
+      .filter(Boolean)
+      .join(" · ");
+  if (response.status) return jsonString(response.status);
+  return event.data.replace(/\s+/g, " ").slice(0, 200);
+}
+
+function isEventStream(part: AuditContentPart): boolean {
+  return part.media_type.toLowerCase().includes("text/event-stream");
+}
+
+function formattedDocument(part: AuditContentPart): string | null {
+  if (
+    part.content.length > 1024 * 1024 ||
+    !(
+      part.media_type.toLowerCase().includes("json") ||
+      looksLikeJson(part.content)
+    )
+  )
+    return null;
+  try {
+    return JSON.stringify(JSON.parse(part.content), null, 2);
+  } catch {
+    return null;
+  }
+}
+
 function DocumentInspector({ part }: { part: AuditContentPart }) {
   const canFormat =
     part.content.length <= 1024 * 1024 &&
@@ -576,7 +1101,17 @@ function DocumentInspector({ part }: { part: AuditContentPart }) {
   );
 }
 
-function RawSegmentView({ content }: { content: string }) {
+/**
+ * `bounded` caps each segment with its own scroller for hosts that stack
+ * several sections; a host that already scrolls one pane turns it off.
+ */
+function RawSegmentView({
+  content,
+  bounded = true,
+}: {
+  content: string;
+  bounded?: boolean;
+}) {
   const totalSegments = Math.max(
     1,
     Math.ceil(content.length / RAW_SEGMENT_SIZE),
@@ -624,7 +1159,12 @@ function RawSegmentView({ content }: { content: string }) {
             </header>
           ) : null}
           <HighlightedAuditText
-            className="max-h-[520px] overflow-auto bg-muted/40 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap"
+            className={cn(
+              "bg-muted/40 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap",
+              bounded
+                ? "max-h-[520px] overflow-auto"
+                : "[overflow-wrap:anywhere]",
+            )}
             content={segment.text}
           />
         </section>

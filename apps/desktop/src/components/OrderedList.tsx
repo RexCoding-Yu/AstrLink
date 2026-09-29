@@ -25,6 +25,7 @@ export function OrderedList<T extends { id: string }>({
   label,
   disabled = false,
   compact = false,
+  showPosition = true,
   positionOf,
   variant = "default",
   className,
@@ -43,6 +44,8 @@ export function OrderedList<T extends { id: string }>({
   label: string;
   disabled?: boolean;
   compact?: boolean;
+  /** Tables whose row order is already visible can drop the position number. */
+  showPosition?: boolean;
   positionOf?: (item: T) => number;
   /** Bare modules keep their own surfaces and expose controls only when editing. */
   variant?: "default" | "modules";
@@ -466,9 +469,11 @@ export function OrderedList<T extends { id: string }>({
             >
               <GripVertical />
             </Button>
-            <span className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">
-              {variant === "modules" ? itemLabel?.(item) : position}
-            </span>
+            {showPosition || variant === "modules" ? (
+              <span className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">
+                {variant === "modules" ? itemLabel?.(item) : position}
+              </span>
+            ) : null}
             {(!compact || itemActions) && (
               <div className="ml-auto flex shrink-0 items-center gap-2">
                 {!compact && (

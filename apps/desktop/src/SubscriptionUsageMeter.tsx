@@ -213,14 +213,14 @@ function QuotaRow({
   const label = t("usage.keyQuota");
   const expiry = formatQuotaExpiry(quota, now);
   if (quota.unlimited) {
-    // An unlimited key has nothing to fill a bar against; its spend takes the
-    // value slot a metered row gives its percentage.
+    // An unlimited key has no bar to span the width, so its spend follows the
+    // label instead of being pushed to the far edge.
     return (
       <div
         className="grid min-w-0 gap-1.5"
         data-testid="subscription-usage-quota"
       >
-        <div className="flex min-w-0 items-center justify-between gap-2 text-xs">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
           <span className="min-w-0 truncate" title={label}>
             {label}
           </span>

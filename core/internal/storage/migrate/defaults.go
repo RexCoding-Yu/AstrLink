@@ -671,5 +671,30 @@ WHERE id = 'policy_privacy_default'
 		{Version: 40, Name: "learned_client_identity", Statements: []string{
 			`CREATE TABLE learned_client_identity (provider TEXT PRIMARY KEY, document_json TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		}},
+		{Version: 41, Name: "shared_audit_payloads", Statements: []string{
+			`CREATE TABLE audit_payloads (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES request_records(id) ON DELETE CASCADE,
+    content_key BLOB NOT NULL CHECK(length(content_key) = 32),
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    UNIQUE(request_id, content_key)
+)`,
+			// Keep legacy ciphertext readable until the bounded retention sweep
+			// moves it into shared payloads. New rows contain only a reference.
+			`ALTER TABLE audit_blobs ADD COLUMN payload_id INTEGER REFERENCES audit_payloads(id)
+CHECK(payload_id IS NULL OR (length(nonce) = 0 AND length(ciphertext) = 0))`,
+			`CREATE INDEX audit_blobs_payload_idx ON audit_blobs(payload_id)`,
+			`CREATE TRIGGER audit_blob_payload_delete AFTER DELETE ON audit_blobs
+WHEN OLD.payload_id IS NOT NULL BEGIN
+    DELETE FROM audit_payloads WHERE id = OLD.payload_id
+      AND NOT EXISTS (SELECT 1 FROM audit_blobs WHERE payload_id = OLD.payload_id);
+END`,
+			`CREATE TRIGGER audit_blob_payload_update AFTER UPDATE OF payload_id ON audit_blobs
+WHEN OLD.payload_id IS NOT NULL AND OLD.payload_id IS NOT NEW.payload_id BEGIN
+    DELETE FROM audit_payloads WHERE id = OLD.payload_id
+      AND NOT EXISTS (SELECT 1 FROM audit_blobs WHERE payload_id = OLD.payload_id);
+END`,
+		}},
 	}
 }

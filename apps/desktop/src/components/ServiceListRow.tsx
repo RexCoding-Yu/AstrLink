@@ -18,29 +18,34 @@ export type ServiceListLabels = Record<
   string
 >;
 
-// Every visible column shares spare width. Bound the contents separately so
-// neither the name column nor a progress bar stretches to fill the whole row.
+// Content columns share spare width. Bound the contents separately so neither
+// the name column nor a progress bar stretches to fill the whole row. The
+// minimums are what each cell needs to stay legible in the narrowest table.
+// The switch and action buttons keep exact tracks: spare width there would
+// open a wider gap between the controls than between the buttons themselves.
 const tracks: Record<ServiceListColumn, string> = {
   models: "minmax(6rem,0.6fr)",
-  usage: "minmax(10rem,1.2fr)",
-  billing: "minmax(5.5rem,0.7fr)",
-  performance: "minmax(7rem,0.7fr)",
-  status: "minmax(3.25rem,0.45fr)",
+  usage: "minmax(7.5rem,1.2fr)",
+  billing: "minmax(4.75rem,0.7fr)",
+  performance: "minmax(5.25rem,0.7fr)",
+  status: "2.25rem",
 };
 
-// An ordinary desktop window has about 820px left after the sidebar and padding.
-// Keep the optional model counts with identity until there is room for a column.
+// The minimum 760px window still leaves about 660px after the collapsed
+// sidebar and padding, so every desktop window gets the same table; only
+// narrower hosts stack the cells. Keep the optional model counts with identity
+// until there is room for a column.
 const columns =
-  "@[820px]/service-list:grid-cols-(--service-list-columns) @[1080px]/service-list:grid-cols-(--service-list-expanded-columns)";
+  "@[640px]/service-list:grid-cols-(--service-list-columns) @[1080px]/service-list:grid-cols-(--service-list-expanded-columns)";
 
 function columnsStyle(hidden: readonly ServiceListColumn[]): CSSProperties {
   const visible = SERVICE_LIST_COLUMNS.filter((id) => !hidden.includes(id));
   const template = (ids: readonly ServiceListColumn[]) =>
     [
-      "2.75rem",
+      "1.75rem",
       "minmax(0,1.4fr)",
       ...ids.map((id) => tracks[id]),
-      "minmax(5.75rem,0.65fr)",
+      "5.75rem",
     ].join(" ");
   return {
     "--service-list-columns": template(visible.filter((id) => id !== "models")),
@@ -59,7 +64,7 @@ export function ServiceListHeader({
     <div
       aria-hidden="true"
       className={cn(
-        "sticky top-0 z-10 hidden shrink-0 items-center gap-3 border-y bg-muted px-2 py-2 text-micro font-medium text-muted-foreground transition-opacity group-has-[[data-sorting=true]]/service-list:opacity-0 motion-reduce:transition-none @[820px]/service-list:grid @[1040px]/service-list:gap-4 @[1040px]/service-list:px-3",
+        "sticky top-0 z-10 hidden shrink-0 items-center gap-2 border-y bg-muted px-2 py-2 text-micro font-medium text-muted-foreground transition-opacity group-has-[[data-sorting=true]]/service-list:opacity-0 motion-reduce:transition-none @[640px]/service-list:grid @[640px]/service-list:gap-3 @[1040px]/service-list:px-3",
         columns,
       )}
       style={columnsStyle(hidden)}
@@ -71,7 +76,7 @@ export function ServiceListHeader({
           className={cn(
             id === "models" &&
               "mx-auto hidden w-full max-w-28 @[1080px]/service-list:block",
-            id === "usage" && "mx-auto w-full max-w-68 px-2",
+            id === "usage" && "mx-auto w-full max-w-68 pr-3 pl-1.5",
             id === "billing" && "mx-auto w-full max-w-24",
             id === "performance" && "mx-auto w-full max-w-32",
             id === "status" && "text-center",
@@ -119,7 +124,7 @@ export function ServiceListRow({
     return (
       <DataRow
         asChild
-        className="grid h-13 grid-cols-[3.25rem_minmax(0,1fr)_auto] gap-4 px-3 py-0"
+        className="grid h-13 grid-cols-[1.75rem_minmax(0,1fr)_auto] gap-4 px-3 py-0"
       >
         <article
           aria-label={name}
@@ -145,13 +150,13 @@ export function ServiceListRow({
     <DataRow
       asChild
       className={cn(
-        "grid grid-cols-[2.75rem_minmax(0,1fr)] items-center gap-x-2 gap-y-2 px-2 py-2.5 transition-colors hover:bg-muted/30 @[480px]/service-list:grid-cols-[2.75rem_minmax(0,1fr)_auto] @[820px]/service-list:min-h-20 @[820px]/service-list:gap-x-3 @[820px]/service-list:gap-y-3 @[820px]/service-list:py-3 @[1040px]/service-list:gap-x-4 @[1040px]/service-list:px-3",
+        "grid grid-cols-[1.75rem_minmax(0,1fr)] items-center gap-x-2 gap-y-2 px-2 py-2.5 transition-colors hover:bg-muted/30 @[480px]/service-list:grid-cols-[1.75rem_minmax(0,1fr)_auto] @[640px]/service-list:min-h-20 @[640px]/service-list:gap-y-3 @[640px]/service-list:gap-x-3 @[640px]/service-list:py-3 @[1040px]/service-list:px-3",
         columns,
       )}
       style={columnsStyle(hidden)}
     >
       <article aria-label={name} data-testid="service-card">
-        <div className="col-start-1 row-start-1 self-start pt-1 @[820px]/service-list:self-center @[820px]/service-list:pt-0">
+        <div className="col-start-1 row-start-1 self-start pt-1 @[640px]/service-list:self-center @[640px]/service-list:pt-0">
           {order}
         </div>
         <div className="col-start-2 row-start-1 grid min-w-0 gap-2 @[1080px]/service-list:contents">
@@ -164,11 +169,12 @@ export function ServiceListRow({
             </div>
           ) : null}
         </div>
-        {/* Small windows get a quota column and a compact billing/performance
-            summary. The same controls become table cells on wide screens. */}
+        {/* Hosts narrower than the table get a quota column and a compact
+            billing/performance summary. The same controls become table cells
+            in every desktop window. */}
         <div
           className={cn(
-            "col-span-full row-start-2 grid min-w-0 items-start gap-x-5 gap-y-2 @[480px]/service-list:col-span-2 @[480px]/service-list:col-start-2 @[820px]/service-list:contents",
+            "col-span-full row-start-2 grid min-w-0 items-start gap-x-5 gap-y-2 @[480px]/service-list:col-span-2 @[480px]/service-list:col-start-2 @[640px]/service-list:contents",
             showUsage &&
               usage &&
               (showBilling || showPerformance) &&
@@ -180,11 +186,14 @@ export function ServiceListRow({
           )}
         >
           {showUsage ? (
-            // Keep empty cells in the table so later columns stay aligned.
+            // Keep empty cells in the table so later columns stay aligned. The
+            // quota bar fills its cell, so its trailing edge gets the wider
+            // inset; the leading edge already follows the service column's
+            // spare width.
             <div
               className={cn(
-                "min-w-0 @[820px]/service-list:row-start-1 @[820px]/service-list:mx-auto @[820px]/service-list:w-full @[820px]/service-list:max-w-68 @[820px]/service-list:px-2",
-                !usage && "hidden @[820px]/service-list:block",
+                "min-w-0 @[640px]/service-list:row-start-1 @[640px]/service-list:mx-auto @[640px]/service-list:w-full @[640px]/service-list:max-w-68 @[640px]/service-list:pr-3 @[640px]/service-list:pl-1.5",
+                !usage && "hidden @[640px]/service-list:block",
               )}
             >
               {usage}
@@ -192,34 +201,34 @@ export function ServiceListRow({
           ) : null}
           <div
             className={cn(
-              "grid min-w-0 gap-1 @[820px]/service-list:contents",
+              "grid min-w-0 gap-1 @[640px]/service-list:contents",
               !showBilling && !showPerformance && "hidden",
             )}
           >
             {showBilling ? (
               <div
                 className={cn(
-                  "min-w-0 @[820px]/service-list:row-start-1 @[820px]/service-list:mx-auto @[820px]/service-list:w-full @[820px]/service-list:max-w-24",
-                  !billing && "hidden @[820px]/service-list:block",
+                  "min-w-0 @[640px]/service-list:row-start-1 @[640px]/service-list:mx-auto @[640px]/service-list:w-full @[640px]/service-list:max-w-24",
+                  !billing && "hidden @[640px]/service-list:block",
                 )}
               >
                 {billing}
               </div>
             ) : null}
             {showPerformance ? (
-              <div className="min-w-0 @[820px]/service-list:row-start-1 @[820px]/service-list:mx-auto @[820px]/service-list:w-full @[820px]/service-list:max-w-32">
+              <div className="min-w-0 @[640px]/service-list:row-start-1 @[640px]/service-list:mx-auto @[640px]/service-list:w-full @[640px]/service-list:max-w-32 @[640px]/service-list:pr-1.5">
                 {performance}
               </div>
             ) : null}
           </div>
         </div>
-        <div className="col-span-full row-start-3 flex min-w-0 items-center justify-between gap-3 @[480px]/service-list:col-span-1 @[480px]/service-list:col-start-3 @[480px]/service-list:row-start-1 @[820px]/service-list:contents">
+        <div className="col-span-full row-start-3 flex min-w-0 items-center justify-between gap-3 @[480px]/service-list:col-span-1 @[480px]/service-list:col-start-3 @[480px]/service-list:row-start-1 @[640px]/service-list:contents">
           {!hidden.includes("status") ? (
-            <div className="flex shrink-0 items-center gap-2 @[820px]/service-list:row-start-1 @[820px]/service-list:justify-center">
+            <div className="flex shrink-0 items-center gap-2 @[640px]/service-list:row-start-1 @[640px]/service-list:justify-center">
               {status}
             </div>
           ) : null}
-          <div className="ml-auto flex shrink-0 items-center justify-end gap-1 @max-[480px]/service-list:[&>button]:size-9 @[820px]/service-list:row-start-1 @[820px]/service-list:ml-0 @[820px]/service-list:justify-center">
+          <div className="ml-auto flex shrink-0 items-center justify-end gap-1 @max-[480px]/service-list:[&>button]:size-9 @[640px]/service-list:row-start-1 @[640px]/service-list:ml-0 @[640px]/service-list:justify-center">
             {actions}
           </div>
         </div>

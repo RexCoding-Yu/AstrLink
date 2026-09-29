@@ -1,5 +1,6 @@
 mod agent_install;
 mod cc_switch;
+mod client_updates;
 mod control_session;
 #[cfg(debug_assertions)]
 mod dev_reload;
@@ -13,6 +14,7 @@ mod service_proxy;
 mod sidecar;
 mod startup_window;
 mod tray;
+mod updates;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -70,6 +72,8 @@ struct PreferencesInput {
     quota_display_mode: preferences::QuotaDisplayMode,
     #[serde(default)]
     tray: TrayPreferences,
+    #[serde(default)]
+    updates: updates::UpdatePreferences,
 }
 
 impl From<PreferencesInput> for Preferences {
@@ -88,6 +92,7 @@ impl From<PreferencesInput> for Preferences {
             theme: input.theme,
             quota_display_mode: input.quota_display_mode,
             tray: input.tray,
+            updates: input.updates,
         }
     }
 }
@@ -135,6 +140,7 @@ async fn restart_core(
     app: tauri::AppHandle,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<AppSnapshot, String> {
+    let _lifecycle = updates::lifecycle_guard(&app)?;
     let manager = Arc::clone(manager.inner());
     manager.restart(&app).await?;
     Ok(AppSnapshot::capture(&app, &manager))
@@ -145,6 +151,7 @@ fn start_core(
     app: tauri::AppHandle,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<AppSnapshot, String> {
+    let _lifecycle = updates::lifecycle_guard(&app)?;
     let manager = Arc::clone(manager.inner());
     manager.start(&app)?;
     Ok(AppSnapshot::capture(&app, &manager))
@@ -155,6 +162,7 @@ async fn stop_core(
     app: tauri::AppHandle,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<AppSnapshot, String> {
+    let _lifecycle = updates::lifecycle_guard(&app)?;
     let manager = Arc::clone(manager.inner());
     manager.stop_and_wait().await?;
     Ok(AppSnapshot::capture(&app, &manager))
@@ -1384,6 +1392,7 @@ pub fn run() {
             None,
         ))
         .append_invoke_initialization_script(platform_initialization_script(std::env::consts::OS))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init());
@@ -1395,7 +1404,16 @@ pub fn run() {
         .manage(explicit_quit)
         .manage(Mutex::new(InspectorRegistry::default()))
         .manage(tray::TrayState::default())
+        .manage(Arc::new(client_updates::ClientUpdateManager::default()))
         .invoke_handler(tauri::generate_handler![
+            client_updates::local_client_status,
+            client_updates::refresh_local_clients,
+            client_updates::update_local_clients,
+            updates::app_update_status,
+            updates::check_app_update,
+            updates::download_app_update,
+            updates::install_app_update,
+            updates::update_update_preferences,
             core_status,
             window_chrome_preferences,
             get_preferences,
@@ -1517,6 +1535,10 @@ pub fn run() {
                 ));
             }
             app.manage(preferences);
+            let updates =
+                Arc::new(updates::UpdateManager::new(app.handle()).map_err(std::io::Error::other)?);
+            app.manage(Arc::clone(&updates));
+            updates.start(app.handle().clone());
 
             tray::build(app.handle())?;
             tray::start(app.handle());

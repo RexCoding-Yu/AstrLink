@@ -87,7 +87,7 @@ func main() {
 	// OAuth, subscriptions, discovery, downloads and inference share this policy.
 	outboundTransport := http.DefaultTransport.(*http.Transport).Clone()
 	outboundTransport.Proxy = proxy
-	http.DefaultTransport = outboundTransport
+	http.DefaultTransport = networkproxy.WrapTransport(outboundTransport)
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()

@@ -158,6 +158,41 @@ export function recordedPrivacyHits(
   }));
 }
 
+/**
+ * What the privacy policy did to the request. `unfinished` covers an
+ * inspection that failed or was cut off before it decided.
+ */
+export type PolicyDecision =
+  | "redact"
+  | "warn"
+  | "block"
+  | "allow"
+  | "inspecting"
+  | "unfinished";
+
+/**
+ * Core writes the decision as the first segment of the POLICY summary
+ * ("allow", "warn", "block", "redact · 3"). A recorded mapping means values
+ * were replaced whatever the summary says, which also covers records
+ * synthesized without events.
+ */
+export function policyDecision(
+  row: Pick<TrajectoryRow, "summary" | "status">,
+  restore: RequestRecord["privacy_restore"],
+): PolicyDecision {
+  const action = row.summary.split(" · ")[0];
+  if (action === "redact" || (restore?.mapping_count ?? 0) > 0) {
+    return "redact";
+  }
+  if (action === "warn") return "warn";
+  if (action === "block" || row.status === "blocked") return "block";
+  if (row.status === "pending") return "inspecting";
+  if (row.status === "failed" || row.status === "cancelled") {
+    return "unfinished";
+  }
+  return "allow";
+}
+
 export function splitPrivacyHighlights(text: string): PrivacyHighlightSpan[] {
   if (!text) return [];
   const marks: Array<{ start: number; end: number; kind: string }> = [];

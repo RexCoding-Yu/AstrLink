@@ -137,6 +137,17 @@ func WrapTransport(base http.RoundTripper) http.RoundTripper {
 	return &scopedTransport{base: base, pools: make(map[contract.ServiceID]poolEntry)}
 }
 
+// BaseTransport exposes the HTTP configuration for cloning or WebSocket dialing.
+// HTTP requests must still use WrapTransport to apply the current proxy policy
+// before reusing a connection, including cached HTTP/2 connections.
+func BaseTransport(transport http.RoundTripper) (*http.Transport, bool) {
+	if scoped, ok := transport.(*scopedTransport); ok {
+		transport = scoped.base
+	}
+	base, ok := transport.(*http.Transport)
+	return base, ok
+}
+
 func WrapClient(client *http.Client) *http.Client {
 	copy := *client
 	copy.Transport = WrapTransport(client.Transport)
@@ -144,21 +155,42 @@ func WrapClient(client *http.Client) *http.Client {
 }
 
 func (t *scopedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	s, ok := req.Context().Value(snapshotKey{}).(snapshot)
-	if !ok {
-		return t.base.RoundTrip(req)
-	}
+	s, bound := req.Context().Value(snapshotKey{}).(snapshot)
 	base, ok := t.base.(*http.Transport)
 	if !ok {
 		// Custom test/instrumentation transports must not silently bypass overrides.
-		if s.mode != "inherit" {
+		if bound && s.mode != "inherit" {
 			return nil, errors.New("transport does not support instance proxy configuration")
 		}
 		return t.base.RoundTrip(req)
 	}
+	var selected *url.URL
+	switch s.mode {
+	case "direct":
+	case "custom":
+		selected = s.proxy
+	default:
+		if base.Proxy != nil {
+			var err error
+			selected, err = base.Proxy(req)
+			if err != nil {
+				if req.Body != nil {
+					req.Body.Close()
+				}
+				return nil, err
+			}
+		}
+	}
+	// net/http can reuse HTTP/2 connections without calling Transport.Proxy.
+	// Resolve the route first and keep each pool pinned to that proxy, so a
+	// system change or discovery failure cannot reuse a stale route.
+	key := s.key
+	if selected != nil {
+		key += "\x00" + selected.String()
+	}
 	t.mu.Lock()
 	entry, found := t.pools[s.service]
-	if !found || entry.key != s.key {
+	if !found || entry.key != key {
 		if found {
 			entry.transport.CloseIdleConnections()
 		}
@@ -170,13 +202,8 @@ func (t *scopedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 		}
 		configured := base.Clone()
-		switch s.mode {
-		case "direct":
-			configured.Proxy = nil
-		case "custom":
-			configured.Proxy = http.ProxyURL(s.proxy)
-		}
-		entry = poolEntry{s.key, configured}
+		configured.Proxy = http.ProxyURL(selected)
+		entry = poolEntry{key, configured}
 		t.pools[s.service] = entry
 	}
 	t.mu.Unlock()

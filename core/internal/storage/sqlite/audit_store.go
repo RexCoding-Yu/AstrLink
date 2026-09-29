@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -151,19 +153,97 @@ func (store *Store) InsertAuditBlob(ctx context.Context, blob storagecontract.Au
 	if createdAt.IsZero() {
 		createdAt = store.now().UTC()
 	}
-	_, err := store.db.ExecContext(ctx, `INSERT INTO audit_blobs (
-    request_id, direction, media_type, nonce, ciphertext, truncated, captured_bytes, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	blob.CreatedAt = createdAt
+	key, err := store.GetAuditKey(ctx)
+	if err != nil && !errors.Is(err, storagecontract.ErrNotFound) {
+		return err
+	}
+	defer clear(key)
+	contentKey := auditContentKey(key, blob)
+	if contentKey == nil {
+		// Preserve historical behavior for opaque/corrupt captures. They must
+		// remain available for the reader to report the decryption failure.
+		return upsertAuditBlob(ctx, store.db, blob, nil)
+	}
+	return store.writeSharedAuditBlob(ctx, blob, contentKey, false)
+}
+
+func auditContentKey(key []byte, blob storagecontract.AuditBlob) []byte {
+	plain, err := storagecontract.OpenAuditBlob(key, blob.Nonce, blob.Ciphertext)
+	if err != nil {
+		return nil
+	}
+	defer clear(plain)
+	// Keyed and request-scoped: the index cannot be used as a public hash of
+	// private content or to correlate equal bodies across conversations.
+	digest := hmac.New(sha256.New, key)
+	_, _ = digest.Write([]byte(blob.RequestID))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(plain)
+	return digest.Sum(nil)
+}
+
+func (store *Store) writeSharedAuditBlob(ctx context.Context, blob storagecontract.AuditBlob, contentKey []byte, legacy bool) (err error) {
+	transaction, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin shared audit write: %w", err)
+	}
+	defer transaction.Rollback()
+	if legacy {
+		// Acquire the writer lock and compare the entire old row before
+		// converting it. A concurrent retry, deletion, or capture must win.
+		result, updateErr := transaction.ExecContext(ctx, `UPDATE audit_blobs SET payload_id = payload_id
+WHERE request_id = ? AND direction = ? AND payload_id IS NULL
+  AND nonce = ? AND ciphertext = ? AND media_type = ? AND truncated = ?
+  AND captured_bytes = ? AND created_at = ?`, blob.RequestID, blob.Direction,
+			blob.Nonce, blob.Ciphertext, blob.MediaType, boolToInt(blob.Truncated), blob.CapturedBytes,
+			blob.CreatedAt.UTC().Format(time.RFC3339Nano))
+		if updateErr != nil {
+			return fmt.Errorf("lock legacy audit blob: %w", updateErr)
+		}
+		changed, updateErr := result.RowsAffected()
+		if updateErr != nil {
+			return updateErr
+		}
+		if changed == 0 {
+			return nil
+		}
+	}
+	// Write first, before reading, so concurrent captures acquire SQLite's
+	// writer lock without a deferred read transaction upgrade.
+	if _, err = transaction.ExecContext(ctx, `INSERT INTO audit_payloads (request_id, content_key, nonce, ciphertext)
+VALUES (?, ?, ?, ?) ON CONFLICT(request_id, content_key) DO NOTHING`, blob.RequestID, contentKey, blob.Nonce, blob.Ciphertext); err != nil {
+		return fmt.Errorf("insert shared audit payload: %w", err)
+	}
+	var payloadID int64
+	if err = transaction.QueryRowContext(ctx, `SELECT id FROM audit_payloads WHERE request_id = ? AND content_key = ?`, blob.RequestID, contentKey).Scan(&payloadID); err != nil {
+		return fmt.Errorf("read shared audit payload: %w", err)
+	}
+	blob.Nonce = []byte{}
+	blob.Ciphertext = []byte{}
+	if err = upsertAuditBlob(ctx, transaction, blob, payloadID); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
+func upsertAuditBlob(ctx context.Context, executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, blob storagecontract.AuditBlob, payloadID any) error {
+	_, err := executor.ExecContext(ctx, `INSERT INTO audit_blobs (
+    request_id, direction, media_type, nonce, ciphertext, truncated, captured_bytes, created_at, payload_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(request_id, direction) DO UPDATE SET
     media_type = excluded.media_type,
     nonce = excluded.nonce,
     ciphertext = excluded.ciphertext,
     truncated = excluded.truncated,
     captured_bytes = excluded.captured_bytes,
-    created_at = excluded.created_at`,
+    created_at = excluded.created_at,
+    payload_id = excluded.payload_id`,
 		string(blob.RequestID), string(blob.Direction), blob.MediaType,
 		blob.Nonce, blob.Ciphertext, boolToInt(blob.Truncated), blob.CapturedBytes,
-		createdAt.UTC().Format(time.RFC3339Nano),
+		blob.CreatedAt.UTC().Format(time.RFC3339Nano), payloadID,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert audit blob: %w", err)
@@ -179,8 +259,11 @@ func (store *Store) GetAuditBlobsByRequest(
 		return nil, fmt.Errorf("%w: %v", storagecontract.ErrInvalidArgument, err)
 	}
 	rows, err := store.db.QueryContext(ctx, `SELECT
-    request_id, direction, media_type, nonce, ciphertext, truncated, captured_bytes, created_at
-FROM audit_blobs WHERE request_id = ? ORDER BY direction ASC`, id)
+    b.request_id, b.direction, b.media_type,
+    COALESCE(p.nonce, b.nonce), COALESCE(p.ciphertext, b.ciphertext),
+    b.truncated, b.captured_bytes, b.created_at
+FROM audit_blobs b LEFT JOIN audit_payloads p ON p.id = b.payload_id
+WHERE b.request_id = ? ORDER BY b.direction ASC`, id)
 	if err != nil {
 		return nil, fmt.Errorf("list audit blobs: %w", err)
 	}
@@ -289,10 +372,59 @@ WHERE request_id NOT IN (SELECT id FROM request_records)`)
 	if err = transaction.Commit(); err != nil {
 		return storagecontract.SweepResult{}, fmt.Errorf("commit audit sweep: %w", err)
 	}
+	if err := store.compactLegacyAuditBlobs(ctx); err != nil {
+		return storagecontract.SweepResult{}, err
+	}
 	return storagecontract.SweepResult{
 		DeletedRecords:    int(deletedRecords),
 		DeletedAuditBlobs: blobCountBefore + int(deletedByAge) + int(deletedOrphans),
 	}, nil
+}
+
+// Upgrade old inline ciphertext gradually, without a full-database rewrite or
+// VACUUM on startup. Freed pages are reusable by subsequent captures.
+func (store *Store) compactLegacyAuditBlobs(ctx context.Context) error {
+	key, err := store.GetAuditKey(ctx)
+	if errors.Is(err, storagecontract.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	var cursor int64
+	var processedBytes int
+	for count := 0; count < 128 && processedBytes < 16*1024*1024; count++ {
+		// Read one capture at a time, including for maximum-size legacy blobs.
+		var rowID int64
+		err := store.db.QueryRowContext(ctx, `SELECT rowid FROM audit_blobs
+WHERE payload_id IS NULL AND rowid > ? ORDER BY rowid LIMIT 1`, cursor).Scan(&rowID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("find legacy audit blob: %w", err)
+		}
+		cursor = rowID
+		blob, err := scanAuditBlob(store.db.QueryRowContext(ctx, `SELECT
+request_id, direction, media_type, nonce, ciphertext, truncated, captured_bytes, created_at
+FROM audit_blobs WHERE rowid = ? AND payload_id IS NULL`, rowID))
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		processedBytes += len(blob.Ciphertext)
+		contentKey := auditContentKey(key, blob)
+		if contentKey == nil {
+			continue
+		}
+		if err := store.writeSharedAuditBlob(ctx, blob, contentKey, true); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func scanAuditBlob(row scannable) (storagecontract.AuditBlob, error) {

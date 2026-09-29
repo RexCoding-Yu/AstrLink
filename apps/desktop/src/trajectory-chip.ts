@@ -5,8 +5,8 @@ import type {
 
 /**
  * Phase colours are shared by the list rows, the timeline marks and the
- * inspector header, and the inspector now runs in its own window. Keeping the
- * scale here is what stops the two windows from drifting apart.
+ * inspector tabs, and the inspector runs in its own window. Keeping the scale
+ * here is what stops the two windows from drifting apart.
  */
 const chipClass: Record<TrajectoryChip, string> = {
   TURN: "bg-foreground text-background",
@@ -30,6 +30,19 @@ const subtleChipClass: Record<TrajectoryChip, string> = {
   RETRY: "bg-warning-wash text-warning-foreground",
   RESTORE: "bg-violet-wash text-violet-foreground",
   RESULT: "bg-success-wash text-success-foreground",
+};
+
+/** The solid scale's fills, for marks too small to carry a wash. */
+const chipDotFill: Record<TrajectoryChip, string> = {
+  TURN: "bg-foreground",
+  CLIENT: "bg-primary",
+  REDIRECT: "bg-accent-foreground",
+  POLICY: "bg-warning",
+  ROUTE: "bg-tide",
+  UPSTREAM: "bg-warning",
+  RETRY: "bg-warning",
+  RESTORE: "bg-violet",
+  RESULT: "bg-success",
 };
 
 const failedPhaseChips = new Set<TrajectoryChip>([
@@ -67,6 +80,23 @@ export function chipToneClass(
   return appearance === "subtle" ? subtleChipClass[chip] : chipClass[chip];
 }
 
-/** Badge shared by the inspector header and the list rows. */
-export const CHIP_BADGE_CLASS =
-  "inline-flex h-5 items-center justify-center rounded-sm px-1 text-micro font-semibold tracking-wide";
+/**
+ * A tab's status mark: the phase colour the list row and timeline use, so a
+ * tab matches the row that opened it. Failures and waits override it on the
+ * same phases that turn red or amber in the list.
+ */
+export function chipDotClass(
+  chip: TrajectoryChip,
+  tone: TrajectoryTone,
+): string {
+  if (tone === "failed" && failedPhaseChips.has(chip)) return "bg-destructive";
+  if (tone === "blocked" && (chip === "RESULT" || chip === "POLICY"))
+    return "bg-blocked";
+  if (
+    (tone === "pending" && failedPhaseChips.has(chip)) ||
+    (tone === "cancelled" &&
+      (chip === "RESULT" || chip === "CLIENT" || chip === "TURN"))
+  )
+    return "bg-warning";
+  return chipDotFill[chip];
+}

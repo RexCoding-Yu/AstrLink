@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -21,6 +23,9 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 }
 
 func TestDefaultForwarderDisablesTransparentCompression(t *testing.T) {
+	previous := http.DefaultTransport
+	http.DefaultTransport = networkproxy.WrapTransport(previous)
+	defer func() { http.DefaultTransport = previous }()
 	forwarder := New(nil)
 	configured, ok := forwarder.roundTripper.(*http.Transport)
 	if !ok || !configured.DisableCompression || configured.ResponseHeaderTimeout != 0 {

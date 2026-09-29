@@ -35,12 +35,10 @@ import {
   MAX_RESPONSE_START_TIMEOUT_SECONDS,
   MIN_MAX_CONCURRENT_INSPECTIONS,
   TRAY_MENUBAR_TEXTS,
-  TRAY_PAGES,
   TRAY_USAGE_KEYS,
   type Preferences,
   type SettingsSnapshot,
   type TrayMenubarText,
-  type TrayPage,
   type TrayPreferences,
 } from "./preferences-model";
 import { notify } from "./notify";
@@ -60,15 +58,6 @@ const TRAY_PREVIEW_REFRESH_MS = 30_000;
 const TRAY_PREVIEW_SETTLE_MS = 2_500;
 
 type SettingsTab = "general" | "tray";
-
-const pageLabelKeys: Record<TrayPage, string> = {
-  records: "nav.records",
-  services: "nav.services",
-  tokens: "nav.tokens",
-  safety: "nav.safety",
-  routing: "nav.routing",
-  agent_tools: "nav.agentTools",
-};
 
 type InstantPatch = Omit<
   Preferences,
@@ -461,15 +450,6 @@ export function SettingsCenter({
   const prefsBusy = busy === "prefs";
   const applyTray = (patch: Partial<TrayPreferences>) =>
     void applyInstant({ tray: { ...prefs.tray, ...patch } });
-  const togglePage = (page: TrayPage, enabled: boolean) => {
-    const selected = new Set(prefs.tray.pages);
-    if (enabled) selected.add(page);
-    else selected.delete(page);
-    // Keep navigation order regardless of the order pages were toggled in.
-    applyTray({
-      pages: TRAY_PAGES.filter((candidate) => selected.has(candidate)),
-    });
-  };
   const phase = snapshot?.phase ?? "unavailable";
   const tone = phaseTone(phase);
   const canStart = ["stopped", "exited", "error"].includes(phase);
@@ -995,36 +975,6 @@ export function SettingsCenter({
                       applyTray({ gateway_controls })
                     }
                   />
-                  <div className="grid gap-2 px-4 py-3">
-                    <span className="text-xs font-medium text-text-secondary">
-                      {t("settings.trayPagesSection")}
-                    </span>
-                    <div
-                      aria-label={t("settings.trayPagesSection")}
-                      className="flex flex-wrap gap-1.5"
-                      role="group"
-                    >
-                      {TRAY_PAGES.map((page) => {
-                        const selected = prefs.tray.pages.includes(page);
-                        return (
-                          <Button
-                            key={page}
-                            aria-pressed={selected}
-                            disabled={prefsBusy}
-                            onClick={() => togglePage(page, !selected)}
-                            size="sm"
-                            type="button"
-                            variant={selected ? "secondary" : "outline"}
-                          >
-                            {t(pageLabelKeys[page])}
-                          </Button>
-                        );
-                      })}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {t("settings.trayPagesHint")}
-                    </p>
-                  </div>
                 </Panel>
               </div>
 

@@ -104,7 +104,7 @@ export function UsagePerformanceMeter({
       className={cn(
         "grid gap-1 text-xs tabular-nums",
         layout === "service" &&
-          "flex flex-wrap items-center gap-x-3 @[820px]/service-list:grid @[820px]/service-list:gap-x-1",
+          "flex flex-wrap items-center gap-x-3 @[640px]/service-list:grid @[640px]/service-list:gap-x-1",
       )}
       data-testid={testId}
     >
@@ -123,14 +123,14 @@ export function UsagePerformanceMeter({
       <div
         className={cn(
           "flex items-center justify-between gap-2 text-micro text-muted-foreground",
-          layout === "service" && "ml-auto @[820px]/service-list:ml-0",
+          layout === "service" && "ml-auto @[640px]/service-list:ml-0",
         )}
       >
         <span
           className={cn(
             layout === "service" &&
               status !== "error" &&
-              "sr-only @[820px]/service-list:not-sr-only",
+              "sr-only @[640px]/service-list:not-sr-only",
           )}
         >
           {status === "error" ? t("services.performanceError") : periodLabel}

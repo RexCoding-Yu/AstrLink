@@ -214,6 +214,7 @@ pub struct Preferences {
     pub theme: ThemePreference,
     pub quota_display_mode: QuotaDisplayMode,
     pub tray: TrayPreferences,
+    pub updates: crate::updates::UpdatePreferences,
 }
 
 impl Default for Preferences {
@@ -232,6 +233,7 @@ impl Default for Preferences {
             theme: ThemePreference::System,
             quota_display_mode: QuotaDisplayMode::Remaining,
             tray: TrayPreferences::default(),
+            updates: crate::updates::UpdatePreferences::default(),
         }
     }
 }
@@ -361,16 +363,30 @@ impl PreferencesStore {
         }
     }
 
-    pub fn replace(&self, values: Preferences) -> Result<PreferencesSnapshot, String> {
+    pub fn replace(&self, mut values: Preferences) -> Result<PreferencesSnapshot, String> {
+        let mut inner = self.lock();
+        // General settings cannot overwrite independently saved About preferences.
+        values.updates = inner.values.updates.clone();
         values.validate()?;
         persist_atomic(&self.path, &values)?;
-        let mut inner = self.lock();
         inner.values = values;
         inner.load_warning = None;
         Ok(PreferencesSnapshot {
             values: inner.values.clone(),
             load_warning: None,
         })
+    }
+
+    pub fn replace_updates(
+        &self,
+        updates: crate::updates::UpdatePreferences,
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        let mut values = inner.values.clone();
+        values.updates = updates;
+        persist_atomic(&self.path, &values)?;
+        inner.values = values;
+        Ok(())
     }
 
     pub fn report_warning(&self, warning: String) {
@@ -508,6 +524,33 @@ mod tests {
             std::process::id(),
             TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn about_and_general_settings_do_not_overwrite_each_other() {
+        let directory = temporary_directory("updates");
+        let store = load(&directory);
+        let mut stale_general = store.snapshot().values;
+        let updates = crate::updates::UpdatePreferences {
+            auto_check: false,
+            auto_download: false,
+            channel: crate::updates::UpdateChannel::Preview,
+        };
+        store.replace_updates(updates.clone()).unwrap();
+        stale_general.inference_port = 9876;
+        store.replace(stale_general).unwrap();
+        assert_eq!(store.snapshot().values.updates, updates);
+        store
+            .replace_updates(crate::updates::UpdatePreferences::default())
+            .unwrap();
+        assert_eq!(store.snapshot().values.inference_port, 9876);
+        let reloaded = load(&directory).snapshot();
+        assert_eq!(reloaded.values.inference_port, 9876);
+        assert_eq!(
+            reloaded.values.updates,
+            crate::updates::UpdatePreferences::default()
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

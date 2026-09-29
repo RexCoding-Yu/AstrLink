@@ -2,21 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import {
-  Activity,
   ArrowUpRight,
   Ban,
-  Bot,
   Copy,
   Eye,
-  Key as KeyRound,
   RefreshCw,
   RotateCcw,
-  Route,
-  Server,
   Settings,
-  ShieldCheck,
   X,
-  type AnimatedIcon,
 } from "@/components/icons";
 import { IconButton } from "@/components/IconButton";
 import { SectionKicker } from "@/components/SectionKicker";
@@ -34,11 +27,7 @@ import {
 } from "./bridge";
 import type { CorePhase } from "./core-model";
 import { i18n, useT } from "./i18n";
-import {
-  TRAY_PAGES,
-  type TrayPage,
-  type TrayPreferences,
-} from "./preferences-model";
+import type { TrayPreferences } from "./preferences-model";
 import { formatResetCountdown, windowLabel } from "./subscription-usage-model";
 import {
   cacheHitPercent,
@@ -55,34 +44,6 @@ const COPY_FEEDBACK_MS = 1_500;
 const CLOCK_TICK_MS = 30_000;
 /** Subscription window rows shown before the list folds behind a toggle. */
 export const SUBSCRIPTION_FOLD_LIMIT = 10;
-
-/** Maps a quick page to the `WorkspacePage.kind` the main window routes on. */
-const pageKinds: Record<TrayPage, string> = {
-  records: "records",
-  services: "list",
-  tokens: "tokens",
-  safety: "safety",
-  routing: "routing",
-  agent_tools: "agentTools",
-};
-
-const pageIcons: Record<TrayPage, AnimatedIcon> = {
-  records: Activity,
-  services: Server,
-  tokens: KeyRound,
-  safety: ShieldCheck,
-  routing: Route,
-  agent_tools: Bot,
-};
-
-const pageLabelKeys: Record<TrayPage, string> = {
-  records: "nav.records",
-  services: "nav.services",
-  tokens: "nav.tokens",
-  safety: "nav.safety",
-  routing: "nav.routing",
-  agent_tools: "nav.agentTools",
-};
 
 function phaseTone(phase: CorePhase): StatusTone {
   if (phase === "ready") return "positive";
@@ -182,11 +143,14 @@ function Stat({
   badge?: string;
 }) {
   return (
-    <div className="min-w-0">
-      <div className="truncate text-2xl leading-8 font-semibold tracking-tight tabular-nums">
+    <div className="min-w-0 space-y-1 border-l pl-3 first:border-l-0 first:pl-0">
+      <div
+        className="truncate text-2xl leading-8 font-semibold tracking-tight tabular-nums"
+        title={value}
+      >
         {value}
       </div>
-      <div className="flex min-w-0 items-center gap-1.5 text-micro text-muted-foreground">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-micro text-muted-foreground">
         <span className="truncate">{label}</span>
         {badge ? (
           <Badge
@@ -258,7 +222,6 @@ export function TrayPopoverPanel({
   const digest = state?.digest ?? null;
   const usage = tray.usage;
   const wantsUsage = Object.values(usage).some(Boolean);
-  const pages = TRAY_PAGES.filter((page) => tray.pages.includes(page));
   const address = view?.inference_url
     ? displayAddress(view.inference_url)
     : null;
@@ -383,7 +346,7 @@ export function TrayPopoverPanel({
       inert={preview}
     >
       {/* Header: state, address, quick actions. */}
-      <header className="flex items-start gap-2.5 px-4 pt-3.5 pb-3">
+      <header className="flex items-start gap-2.5 px-4 py-3.5">
         <StatusDot className="mt-[7px] size-2" tone={phaseTone(phase)} />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
@@ -432,7 +395,7 @@ export function TrayPopoverPanel({
             </p>
           ) : null}
         </div>
-        <div className="flex shrink-0 items-center gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5 text-muted-foreground">
           {tray.copy_address ? (
             <IconButton
               disabled={!address}
@@ -456,9 +419,12 @@ export function TrayPopoverPanel({
 
       {/* Usage: the reason to open the panel. */}
       {ready && wantsUsage ? (
-        <div className="grid gap-3 border-t px-4 py-3">
+        <div
+          className="grid max-h-96 content-start gap-4 overflow-y-auto overscroll-contain border-t px-4 pt-4 pb-5"
+          data-slot="tray-usage"
+        >
           {showToday ? (
-            <div className="grid gap-2.5">
+            <div className="grid gap-3">
               <div className="flex items-center justify-between gap-2">
                 <SectionKicker>{t("tray.today")}</SectionKicker>
                 <div className="flex items-center gap-1 text-micro text-muted-foreground">
@@ -485,14 +451,7 @@ export function TrayPopoverPanel({
                   {t("tray.noCallsToday")}
                 </p>
               ) : (
-                <div
-                  className={cn(
-                    "grid gap-3",
-                    usage.today && usage.cost && digest.cost_today
-                      ? "grid-cols-3"
-                      : "grid-cols-2",
-                  )}
-                >
+                <div className="grid auto-cols-fr grid-flow-col gap-3">
                   {usage.today && digest.today ? (
                     <>
                       <Stat
@@ -540,7 +499,12 @@ export function TrayPopoverPanel({
           ) : null}
 
           {subscriptionRows.length > 0 ? (
-            <div className="grid gap-2.5">
+            <div
+              className={cn(
+                "grid gap-3",
+                (showToday || chips.length > 0) && "border-t pt-4",
+              )}
+            >
               <div className="flex items-center justify-between gap-2">
                 <SectionKicker>{t("tray.subscriptions")}</SectionKicker>
                 {subscriptionsFoldable ? (
@@ -549,17 +513,7 @@ export function TrayPopoverPanel({
                   </span>
                 ) : null}
               </div>
-              <div
-                className={cn(
-                  "grid gap-2.5",
-                  // Expanded lists scroll inside the panel so the popover never
-                  // outgrows the screen it is anchored to.
-                  subscriptionsFoldable &&
-                    subscriptionsExpanded &&
-                    "max-h-72 overflow-y-auto overscroll-contain pr-1",
-                )}
-                data-slot="tray-subscriptions"
-              >
+              <div className="grid gap-4" data-slot="tray-subscriptions">
                 {visibleSubscriptionRows.map(({ key, name, window }) => (
                   <SubscriptionQuotaMeter
                     key={key}
@@ -632,57 +586,21 @@ export function TrayPopoverPanel({
         </div>
       ) : null}
 
-      {/* Quick pages. */}
-      {pages.length > 0 ? (
-        <div
-          className={cn(
-            "grid gap-1 border-t px-2 py-2",
-            pages.length === 1
-              ? "grid-cols-1"
-              : pages.length === 2 || pages.length === 4
-                ? "grid-cols-2"
-                : "grid-cols-3",
-          )}
-        >
-          {pages.map((page) => {
-            const Icon = pageIcons[page];
-            return (
-              <Button
-                key={page}
-                className="h-8 justify-start px-2 text-xs font-normal"
-                onClick={() =>
-                  onAction({ kind: "navigate", page: pageKinds[page] })
-                }
-                size="sm"
-                type="button"
-                variant="ghost"
-              >
-                <Icon
-                  aria-hidden="true"
-                  className="size-3.5 text-muted-foreground"
-                  strokeWidth={1.6}
-                />
-                <span className="truncate">{t(pageLabelKeys[page])}</span>
-              </Button>
-            );
-          })}
-        </div>
-      ) : null}
-
       {/* Footer: gateway controls and the always-available actions. */}
-      <footer className="flex items-center justify-between gap-2 border-t bg-muted/40 px-2 py-2">
+      <footer className="flex items-center justify-between gap-2 border-t bg-muted/40 px-4 py-3">
         <div className="flex min-w-0 items-center gap-0.5">
           {tray.gateway_controls && ready ? (
             // Bare icon buttons, the same weight as the header's copy and
             // settings controls; the destructive one only turns red on intent.
             <div
               aria-label={t("tray.gatewayControls")}
-              className="inline-flex items-center gap-0.5"
+              className="inline-flex items-center gap-1 text-muted-foreground"
               role="group"
             >
               <IconButton
                 label={t("tray.core.restart")}
                 onClick={() => onAction({ kind: "core", op: "restart" })}
+                size="icon"
               >
                 <RotateCcw aria-hidden="true" />
               </IconButton>
@@ -690,6 +608,7 @@ export function TrayPopoverPanel({
                 className="hover:bg-danger-wash hover:text-destructive"
                 label={t("tray.core.stop")}
                 onClick={() => onAction({ kind: "core", op: "stop" })}
+                size="icon"
               >
                 <Ban aria-hidden="true" />
               </IconButton>
@@ -698,20 +617,14 @@ export function TrayPopoverPanel({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <Button
-            className="h-7 px-2 text-xs text-muted-foreground"
+            className="px-2 text-muted-foreground"
             onClick={() => onAction({ kind: "quit" })}
-            size="sm"
             type="button"
             variant="ghost"
           >
             {t("tray.quit")}
           </Button>
-          <Button
-            className="h-7"
-            onClick={() => onAction({ kind: "open" })}
-            size="sm"
-            type="button"
-          >
+          <Button onClick={() => onAction({ kind: "open" })} type="button">
             {t("tray.open")}
             <ArrowUpRight aria-hidden="true" />
           </Button>

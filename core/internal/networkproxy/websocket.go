@@ -18,7 +18,7 @@ import (
 // ConfigureWebSocket shares the HTTP instance policy, including TLS to HTTPS
 // proxies, which Gorilla's built-in proxy adapter does not implement.
 func ConfigureWebSocket(ctx context.Context, dialer *websocket.Dialer, target *url.URL) error {
-	base, ok := http.DefaultTransport.(*http.Transport)
+	base, ok := BaseTransport(http.DefaultTransport)
 	if !ok {
 		return errors.New("WebSocket requires an HTTP transport")
 	}

@@ -389,6 +389,7 @@ pub struct CoreSnapshot {
 }
 
 struct CoreInner {
+    update_in_progress: bool,
     generation: u64,
     phase: CorePhase,
     child: Option<CommandChild>,
@@ -420,6 +421,7 @@ struct CoreInner {
 impl Default for CoreInner {
     fn default() -> Self {
         Self {
+            update_in_progress: false,
             generation: 0,
             phase: CorePhase::Stopped,
             child: None,
@@ -578,7 +580,23 @@ pub struct PolicyRecordResponse {
     pub etag: String,
 }
 
+pub struct CoreUpdateGuard(Arc<CoreManager>);
+impl Drop for CoreUpdateGuard {
+    fn drop(&mut self) {
+        self.0.lock_inner().update_in_progress = false;
+    }
+}
+
 impl CoreManager {
+    pub fn begin_update(self: &Arc<Self>) -> Result<(CoreUpdateGuard, bool), String> {
+        let mut inner = self.lock_inner();
+        if inner.update_in_progress {
+            return Err("Application update in progress".into());
+        }
+        inner.update_in_progress = true;
+        let running = inner.child.is_some();
+        Ok((CoreUpdateGuard(Arc::clone(self)), running))
+    }
     pub fn new() -> Self {
         let client = Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -613,6 +631,9 @@ impl CoreManager {
         // cannot observe "no child" and return before this start completes.
         let (generation, receiver) = {
             let mut inner = self.lock_inner();
+            if inner.update_in_progress {
+                return Err("Application update in progress".into());
+            }
             if !start_allowed(&inner.lifecycle(), inner.child.is_some()) {
                 return Err(inner.last_error.clone().unwrap_or_else(|| {
                     "astrlink-core is already running or stopping".to_string()
@@ -4810,7 +4831,7 @@ fn verify_capabilities(capabilities: &CapabilitiesResponse) -> Result<(), String
 }
 
 #[cfg(windows)]
-mod windows_job {
+pub(crate) mod windows_job {
     use std::{ffi::c_void, mem::size_of, ptr};
 
     use windows_sys::Win32::{
@@ -4826,7 +4847,7 @@ mod windows_job {
     };
 
     #[derive(Debug)]
-    pub(super) struct JobObject(HANDLE);
+    pub(crate) struct JobObject(HANDLE);
 
     // The handle is owned by this value, and all mutation happens through the
     // CoreManager mutex. Windows kernel handles may be closed from any thread.
@@ -4834,7 +4855,7 @@ mod windows_job {
     unsafe impl Sync for JobObject {}
 
     impl JobObject {
-        pub(super) fn attach(pid: u32) -> Result<Self, String> {
+        pub(crate) fn attach(pid: u32) -> Result<Self, String> {
             let job = Self::new()?;
             let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
             if process.is_null() {
@@ -4916,6 +4937,18 @@ mod windows_job {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_guard_is_exclusive_and_releases_after_failure() {
+        let manager = Arc::new(CoreManager::new());
+        let (guard, running) = manager.begin_update().unwrap();
+        assert!(!running);
+        assert!(manager.lock_inner().update_in_progress);
+        assert!(manager.begin_update().is_err());
+        drop(guard);
+        assert!(!manager.lock_inner().update_in_progress);
+        assert!(manager.begin_update().is_ok());
+    }
+
     #[test]
     fn service_risk_events_path_bounds_the_limit() {
         assert_eq!(

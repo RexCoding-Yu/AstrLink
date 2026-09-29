@@ -1,7 +1,7 @@
 # Animated Icons
 
-AstrLink's UI icons come from [lucide-animated](https://lucide-animated.com/)
-by pqoqubbw, under the included MIT [LICENSE](./LICENSE). The selected official
+AstrLink's UI icons come from [lucide-animated](https://lucide-animated.com/) by
+pqoqubbw, under the included MIT [LICENSE](./LICENSE). The selected official
 registry components were imported on 2026-09-18. Each file links to its source.
 
 Import icons and the `AnimatedIcon` type from `@/components/icons`. Artwork,
@@ -11,10 +11,10 @@ with a single SVG, preserving SVG props, refs, Radix `asChild`, and existing
 control sizing. Root SVG animations run on an inner group so CSS rotation and
 loading indicators do not conflict with Motion transforms.
 
-Icons animate when their containing control is hovered or focused, and stop
-on leaving it. Disabled controls and `prefers-reduced-motion` suppress these
-animations. Standalone icons respond to their own hover/focus. Loading icons
-use the existing CSS spin with `motion-reduce:animate-none` and disable hover
+Icons animate when their containing control is hovered or focused, and stop on
+leaving it. Disabled controls and `prefers-reduced-motion` suppress these
+animations. Standalone icons respond to their own hover/focus. Loading icons use
+the existing CSS spin with `motion-reduce:animate-none` and disable hover
 animation. Radio selection dots are CSS control indicators, not icon glyphs.
 
 The upstream library does not provide every static Lucide icon. Consumers use
@@ -31,15 +31,18 @@ explicit import aliases for these semantic replacements:
 | Info                  | CircleHelp        |
 | OctagonX              | Ban               |
 | Pencil                | SquarePen         |
-| Pin, PinOff           | MapPin, MapPinOff |
 | ScanLine              | ScanText          |
 | Trash2                | Shredder          |
 | TriangleAlert         | BadgeAlert        |
 | Loader2               | LoaderCircle      |
 
+`Pin` has no upstream counterpart, and a map pin reads as a location rather than
+"keep on top". It uses Lucide's static `pin` artwork (ISC) with a local
+press-down animation, and keeps the same wrapper and hover behavior.
+
 AI provider/model marks use `@lobehub/icons` artwork, deep-imported one SVG
 component at a time through `@/components/brand-icons`; its barrel and model
 mapping pull in every brand plus `@lobehub/ui`. `ModelBrandIcon` keeps its own
 keyword table for the brands it shows, and unknown models use the animated
-`Brain` instead of that package's static fallback. AstrLink branding
-and SVG data visualizations are separate from the UI icon library.
+`Brain` instead of that package's static fallback. AstrLink branding and SVG
+data visualizations are separate from the UI icon library.
