@@ -143,6 +143,7 @@ export interface HTTPServiceConnection {
   base_url: string;
   auth: ServiceAuth;
   credential_ref?: string;
+  model_list_path?: string;
 }
 
 export interface SubscriptionServiceConnection {
@@ -249,6 +250,7 @@ export type HTTPServiceCreateInput = {
     base_url: string;
     auth: ServiceAuth;
     credential?: { secret: string };
+    model_list_path?: string;
   };
   capabilities: ServiceCapability[];
 };
@@ -268,6 +270,7 @@ export type ServicePatchInput = {
     base_url?: string;
     auth?: ServiceAuth;
     credential?: { secret: string } | null;
+    model_list_path?: string | null;
   };
   capabilities?: ServiceCapability[];
 };
@@ -465,7 +468,12 @@ function parseHTTPConnection(
   path: string,
 ): HTTPServiceConnection {
   const connection = objectAt(value, path);
-  keysAt(connection, ["base_url", "auth"], ["credential_ref"], path);
+  keysAt(
+    connection,
+    ["base_url", "auth"],
+    ["credential_ref", "model_list_path"],
+    path,
+  );
   const baseURL = stringAt(connection.base_url, `${path}.base_url`, 1, 2048);
   let parsed: URL;
   try {
@@ -494,10 +502,20 @@ function parseHTTPConnection(
       invalid(`${path}.credential_ref`, "must use local://service/<id>");
     }
   }
+  let modelListPath: string | undefined;
+  if (Object.hasOwn(connection, "model_list_path")) {
+    modelListPath = stringAt(
+      connection.model_list_path,
+      `${path}.model_list_path`,
+      1,
+      512,
+    );
+  }
   return {
     base_url: baseURL,
     auth: parseAuth(connection.auth, `${path}.auth`),
     ...(credentialRef ? { credential_ref: credentialRef } : {}),
+    ...(modelListPath ? { model_list_path: modelListPath } : {}),
   };
 }
 

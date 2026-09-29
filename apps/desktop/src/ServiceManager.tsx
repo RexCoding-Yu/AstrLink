@@ -101,6 +101,7 @@ import {
   completeServiceAuthorization,
   createService,
   deleteService,
+  fetchCustomModelList,
   getService,
   getServiceAuthorization,
   getServiceUsage,
@@ -222,6 +223,7 @@ type Draft = {
   models: string[];
   capabilities: ServiceCapability[];
   authorizationFlow: AuthorizationFlow | null;
+  modelListPath: string;
 };
 
 type ConfirmAction =
@@ -352,6 +354,7 @@ function draftForKind(
         ...capability,
       })),
       authorizationFlow: defaultAuthorizationFlow(kind),
+      modelListPath: "",
     };
   }
   const preset = httpServicePreset(kind as HTTPServicePresetID, protocols);
@@ -369,6 +372,7 @@ function draftForKind(
     models: [...(preset.models ?? [])],
     capabilities: preset.capabilities.map((capability) => ({ ...capability })),
     authorizationFlow: null,
+    modelListPath: "",
   };
 }
 
@@ -406,6 +410,7 @@ function draftFromRecord(record: ServiceRecord): Draft {
     capabilities: service.capabilities.map((capability) =>
       wireCapability(capability),
     ),
+    modelListPath: service.http.model_list_path ?? "",
   };
 }
 
@@ -1160,6 +1165,52 @@ export function ServiceManager({
       setError(t("services.saveBeforeFetch"));
       return;
     }
+
+    // Custom kind with model_list_path uses a dedicated fetch command
+    if (draft.kind === "custom" && draft.modelListPath.trim() !== "") {
+      setProbingModels(true);
+      setError(null);
+      try {
+        const result = await fetchCustomModelList({
+          ...(draft.proxy.mode !== "inherit" || editing?.service.proxy
+            ? { proxy: proxyInput(draft.proxy) }
+            : {}),
+          ...(editing ? { service_id: editing.service.id } : {}),
+          kind: draft.kind,
+          http: {
+            base_url: draft.baseURL.trim(),
+            auth: authForDraft(draft),
+            ...(draft.secret.trim()
+              ? { credential: { secret: draft.secret } }
+              : {}),
+            model_list_path: draft.modelListPath.trim(),
+          },
+        });
+        const models = [
+          ...new Set([...draft.models, ...result.model_ids]),
+        ].sort();
+        if (models.length > 2_000) {
+          setError(t("services.mergeTooMany"));
+          return;
+        }
+        setModelPreviewQuery("");
+        setModelPreview({
+          models,
+          selected: initialModelPreviewSelection(draft.models, models),
+          warnings: result.warnings ?? [],
+        });
+      } catch (cause) {
+        setError(
+          t("services.fetchFailedDetail", {
+            warnings: errorMessage(cause, t("services.fetchFailed")),
+          }),
+        );
+      } finally {
+        setProbingModels(false);
+      }
+      return;
+    }
+
     const discoveryProtocols: ModelDiscoveryProtocol[] = isSubscriptionKind(
       draft.kind,
     )
@@ -1299,6 +1350,9 @@ export function ServiceManager({
               : draft.removeCredential
                 ? { credential: null }
                 : {}),
+            ...(draft.kind === "custom"
+              ? { model_list_path: draft.modelListPath.trim() || null }
+              : {}),
           };
         }
         patch.capabilities = isSubscriptionKind(draft.kind)
@@ -1348,6 +1402,9 @@ export function ServiceManager({
               auth: authForDraft(draft),
               ...(draft.secret.trim()
                 ? { credential: { secret: draft.secret } }
+                : {}),
+              ...(draft.kind === "custom" && draft.modelListPath.trim()
+                ? { model_list_path: draft.modelListPath.trim() }
                 : {}),
             },
             capabilities: draft.capabilities.map(wireCapability),
@@ -2517,7 +2574,8 @@ export function ServiceManager({
         draft.capabilities.some(
           ({ protocol }) =>
             protocol === "openai.models" || protocol === "google.models",
-        )
+        ) ||
+        (draft.kind === "custom" && draft.modelListPath.trim() !== "")
           ? () => void discoverModels()
           : undefined
       }
@@ -3072,6 +3130,24 @@ export function ServiceManager({
                   />
                   <span>{t("services.removeStoredKey")}</span>
                 </Label>
+              ) : null}
+              {draft.kind === "custom" ? (
+                <Field
+                  label={t("services.modelListPath")}
+                  hint={t("services.modelListPathHint")}
+                >
+                  <Input
+                    maxLength={512}
+                    placeholder="/v1/models"
+                    value={draft.modelListPath}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        modelListPath: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
               ) : null}
             </>
           )}

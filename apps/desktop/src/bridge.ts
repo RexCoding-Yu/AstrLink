@@ -371,6 +371,37 @@ export async function probeDraftServiceModels(
   );
 }
 
+export interface CustomModelListInput {
+  proxy?: import("./service-proxy-model").ServiceProxyInput | null;
+  service_id?: string;
+  kind: import("./service-model").HTTPServiceKind;
+  http: {
+    base_url: string;
+    auth: import("./service-model").ServiceAuth;
+    credential?: { secret: string };
+    model_list_path: string;
+  };
+}
+
+export interface CustomModelListResult {
+  model_ids: string[];
+  warnings?: string[];
+}
+
+export async function fetchCustomModelList(
+  input: CustomModelListInput,
+): Promise<CustomModelListResult> {
+  requireNativeBridge();
+  const raw = await invoke<{ model_ids: string[]; warnings?: string[] }>(
+    "fetch_and_parse_model_list",
+    { input },
+  );
+  return {
+    model_ids: Array.isArray(raw.model_ids) ? raw.model_ids : [],
+    warnings: Array.isArray(raw.warnings) ? raw.warnings : [],
+  };
+}
+
 export async function probeServiceProxy(
   input: ServiceProxyProbeInput,
 ): Promise<ServiceProxyProbeResult> {

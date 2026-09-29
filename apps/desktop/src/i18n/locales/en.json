@@ -832,6 +832,8 @@
     "apiAddress": "API address",
     "headerName": "Auth header name",
     "removeStoredKey": "Delete the stored API Key when saving",
+    "modelListPath": "Model list path",
+    "modelListPathHint": "Optional. When set, the \"Fetch model list\" button fetches models from this endpoint using the connection's auth.",
     "independentAccounts": "Authorization and credentials are independent for each subscription account.",
     "loadingRecord": "Loading API provider settings…",
     "loadRecordFailed": "Unable to load this API provider. Go back to the list and try again.",
