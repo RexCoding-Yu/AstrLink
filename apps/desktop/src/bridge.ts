@@ -391,15 +391,17 @@ export interface CustomModelListResult {
 export async function fetchCustomModelList(
   input: CustomModelListInput,
 ): Promise<CustomModelListResult> {
-  requireNativeBridge();
-  const raw = await invoke<{ model_ids: string[]; warnings?: string[] }>(
-    "fetch_and_parse_model_list",
-    { input },
-  );
-  return {
-    model_ids: Array.isArray(raw.model_ids) ? raw.model_ids : [],
-    warnings: Array.isArray(raw.warnings) ? raw.warnings : [],
-  };
+  // Route through the existing probe_draft_service_models command rather than
+  // a separate Tauri command. The prober already handles custom kind with any
+  // OpenAI-compatible /v1/models endpoint via ProtocolOpenAIModels.
+  const probe = await probeDraftServiceModels({
+    ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
+    ...(input.service_id !== undefined ? { service_id: input.service_id } : {}),
+    kind: input.kind,
+    http: input.http,
+    protocol: "openai.models",
+  });
+  return { model_ids: probe.model_ids };
 }
 
 export async function probeServiceProxy(
