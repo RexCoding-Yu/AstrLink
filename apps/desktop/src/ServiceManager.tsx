@@ -24,6 +24,7 @@ import { parseFailurePolicy, type FailurePolicy } from "./failure-policy-model";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Boxes,
+  ChevronRight,
   Flask,
   Connect as Cable,
   Menu as Ellipsis,
@@ -735,6 +736,7 @@ export function ServiceManager({
   const [modelPreview, setModelPreview] = useState<ModelPreview | null>(null);
   const [modelPreviewQuery, setModelPreviewQuery] = useState("");
   const [editorTab, setEditorTab] = useState<EditorTab>("connection");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [usageByService, setUsageByService] = useWorkspaceSnapshot<
     Record<
       string,
@@ -896,6 +898,7 @@ export function ServiceManager({
         const next = draftFromRecord(record);
         setEditing(record);
         setDraft(next);
+        setAdvancedOpen(next.modelListPath.trim() !== "");
         setBaseline(draftSignature(next));
       })
       .catch((cause) => {
@@ -2760,7 +2763,7 @@ export function ServiceManager({
           ? "https://api.x.ai"
           : draft.baseURL.trim();
   const connectionFields = (
-    <div className="grid min-w-0 items-start gap-4 pb-2 @[760px]:grid-cols-2">
+    <div className="grid min-w-0 gap-4 pb-2 @[760px]:grid-cols-2">
       <Panel>
         <PanelHeader>
           <h2 className="flex items-center gap-2 text-sm font-semibold">
@@ -3131,24 +3134,6 @@ export function ServiceManager({
                   <span>{t("services.removeStoredKey")}</span>
                 </Label>
               ) : null}
-              {draft.kind === "custom" ? (
-                <Field
-                  label={t("services.modelListPath")}
-                  hint={t("services.modelListPathHint")}
-                >
-                  <Input
-                    maxLength={512}
-                    placeholder="/v1/models"
-                    value={draft.modelListPath}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        modelListPath: event.target.value,
-                      }))
-                    }
-                  />
-                </Field>
-              ) : null}
             </>
           )}
         </div>
@@ -3167,6 +3152,46 @@ export function ServiceManager({
           })
         }
       />
+      {draft.kind === "custom" ? (
+        <Panel className="@[760px]:col-span-2" data-testid="service-advanced">
+          <details
+            className="group/advanced min-w-0"
+            open={advancedOpen}
+          >
+            <summary
+              className="flex cursor-pointer list-none items-center gap-2 p-4 text-sm font-semibold transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden"
+              onClick={(event) => {
+                event.preventDefault();
+                setAdvancedOpen((current) => !current);
+              }}
+            >
+              <ChevronRight
+                aria-hidden="true"
+                className="size-4 shrink-0 text-primary transition-transform group-open/advanced:rotate-90"
+              />
+              {t("services.advancedSettings")}
+            </summary>
+            <div className="grid min-w-0 gap-4 px-4 pb-4">
+              <Field
+                label={t("services.modelListPath")}
+                hint={t("services.modelListPathHint")}
+              >
+                <Input
+                  maxLength={512}
+                  placeholder="/v1/models"
+                  value={draft.modelListPath}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      modelListPath: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+          </details>
+        </Panel>
+      ) : null}
     </div>
   );
   return (

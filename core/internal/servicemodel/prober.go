@@ -126,7 +126,7 @@ func (prober *Prober) ProbeHTTP(
 		return nil, fmt.Errorf("%w: invalid base URL", ErrUnsupported)
 	}
 	baseURL = providerapi.BaseURL(kind, protocol, baseURL)
-	return prober.probeHTTPPages(probeContext, baseURL.String(), headers, protocol, kind == contract.ServiceKindAnthropic)
+	return prober.probeHTTPPages(probeContext, baseURL.String(), headers, protocol, kind == contract.ServiceKindAnthropic, connection.ModelListPath)
 }
 
 func (prober *Prober) probeSubscription(
@@ -157,12 +157,12 @@ func (prober *Prober) probeSubscription(
 	if account.Provider == contract.SubscriptionProviderClaudeCode {
 		headers := make(http.Header)
 		accountauth.ApplyClaudeAPIHeaders(headers, tokens, prober.subscriptions.ClaudeIdentity(probeContext))
-		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, true)
+		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, true, "")
 	}
 	if account.Provider == contract.SubscriptionProviderXAIGrok {
 		headers := make(http.Header)
 		accountauth.ApplyGrokAPIHeaders(headers, tokens, prober.subscriptions.GrokClientVersion())
-		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, false)
+		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, false, "")
 	}
 	models, err := prober.subscriptions.Provider().ListModels(probeContext, tokens)
 	if err != nil {
@@ -184,6 +184,7 @@ func (prober *Prober) probeHTTPPages(
 	headers http.Header,
 	protocol contract.ProtocolID,
 	anthropic bool,
+	customPath string,
 ) ([]string, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
@@ -192,7 +193,9 @@ func (prober *Prober) probeHTTPPages(
 	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	path := "/v1/models"
-	if protocol == contract.ProtocolGoogleModels {
+	if customPath != "" {
+		path = customPath
+	} else if protocol == contract.ProtocolGoogleModels {
 		path = "/v1beta/models"
 	}
 	nextToken := ""
