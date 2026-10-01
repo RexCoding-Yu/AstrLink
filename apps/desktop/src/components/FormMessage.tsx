@@ -1,4 +1,5 @@
 import type { HTMLAttributes } from "react";
+import { Slot } from "radix-ui";
 
 import { cn } from "@/lib/utils";
 
@@ -11,13 +12,19 @@ const toneClasses: Record<FormMessageTone, string> = {
   warning: "border-warning/30 bg-warning-wash text-warning-foreground",
 };
 
+/** Inline status text. Use `asChild` for block content such as lists. */
 export function FormMessage({
+  asChild = false,
   className,
   tone = "notice",
   ...props
-}: HTMLAttributes<HTMLParagraphElement> & { tone?: FormMessageTone }) {
+}: HTMLAttributes<HTMLParagraphElement> & {
+  asChild?: boolean;
+  tone?: FormMessageTone;
+}) {
+  const Comp = asChild ? Slot.Root : "p";
   return (
-    <p
+    <Comp
       className={cn(
         "shrink-0 rounded-md border px-3 py-2 text-xs",
         toneClasses[tone],

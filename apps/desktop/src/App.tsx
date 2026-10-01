@@ -51,11 +51,23 @@ import { RequestRecords } from "./RequestRecords";
 import { RouteManager } from "./RouteManager";
 import { SafetyPolicy } from "./SafetyPolicy";
 import { AgentDebugSettings } from "./AgentDebugSettings";
+import type { AgentSkillId } from "./agent-install-model";
+import { RawPasswordGate, useRawSetupNeeded } from "./RawSealingControls";
+import { useRawSealingStatus } from "./use-raw-sealing-status";
+import { LocalDataNotice } from "./LocalDataNotice";
 import { SettingsCenter } from "./SettingsCenter";
 import { About } from "./About";
 import { useAppUpdates } from "./use-app-updates";
+import { updateNotice } from "./update-model";
 import { toast } from "sonner";
-import { ServiceManager, type ServiceManagerView } from "./ServiceManager";
+import {
+  ServiceKindPickerDialog,
+  ServiceManager,
+  type ServiceManagerView,
+} from "./ServiceManager";
+import { ProviderImportDialog } from "./ProviderImportDialog";
+import { useProviderImport } from "./use-provider-import";
+import { notify } from "./notify";
 import type { Service } from "./service-model";
 import { TRAY_NAVIGATE_EVENT } from "./tray-popover-window";
 import {
@@ -71,7 +83,7 @@ type WorkspacePage =
   | { kind: "safety" }
   | { kind: "records"; tokenId?: string }
   | { kind: "routing" }
-  | { kind: "agentTools" }
+  | { kind: "agentTools"; preselectSkill?: AgentSkillId }
   | { kind: "settings" }
   | { kind: "about" }
   | ServiceManagerView;
@@ -211,6 +223,8 @@ export default function App() {
   const notifiedUpdate = useRef<string | null>(null);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [isRestarting, setIsRestarting] = useState(false);
+  // Hiding the unreadable-credentials notice lasts until the app restarts.
+  const [localDataDismissed, setLocalDataDismissed] = useState(false);
   const [catalog, setCatalog] = useState<ServiceCatalog>(emptyCatalog);
   const [tokenCatalog, setTokenCatalog] =
     useState<AccessTokenCatalog>(emptyTokenCatalog);
@@ -220,6 +234,8 @@ export default function App() {
   );
   const [page, setPage] = useState<WorkspacePage>({ kind: "overview" });
   const [pendingPage, setPendingPage] = useState<WorkspacePage | null>(null);
+  // Overview and the guide add providers through the same type picker as the list.
+  const [serviceKindPickerOpen, setServiceKindPickerOpen] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   const editorDirtyRef = useRef(false);
@@ -289,11 +305,19 @@ export default function App() {
 
   const isReady = snapshot?.phase === "ready";
   const isNativeApp = snapshot !== null && snapshot.phase !== "unavailable";
-  const onboarding = useOnboarding({ isReady, catalog, tokenCatalog, usage });
   const coreSessionKey =
     isReady && snapshot?.ready
       ? `${snapshot.pid ?? "none"}|${snapshot.ready.control_url}|${snapshot.ready.inference_url}`
       : null;
+  const rawSealing = useRawSealingStatus(coreSessionKey, isReady);
+  const rawSetupNeeded = useRawSetupNeeded(rawSealing.status);
+  const onboarding = useOnboarding({
+    isReady,
+    catalog,
+    tokenCatalog,
+    usage,
+    passwordReady: rawSealing.status !== null && !rawSetupNeeded,
+  });
 
   const refreshServices = useCallback(async () => {
     const generation = catalogGeneration.current + 1;
@@ -527,22 +551,22 @@ export default function App() {
     };
   }, []);
 
+  const updateNoticeKind = updateNotice(updates.snapshot);
   useEffect(() => {
     const version = updates.snapshot.release?.version;
-    if (
-      updates.snapshot.phase !== "ready" ||
-      !version ||
-      notifiedUpdate.current === version
-    )
-      return;
-    notifiedUpdate.current = version;
-    toast.info(t("about.readyNotification", { version }), {
+    if (!updateNoticeKind || !version) return;
+    const key = `${updateNoticeKind}:${version}`;
+    if (notifiedUpdate.current === key) return;
+    notifiedUpdate.current = key;
+    // About already shows this state; a toast linking back to it adds nothing.
+    if (page.kind === "about") return;
+    toast.info(t(`about.${updateNoticeKind}Notification`, { version }), {
       action: {
         label: t("about.title"),
         onClick: () => navigateRef.current({ kind: "about" }),
       },
     });
-  }, [updates.snapshot, t]);
+  }, [updateNoticeKind, updates.snapshot.release?.version, page.kind, t]);
 
   const confirmPendingNavigation = () => {
     if (pendingPage === null) return;
@@ -551,7 +575,7 @@ export default function App() {
     handleEditorDirtyChange(false);
   };
 
-  const handleServiceSaved = (service: Service) => {
+  const rememberService = (service: Service) => {
     setCatalog((current) => {
       const existingIndex = current.items.findIndex(
         (item) => item.id === service.id,
@@ -564,6 +588,10 @@ export default function App() {
             );
       return { status: "ready", items, error: null, stale: false };
     });
+  };
+
+  const handleServiceSaved = (service: Service) => {
+    rememberService(service);
     handleEditorDirtyChange(false);
     setPage({ kind: "list" });
   };
@@ -606,6 +634,22 @@ export default function App() {
     () => snapshot?.capabilities?.protocols ?? [],
     [snapshot?.capabilities?.protocols],
   );
+  const providerImport = useProviderImport({
+    enabled: isReady && rawSealing.status !== null && !rawSetupNeeded,
+    protocols,
+  });
+
+  const handleProviderImported = (service: Service) => {
+    providerImport.close();
+    rememberService(service);
+    notify.success(t("providerImport.added", { name: service.name }));
+    // Without models the provider cannot route yet; land where they are fetched.
+    navigate(
+      service.models.length > 0
+        ? { kind: "list" }
+        : { kind: "edit", serviceId: service.id, tab: "models" },
+    );
+  };
 
   return (
     <AppShell
@@ -690,8 +734,8 @@ export default function App() {
               icon="about"
               label={t("nav.about")}
               badge={
-                updates.snapshot.phase === "ready"
-                  ? t("about.phase.ready")
+                updateNoticeKind
+                  ? t(`about.phase.${updateNoticeKind}`)
                   : undefined
               }
               onClick={() => navigate({ kind: "about" })}
@@ -756,6 +800,7 @@ export default function App() {
                   {t("onboarding.inProgress")} ·{" "}
                   {t(
                     [
+                      "onboarding.passwordTitle",
                       "onboarding.serviceTitle",
                       "onboarding.tokenTitle",
                       "onboarding.clientTitle",
@@ -773,6 +818,7 @@ export default function App() {
             ) : null}
             {page.kind === "overview" && onboarding.active ? (
               <GettingStarted
+                conversionEngine={snapshot?.capabilities?.conversion_engine}
                 onboarding={onboarding}
                 catalog={catalog}
                 tokenCatalog={tokenCatalog}
@@ -780,7 +826,7 @@ export default function App() {
                 usage={usage}
                 isReady={isReady}
                 isRestarting={isRestarting}
-                onAddService={() => navigate({ kind: "create" })}
+                onAddService={() => setServiceKindPickerOpen(true)}
                 onManageServices={() => navigate({ kind: "list" })}
                 onManageTokens={() => navigate({ kind: "tokens" })}
                 onOpenRecords={() => navigate({ kind: "records" })}
@@ -790,6 +836,8 @@ export default function App() {
                   void refreshUsage();
                 }}
                 onRestart={() => void handleRestart()}
+                onRawSealingStatus={rawSealing.setStatus}
+                rawSealing={rawSealing}
               />
             ) : page.kind === "overview" ? (
               <Overview
@@ -799,7 +847,7 @@ export default function App() {
                 isNativeApp={isNativeApp}
                 isReady={isReady}
                 isRestarting={isRestarting}
-                onAddService={() => navigate({ kind: "create" })}
+                onAddService={() => setServiceKindPickerOpen(true)}
                 onCopy={(value, label) => void copyValue(value, label)}
                 onManageServices={() => navigate({ kind: "list" })}
                 onManageTokens={() => navigate({ kind: "tokens" })}
@@ -823,16 +871,26 @@ export default function App() {
               />
             ) : page.kind === "tokens" ? (
               <AccessTokenManager
+                conversionEngine={snapshot?.capabilities?.conversion_engine}
                 catalog={tokenCatalog}
                 coreSessionKey={coreSessionKey}
-                inferenceURL={snapshot?.ready?.inference_url ?? ""}
+                inferenceURL={snapshot?.ready?.client_inference_url ?? ""}
                 isReady={isReady}
                 onRefresh={() => void refreshAccessTokens()}
                 onTokenCreated={handleTokenCreated}
                 onTokenDeleted={handleTokenDeleted}
               />
             ) : page.kind === "safety" ? (
-              <SafetyPolicy coreSessionKey={coreSessionKey} isReady={isReady} />
+              <SafetyPolicy
+                coreSessionKey={coreSessionKey}
+                isReady={isReady}
+                onInstallPlaceholderSkill={() =>
+                  navigate({
+                    kind: "agentTools",
+                    preselectSkill: "redaction-placeholders",
+                  })
+                }
+              />
             ) : page.kind === "records" ? (
               <RequestRecords
                 accessTokens={tokenCatalog.items}
@@ -849,7 +907,7 @@ export default function App() {
                 onDirtyChange={handleEditorDirtyChange}
               />
             ) : page.kind === "agentTools" ? (
-              <AgentDebugSettings />
+              <AgentDebugSettings preselectSkill={page.preselectSkill} />
             ) : page.kind === "about" ? (
               <About
                 snapshot={updates.snapshot}
@@ -859,6 +917,14 @@ export default function App() {
               />
             ) : page.kind === "settings" ? (
               <SettingsCenter
+                localDataNotice={
+                  <LocalDataNotice
+                    coreSessionKey={coreSessionKey}
+                    dismissed={localDataDismissed}
+                    onDismiss={() => setLocalDataDismissed(true)}
+                    onOpenServices={() => navigate({ kind: "list" })}
+                  />
+                }
                 onCoreSnapshot={setSnapshot}
                 onDirtyChange={handleEditorDirtyChange}
                 snapshot={snapshot}
@@ -882,6 +948,11 @@ export default function App() {
           </main>
         </ValueTransition>
       </WorkspaceSnapshotProvider>
+      <ServiceKindPickerDialog
+        onOpenChange={setServiceKindPickerOpen}
+        onSelect={(serviceKind) => navigate({ kind: "create", serviceKind })}
+        open={serviceKindPickerOpen}
+      />
       <ConfirmDialog
         cancelLabel={t("common.continueEditing")}
         confirmLabel={t("common.discardAndLeave")}
@@ -891,6 +962,23 @@ export default function App() {
         open={pendingPage !== null}
         title={t("common.discardUnsaved")}
       />
+      <RawPasswordGate
+        onStatus={rawSealing.setStatus}
+        status={rawSealing.status}
+        // The guide asks for the password in its own first step.
+        suspended={
+          !onboarding.settled || (onboarding.active && page.kind === "overview")
+        }
+      />
+      {providerImport.active && (
+        <ProviderImportDialog
+          key={providerImport.active.id}
+          id={providerImport.active.id}
+          plan={providerImport.active.plan}
+          onAdded={handleProviderImported}
+          onClose={providerImport.close}
+        />
+      )}
     </AppShell>
   );
 }

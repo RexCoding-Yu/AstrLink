@@ -11,11 +11,18 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-import { getRequestAuditContent } from "./bridge";
+import { getRawSealingStatus, getRequestAuditContent } from "./bridge";
 import { useCopyFeedback } from "./copy-feedback";
 import { i18n } from "./i18n";
 import { notify } from "./notify";
-import type { AuditContent, RequestRecord } from "./request-record-model";
+import { rawPasswordUnset, type RawSealingState } from "./raw-sealing-model";
+import { RawSealingDialogs, type RawDialog } from "./RawSealingControls";
+import {
+  holdsLockedPart,
+  holdsRawPart,
+  type AuditContent,
+  type RequestRecord,
+} from "./request-record-model";
 import { TrajectoryInspector } from "./TrajectoryInspector";
 import {
   listenInspectorSelection,
@@ -23,6 +30,7 @@ import {
   trajectoryInspectorState,
   type TrajectoryInspectorSelection,
 } from "./trajectory-inspector-window";
+import { useRawUnlockWatch } from "./use-raw-unlock-watch";
 import { WindowChromeAccessory } from "./WindowChrome";
 
 /**
@@ -38,6 +46,9 @@ import { WindowChromeAccessory } from "./WindowChrome";
  *
  * Audit content is decrypted here rather than forwarded, so captured bodies
  * never cross the channel and the main window's cache stays the main window's.
+ * The unlock is shared with the main window: this one can open it for the
+ * parts on screen and watches it, so raw parts go when the unlock ends —
+ * pinned or not — and locked parts fill in after one, wherever it opened.
  */
 export function TrajectoryInspectorWindow() {
   const t = i18n.t.bind(i18n);
@@ -92,11 +103,40 @@ export function TrajectoryInspectorWindow() {
       });
   }, []);
 
+  const [rawCheck, setRawCheck] = useState(0);
   const audit = useRequestAudit(
     selection?.record.id ?? null,
     selection?.record.status ?? null,
     auditCaptureKey(selection?.record ?? null),
+    rawCheck,
   );
+  const refetchAudit = useCallback(() => setRawCheck((count) => count + 1), []);
+  useRawUnlockWatch(
+    selection !== null && !audit.loading,
+    {
+      holdsRaw: () => audit.content !== null && holdsRawPart(audit.content),
+      holdsLocked: () =>
+        audit.content !== null && holdsLockedPart(audit.content),
+    },
+    refetchAudit,
+  );
+
+  const [rawSealing, setRawSealing] = useState<RawSealingState | null>(null);
+  const [rawDialog, setRawDialog] = useState<RawDialog | null>(null);
+  const unlockRaw = useCallback(() => {
+    // Read fresh: the unlock may have opened in the main window meanwhile.
+    getRawSealingStatus().then(
+      (current) => {
+        setRawSealing(current);
+        if (current.unlocked) {
+          refetchAudit();
+          return;
+        }
+        setRawDialog({ kind: rawPasswordUnset(current) ? "set" : "unlock" });
+      },
+      () => notify.error(i18n.t("records.unlockSealingUnknown")),
+    );
+  }, [refetchAudit]);
 
   return (
     <main className="flex h-dvh min-h-0 flex-col overflow-hidden pt-[var(--window-chrome-height)]">
@@ -115,6 +155,7 @@ export function TrajectoryInspectorWindow() {
           auditError={audit.error}
           auditLoading={audit.loading}
           copyFeedback={copyFeedback}
+          onUnlockRaw={unlockRaw}
           pinned={pinned}
           record={selection.record}
           row={selection.row}
@@ -131,6 +172,15 @@ export function TrajectoryInspectorWindow() {
           </span>
         </div>
       )}
+      <RawSealingDialogs
+        dialog={rawDialog}
+        onClose={(done) => {
+          setRawDialog(null);
+          if (done) refetchAudit();
+        }}
+        onStatus={setRawSealing}
+        status={rawSealing}
+      />
     </main>
   );
 }
@@ -191,14 +241,16 @@ interface AuditState {
 }
 
 /**
- * Refetches when the request changes, when a running request settles, and
- * when a pending record's captured flags flip — request-side blobs can land
- * before the call finishes.
+ * Refetches when the request changes, when a running request settles, when a
+ * pending record's captured flags flip — request-side blobs can land before
+ * the call finishes — and when the raw unlock watch asks. Every refetch drops
+ * the content first, so raw parts leave the screen before the read returns.
  */
 function useRequestAudit(
   requestId: string | null,
   status: string | null,
   captureKey: string,
+  rawCheck: number,
 ): AuditState {
   const [state, setState] = useState<AuditState>({
     content: null,
@@ -234,7 +286,7 @@ function useRequestAudit(
     return () => {
       active = false;
     };
-  }, [requestId, status, captureKey]);
+  }, [requestId, status, captureKey, rawCheck]);
 
   return state;
 }

@@ -367,6 +367,74 @@ describe("RequestTrajectory in a window host", () => {
     expect(invoked("show_trajectory_inspector")).toBe(false);
   });
 
+  it("keeps the window on the clicked call when a new turn lands", async () => {
+    await renderTrajectory();
+    await clickRow("UPSTREAM");
+    hostMocks.invoke.mockClear();
+
+    const latest = {
+      ...record,
+      id: "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      started_at: "2026-07-25T10:01:00Z",
+    };
+    // The detail reload hands down fresh copies of the turns already listed.
+    await renderTrajectory([structuredClone(record), latest]);
+
+    // Nothing about the clicked call changed, so the window is left alone.
+    expect(invoked("update_trajectory_inspector")).toBe(false);
+    const selected = container.querySelector(
+      '[data-testid="trajectory-row"][aria-current="true"]',
+    );
+    expect(selected?.getAttribute("data-request-id")).toBe(record.id);
+    expect(selected?.getAttribute("data-chip")).toBe("UPSTREAM");
+  });
+
+  it("folds past turns and toggles one from its header without a window", async () => {
+    const latest = {
+      ...record,
+      id: "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      started_at: "2026-07-25T10:01:00Z",
+    };
+    await renderTrajectory([record, latest]);
+
+    const header = (requestId: string) =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-testid="trajectory-row"][data-chip="TURN"][data-request-id="${requestId}"]`,
+      )!;
+    const phaseCount = (requestId: string) =>
+      container.querySelectorAll(
+        `[data-testid="trajectory-row"][data-request-id="${requestId}"]:not([data-chip="TURN"])`,
+      ).length;
+
+    expect(header(record.id).getAttribute("aria-expanded")).toBe("false");
+    expect(header(latest.id).getAttribute("aria-expanded")).toBe("true");
+    expect(phaseCount(record.id)).toBe(0);
+    expect(phaseCount(latest.id)).toBe(3);
+
+    await act(async () => header(record.id).click());
+    expect(header(record.id).getAttribute("aria-expanded")).toBe("true");
+    expect(phaseCount(record.id)).toBe(3);
+    await act(async () => header(latest.id).click());
+    expect(header(latest.id).getAttribute("aria-expanded")).toBe("false");
+    expect(phaseCount(latest.id)).toBe(0);
+    await act(async () => header(record.id).click());
+    expect(phaseCount(record.id)).toBe(0);
+    expect(invoked("show_trajectory_inspector")).toBe(false);
+
+    // The timeline still reaches a folded call: it opens the turn to show it.
+    const bar = container.querySelector<HTMLElement>(
+      `[data-testid="trajectory-call"][data-lane="upstream"][data-request-id="${record.id}"]`,
+    );
+    if (!bar) throw new Error("Missing upstream lane bar");
+    await act(async () => bar.click());
+    expect(header(record.id).getAttribute("aria-expanded")).toBe("true");
+    expect(
+      container
+        .querySelector('[data-testid="trajectory-row"][aria-current="true"]')
+        ?.getAttribute("data-request-id"),
+    ).toBe(record.id);
+  });
+
   it("closes the following windows when the conversation is left", async () => {
     await renderTrajectory();
     await clickRow("CLIENT");

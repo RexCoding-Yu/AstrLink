@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	CatalogAstrLinkGuard           contract.PrivacyModelCatalogID = "catalog_astrlink_guard"
 	CatalogPPLXPIITracer           contract.PrivacyModelCatalogID = "catalog_pplx_pii_tracer"
 	CatalogSheltronEttin32M        contract.PrivacyModelCatalogID = "catalog_sheltron_ettin_32m"
 	CatalogNymPIIMultilingualSmall contract.PrivacyModelCatalogID = "catalog_nym_pii_multilingual_small"
@@ -48,7 +49,7 @@ func BuiltinCatalog() contract.PrivacyModelCatalogResponse {
 }
 
 func builtinCatalogEntries() []contract.PrivacyModelCatalogItem {
-	return []contract.PrivacyModelCatalogItem{{
+	return []contract.PrivacyModelCatalogItem{astrLinkGuardCatalogEntry(), {
 		ID: CatalogPPLXPIITracer, Name: "AstrLink PII-Tracer 0.6B INT4",
 		Summary:  "PII-Tracer adapted by AstrLink with INT4 weights and calibrated error correction. Detects personal information and credentials locally.",
 		Source:   contract.PrivacyModelCatalogSourceCommunity,
@@ -176,6 +177,9 @@ func builtinVariantPlan(repoID, revision, variantID string) (variantPlan, bool) 
 			}
 			plan := variantPlan{item: copyCatalogItem(item), variant: variant}
 			switch item.ID {
+			case CatalogAstrLinkGuard:
+				plan.assets = astrLinkGuardAssets(variantID)
+				plan.runtime = astrLinkGuardRuntime(variantID)
 			case CatalogPPLXPIITracer:
 				plan.assets = pplxAssets(variantID)
 				plan.runtime = pplxRuntime(variantID)
@@ -354,6 +358,7 @@ func InstallationID(repoID, revision, variantID string) contract.PrivacyModelID 
 }
 
 func copyCatalogItem(item contract.PrivacyModelCatalogItem) contract.PrivacyModelCatalogItem {
+	item.Version = cloneString(item.Version)
 	item.Languages = append([]string(nil), item.Languages...)
 	item.Variants = append([]contract.PrivacyModelVariant(nil), item.Variants...)
 	for index := range item.Variants {

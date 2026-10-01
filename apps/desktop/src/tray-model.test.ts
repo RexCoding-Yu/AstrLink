@@ -21,22 +21,54 @@ export const readyTrayState = {
     recovery_attempt: 0,
     recovery_scheduled: false,
     observer_active: false,
+    observer_read_level: null,
+    pending_raw_access: 0,
+    active_raw_grants: 0,
+    raw_password_required: false,
+    raw_key_event: null,
+    raw_key_replaced: false,
   },
   digest: {
-    today: { requests: 128, failed: 3, total_tokens: 1_230_000, input_tokens: 1_000_000, cache_read_tokens: 410_000 },
-    hourly_tokens: Array.from({ length: 24 }, (_, hour) => (hour === 14 ? 400_000 : hour < 14 ? 50_000 : 0)),
+    today: {
+      requests: 128,
+      failed: 3,
+      total_tokens: 1_230_000,
+      input_tokens: 1_000_000,
+      cache_read_tokens: 410_000,
+    },
+    hourly_tokens: Array.from({ length: 24 }, (_, hour) =>
+      hour === 14 ? 400_000 : hour < 14 ? 50_000 : 0,
+    ),
     yesterday_tokens: 1_000_000,
     top_model: { name: "claude-sonnet-4", percent: 62 },
     cost_today: { amount_usd: 0.834, unpriced: 0 },
     top_client: { name: "Cursor", percent: 71 },
-    last_request: { started_at: "2026-09-22T10:00:00Z", model: "gpt-5", latency_ms: 2100, failed: false },
+    last_request: {
+      started_at: "2026-09-22T10:00:00Z",
+      model: "gpt-5",
+      latency_ms: 2100,
+      failed: false,
+    },
     month_tokens: 48_000_000,
     subscriptions: [
       {
         name: "Codex",
+        kind: "codex_subscription",
         windows: [
-          { label: null, limit_window_seconds: 18_000, secondary: false, used_percent: 62, reset_at: "2026-09-22T12:13:00Z" },
-          { label: null, limit_window_seconds: 604_800, secondary: true, used_percent: 18, reset_at: null },
+          {
+            label: null,
+            limit_window_seconds: 18_000,
+            secondary: false,
+            used_percent: 62,
+            reset_at: "2026-09-22T12:13:00Z",
+          },
+          {
+            label: null,
+            limit_window_seconds: 604_800,
+            secondary: true,
+            used_percent: 18,
+            reset_at: null,
+          },
         ],
       },
     ],
@@ -55,13 +87,41 @@ describe("tray state IPC contract", () => {
     expect(parsed.digest?.subscriptions[0].windows[1].secondary).toBe(true);
     expect(parsed.tray.pages).toEqual(["records", "services", "tokens"]);
     expect(parsed.view.observer_active).toBe(false);
+    expect(parsed.view.observer_read_level).toBeNull();
+    expect(parsed.view.pending_raw_access).toBe(0);
+    expect(parsed.view.raw_password_required).toBe(false);
+    expect(parsed.view.raw_key_event).toBeNull();
+    expect(parsed.view.raw_key_replaced).toBe(false);
     expect(parsed.popover_below).toBe(true);
+  });
+
+  it("reads the raw password gate and the latest raw key change", () => {
+    const parsed = parseTrayState({
+      ...readyTrayState,
+      view: {
+        ...readyTrayState.view,
+        raw_password_required: true,
+        raw_key_event: { kind: "raw_key_reset", at: "2026-09-28T09:30:00Z" },
+        raw_key_replaced: true,
+      },
+    });
+    expect(parsed.view.raw_password_required).toBe(true);
+    expect(parsed.view.raw_key_replaced).toBe(true);
+    expect(parsed.view.raw_key_event).toEqual({
+      kind: "raw_key_reset",
+      at: "2026-09-28T09:30:00Z",
+    });
   });
 
   it("accepts a stopped gateway without a digest", () => {
     const parsed = parseTrayState({
       ...readyTrayState,
-      view: { ...readyTrayState.view, phase: "stopped", inference_url: null, core_version: null },
+      view: {
+        ...readyTrayState.view,
+        phase: "stopped",
+        inference_url: null,
+        core_version: null,
+      },
       digest: null,
       digest_age_ms: null,
     });
@@ -71,25 +131,109 @@ describe("tray state IPC contract", () => {
 
   it("rejects malformed payloads at the offending path", () => {
     const withDigest = (patch: Record<string, unknown>) =>
-      parseTrayState({ ...readyTrayState, digest: { ...readyTrayState.digest, ...patch } });
-    expect(() => parseTrayState({ ...readyTrayState, surprise: 1 })).toThrow("$.surprise");
-    expect(() => parseTrayState({ ...readyTrayState, view: { ...readyTrayState.view, phase: "unavailable" } })).toThrow(
-      "$.view.phase",
-    );
-    expect(() => withDigest({ hourly_tokens: [1, 2, 3] })).toThrow("$.digest.hourly_tokens");
-    expect(() => withDigest({ top_model: { name: "x", percent: 101 } })).toThrow("$.digest.top_model.percent");
-    expect(() => withDigest({ cost_today: { amount_usd: "0.83", unpriced: 0 } })).toThrow(
-      "$.digest.cost_today.amount_usd",
-    );
-    expect(() => withDigest({ subscriptions: [{ name: "Codex", windows: [] }] })).toThrow(
-      "$.digest.subscriptions[0].windows",
+      parseTrayState({
+        ...readyTrayState,
+        digest: { ...readyTrayState.digest, ...patch },
+      });
+    expect(() => parseTrayState({ ...readyTrayState, surprise: 1 })).toThrow(
+      "$.surprise",
     );
     expect(() =>
-      withDigest({ last_request: { started_at: "yesterday", model: null, latency_ms: null, failed: false } }),
-    ).toThrow("$.digest.last_request.started_at");
-    expect(() => parseTrayState({ ...readyTrayState, tray: { ...readyTrayState.tray, pages: ["overview"] } })).toThrow(
-      "$.tray.pages[0]",
+      parseTrayState({
+        ...readyTrayState,
+        view: { ...readyTrayState.view, phase: "unavailable" },
+      }),
+    ).toThrow("$.view.phase");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        view: { ...readyTrayState.view, observer_read_level: "full" },
+      }),
+    ).toThrow("$.view.observer_read_level");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        view: { ...readyTrayState.view, pending_raw_access: -1 },
+      }),
+    ).toThrow("$.view.pending_raw_access");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        view: { ...readyTrayState.view, active_raw_grants: 1.5 },
+      }),
+    ).toThrow("$.view.active_raw_grants");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        view: { ...readyTrayState.view, raw_password_required: "yes" },
+      }),
+    ).toThrow("$.view.raw_password_required");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        view: { ...readyTrayState.view, raw_key_replaced: null },
+      }),
+    ).toThrow("$.view.raw_key_replaced");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        view: {
+          ...readyTrayState.view,
+          raw_key_event: { kind: "raw_read", at: "2026-09-28T09:30:00Z" },
+        },
+      }),
+    ).toThrow("$.view.raw_key_event.kind");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        view: {
+          ...readyTrayState.view,
+          raw_key_event: { kind: "raw_key_reset", at: "yesterday" },
+        },
+      }),
+    ).toThrow("$.view.raw_key_event.at");
+    expect(() => withDigest({ hourly_tokens: [1, 2, 3] })).toThrow(
+      "$.digest.hourly_tokens",
     );
+    expect(() =>
+      withDigest({ top_model: { name: "x", percent: 101 } }),
+    ).toThrow("$.digest.top_model.percent");
+    expect(() =>
+      withDigest({ cost_today: { amount_usd: "0.83", unpriced: 0 } }),
+    ).toThrow("$.digest.cost_today.amount_usd");
+    expect(() =>
+      withDigest({
+        subscriptions: [
+          { name: "Codex", kind: "codex_subscription", windows: [] },
+        ],
+      }),
+    ).toThrow("$.digest.subscriptions[0].windows");
+    expect(() =>
+      withDigest({
+        subscriptions: [
+          {
+            ...readyTrayState.digest.subscriptions[0],
+            kind: "openai",
+          },
+        ],
+      }),
+    ).toThrow("$.digest.subscriptions[0].kind");
+    expect(() =>
+      withDigest({
+        last_request: {
+          started_at: "yesterday",
+          model: null,
+          latency_ms: null,
+          failed: false,
+        },
+      }),
+    ).toThrow("$.digest.last_request.started_at");
+    expect(() =>
+      parseTrayState({
+        ...readyTrayState,
+        tray: { ...readyTrayState.tray, pages: ["overview"] },
+      }),
+    ).toThrow("$.tray.pages[0]");
   });
 
   it("formats numbers the way the tiles show them", () => {
@@ -105,7 +249,23 @@ describe("tray state IPC contract", () => {
     expect(percentChange(1_230_000, 1_000_000)).toBe(23);
     expect(percentChange(800_000, 1_000_000)).toBe(-20);
     expect(percentChange(5, 0)).toBeNull();
-    expect(cacheHitPercent({ requests: 1, failed: 0, total_tokens: 1, input_tokens: 1_000_000, cache_read_tokens: 410_000 })).toBe(41);
-    expect(cacheHitPercent({ requests: 1, failed: 0, total_tokens: 1, input_tokens: 0, cache_read_tokens: 0 })).toBeNull();
+    expect(
+      cacheHitPercent({
+        requests: 1,
+        failed: 0,
+        total_tokens: 1,
+        input_tokens: 1_000_000,
+        cache_read_tokens: 410_000,
+      }),
+    ).toBe(41);
+    expect(
+      cacheHitPercent({
+        requests: 1,
+        failed: 0,
+        total_tokens: 1,
+        input_tokens: 0,
+        cache_read_tokens: 0,
+      }),
+    ).toBeNull();
   });
 });

@@ -60,6 +60,7 @@ import {
   dryRunPrivacyPolicy,
   getPrivacyModelCatalog,
   getPrivacyModelInstallation,
+  getPrivacyModelReleases,
   getPrivacyPolicy,
   getPrivacyRegexBuiltinRules,
   installPrivacyModel,
@@ -73,6 +74,7 @@ import {
 import { i18n, useT } from "./i18n";
 import { notify } from "./notify";
 import {
+  compareReleaseVersions,
   isResourceHeavyVariant,
   localModelActive,
   MAX_PRIVACY_ALLOWLIST_RULES,
@@ -108,6 +110,7 @@ import {
   type PrivacyRegexSource,
 } from "./privacy-policy-model";
 import { PageHeader } from "./PageHeader";
+import { RawPasswordEntry } from "./RawSealingControls";
 import {
   privacyModelOperationError,
   type PrivacyModelOperationError,
@@ -156,6 +159,8 @@ type PendingModelAction =
 export interface SafetyPolicyProps {
   coreSessionKey: string | null;
   isReady: boolean;
+  /** Opens the agent tools page to install the placeholder skill. */
+  onInstallPlaceholderSkill?: () => void;
 }
 
 function actionLabel(action: PrivacyAction): string {
@@ -485,6 +490,21 @@ function initialLabelMapping(probe: PrivacyModelProbe): PrivacyLabelMapping {
   return Object.fromEntries(
     probe.labels.map((label) => [label.label, label.suggested_kind]),
   );
+}
+
+// A newer tagged release replaces the pinned catalog entry for new installs.
+function latestCatalogModel(
+  model: PrivacyCatalogModel,
+  release: PrivacyCatalogModel | undefined,
+): PrivacyCatalogModel {
+  return release !== undefined &&
+    release.repo_id === model.repo_id &&
+    release.revision !== model.revision &&
+    release.version !== null &&
+    model.version !== null &&
+    compareReleaseVersions(release.version, model.version) > 0
+    ? release
+    : model;
 }
 
 function variantForCatalog(
@@ -909,14 +929,7 @@ function StreamingRestoreDemoDialog({
           </DialogDescription>
         </DialogHeader>
         <p className="rounded-lg bg-muted px-3 py-2.5 text-sm leading-relaxed text-text-secondary">
-          {t("safety.demoEmailLead")}
-          <code>alice@example.com</code>
-          {t("safety.demoEmailTail")}
-        </p>
-        <p className="rounded-lg bg-muted px-3 py-2.5 text-sm leading-relaxed text-text-secondary">
-          {t("safety.demoTokenNote")}
-          <code>&lt;PRIVATE_EMAIL_7f3a91c04d28be56&gt;</code>
-          {t("safety.demoTokenNoteEnd")}
+          {t("safety.demoFixedNote")}
         </p>
         <div
           aria-label={t("safety.flowTitle")}
@@ -1058,17 +1071,18 @@ function PolicySection({
     >
       <PanelHeader
         actions={actions}
-        className="shrink-0 flex-wrap items-center gap-2 px-4 py-3"
+        className="shrink-0 flex-wrap gap-2"
+        size="sm"
       >
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
-          <Icon aria-hidden="true" className="size-4 shrink-0 text-primary" />
-          {title}
-        </h2>
-        {description ? (
-          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-            {description}
-          </p>
-        ) : null}
+        <div className="flex min-w-0 items-center gap-1">
+          <h2 className="flex items-center gap-2 text-sm font-semibold">
+            <Icon aria-hidden="true" className="size-4 shrink-0 text-primary" />
+            {title}
+          </h2>
+          {description ? (
+            <HelpPopover label={title}>{description}</HelpPopover>
+          ) : null}
+        </div>
       </PanelHeader>
       <PanelBody className="flex flex-col gap-4 overflow-visible @[720px]/privacy:overflow-y-auto [&>fieldset]:shrink-0 [&>div]:shrink-0">
         {children}
@@ -1077,7 +1091,11 @@ function PolicySection({
   );
 }
 
-export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
+export function SafetyPolicy({
+  coreSessionKey,
+  isReady,
+  onInstallPlaceholderSkill,
+}: SafetyPolicyProps) {
   const t = useT();
   const [savedRecord, cacheRecord] =
     useWorkspaceSnapshot<PrivacyPolicyRecord | null>(
@@ -1090,6 +1108,10 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
     `privacy-catalog:${coreSessionKey}`,
     [],
   );
+  // Newest release per catalog ID; present only once an update check succeeded.
+  const [releases, setReleases] = useWorkspaceSnapshot<
+    Record<string, PrivacyCatalogModel>
+  >(`privacy-releases:${coreSessionKey}`, {});
   const [installations, setInstallations] = useWorkspaceSnapshot<
     PrivacyModelInstallation[]
   >(`privacy-installations:${coreSessionKey}`, []);
@@ -1220,8 +1242,21 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
     }
   }, [dryRunResult]);
 
+  const loadReleases = async (generation: number) => {
+    try {
+      const next = await getPrivacyModelReleases();
+      if (generationRef.current !== generation) return;
+      setReleases(
+        Object.fromEntries(next.items.map((model) => [model.id, model])),
+      );
+    } catch {
+      // Update checks are best effort; the pinned catalog stays installable.
+    }
+  };
+
   const load = async (generation: number) => {
     const version = policyMutationVersion.current;
+    void loadReleases(generation);
     try {
       const [nextRecord, nextCatalog, nextInstallations] = await Promise.all([
         getPrivacyPolicy(),
@@ -1294,6 +1329,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
       setStatus("blocked");
       setRecord(null);
       setCatalog([]);
+      setReleases({});
       setInstallations([]);
       return () => {
         if (generationRef.current === generation) {
@@ -1883,6 +1919,14 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
     const generation = generationRef.current;
     const request = operationRequestRef.current + 1;
     operationRequestRef.current = request;
+    // The policy keeps its model, so an update must be switched to manually.
+    const updating = installations.some(
+      (installation) =>
+        installation.source === "catalog" &&
+        installation.repo_id === input.repo_id &&
+        installation.variant_id === input.variant_id &&
+        installation.revision !== input.revision,
+    );
     setOperationBusy(key);
     setError(null);
     try {
@@ -1900,7 +1944,9 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
       notify.success(
         key === "local"
           ? t("safety.importStarted")
-          : t("safety.installStarted"),
+          : updating
+            ? t("safety.updateStarted")
+            : t("safety.installStarted"),
       );
     } catch (installError) {
       if (
@@ -2293,7 +2339,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
 
   if (status === "blocked") {
     return (
-      <div className="flex h-full min-h-0 w-full min-w-0 flex-col">
+      <div className="gutter-frame flex h-full min-h-0 w-full min-w-0 flex-col">
         <PageHeader
           description={t("safety.description")}
           title={t("safety.title")}
@@ -2341,6 +2387,52 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
         !label.suggested_ignore &&
         !labelMappingTouched.includes(label.label),
     ) ?? [];
+  const catalogVersions = new Map<string, string>();
+  for (const model of [...catalog, ...Object.values(releases)]) {
+    if (model.version !== null) {
+      catalogVersions.set(`${model.repo_id}\n${model.revision}`, model.version);
+    }
+  }
+  const installationVersion = (installation: PrivacyModelInstallation) =>
+    installation.source === "catalog"
+      ? (catalogVersions.get(
+          `${installation.repo_id}\n${installation.revision}`,
+        ) ?? null)
+      : null;
+  // The update check reports the newest compatible release, so every other
+  // catalog revision of that model is older.
+  const installationUpdate = (installation: PrivacyModelInstallation) => {
+    const model = catalog.find(
+      (candidate) => candidate.id === installation.catalog_id,
+    );
+    if (
+      installation.source !== "catalog" ||
+      model === undefined ||
+      releases[model.id] === undefined
+    ) {
+      return null;
+    }
+    const latest = latestCatalogModel(model, releases[model.id]);
+    const variant = latest.variants.find(
+      (candidate) =>
+        candidate.id === installation.variant_id && candidate.supported,
+    );
+    if (
+      latest.version === null ||
+      latest.repo_id !== installation.repo_id ||
+      latest.revision === installation.revision ||
+      variant === undefined ||
+      installations.some(
+        (candidate) =>
+          candidate.repo_id === latest.repo_id &&
+          candidate.revision === latest.revision &&
+          candidate.variant_id === variant.id,
+      )
+    ) {
+      return null;
+    }
+    return { model: latest, variant, version: latest.version };
+  };
   const catalogPreparationModel =
     catalogPreparation === null
       ? null
@@ -2363,7 +2455,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
 
   return (
     <div
-      className="@container/privacy flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
+      className="@container/privacy gutter-frame flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
       data-testid="safety-policy"
     >
       <PageHeader
@@ -2410,6 +2502,10 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                 </Label>
               </>
             ) : null}
+            <RawPasswordEntry
+              coreSessionKey={coreSessionKey}
+              isReady={isReady}
+            />
             <Button
               disabled={
                 status === "loading" ||
@@ -2508,12 +2604,12 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
           </TabsList>
 
           <TabsContent
-            className="min-h-0 min-w-0 flex-1 overflow-hidden"
+            className="min-h-0 min-w-0 flex-1 overflow-y-clip"
             forceMount
             hidden={workspace !== "detection"}
             value="detection"
           >
-            <SplitWorkspace className="auto-rows-max items-start @[720px]:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+            <SplitWorkspace className="gutter-scroller auto-rows-max items-start @[720px]:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
               <PolicySection
                 title={t("safety.detector")}
                 description={t("safety.description")}
@@ -2909,27 +3005,45 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                         }
                       />
                     </Label>
-                    <Label className="flex min-w-0 cursor-pointer items-center justify-between gap-3 py-4 font-normal last:pb-0">
-                      <span className="flex min-w-0 flex-col gap-0.5">
-                        <strong className="text-sm font-medium leading-snug">
-                          {t("safety.injectNotice")}
-                        </strong>
-                        <small className="text-xs leading-relaxed text-muted-foreground">
-                          {t("safety.injectNoticeHint", {
-                            style: placeholderStyleLabel("token"),
-                          })}
-                        </small>
-                      </span>
-                      <Switch
-                        aria-label={t("safety.injectNotice")}
-                        checked={policy.placeholder_notice}
-                        disabled={saving}
-                        onCheckedChange={(checked) =>
-                          void patchPolicy({ placeholder_notice: checked })
-                        }
-                        size="sm"
-                      />
-                    </Label>
+                    <div className="grid min-w-0 gap-2 py-4 last:pb-0">
+                      <Label className="flex min-w-0 cursor-pointer items-center justify-between gap-3 font-normal">
+                        <span className="flex min-w-0 flex-col gap-0.5">
+                          <strong className="text-sm font-medium leading-snug">
+                            {t("safety.injectNotice")}
+                          </strong>
+                          <small className="text-xs leading-relaxed text-muted-foreground">
+                            {t("safety.injectNoticeHint", {
+                              style: placeholderStyleLabel("token"),
+                            })}
+                          </small>
+                        </span>
+                        <Switch
+                          aria-label={t("safety.injectNotice")}
+                          checked={policy.placeholder_notice}
+                          disabled={saving}
+                          onCheckedChange={(checked) =>
+                            void patchPolicy({ placeholder_notice: checked })
+                          }
+                          size="sm"
+                        />
+                      </Label>
+                      {onInstallPlaceholderSkill ? (
+                        <div className="flex min-w-0 items-center justify-between gap-3">
+                          <small className="text-xs leading-relaxed text-muted-foreground">
+                            {t("safety.placeholderSkillHint")}
+                          </small>
+                          <Button
+                            className="shrink-0"
+                            onClick={onInstallPlaceholderSkill}
+                            size="xs"
+                            type="button"
+                            variant="outline"
+                          >
+                            {t("safety.placeholderSkillInstall")}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 </fieldset>
                 <div className="grid min-w-0 divide-y border-t">
@@ -2982,13 +3096,13 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
             </SplitWorkspace>
           </TabsContent>
           <TabsContent
-            className="min-h-0 min-w-0 flex-1 overflow-hidden"
+            className="min-h-0 min-w-0 flex-1 overflow-y-clip"
             data-tab-scroller
             forceMount
             hidden={workspace !== "redaction"}
             value="redaction"
           >
-            <SplitWorkspace className="@[720px]:grid-cols-[minmax(0,0.95fr)_minmax(0,1.15fr)]">
+            <SplitWorkspace className="gutter-scroller @[720px]:grid-cols-[minmax(0,0.95fr)_minmax(0,1.15fr)]">
               <Panel className="@container flex min-h-0 flex-col">
                 <PanelHeader
                   className="shrink-0 items-center px-3 py-2"
@@ -3285,7 +3399,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
           </TabsContent>
 
           <TabsContent
-            className="min-h-0 min-w-0 flex-1 overflow-hidden"
+            className="min-h-0 min-w-0 flex-1 overflow-y-clip"
             forceMount
             hidden={workspace !== "dryRun"}
             onKeyDown={(event) => {
@@ -3300,7 +3414,10 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
             }}
             value="dryRun"
           >
-            <SplitWorkspace ref={dryRunWorkspaceRef}>
+            <SplitWorkspace
+              className="gutter-scroller"
+              ref={dryRunWorkspaceRef}
+            >
               <Panel
                 className="flex min-h-0 flex-col"
                 data-testid="dry-run-input-panel"
@@ -3582,14 +3699,14 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
           </TabsContent>
 
           <TabsContent
-            className="@container/models flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+            className="@container/models flex min-h-0 min-w-0 flex-1 flex-col overflow-y-clip"
             forceMount
             hidden={workspace !== "models"}
             value="models"
           >
             <h3 className="sr-only">{t("safety.localPrivacyModels")}</h3>
             <Tabs
-              className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden"
+              className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-clip"
               onValueChange={(value) => setView(value as ModelView)}
               value={view}
             >
@@ -3632,11 +3749,15 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                 </HelpPopover>
               </div>
               <TabsContent
-                className="min-h-0 min-w-0 flex-1 overflow-y-auto"
+                className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto"
                 value="catalog"
               >
                 <div className="grid items-stretch gap-3 pb-3 pr-1 @[760px]/models:grid-cols-2">
-                  {catalog.map((model) => {
+                  {catalog.map((pinned) => {
+                    const model = latestCatalogModel(
+                      pinned,
+                      releases[pinned.id],
+                    );
                     const variant = variantForCatalog(model, selectedVariants);
                     const existing =
                       variant === null
@@ -3647,21 +3768,41 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                               installation.revision === model.revision &&
                               installation.variant_id === variant.id,
                           ) ?? null);
+                    const update =
+                      existing === null && variant !== null
+                        ? (installations
+                            .map(installationUpdate)
+                            .find(
+                              (candidate) =>
+                                candidate?.model.id === model.id &&
+                                candidate.variant.id === variant.id,
+                            ) ?? null)
+                        : null;
                     const variantSelectID = `privacy-catalog-variant-${model.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
                     return (
                       <Panel asChild className="flex flex-col" key={model.id}>
                         <article>
                           <div className="flex flex-1 flex-col gap-3 p-4">
                             <div className="min-w-0">
-                              <h4 className="text-sm font-semibold leading-snug break-words">
-                                {model.name}
-                              </h4>
+                              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                <h4 className="min-w-0 text-sm font-semibold leading-snug break-words">
+                                  {model.name}
+                                </h4>
+                                {model.recommended ? (
+                                  <Badge variant="accent">
+                                    {t("safety.recommendedModel")}
+                                  </Badge>
+                                ) : null}
+                              </div>
                               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                                 <span>
                                   {model.source === "official"
                                     ? t("safety.official")
                                     : t("safety.community")}{" "}
                                   · {model.license}
+                                  {model.version === null
+                                    ? null
+                                    : ` · v${model.version}`}
                                 </span>
                                 {model.languages.map((language) => (
                                   <Badge key={language} variant="secondary">
@@ -3671,8 +3812,17 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                               </div>
                             </div>
                             <p className="text-xs leading-relaxed text-text-secondary">
-                              {model.summary}
+                              {t(`safety.modelSummaries.${model.repo_id}`, {
+                                defaultValue: model.summary,
+                              })}
                             </p>
+                            {update === null ? null : (
+                              <StatusBadge tone="pending">
+                                {t("safety.updateAvailableHint", {
+                                  version: update.version,
+                                })}
+                              </StatusBadge>
+                            )}
                             <Field
                               className="mt-auto"
                               htmlFor={variantSelectID}
@@ -3769,7 +3919,11 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                                   >
                                     {catalogProbeBusy === model.id
                                       ? t("common.checking")
-                                      : t("safety.checkAndInstall")}
+                                      : update === null
+                                        ? t("safety.checkAndInstall")
+                                        : t("safety.updateTo", {
+                                            version: update.version,
+                                          })}
                                   </Button>
                                 </>
                               ) : (
@@ -3817,7 +3971,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
               </TabsContent>
 
               <TabsContent
-                className="min-h-0 min-w-0 flex-1 overflow-y-auto"
+                className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto"
                 value="installed"
               >
                 <div className="grid items-start gap-3 pb-3 pr-1 @[760px]/models:grid-cols-2">
@@ -3848,6 +4002,8 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                       installation.languages.length > 0
                         ? installation.languages.join(" / ")
                         : t("safety.languageUnknown");
+                    const version = installationVersion(installation);
+                    const update = installationUpdate(installation);
                     return (
                       <Panel
                         asChild
@@ -3868,6 +4024,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                                 <span className="mt-1 block text-xs leading-snug text-muted-foreground">
                                   {installation.variant_name} ·{" "}
                                   {installation.quantization}
+                                  {version === null ? null : ` · v${version}`}
                                 </span>
                               </div>
                               <StatusBadge
@@ -3897,6 +4054,13 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                                 {installation.repo_id}
                               </p>
                             </div>
+                            {update === null ? null : (
+                              <StatusBadge tone="pending">
+                                {t("safety.updateAvailableHint", {
+                                  version: update.version,
+                                })}
+                              </StatusBadge>
+                            )}
                             {installation.status === "downloading" ||
                             installation.status === "paused" ? (
                               <div className="grid gap-1.5">
@@ -3988,6 +4152,30 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
                                       : t("safety.usedByPolicy")}
                                   </Button>
                                 ) : null}
+                                {update === null ? null : (
+                                  <Button
+                                    disabled={
+                                      operationBusy !== null ||
+                                      catalogProbeBusy !== null ||
+                                      probing
+                                    }
+                                    onClick={() =>
+                                      void prepareCatalogInstallation(
+                                        update.model,
+                                        update.variant,
+                                      )
+                                    }
+                                    size="sm"
+                                    type="button"
+                                    variant="outline"
+                                  >
+                                    {catalogProbeBusy === update.model.id
+                                      ? t("common.checking")
+                                      : t("safety.updateTo", {
+                                          version: update.version,
+                                        })}
+                                  </Button>
+                                )}
                                 {installation.source !== "local" &&
                                 installation.status !== "ready" ? (
                                   <Button
@@ -4040,7 +4228,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
               </TabsContent>
 
               <TabsContent
-                className="min-h-0 min-w-0 flex-1 overflow-y-auto"
+                className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto"
                 value="local"
               >
                 <Panel className="grid max-w-3xl gap-4 p-4">
@@ -4205,7 +4393,7 @@ export function SafetyPolicy({ coreSessionKey, isReady }: SafetyPolicyProps) {
               </TabsContent>
 
               <TabsContent
-                className="min-h-0 min-w-0 flex-1 overflow-y-auto"
+                className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto"
                 value="custom"
               >
                 <Panel className="grid max-w-3xl gap-4 p-4">

@@ -174,9 +174,12 @@ func TestAuditContentRoundTripAndLeakBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Without a raw password only shareable parts are kept; raw parts
+		// are covered by the raw access tests.
 		if err := store.InsertAuditBlob(ctx, storage.AuditBlob{
 			RequestID: "request_audit", Direction: item.direction, MediaType: item.media,
 			Nonce: nonce, Ciphertext: ciphertext, CapturedBytes: len(item.plain),
+			Exposure: storage.AuditExposureShareable,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -200,7 +203,7 @@ func TestAuditContentRoundTripAndLeakBoundary(t *testing.T) {
 	if err := store.InsertAuditBlob(ctx, storage.AuditBlob{
 		RequestID: "request_audit", Direction: storage.AuditDirectionHTTPMeta,
 		MediaType: "application/json", Nonce: metaNonce, Ciphertext: metaCiphertext,
-		CapturedBytes: len(metaPayload),
+		CapturedBytes: len(metaPayload), Exposure: storage.AuditExposureShareable,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +312,7 @@ func TestAuditContentConflictWhenKeyMissing(t *testing.T) {
 	if err := store.InsertAuditBlob(ctx, storage.AuditBlob{
 		RequestID: "request_orphan_blob", Direction: storage.AuditDirectionRequest,
 		MediaType: "application/json", Nonce: nonce, Ciphertext: ciphertext, CapturedBytes: 2,
+		Exposure: storage.AuditExposureShareable,
 	}); err != nil {
 		t.Fatal(err)
 	}

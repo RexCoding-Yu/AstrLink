@@ -23,7 +23,7 @@ const iconSvg = join(iconsDir, "icon.svg");
 const stampPath = join(iconsDir, ".branding-hash");
 
 // The tray icon carries gateway state, so each source gets three variants:
-// ready (the source itself), watched (an agent is reading through MCP: a
+// ready (the source itself), watched (an agent is reading through the CLI: a
 // badge) and idle (dimmed). macOS uses the monochrome menu-bar template at
 // 18pt (36px for Retina); Windows and Linux use the colour mark at 32px.
 const menuBarLogo = join(
@@ -77,15 +77,14 @@ function inkedMenuBarSvg(ink) {
   const text = traySvg.toString("utf8");
   const defsEnd = text.indexOf("</defs>") + "</defs>".length;
   return Buffer.from(
-    text.slice(0, defsEnd) +
-      text.slice(defsEnd).replaceAll("#000000", ink),
+    text.slice(0, defsEnd) + text.slice(defsEnd).replaceAll("#000000", ink),
     "utf8",
   );
 }
 
 // macOS states, per the operator's brief: a running gateway is the native
 // template glyph (the menu bar tints it, off-white on a dark bar); a stopped
-// one is a fixed black glyph; an agent reading through MCP is the off-white
+// one is a fixed black glyph; an agent reading through the CLI is the off-white
 // glyph with a red badge. Red cannot live in a template, so the last two are
 // plain images with the ink baked in.
 const macRunningInk = "#F5F5F7";
@@ -102,7 +101,11 @@ const trayVariants = [
     }),
     sizes: ["18", "36"],
   },
-  { dir: "mac-idle", source: inkedMenuBarSvg("#000000").toString("utf8"), sizes: ["18", "36"] },
+  {
+    dir: "mac-idle",
+    source: inkedMenuBarSvg("#000000").toString("utf8"),
+    sizes: ["18", "36"],
+  },
   { dir: "color-ready", source: svg.toString("utf8"), sizes: ["32"] },
   {
     dir: "color-watched",
@@ -127,9 +130,14 @@ const previousTrayHash = existsSync(trayStampPath)
   ? readFileSync(trayStampPath, "utf8").trim()
   : "";
 const trayOutputs = trayVariants.flatMap((variant) =>
-  variant.sizes.map((size) => join(trayDir, variant.dir, `${size}x${size}.png`)),
+  variant.sizes.map((size) =>
+    join(trayDir, variant.dir, `${size}x${size}.png`),
+  ),
 );
-if (previousTrayHash !== trayHash || trayOutputs.some((path) => !existsSync(path))) {
+if (
+  previousTrayHash !== trayHash ||
+  trayOutputs.some((path) => !existsSync(path))
+) {
   const renderTray = (sourcePath, outputDir, sizes) => {
     const result = spawnSync(
       "bun",

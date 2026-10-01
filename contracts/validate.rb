@@ -130,6 +130,21 @@ ready_schema = openapi.dig("components", "schemas", "ReadyEvent", "properties")
   raise "#{field} accepts a trailing newline" if pattern.match?("http://127.0.0.1:8317\n")
 end
 
+client_url_pattern = Regexp.new(ready_schema.fetch("client_inference_url").fetch("pattern"))
+%w[http://127.0.0.1:1 http://localhost:8317 http://localhost:65535].each do |url|
+  raise "client_inference_url rejects valid loopback URL #{url}" unless client_url_pattern.match?(url)
+end
+%w[
+  http://localhost:0
+  http://localhost:65536
+  http://[::1]:8317
+  http://localhost:8317/
+  http://localhost.example:8317
+].each do |url|
+  raise "client_inference_url accepts invalid loopback URL #{url}" if client_url_pattern.match?(url)
+end
+raise "client_inference_url accepts a trailing newline" if client_url_pattern.match?("http://localhost:8317\n")
+
 audit_properties = schema.dig("$defs", "AuditSettings", "properties")
 %w[request_body_enabled response_content_enabled].each do |setting|
   raise "#{setting} must default to false" unless audit_properties.dig(setting, "default") == false
@@ -137,10 +152,50 @@ end
 unless audit_properties.dig("http_meta_enabled", "default") == true
   raise "http_meta_enabled must default to true (ADR 0008)"
 end
+unless audit_properties.dig("agent_raw_access_enabled", "default") == true
+  raise "agent_raw_access_enabled must default to true; each raw read still needs desktop approval"
+end
 
 audit_content = openapi.dig("components", "schemas", "AuditContent")
 unless audit_content.fetch("required").include?("http_meta")
   raise "AuditContent must require http_meta so its absence is always explicit null"
+end
+%w[view privacy_findings].each do |field|
+  raise "AuditContent must require #{field}" unless audit_content.fetch("required").include?(field)
+end
+withheld_part = openapi.dig("components", "schemas", "AuditWithheldPart")
+if withheld_part.fetch("properties").key?("content") || withheld_part.fetch("additionalProperties") != false
+  raise "AuditWithheldPart must never carry content"
+end
+raw_sealing_summary = openapi.dig("components", "schemas", "RawSealingSummary")
+unless raw_sealing_summary.fetch("properties").keys == %w[raw_available] && raw_sealing_summary.fetch("additionalProperties") == false
+  raise "RawSealingSummary is the observer view and must carry only raw_available"
+end
+policy_summary = openapi.dig("components", "schemas", "PolicySummary", "properties")
+if policy_summary.key?("allowlist_rules") || policy_summary.dig("custom_regex_rules", "type") != "object"
+  raise "PolicySummary is the observer view and must report allowlist and custom regex rules as counts only"
+end
+raw_sealing_fields = openapi.dig("components", "schemas", "RawSealingStatusFields", "properties").keys
+# The raw password is mandatory on every platform; clients read this to ask for it.
+unless openapi.dig("components", "schemas", "RawSealingStatusFields", "required").include?("password_required")
+  raise "RawSealingStatus must require password_required"
+end
+# A public key fingerprint identifies the key without being key material.
+leaked_key_fields = raw_sealing_fields.grep(/(?<!pass)key(?!_verified|_fingerprint)|secret|salt|nonce|envelope_/)
+raise "RawSealingStatus must not carry key material: #{leaked_key_fields.join(", ")}" unless leaked_key_fields.empty?
+# The raw password is the only proof that opens the raw key.
+unless openapi.dig("components", "schemas", "RawProof", "properties")&.keys&.sort == %w[kind password]
+  raise "RawProof must carry only the raw password"
+end
+# A wrong password on the desktop's own unlock names no grant or request.
+raw_event_required = openapi.dig("components", "schemas", "RawAccessEvent", "required")
+raise "RawAccessEvent must not require grant_id or request_id" unless (raw_event_required & %w[grant_id request_id]).empty?
+# Raw password and key changes are visible to the operator, whoever made them.
+raw_event_kinds = openapi.dig("components", "schemas", "RawAccessEvent", "properties", "kind", "enum")
+missing_key_events = %w[raw_password_set raw_password_changed raw_key_reset] - raw_event_kinds
+raise "RawAccessEvent must record #{missing_key_events.join(", ")}" unless missing_key_events.empty?
+unless openapi.dig("components", "schemas", "ObserversResponse", "required").include?("raw_password_required")
+  raise "ObserversResponse must require raw_password_required so the tray can point at the setup"
 end
 http_meta_choices = audit_content.dig("properties", "http_meta", "oneOf")
 unless http_meta_choices.is_a?(Array) && http_meta_choices.include?({ "type" => "null" })
@@ -173,7 +228,7 @@ routing_patch = openapi.dig("components", "schemas", "RoutingSettingsPatch", "pr
 raise "RoutingSettingsPatch must cover every routing setting" unless routing_patch.keys.sort == routing_settings.keys.sort
 routing_patch_defaults = routing_patch.select { |_, definition| definition.is_a?(Hash) && definition.key?("default") }.keys
 raise "RoutingSettingsPatch must not materialize defaults: #{routing_patch_defaults.join(', ')}" unless routing_patch_defaults.empty?
-%w[official_client_passthrough claude_identity_auto_learn codex_identity_auto_learn].each do |setting|
+%w[official_client_passthrough claude_identity_auto_learn codex_identity_auto_learn grok_identity_auto_learn].each do |setting|
   raise "#{setting} must default to true" unless routing_settings.dig(setting, "default") == true
 end
 identity_version = Regexp.new(openapi.dig("components", "schemas", "ClientIdentityVersion", "pattern"))
@@ -183,7 +238,7 @@ end
 ["", "2.1", "v2.1.300", "claude-cli/2.1.300", "2.1.300 (external, cli)", "2.1.300\n"].each do |version|
   raise "client identity version accepts #{version.inspect}" if identity_version.match?(version)
 end
-%w[claude_identity_version codex_identity_version].each do |setting|
+%w[claude_identity_version codex_identity_version grok_identity_version].each do |setting|
   choices = routing_patch.dig(setting, "oneOf")
   raise "#{setting} patch must accept an empty string to clear the override" unless choices.is_a?(Array) &&
                                                                                   choices.include?({ "type" => "string", "const" => "" })
@@ -267,6 +322,32 @@ credential_ref_fixture.fetch("rejected").each do |reference|
 end
 
 implemented_operations = openapi.dig("x-astrlink-implementation", "implemented_operations")
+
+public_operations = %w[/control/v1/health /control/v1/version /control/v1/capabilities]
+operator_reads = %w[
+  /control/v1/access-tokens/{token_id}/secret
+  /control/v1/services/{service_id}/authorization
+  /control/v1/builtin-tools/{kind}/credential
+  /control/v1/audit/raw-access
+]
+# An agent may ask for raw access and give up its own grant; only the
+# operator can approve it.
+observer_writes = %w[/control/v1/requests/{request_id}/audit/raw-access /control/v1/audit/raw-grant]
+openapi.fetch("paths").each do |path, item|
+  item.slice("get", "head", "post", "put", "patch", "delete").each do |method, operation|
+    role = operation["x-astrlink-role"]
+    expected = if public_operations.include?(path)
+                 "public"
+               elsif observer_writes.include?(path)
+                 "observer"
+               elsif !%w[get head].include?(method) || operator_reads.include?(path)
+                 "operator"
+               else
+                 "observer"
+               end
+    raise "#{method.upcase} #{path} must declare x-astrlink-role: #{expected} (got #{role.inspect})" unless role == expected
+  end
+end
 %w[
   GET\ /control/v1/services
   POST\ /control/v1/services
@@ -337,6 +418,7 @@ raise "policy matches must use service_ids" unless policy_match.fetch("propertie
   GET\ /control/v1/policies/{policy_id}
   PATCH\ /control/v1/policies/{policy_id}
   GET\ /control/v1/privacy-model-catalog
+  GET\ /control/v1/privacy-model-catalog/releases
   POST\ /control/v1/privacy-models/probe
   POST\ /control/v1/privacy-models/local/probe
   GET\ /control/v1/privacy-models
@@ -348,6 +430,8 @@ raise "policy matches must use service_ids" unless policy_match.fetch("propertie
 end
 privacy_catalog_methods = openapi.dig("paths", "/control/v1/privacy-model-catalog").keys
 raise "privacy-model catalog methods drifted: #{privacy_catalog_methods}" unless privacy_catalog_methods == %w[get]
+privacy_release_methods = openapi.dig("paths", "/control/v1/privacy-model-catalog/releases").keys
+raise "privacy-model release methods drifted: #{privacy_release_methods}" unless privacy_release_methods == %w[get]
 privacy_probe_methods = openapi.dig("paths", "/control/v1/privacy-models/probe").keys
 raise "privacy-model probe methods drifted: #{privacy_probe_methods}" unless privacy_probe_methods == %w[post]
 local_privacy_probe_methods = openapi.dig("paths", "/control/v1/privacy-models/local/probe").keys

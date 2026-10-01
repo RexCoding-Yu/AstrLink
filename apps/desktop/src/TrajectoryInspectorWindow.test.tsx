@@ -25,9 +25,12 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 const bridgeMocks = vi.hoisted(() => ({
   getRequestAuditContent: vi.fn(),
+  getRawSealingStatus: vi.fn(),
+  listenRawSealingChanged: vi.fn(),
 }));
 vi.mock("./bridge", () => bridgeMocks);
 
+import type { RawSealingState } from "./raw-sealing-model";
 import type { AuditContent, RequestRecord } from "./request-record-model";
 import { emptyTrajectoryFields } from "./request-record-model";
 import type { TrajectoryRow } from "./request-trajectory-model";
@@ -97,6 +100,9 @@ const laterRow: TrajectoryRow = {
 
 const auditContent: AuditContent = {
   request_id: record.id,
+  view: "full",
+  withheld: {},
+  privacy_findings: [],
   http_meta: null,
   request_body: null,
   response_content: null,
@@ -109,6 +115,59 @@ const auditContent: AuditContent = {
     captured_bytes: 11,
   },
 };
+
+function sealing(
+  unlocked: boolean,
+  unlockExpiresAt: string | null = null,
+): RawSealingState {
+  return {
+    raw_available: true,
+    configured: true,
+    password_set: true,
+    password_required: false,
+    envelopes: ["password"],
+    key_verified: true,
+    unlocked,
+    unlock_expires_at: unlockExpiresAt,
+    unlock_idle_seconds: 900,
+    retry_after_seconds: 0,
+    password_min_length: 8,
+    password_max_length: 128,
+    key_replaced: false,
+  };
+}
+
+const rawContent: AuditContent = {
+  ...auditContent,
+  upstream_response_content: {
+    media_type: "application/json",
+    content: '{"secret":"raw-only"}',
+    truncated: false,
+    captured_bytes: 21,
+    exposure: "raw",
+  },
+};
+
+const lockedContent: AuditContent = {
+  ...auditContent,
+  upstream_response_content: null,
+  withheld: {
+    upstream_response_content: {
+      reason: "raw_locked",
+      raw_available: false,
+      media_type: "application/json",
+      truncated: false,
+      captured_bytes: 21,
+    },
+  },
+};
+
+/** Tells the window, as the host does, that another window changed the unlock. */
+async function announceSealingChange(): Promise<void> {
+  const call = bridgeMocks.listenRawSealingChanged.mock.calls.at(-1);
+  if (!call) throw new Error("The inspector window never watched the unlock");
+  await act(async () => (call[0] as () => void)());
+}
 
 /** What the host reports when this window pulls its state on mount. */
 const hostState: { current: TrajectoryInspectorWindowState } = {
@@ -158,6 +217,11 @@ describe("TrajectoryInspectorWindow", () => {
       },
     );
     bridgeMocks.getRequestAuditContent.mockResolvedValue(auditContent);
+    bridgeMocks.getRawSealingStatus.mockResolvedValue({
+      ...sealing(false),
+      configured: false,
+    });
+    bridgeMocks.listenRawSealingChanged.mockResolvedValue(() => undefined);
     Object.assign(window, {
       __TAURI_INTERNALS__: {},
       __ASTRLINK_DESKTOP_PLATFORM__: "macos",
@@ -558,6 +622,46 @@ describe("TrajectoryInspectorWindow", () => {
     expect(inspector(container)?.textContent).toContain('"ok": true');
   });
 
+  it("keeps the chosen tab when a poll pushes the same phase again", async () => {
+    await render();
+    await act(async () => {
+      pushSelection({ row, record });
+    });
+    await flush();
+
+    await act(async () => {
+      inspector(container)
+        ?.querySelector<HTMLButtonElement>(
+          '[data-testid="inspector-tab"][data-chip="RESULT"]',
+        )
+        ?.click();
+    });
+
+    // A new turn in the list hands down fresh copies of every record.
+    await act(async () => {
+      pushSelection(structuredClone({ row, record }));
+    });
+    await flush();
+
+    expect(
+      inspector(container)
+        ?.querySelector('[data-testid="inspector-section"]')
+        ?.getAttribute("data-chip"),
+    ).toBe("RESULT");
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pushSelection({ row: laterRow, record });
+    });
+    await flush();
+
+    expect(
+      inspector(container)
+        ?.querySelector('[data-testid="inspector-section"]')
+        ?.getAttribute("data-chip"),
+    ).toBe("CLIENT");
+  });
+
   it("freezes on its call once pinned and thaws when unpinned", async () => {
     await render();
     await act(async () => {
@@ -714,19 +818,23 @@ describe("TrajectoryInspectorWindow", () => {
     expect(
       [
         ...inspector(container)!.querySelectorAll(
-          '[data-testid="route-attempts"] li',
+          '[data-testid="routing-steps"] li',
         ),
-      ].map((item) => [item.textContent, item.getAttribute("data-tone")]),
+      ].map((item) => [item.textContent, item.getAttribute("data-outcome")]),
     ).toEqual([
-      ["native · Primary", "ok"],
-      ["Backup · credential_unavailable", "failed"],
+      ["已选用Primary · 原样转发", "selected"],
+      ["无法使用Backup · 凭据不可用", "rejected"],
     ]);
-    expect(inspector(container)?.textContent).toContain("尝试过的 API 提供商");
+    expect(inspector(container)?.textContent).toContain("路由过程");
+    expect(inspector(container)?.textContent).not.toContain(
+      "credential_unavailable",
+    );
   });
 
   it("says why routing chose the provider and names the ones it skipped", async () => {
     const skipped = "service_aaaaaaaaaaaaaaaaaaaaaaaa";
     const deleted = "service_bbbbbbbbbbbbbbbbbbbbbbbb";
+    const unlisted = "service_eeeeeeeeeeeeeeeeeeeeeeee";
     const routeRow: TrajectoryRow = {
       ...row,
       id: `${record.id}:routed`,
@@ -743,7 +851,8 @@ describe("TrajectoryInspectorWindow", () => {
           routing_decision: {
             selected: "failover",
             skipped: [
-              { service_id: skipped, reason: "model_not_listed" },
+              { service_id: skipped, reason: "protocol_unsupported" },
+              { service_id: unlisted, reason: "model_not_listed" },
               { service_id: deleted, reason: "disabled" },
             ],
           },
@@ -753,35 +862,175 @@ describe("TrajectoryInspectorWindow", () => {
     });
     await flush();
 
-    const decision = inspector(container)?.querySelector(
-      '[data-testid="routing-decision"]',
-    );
-    expect(
-      decision
-        ?.querySelector("[data-selection]")
-        ?.getAttribute("data-selection"),
-    ).toBe("failover");
-    expect(decision?.textContent).toContain(
-      "故障切换：此前尝试的 API 提供商失败或被拒绝",
-    );
-    // A provider missing from the list is still named, by its ID.
-    expect(
+    const steps = () =>
       [
-        ...(decision?.querySelectorAll('[data-testid="routing-skipped"] li') ??
-          []),
-      ].map((item) => [item.textContent, item.getAttribute("data-reason")]),
-    ).toEqual([
-      ["mly · 未列出该模型", "model_not_listed"],
-      [`${deleted} · 已停用`, "disabled"],
+        ...(inspector(container)?.querySelectorAll(
+          '[data-testid="routing-steps"] li',
+        ) ?? []),
+      ].map((item) => [
+        item.textContent,
+        item.getAttribute("data-outcome"),
+        item.getAttribute("data-code"),
+      ]);
+    // A provider missing from the list is still named, by its ID; one without
+    // the model is no step at all.
+    expect(steps()).toEqual([
+      ["已跳过mly · 不支持该入口协议", "skipped", "protocol_unsupported"],
+      [`已跳过${deleted} · 已停用`, "skipped", "disabled"],
+      [
+        `已选用${record.service_id} · 故障切换：此前尝试的 API 提供商失败或被拒绝`,
+        "selected",
+        null,
+      ],
     ]);
 
-    // Records from before the gateway explained its choice show nothing.
+    // Records from before the gateway explained its choice show only the route.
+    await act(async () => {
+      pushSelection({ row: routeRow, record });
+    });
+    await flush();
+    expect(steps()).toEqual([[`已选用${record.service_id}`, "selected", null]]);
+  });
+
+  it("explains a call no provider could take, and what a paused provider is", async () => {
+    const paused = "service_cccccccccccccccccccccccc";
+    const disabled = "service_dddddddddddddddddddddddd";
+    const unavailable: RequestRecord = {
+      ...record,
+      status: "failed",
+      service_id: null,
+      http_status: null,
+      error: {
+        category: "upstream",
+        code: "upstream_unavailable",
+        message: "all capable endpoints are temporarily unhealthy",
+        retryable: true,
+      },
+      events: [
+        {
+          kind: "accepted",
+          started_at: record.started_at,
+          ended_at: record.started_at,
+          status: "succeeded",
+          summary: "claude-opus-5 · anthropic.messages",
+          attempt_index: 0,
+        },
+        {
+          kind: "completed",
+          started_at: record.started_at,
+          ended_at: record.started_at,
+          status: "failed",
+          summary: "all capable endpoints are temporarily unhealthy",
+          attempt_index: 0,
+        },
+      ],
+      routing_decision: {
+        skipped: [
+          { service_id: disabled, reason: "disabled" },
+          { service_id: paused, reason: "circuit_open" },
+        ],
+      },
+    };
+    await render();
+
+    await act(async () => {
+      pushSelection({
+        row: {
+          ...row,
+          id: `${unavailable.id}:routed`,
+          chip: "ROUTE",
+          lane: "gateway",
+        },
+        record: unavailable,
+        services: { [paused]: { id: paused, name: "new-api" } },
+      });
+    });
+    await flush();
+
+    // Without a route event the call still gets a route tab.
+    expect(
+      [
+        ...inspector(container)!.querySelectorAll(
+          '[data-testid="inspector-tab"]',
+        ),
+      ].map((tab) => tab.getAttribute("data-chip")),
+    ).toEqual(["CLIENT", "ROUTE", "RESULT"]);
+    const steps = inspector(container)!.querySelector(
+      '[data-testid="routing-steps"]',
+    );
+    expect(
+      [...steps!.querySelectorAll("li")].map((item) => item.textContent),
+    ).toEqual([
+      `已跳过${disabled} · 已停用`,
+      "已跳过new-api · 连续失败，暂停使用中",
+    ]);
+    expect(steps?.textContent).toContain("冷却结束后先放行一次试探请求");
+    expect(inspector(container)?.textContent).not.toContain("circuit_open");
+  });
+
+  it("lists the tools and fields the protocol conversion dropped", async () => {
+    const routeRow: TrajectoryRow = {
+      ...row,
+      id: `${record.id}:routed`,
+      chip: "ROUTE",
+      lane: "gateway",
+    };
+    await render();
+
+    await act(async () => {
+      pushSelection({
+        row: routeRow,
+        record: {
+          ...record,
+          conversion_diagnostics: [
+            {
+              phase: "request",
+              severity: "error",
+              code: "unsupported_hosted_tool",
+              path: "tools[0]",
+              message:
+                'OpenAI Chat Completions cannot represent hosted tool "local_shell"',
+            },
+            {
+              phase: "request",
+              severity: "warning",
+              code: "unsupported_parallel_tool_control",
+              path: "parallel_tool_calls",
+              message: "",
+            },
+          ],
+        },
+      });
+    });
+    await flush();
+
+    const details = inspector(container)?.querySelector(
+      '[data-testid="conversion-diagnostics"]',
+    );
+    const groups = [...(details?.querySelectorAll("[data-group]") ?? [])];
+    expect(groups.map((group) => group.getAttribute("data-group"))).toEqual([
+      "tools",
+      "fields",
+    ]);
+    expect(groups[0]?.textContent).toContain("转换时丢弃或改写的工具");
+    expect(groups[0]?.textContent).toContain("请求 · tools[0]");
+    expect(groups[0]?.textContent).toContain("可能影响结果");
+    expect(groups[0]?.textContent).toContain('hosted tool "local_shell"');
+    expect(groups[1]?.textContent).toContain("转换时丢弃或改写的字段");
+    expect(groups[1]?.textContent).toContain("仅细节差异");
+    // Without a message the code still says what was lost.
+    expect(groups[1]?.textContent).toContain(
+      "unsupported_parallel_tool_control",
+    );
+
     await act(async () => {
       pushSelection({ row: routeRow, record });
     });
     await flush();
     expect(
-      inspector(container)?.querySelector('[data-testid="routing-decision"]'),
+      inspector(container)?.querySelector(
+        '[data-testid="conversion-diagnostics"]',
+      ),
     ).toBeNull();
   });
 
@@ -822,6 +1071,79 @@ describe("TrajectoryInspectorWindow", () => {
     ).toBeNull();
   });
 
+  it("says a withheld body waits for an unlock instead of capture", async () => {
+    await render();
+    const withheld = {
+      reason: "raw_locked",
+      raw_available: false,
+      media_type: "application/json",
+      truncated: false,
+      captured_bytes: 64,
+    } as const;
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      ...auditContent,
+      withheld: {
+        request_body: withheld,
+        upstream_request_body: { ...withheld, reason: "privacy_redacted" },
+      },
+    });
+    const captured: RequestRecord = {
+      ...record,
+      audit: {
+        ...record.audit,
+        request_body_captured: true,
+        upstream_request_body_captured: true,
+      },
+    };
+    const hint = (testId: string) =>
+      container
+        .querySelector(`[data-testid="${testId}"]`)
+        ?.querySelector('[data-testid="inspector-missing-body"]')?.textContent;
+
+    await act(async () => {
+      pushSelection({ row: laterRow, record: captured });
+    });
+    await flush();
+    expect(hint("inspector-client-body")).toBe(
+      "原文已封存，输入原文口令解锁后才能查看。",
+    );
+
+    // The unlock opens here, so the operator is not sent to the main window.
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(sealing(false));
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-inspector-unlock"]',
+        )!
+        .click();
+    });
+    await flush();
+    expect(document.body.textContent).toContain(
+      "解锁后可在本机查看已封存的原文",
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="inspector-tab"][data-chip="UPSTREAM"]',
+        )!
+        .click();
+    });
+    await flush();
+    await act(async () =>
+      [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[aria-label="上游内容"] button',
+        ),
+      ]
+        .find((button) => button.textContent === "请求")!
+        .click(),
+    );
+    expect(hint("inspector-upstream-body")).toBe(
+      "此部分已捕获，当前视图不显示。",
+    );
+  });
+
   it("refetches audit when a pending record's captured flags flip", async () => {
     await render();
     const pendingRecord: RequestRecord = {
@@ -843,6 +1165,7 @@ describe("TrajectoryInspectorWindow", () => {
       endedAt: null,
     };
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      ...auditContent,
       request_id: record.id,
       http_meta: null,
       request_body: null,
@@ -864,6 +1187,7 @@ describe("TrajectoryInspectorWindow", () => {
     ).toContain("进行中");
 
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      ...auditContent,
       request_id: record.id,
       http_meta: null,
       request_body: {
@@ -890,6 +1214,82 @@ describe("TrajectoryInspectorWindow", () => {
 
     expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(2);
     expect(inspector(container)?.textContent).toContain("live");
+  });
+
+  it("drops raw parts from a pinned window once another window locks", async () => {
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(sealing(true));
+    bridgeMocks.getRequestAuditContent.mockResolvedValue(rawContent);
+    hostState.current = { selection: { record, row }, pinned: true };
+    await render();
+    await flush();
+    expect(inspector(container)?.textContent).toContain("raw-only");
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(1);
+
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(sealing(false));
+    let settle: (content: AuditContent) => void = () => undefined;
+    bridgeMocks.getRequestAuditContent.mockReturnValue(
+      new Promise<AuditContent>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    await announceSealingChange();
+    await flush();
+    // The raw part leaves before Core answers the refetch.
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(2);
+    expect(inspector(container)?.textContent).not.toContain("raw-only");
+
+    await act(async () => settle(lockedContent));
+    await flush();
+    expect(inspector(container)?.textContent).not.toContain("raw-only");
+    expect(pinButton(container).getAttribute("aria-pressed")).toBe("true");
+
+    // A lock that changes nothing more does not refetch again.
+    await announceSealingChange();
+    await flush();
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(2);
+
+    // An unlock elsewhere fills the locked part in.
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(sealing(true));
+    bridgeMocks.getRequestAuditContent.mockResolvedValue(rawContent);
+    await announceSealingChange();
+    await flush();
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(3);
+    expect(inspector(container)?.textContent).toContain("raw-only");
+  });
+
+  it("drops raw parts when the unlock idles out without any event", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const tick = async (ms: number) => {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(ms);
+        });
+      };
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      bridgeMocks.getRawSealingStatus.mockResolvedValue(
+        sealing(true, expiresAt),
+      );
+      bridgeMocks.getRequestAuditContent.mockResolvedValue(rawContent);
+      hostState.current = { selection: { record, row }, pinned: true };
+      await act(async () => {
+        root.render(<TrajectoryInspectorWindow />);
+      });
+      await tick(0);
+      await tick(0);
+      expect(inspector(container)?.textContent).toContain("raw-only");
+
+      // Core locks on its own; the window reads the state after the expiry.
+      bridgeMocks.getRawSealingStatus.mockResolvedValue(sealing(false));
+      bridgeMocks.getRequestAuditContent.mockResolvedValue(lockedContent);
+      await tick(59_000);
+      expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(1);
+      await tick(3_000);
+      await tick(0);
+      expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(2);
+      expect(inspector(container)?.textContent).not.toContain("raw-only");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports a broken audit key instead of the raw transport error", async () => {

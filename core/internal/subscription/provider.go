@@ -56,6 +56,9 @@ type ModelRecord struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
 	OwnedBy string `json:"owned_by,omitempty"`
+	// CodexCatalog preserves capability metadata without changing the public
+	// OpenAI model-list representation used by control API consumers.
+	CodexCatalog json.RawMessage `json:"-"`
 }
 
 func (provider *CodexProvider) ModelsClientVersion() string {

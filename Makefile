@@ -1,6 +1,6 @@
 BUN ?= bun
 
-.PHONY: check core-check core-race convo-check convo-race contracts-check contracts-race desktop-install desktop-check desktop-sidecar desktop-rust-check privacy-worker-check classifier-worker-check classifier-ort-gate classifier-bench model-safety-check dev
+.PHONY: check core-check core-race convo-check convo-race contracts-check contracts-race desktop-install desktop-check desktop-sidecar desktop-rust-check privacy-worker-check classifier-worker-check classifier-ort-gate classifier-bench model-safety-check desktop-toolchain dev start
 
 check: model-safety-check convo-check core-check contracts-check desktop-check privacy-worker-check classifier-worker-check desktop-rust-check
 
@@ -63,11 +63,18 @@ desktop-rust-check: desktop-sidecar
 	cd apps/desktop/src-tauri && cargo clippy --locked --all-targets -- -D warnings
 	cd apps/desktop/src-tauri && cargo test --locked --all-targets
 
-# One-shot local desktop: install JS deps, build Go/Rust sidecars, start Tauri.
 # Requires Bun, Go, Rust, and Tauri platform prerequisites on PATH.
-dev: desktop-install
+desktop-toolchain:
 	@command -v $(BUN) >/dev/null || { echo "error: bun not found on PATH"; exit 1; }
 	@command -v go >/dev/null || { echo "error: go not found on PATH (need Go 1.23+)"; exit 1; }
 	@command -v rustc >/dev/null || { echo "error: rustc not found on PATH (need Rust stable)"; exit 1; }
 	@command -v cargo >/dev/null || { echo "error: cargo not found on PATH"; exit 1; }
+
+# One-shot local desktop: install JS deps, build Go/Rust sidecars, start Tauri.
+dev: desktop-install desktop-toolchain
 	cd apps/desktop && $(BUN) run desktop:dev
+
+# Like dev, but builds the frontend once and starts without file watching:
+# neither frontend nor Rust changes reload until the next start.
+start: desktop-install desktop-toolchain
+	cd apps/desktop && $(BUN) run desktop:start

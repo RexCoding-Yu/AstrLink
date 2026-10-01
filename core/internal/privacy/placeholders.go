@@ -1,7 +1,6 @@
 package privacy
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -49,8 +48,9 @@ var errNamespaceExhausted = errors.New("privacy: reserved placeholder namespace 
 //
 //   - Two different plaintexts deriving the same suffix. Resolved by re-deriving
 //     with an incrementing counter folded into the HMAC input.
-//   - A candidate that already occurs literally in the request. Restoring would
-//     then rewrite genuine content, so the candidate is rejected and re-derived.
+//   - A candidate that already occurs in the request, literally or in any
+//     spelling the response restorer recognises. Restoring would then rewrite
+//     genuine content, so the candidate is rejected and re-derived.
 //   - A kind whose reserved namespace is finite (the test IP ranges, the
 //     fictional phone block) running dry. The affected value falls back to a
 //     token placeholder rather than reusing a stand-in, because two originals
@@ -59,6 +59,7 @@ type placeholderAllocator struct {
 	key       []byte
 	resolve   func(Kind) KindRule
 	body      []byte
+	bodyText  string
 	used      map[string]struct{}
 	exhausted map[Kind]bool
 }
@@ -126,7 +127,7 @@ func (allocator *placeholderAllocator) allocateToken(kind Kind, value string) (s
 	for trial := range placeholderDerivationTrials {
 		suffix := allocator.derive(kind, value, trial, placeholderTokenHexLength)
 		candidate := withPlaceholderSuffix(replacementFor(kind), suffix)
-		if allocator.reserve(candidate) {
+		if allocator.reserve(kind, candidate) {
 			return candidate, nil
 		}
 	}
@@ -144,7 +145,7 @@ func (allocator *placeholderAllocator) allocateNatural(kind Kind, value string) 
 		if !ok {
 			return "", errNamespaceExhausted
 		}
-		if allocator.reserve(candidate) {
+		if allocator.reserve(kind, candidate) {
 			return candidate, nil
 		}
 	}
@@ -152,13 +153,19 @@ func (allocator *placeholderAllocator) allocateNatural(kind Kind, value string) 
 }
 
 // reserve accepts a candidate only if no earlier value in this request took it
-// and it does not already appear in the request body.
-func (allocator *placeholderAllocator) reserve(candidate string) bool {
+// and no spelling the response restorer recognises already appears in the
+// request body.
+func (allocator *placeholderAllocator) reserve(kind Kind, candidate string) bool {
 	if _, exists := allocator.used[candidate]; exists {
 		return false
 	}
-	if bytes.Contains(allocator.body, []byte(candidate)) {
-		return false
+	if len(allocator.body) > 0 {
+		if allocator.bodyText == "" {
+			allocator.bodyText = string(allocator.body)
+		}
+		if restorableSpellingIn(kind, candidate, allocator.bodyText) {
+			return false
+		}
 	}
 	allocator.used[candidate] = struct{}{}
 	return true

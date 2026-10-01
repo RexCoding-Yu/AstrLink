@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseAccessTokenCreateResult,
   parseAccessTokenPage,
-  parseAccessTokenRevealResult,
+  parseAccessTokenCopied,
   parseAccessTokenUsageResponse,
 } from "./access-token-model";
 
@@ -108,7 +108,7 @@ describe("access-token IPC contract", () => {
     }
   });
 
-  it("strictly parses list, create, and reveal responses", () => {
+  it("strictly parses list, create, and copy responses", () => {
     expect(parseAccessTokenPage({ items: [token], next_cursor: null })).toEqual(
       { items: [token], next_cursor: null },
     );
@@ -118,8 +118,10 @@ describe("access-token IPC contract", () => {
         access_token: accessToken,
       }),
     ).toEqual({ token, access_token: accessToken });
-    expect(parseAccessTokenRevealResult({ access_token: accessToken })).toEqual(
-      { access_token: accessToken },
+    expect(parseAccessTokenCopied(true)).toBe(true);
+    expect(parseAccessTokenCopied(false)).toBe(false);
+    expect(() => parseAccessTokenCopied({ access_token: accessToken })).toThrow(
+      "boolean",
     );
   });
 
@@ -165,15 +167,17 @@ describe("access-token IPC contract", () => {
       }),
     ).toThrow("1 to 64");
     expect(() =>
-      parseAccessTokenRevealResult({ access_token: "short" }),
+      parseAccessTokenCreateResult({ token, access_token: "short" }),
     ).toThrow("astr_ token");
     expect(() =>
-      parseAccessTokenRevealResult({
+      parseAccessTokenCreateResult({
+        token,
         access_token: `other_${"A".repeat(42)}`,
       }),
     ).toThrow("astr_ token");
     expect(() =>
-      parseAccessTokenRevealResult({
+      parseAccessTokenCreateResult({
+        token,
         access_token: `astr_${"A".repeat(42)}B`,
       }),
     ).toThrow("astr_ token");

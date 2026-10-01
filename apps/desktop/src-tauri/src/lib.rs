@@ -1,14 +1,23 @@
 mod agent_install;
 mod cc_switch;
+mod client_config;
 mod client_updates;
 mod control_session;
+mod data_hygiene;
 #[cfg(debug_assertions)]
 mod dev_reload;
 mod failure_policy;
+mod host_files;
 mod i18n;
+mod kek_store;
 #[cfg(target_os = "macos")]
 mod macos_app;
 mod preferences;
+mod provider_import;
+mod proxy_check;
+mod raw_access;
+mod raw_approval;
+mod raw_key_pin;
 mod recovery_path;
 mod service_proxy;
 mod sidecar;
@@ -30,6 +39,8 @@ use serde::{Deserialize, Serialize};
 use sidecar::{CoreManager, CoreSnapshot, PolicyRecordResponse, ServiceRecordResponse};
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
@@ -53,6 +64,9 @@ struct SettingsSnapshot {
     preferences: PreferencesSnapshot,
     autostart_actual: Option<bool>,
     autostart_error: Option<String>,
+    data_backups: Vec<data_hygiene::DataBackupFile>,
+    /// Where Core's local key lives; `None` before the first Core start.
+    local_key_storage: Option<kek_store::LocalKeyStorage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,14 +160,19 @@ async fn restart_core(
     Ok(AppSnapshot::capture(&app, &manager))
 }
 
+// Async so the start, which may wait on a keychain prompt, runs on a
+// blocking worker rather than the main thread.
 #[tauri::command]
-fn start_core(
+async fn start_core(
     app: tauri::AppHandle,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<AppSnapshot, String> {
     let _lifecycle = updates::lifecycle_guard(&app)?;
     let manager = Arc::clone(manager.inner());
-    manager.start(&app)?;
+    let (starter, handle) = (Arc::clone(&manager), app.clone());
+    tauri::async_runtime::spawn_blocking(move || starter.start(&handle))
+        .await
+        .map_err(|error| format!("unable to start astrlink-core: {error}"))??;
     Ok(AppSnapshot::capture(&app, &manager))
 }
 
@@ -169,11 +188,22 @@ async fn stop_core(
 }
 
 fn settings_snapshot(app: &tauri::AppHandle, store: &PreferencesStore) -> SettingsSnapshot {
+    // Rescanned on every snapshot so a backup the user deletes stops showing.
+    let data_backups = app
+        .path()
+        .app_data_dir()
+        .map(|directory| data_hygiene::scan_backup_files(&directory))
+        .unwrap_or_default();
+    let local_key_storage = app
+        .try_state::<Arc<CoreManager>>()
+        .and_then(|manager| manager.local_key_storage());
     match app.autolaunch().is_enabled() {
         Ok(actual) => SettingsSnapshot {
             preferences: store.snapshot(),
             autostart_actual: Some(actual),
             autostart_error: None,
+            data_backups,
+            local_key_storage,
         },
         Err(error) => SettingsSnapshot {
             preferences: store.snapshot(),
@@ -183,6 +213,8 @@ fn settings_snapshot(app: &tauri::AppHandle, store: &PreferencesStore) -> Settin
                 "host.autostart.readFailed",
                 &[("error", &error.to_string())],
             )),
+            data_backups,
+            local_key_storage,
         },
     }
 }
@@ -195,33 +227,71 @@ fn get_preferences(
     settings_snapshot(&app, store.inner())
 }
 
-fn agent_install_context() -> Result<agent_install::InstallContext, String> {
+fn agent_install_context(app: &tauri::AppHandle) -> Result<agent_install::InstallContext, String> {
     Ok(agent_install::InstallContext {
         home: control_session::user_home()?,
-        mcp_source: agent_install::resolve_sidecar_binary("astrlink-mcp")?,
+        // Install reports a missing sidecar itself; status and uninstall do not need it.
+        cli_source: agent_install::resolve_sidecar_binary("astrlink-cli").unwrap_or_default(),
+        data_directory: app.path().app_data_dir().ok(),
+        raw_key_pins: raw_key_pin_file(app),
     })
 }
 
+/// Keeps client configs AstrLink wrote pointed at the gateway's current
+/// address, including a fallback port picked at startup.
+fn start_client_config_sync(manager: &CoreManager, preferences: Arc<PreferencesStore>) {
+    let mut changes = manager.subscribe();
+    tauri::async_runtime::spawn(async move {
+        let mut synced: Option<String> = None;
+        while changes.changed().await.is_ok() {
+            let inference_url = changes.borrow_and_update().inference_url.clone();
+            let Some(inference_url) = inference_url.filter(|url| synced.as_ref() != Some(url))
+            else {
+                continue;
+            };
+            synced = Some(inference_url.clone());
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                client_config::sync(&control_session::user_home()?, &inference_url)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
+            if let Err(error) = result {
+                eprintln!("failed to update client configs for the gateway address: {error}");
+                preferences.report_warning(i18n::t(
+                    preferences.snapshot().values.locale,
+                    "host.clientConfig.syncFailed",
+                    &[("error", &error)],
+                ));
+            }
+        }
+    });
+}
+
+/// The raw key pin file agent guards deny, where the pins live in one.
+fn raw_key_pin_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.try_state::<Arc<raw_key_pin::RawKeyPins>>()?
+        .file()
+        .map(std::path::Path::to_path_buf)
+}
+
 #[tauri::command]
-fn agent_debug_status() -> Result<agent_install::AgentInstallStatus, String> {
-    let home = control_session::user_home()?;
-    let mcp_source = agent_install::resolve_sidecar_binary("astrlink-mcp").unwrap_or_default();
-    Ok(agent_install::status(&agent_install::InstallContext {
-        home,
-        mcp_source,
-    }))
+fn agent_debug_status(app: tauri::AppHandle) -> Result<agent_install::AgentInstallStatus, String> {
+    Ok(agent_install::status(&agent_install_context(&app)?))
 }
 
 #[tauri::command]
 fn install_agent_debug(
+    app: tauri::AppHandle,
+    skill_ids: Vec<agent_install::AgentSkillId>,
     tool_ids: Vec<agent_install::AgentToolId>,
 ) -> Result<agent_install::InstallReceipt, String> {
-    agent_install::install(&agent_install_context()?, &tool_ids)
+    agent_install::install(&agent_install_context(&app)?, &skill_ids, &tool_ids)
 }
 
 #[tauri::command]
-fn uninstall_agent_debug() -> Result<(), String> {
-    agent_install::uninstall(&agent_install_context()?)
+fn uninstall_agent_debug(app: tauri::AppHandle) -> Result<(), String> {
+    agent_install::uninstall(&agent_install_context(&app)?)
 }
 
 #[tauri::command]
@@ -375,7 +445,18 @@ fn tray_popover_resize(app: tauri::AppHandle, height: f64) -> Result<(), String>
 
 #[tauri::command]
 fn tray_popover_hide(app: tauri::AppHandle) {
-    tray::hide_popover(&app);
+    tray::dismiss_popover(&app);
+}
+
+fn receive_deep_links(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
+    // One confirmation at a time: only the last AstrLink link is kept.
+    if let Some(url) = urls
+        .iter()
+        .rev()
+        .find(|url| url.scheme() == provider_import::SCHEME)
+    {
+        provider_import::receive(app, url.as_str());
+    }
 }
 
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
@@ -410,6 +491,7 @@ fn hide_main_window_to_tray(app: &tauri::AppHandle) {
     // A tray-parked app must not leave a following inspector on screen showing
     // a request the operator can no longer reach. Pinned ones stay.
     close_unpinned_inspectors(app);
+    raw_approval::lock_on_hide(app);
     notify_hidden_to_tray(app);
 }
 
@@ -428,21 +510,24 @@ fn notify_hidden_to_tray(app: &tauri::AppHandle) {
         ("host.tray.hiddenTitle", "host.tray.hiddenBody")
     };
     // Use a native notification: an in-window toast is invisible after hiding.
-    // Notification delivery must never prevent the app from staying in the tray.
-    #[cfg(target_os = "macos")]
-    macos_app::notify(
+    notify_native(
+        app,
         i18n::t(locale, title_key, &[]),
         i18n::t(locale, body_key, &[]),
     );
-    #[cfg(not(target_os = "macos"))]
-    if let Err(error) = app
-        .notification()
-        .builder()
-        .title(i18n::t(locale, title_key, &[]))
-        .body(i18n::t(locale, body_key, &[]))
-        .show()
+}
+
+/// Delivery failures are logged only; a notification must never block the
+/// caller, such as the app staying in the tray.
+pub(crate) fn notify_native(app: &tauri::AppHandle, title: String, body: String) {
+    #[cfg(target_os = "macos")]
     {
-        eprintln!("unable to send AstrLink tray notification: {error}");
+        let _ = app;
+        macos_app::notify(title, body);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Err(error) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("unable to send AstrLink notification: {error}");
     }
 }
 
@@ -909,6 +994,14 @@ async fn get_service_usage(
 }
 
 #[tauri::command]
+async fn get_service_reset_credits(
+    service_id: String,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.get_service_reset_credits(&service_id).await
+}
+
+#[tauri::command]
 async fn reset_service_usage(
     service_id: String,
     manager: State<'_, Arc<CoreManager>>,
@@ -1138,6 +1231,233 @@ async fn get_request_audit_content(
 }
 
 #[tauri::command]
+async fn list_raw_access(
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.list_raw_access().await
+}
+
+/// Turns a window's proof into one for Core.
+fn raw_proof(arg: raw_access::ProofArg) -> raw_access::Proof {
+    match arg {
+        raw_access::ProofArg::Password { password } => raw_access::Proof::Password(password),
+    }
+}
+
+#[tauri::command]
+async fn decide_raw_access(
+    grant_id: String,
+    decision: String,
+    proof: Option<raw_access::ProofArg>,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    // The desktop never keeps the proof: it is wiped once it has been sent.
+    let proof = match proof {
+        Some(arg) if decision != "deny" => Some(raw_proof(arg)),
+        _ => None,
+    };
+    manager
+        .decide_raw_access(&grant_id, &decision, proof.as_ref())
+        .await
+}
+
+/// Ends a running timed agent grant before it expires.
+#[tauri::command]
+async fn revoke_raw_grant(
+    grant_id: String,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.revoke_raw_grant(&grant_id).await
+}
+
+/// Raw sealing state plus whether the raw key was replaced outside the
+/// desktop.
+#[tauri::command]
+async fn raw_sealing_status(
+    manager: State<'_, Arc<CoreManager>>,
+    pins: State<'_, Arc<raw_key_pin::RawKeyPins>>,
+) -> Result<serde_json::Value, String> {
+    let _pinning = pins.guard().await;
+    let mut status = manager.raw_sealing_status().await?;
+    note_raw_key(&pins, &manager, &mut status, raw_key_pin::PinAction::Check).await;
+    Ok(status)
+}
+
+/// Adds `key_replaced` to a raw sealing status after applying `action` to
+/// the pin of the running data directory, and hands the verdict to the tray.
+/// Callers hold the pin guard.
+async fn note_raw_key(
+    pins: &Arc<raw_key_pin::RawKeyPins>,
+    manager: &CoreManager,
+    status: &mut serde_json::Value,
+    action: raw_key_pin::PinAction,
+) {
+    let replaced = match manager.data_directory() {
+        Some(data_directory) => {
+            let account = kek_store::keychain_account(&data_directory);
+            let pins = Arc::clone(pins);
+            let observed = status.clone();
+            tauri::async_runtime::spawn_blocking(move || pins.apply(&account, &observed, action))
+                .await
+                .unwrap_or(false)
+        }
+        None => false,
+    };
+    manager.note_raw_key_replaced(replaced);
+    if let Some(object) = status.as_object_mut() {
+        object.insert("key_replaced".to_string(), replaced.into());
+    }
+}
+
+/// Checks the raw key pin without any window, when Core becomes ready or
+/// records a raw key change, so the tray can warn about a key replaced while
+/// the app was closed. Windows read the state again when the verdict moves.
+pub(crate) async fn check_raw_key(app: tauri::AppHandle) {
+    let (Some(manager), Some(pins)) = (
+        app.try_state::<Arc<CoreManager>>(),
+        app.try_state::<Arc<raw_key_pin::RawKeyPins>>(),
+    ) else {
+        return;
+    };
+    let (manager, pins) = (Arc::clone(&manager), Arc::clone(&pins));
+    let _pinning = pins.guard().await;
+    // Errors are transient (Core restarting); the next ready checks again.
+    let Ok(mut status) = manager.raw_sealing_status().await else {
+        return;
+    };
+    let before = manager.view().raw_key_replaced;
+    note_raw_key(&pins, &manager, &mut status, raw_key_pin::PinAction::Check).await;
+    if manager.view().raw_key_replaced != before {
+        let _ = broadcast_raw_sealing_change(&app, Ok(serde_json::Value::Null));
+    }
+}
+
+/// The new raw sealing state inside a successful unlock or password outcome.
+fn sealing_outcome_status(outcome: &mut serde_json::Value) -> Option<&mut serde_json::Value> {
+    if outcome.get("outcome")?.as_str()? != "sealing" {
+        return None;
+    }
+    outcome.get_mut("status")
+}
+
+/// Applies `action` to the status of a successful proof outcome; refusals
+/// pass through unchanged.
+async fn note_raw_key_outcome(
+    pins: &Arc<raw_key_pin::RawKeyPins>,
+    manager: &CoreManager,
+    result: Result<serde_json::Value, String>,
+    action: raw_key_pin::PinAction,
+) -> Result<serde_json::Value, String> {
+    let mut outcome = result?;
+    if let Some(status) = sealing_outcome_status(&mut outcome) {
+        note_raw_key(pins, manager, status, action).await;
+    }
+    Ok(outcome)
+}
+
+/// Tells every window that the raw unlock or key may have changed, so one
+/// showing raw parts, such as a pinned inspector, reads the state again.
+const RAW_SEALING_CHANGED_EVENT: &str = "raw-sealing-changed";
+
+fn broadcast_raw_sealing_change(
+    app: &tauri::AppHandle,
+    result: Result<serde_json::Value, String>,
+) -> Result<serde_json::Value, String> {
+    if result.is_ok() {
+        if let Err(error) = app.emit(RAW_SEALING_CHANGED_EVENT, ()) {
+            eprintln!("unable to broadcast a raw sealing change: {error}");
+        }
+    }
+    result
+}
+
+#[tauri::command]
+async fn unlock_raw(
+    app: tauri::AppHandle,
+    proof: raw_access::ProofArg,
+    manager: State<'_, Arc<CoreManager>>,
+    pins: State<'_, Arc<raw_key_pin::RawKeyPins>>,
+) -> Result<serde_json::Value, String> {
+    let proof = raw_proof(proof);
+    let _pinning = pins.guard().await;
+    let result = manager.unlock_raw(&proof).await;
+    let result = note_raw_key_outcome(&pins, &manager, result, raw_key_pin::PinAction::Check).await;
+    broadcast_raw_sealing_change(&app, result)
+}
+
+/// The operator's own lock also revokes every agent grant; locking when the
+/// main window hides keeps them (`raw_approval::lock_on_hide`).
+#[tauri::command]
+async fn lock_raw(
+    app: tauri::AppHandle,
+    manager: State<'_, Arc<CoreManager>>,
+    pins: State<'_, Arc<raw_key_pin::RawKeyPins>>,
+) -> Result<serde_json::Value, String> {
+    let _pinning = pins.guard().await;
+    let result = match manager.lock_raw(false).await {
+        Ok(mut status) => {
+            note_raw_key(&pins, &manager, &mut status, raw_key_pin::PinAction::Check).await;
+            Ok(status)
+        }
+        Err(error) => Err(error),
+    };
+    broadcast_raw_sealing_change(&app, result)
+}
+
+/// Accepts a raw key replaced outside the desktop, such as by the operator's
+/// own `astrlink-core raw-password`. Only the key's own password accepts it:
+/// that shows the operator chose the key. Nothing unlocks raw parts.
+#[tauri::command]
+async fn acknowledge_raw_key(
+    app: tauri::AppHandle,
+    proof: raw_access::ProofArg,
+    manager: State<'_, Arc<CoreManager>>,
+    pins: State<'_, Arc<raw_key_pin::RawKeyPins>>,
+) -> Result<serde_json::Value, String> {
+    let proof = raw_proof(proof);
+    let result = acknowledge_replaced_key(&manager, &pins, &proof).await;
+    broadcast_raw_sealing_change(&app, result)
+}
+
+/// The acknowledgement behind `acknowledge_raw_key`. Core's verify route
+/// checks the proof without starting an unlock session, and the key its
+/// answer names is pinned.
+async fn acknowledge_replaced_key(
+    manager: &CoreManager,
+    pins: &Arc<raw_key_pin::RawKeyPins>,
+    proof: &raw_access::Proof,
+) -> Result<serde_json::Value, String> {
+    let _pinning = pins.guard().await;
+    let result = manager.verify_raw(proof).await;
+    note_raw_key_outcome(pins, manager, result, raw_key_pin::PinAction::Pin).await
+}
+
+/// Sets, changes, or resets the raw password. `password` is the new one;
+/// `proof` opens the existing key where Core needs it.
+#[tauri::command]
+async fn set_raw_password(
+    app: tauri::AppHandle,
+    action: String,
+    password: Option<zeroize::Zeroizing<String>>,
+    proof: Option<raw_access::ProofArg>,
+    manager: State<'_, Arc<CoreManager>>,
+    pins: State<'_, Arc<raw_key_pin::RawKeyPins>>,
+) -> Result<serde_json::Value, String> {
+    let proof = proof.map(raw_proof);
+    let _pinning = pins.guard().await;
+    let result = manager
+        .change_raw_password(
+            &action,
+            password.as_deref().map(String::as_str),
+            proof.as_ref(),
+        )
+        .await;
+    let pin_action = raw_key_pin::PinAction::after_password(&action);
+    let result = note_raw_key_outcome(&pins, &manager, result, pin_action).await;
+    broadcast_raw_sealing_change(&app, result)
+}
+
+#[tauri::command]
 async fn builtin_tool_action(
     kind: String,
     action: String,
@@ -1163,10 +1483,24 @@ async fn update_routing_settings(
 }
 
 #[tauri::command]
+async fn get_client_identities(
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.get_client_identities().await
+}
+
+#[tauri::command]
 async fn get_audit_settings(
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<serde_json::Value, String> {
     manager.get_audit_settings().await
+}
+
+#[tauri::command]
+async fn local_data_status(
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.local_data_status().await
 }
 
 #[tauri::command]
@@ -1213,24 +1547,150 @@ async fn create_access_token(
     manager.create_access_token(&name).await
 }
 
+/// Copies an access token from Core straight to the clipboard: the token
+/// never reaches the webview, and no click gesture has to outlast the
+/// reveal. `false` means the clipboard refused it.
 #[tauri::command]
-async fn reveal_access_token(
+async fn copy_access_token(
+    app: tauri::AppHandle,
     token_id: String,
     manager: State<'_, Arc<CoreManager>>,
-) -> Result<serde_json::Value, String> {
-    manager.reveal_access_token(&token_id).await
+) -> Result<bool, String> {
+    let secret = manager.reveal_access_token(&token_id).await?;
+    let token = secret["access_token"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .ok_or("access token reveal returned no token")?;
+    match app.clipboard().write_text(token) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            eprintln!("unable to copy the access token: {error}");
+            Ok(false)
+        }
+    }
+}
+
+#[tauri::command]
+async fn cc_switch_installed() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(cc_switch::installed)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 async fn open_cc_switch_import(
     token_id: String,
-    client: cc_switch::Client,
-    name: String,
-    models: cc_switch::Models,
+    client: client_config::Client,
+    models: client_config::Models,
     inference_url: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<(), String> {
-    cc_switch::open_import(&manager, &token_id, client, &name, &models, &inference_url).await
+    cc_switch::open_import(&manager, &token_id, client, &models, &inference_url).await
+}
+
+/// Read-only: reports whether the system proxy keeps Codex from reaching
+/// the gateway, and never changes proxy settings.
+#[tauri::command]
+async fn check_client_proxy(inference_url: String) -> Result<proxy_check::ProxyCheck, String> {
+    proxy_check::check(&inference_url).await
+}
+
+#[tauri::command]
+async fn client_config_status(
+    inference_url: Option<String>,
+) -> Result<Vec<client_config::ClientStatus>, String> {
+    let home = control_session::user_home()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        client_config::status(&home, inference_url.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn apply_client_config(
+    token_id: String,
+    client: client_config::Client,
+    models: client_config::Models,
+    inference_url: String,
+    replace: bool,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<client_config::ApplyOutcome, String> {
+    let home = control_session::user_home()?;
+    client_config::apply(
+        &manager,
+        home,
+        token_id,
+        client,
+        &models,
+        inference_url,
+        replace,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn remove_client_config(client: client_config::Client) -> Result<(), String> {
+    let home = control_session::user_home()?;
+    tauri::async_runtime::spawn_blocking(move || client_config::remove(&home, client))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// The config `apply_client_config` would write to a fresh file, with the
+/// token shown as its hint.
+#[tauri::command]
+async fn preview_client_config_snippet(
+    token_id: String,
+    client: client_config::Client,
+    models: client_config::Models,
+    inference_url: String,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<String, String> {
+    let origin = client_config::local_origin(&inference_url)?;
+    let models = models.fields(client)?;
+    let (_, hint) = client_config::token_summary(&manager, &token_id).await?;
+    client_config::snippet(
+        client,
+        &client_config::Connection {
+            token_id: &token_id,
+            token: &hint,
+            origin: &origin,
+            models: &models,
+        },
+    )
+}
+
+/// Copies the real snippet straight to the clipboard, like
+/// `copy_access_token`. `false` means the clipboard refused it.
+#[tauri::command]
+async fn copy_client_config_snippet(
+    app: tauri::AppHandle,
+    token_id: String,
+    client: client_config::Client,
+    models: client_config::Models,
+    inference_url: String,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<bool, String> {
+    let origin = client_config::local_origin(&inference_url)?;
+    let models = models.fields(client)?;
+    let token = client_config::reveal_access_token(&manager, &token_id, &inference_url).await?;
+    let snippet = client_config::snippet(
+        client,
+        &client_config::Connection {
+            token_id: &token_id,
+            token: &token,
+            origin: &origin,
+            models: &models,
+        },
+    )?;
+    match app.clipboard().write_text(snippet) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            eprintln!("unable to copy the client config: {error}");
+            Ok(false)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1284,6 +1744,13 @@ async fn get_privacy_model_catalog(
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<serde_json::Value, String> {
     manager.get_privacy_model_catalog().await
+}
+
+#[tauri::command]
+async fn get_privacy_model_releases(
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.get_privacy_model_releases().await
 }
 
 #[tauri::command]
@@ -1387,6 +1854,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
+        // After single-instance, which forwards a second launch's link here.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -1405,8 +1874,12 @@ pub fn run() {
         .manage(Mutex::new(InspectorRegistry::default()))
         .manage(tray::TrayState::default())
         .manage(Arc::new(client_updates::ClientUpdateManager::default()))
+        .manage(provider_import::ProviderImports::default())
         .invoke_handler(tauri::generate_handler![
             client_updates::local_client_status,
+            provider_import::pending_provider_import,
+            provider_import::dismiss_provider_import,
+            provider_import::confirm_provider_import,
             client_updates::refresh_local_clients,
             client_updates::update_local_clients,
             updates::app_update_status,
@@ -1433,6 +1906,7 @@ pub fn run() {
             update_service,
             delete_service,
             get_service_usage,
+            get_service_reset_credits,
             pricing,
             reset_service_usage,
             test_service,
@@ -1459,17 +1933,34 @@ pub fn run() {
             delete_request_record,
             purge_request_records,
             get_request_audit_content,
+            list_raw_access,
+            decide_raw_access,
+            revoke_raw_grant,
+            raw_sealing_status,
+            unlock_raw,
+            lock_raw,
+            acknowledge_raw_key,
+            set_raw_password,
             builtin_tool_action,
             get_routing_settings,
             update_routing_settings,
+            get_client_identities,
             get_audit_settings,
             update_audit_settings,
+            local_data_status,
             list_access_tokens,
             list_access_token_usage,
             get_usage_summary,
             create_access_token,
-            reveal_access_token,
+            copy_access_token,
+            cc_switch_installed,
             open_cc_switch_import,
+            client_config_status,
+            check_client_proxy,
+            apply_client_config,
+            remove_client_config,
+            preview_client_config_snippet,
+            copy_client_config_snippet,
             delete_access_token,
             list_privacy_policies,
             get_privacy_policy,
@@ -1477,6 +1968,7 @@ pub fn run() {
             dry_run_privacy_policy,
             get_privacy_regex_builtin_rules,
             get_privacy_model_catalog,
+            get_privacy_model_releases,
             probe_privacy_model,
             probe_local_privacy_model,
             list_privacy_model_installations,
@@ -1504,6 +1996,9 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| format!("unable to resolve AstrLink data directory: {error}"))?;
             let preferences = Arc::new(PreferencesStore::load(&config_directory, &data_directory));
+            let raw_key_pins = Arc::new(raw_key_pin::RawKeyPins::system(&config_directory));
+            let raw_key_pin_file = raw_key_pins.file().map(std::path::Path::to_path_buf);
+            app.manage(raw_key_pins);
             let values = preferences.snapshot().values;
             apply_native_theme(app.handle(), values.theme);
             if let Some(window) = app.get_webview_window("main") {
@@ -1534,6 +2029,7 @@ pub fn run() {
                     &[("error", &error)],
                 ));
             }
+            start_client_config_sync(&setup_manager, Arc::clone(&preferences));
             app.manage(preferences);
             let updates =
                 Arc::new(updates::UpdateManager::new(app.handle()).map_err(std::io::Error::other)?);
@@ -1543,6 +2039,21 @@ pub fn run() {
             tray::build(app.handle())?;
             tray::start(app.handle());
 
+            let deep_link = app.deep_link();
+            // Installers register the scheme; this repairs portable copies.
+            #[cfg(any(windows, target_os = "linux"))]
+            if let Err(error) = deep_link.register_all() {
+                eprintln!("unable to register astrlink:// links: {error}");
+            }
+            let handle = app.handle().clone();
+            deep_link.on_open_url(move |event| {
+                receive_deep_links(&handle, event.urls());
+            });
+            match deep_link.get_current() {
+                Ok(urls) => receive_deep_links(app.handle(), urls.unwrap_or_default()),
+                Err(error) => eprintln!("unable to read the launch link: {error}"),
+            }
+
             #[cfg(debug_assertions)]
             dev_reload::start(app.handle());
 
@@ -1550,22 +2061,36 @@ pub fn run() {
                 if let Err(error) = agent_install::sync_installed_skills(&home) {
                     eprintln!("failed to sync AstrLink agent skills: {error}");
                 }
-                if let Ok(mcp_source) = agent_install::resolve_sidecar_binary("astrlink-mcp") {
-                    if let Err(error) =
-                        agent_install::sync_installed_mcp(&agent_install::InstallContext {
-                            home,
-                            mcp_source,
-                        })
-                    {
-                        eprintln!("failed to sync AstrLink MCP binary: {error}");
-                    }
+                if let Err(error) = agent_install::sync_installed_host_guards(
+                    &home,
+                    Some(&data_directory),
+                    raw_key_pin_file.as_deref(),
+                ) {
+                    eprintln!("failed to sync AstrLink agent host guards: {error}");
+                }
+                // Runs without a sidecar too, so the MCP migration still happens.
+                if let Err(error) =
+                    agent_install::sync_installed_cli(&agent_install::InstallContext {
+                        home,
+                        cli_source: agent_install::resolve_sidecar_binary("astrlink-cli")
+                            .unwrap_or_default(),
+                        data_directory: Some(data_directory.clone()),
+                        raw_key_pins: raw_key_pin_file.clone(),
+                    })
+                {
+                    eprintln!("failed to sync AstrLink agent CLI: {error}");
                 }
             }
 
             if values.core_auto_start {
-                if let Err(error) = setup_manager.start(app.handle()) {
-                    eprintln!("failed to start astrlink-core: {error}");
-                }
+                // Off the main thread: resolving the local key may wait on a
+                // keychain prompt.
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(error) = setup_manager.start(&handle) {
+                        eprintln!("failed to start astrlink-core: {error}");
+                    }
+                });
             }
             Ok(())
         })
@@ -1596,6 +2121,26 @@ pub fn run() {
         {
             if label == tray::POPOVER_LABEL {
                 tray::on_popover_blur(app_handle);
+            }
+        }
+        if let RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Focused(focused),
+            ..
+        } = &event
+        {
+            if label == "main" {
+                raw_approval::on_main_focus(app_handle, *focused);
+            }
+        }
+        if let RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Resized(_),
+            ..
+        } = &event
+        {
+            if label == "main" {
+                raw_approval::on_main_resized(app_handle);
             }
         }
         if let RunEvent::WindowEvent {
@@ -1654,6 +2199,256 @@ pub fn run() {
 mod tests {
     use super::*;
     use sidecar::CorePhase;
+
+    #[derive(Default)]
+    struct MemoryPins(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+
+    impl raw_key_pin::PinStore for MemoryPins {
+        fn load(&self, account: &str) -> Result<Option<String>, String> {
+            Ok(self.0.lock().unwrap().get(account).cloned())
+        }
+
+        fn save(&self, account: &str, pin: &str) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(account.to_string(), pin.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn raw_key_verdicts_reach_the_status_and_the_tray() {
+        use raw_key_pin::PinAction;
+
+        let pins = Arc::new(raw_key_pin::RawKeyPins::new(
+            Box::new(MemoryPins::default()),
+        ));
+        let manager = CoreManager::new();
+        let keyed = |fingerprint: String| serde_json::json!({ "password_set": true, "key_fingerprint": fingerprint });
+        let (first, second) = ("a".repeat(64), "b".repeat(64));
+        tauri::async_runtime::block_on(async {
+            // Without a data directory there is nothing to compare with.
+            let mut status = keyed(first.clone());
+            note_raw_key(&pins, &manager, &mut status, PinAction::Check).await;
+            assert_eq!(status["key_replaced"], false);
+
+            manager.ready_for_tests(std::path::PathBuf::from("/nonexistent/astrlink-data"));
+            let mut status = keyed(first.clone());
+            note_raw_key(&pins, &manager, &mut status, PinAction::Check).await;
+            assert_eq!(status["key_replaced"], false);
+            assert!(!manager.view().raw_key_replaced);
+
+            let mut status = keyed(second.clone());
+            note_raw_key(&pins, &manager, &mut status, PinAction::Check).await;
+            assert_eq!(status["key_replaced"], true);
+            assert!(manager.view().raw_key_replaced);
+
+            // A refusal leaves the verdict; accepting the key clears it.
+            let refused = serde_json::json!({ "outcome": "password_invalid" });
+            let refused = note_raw_key_outcome(&pins, &manager, Ok(refused), PinAction::Pin)
+                .await
+                .unwrap();
+            assert!(refused.get("status").is_none());
+            assert!(manager.view().raw_key_replaced);
+            let accepted =
+                serde_json::json!({ "outcome": "sealing", "status": keyed(second.clone()) });
+            let accepted = note_raw_key_outcome(&pins, &manager, Ok(accepted), PinAction::Pin)
+                .await
+                .unwrap();
+            assert_eq!(accepted["status"]["key_replaced"], false);
+            assert!(!manager.view().raw_key_replaced);
+            let mut status = keyed(second);
+            note_raw_key(&pins, &manager, &mut status, PinAction::Check).await;
+            assert_eq!(status["key_replaced"], false);
+        });
+    }
+
+    /// A control API that keeps an unlock session like Core's: raw-unlock
+    /// opens it, raw-lock ends it, raw-verify only checks the password. It
+    /// answers every status with `fingerprint` and records each request.
+    struct FakeRawCore {
+        url: String,
+        requests: Arc<std::sync::Mutex<Vec<String>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeRawCore {
+        const PASSWORD: &'static str = "the terminal password";
+
+        fn start(fingerprint: String) -> Self {
+            use std::io::{BufRead, Read, Write};
+            use std::sync::atomic::Ordering;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (seen, stopping) = (Arc::clone(&requests), Arc::clone(&stop));
+            let server = std::thread::spawn(move || {
+                let mut unlocked = false;
+                while !stopping.load(Ordering::SeqCst) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = std::io::BufReader::new(&mut stream);
+                    let mut request_line = String::new();
+                    reader.read_line(&mut request_line).unwrap();
+                    let mut length = 0;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let mut words = request_line.split_whitespace();
+                    let request = format!(
+                        "{} {}",
+                        words.next().unwrap_or_default(),
+                        words.next().unwrap_or_default()
+                    );
+                    seen.lock().unwrap().push(request.clone());
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    let right = body["proof"]["password"] == Self::PASSWORD;
+                    let (status, answer) = match request.as_str() {
+                        "POST /control/v1/audit/raw-unlock" if right => {
+                            unlocked = true;
+                            ("200 OK", None)
+                        }
+                        "POST /control/v1/audit/raw-verify" if right => ("200 OK", None),
+                        "POST /control/v1/audit/raw-unlock"
+                        | "POST /control/v1/audit/raw-verify" => (
+                            "403 Forbidden",
+                            Some(
+                                serde_json::json!({"error": {"code": "raw_password_invalid", "message": "wrong"}}),
+                            ),
+                        ),
+                        "POST /control/v1/audit/raw-lock" => {
+                            unlocked = false;
+                            ("200 OK", None)
+                        }
+                        "GET /control/v1/audit/raw-sealing" => ("200 OK", None),
+                        _ => (
+                            "404 Not Found",
+                            Some(
+                                serde_json::json!({"error": {"code": "not_found", "message": "no route"}}),
+                            ),
+                        ),
+                    };
+                    let answer = answer.unwrap_or_else(|| {
+                        serde_json::json!({
+                            "configured": true,
+                            "password_set": true,
+                            "unlocked": unlocked,
+                            "key_fingerprint": fingerprint,
+                        })
+                    });
+                    let answer = answer.to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    );
+                }
+            });
+            Self {
+                url,
+                requests,
+                stop,
+                server: Some(server),
+            }
+        }
+
+        fn take_requests(&self) -> Vec<String> {
+            std::mem::take(&mut *self.requests.lock().unwrap())
+        }
+    }
+
+    impl Drop for FakeRawCore {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(server) = self.server.take() {
+                let _ = server.join();
+            }
+        }
+    }
+
+    /// Pins `pinned`, then lets the fake Core answer with its own key, so
+    /// the desktop sees that key as replaced.
+    async fn replace_raw_key(
+        pins: &Arc<raw_key_pin::RawKeyPins>,
+        manager: &CoreManager,
+        core: &FakeRawCore,
+        pinned: &str,
+    ) {
+        use raw_key_pin::PinAction;
+
+        let mut status = serde_json::json!({ "password_set": true, "key_fingerprint": pinned });
+        note_raw_key(pins, manager, &mut status, PinAction::Pin).await;
+        let mut status = manager.raw_sealing_status().await.unwrap();
+        note_raw_key(pins, manager, &mut status, PinAction::Check).await;
+        assert_eq!(status["key_replaced"], true);
+        core.take_requests();
+    }
+
+    #[test]
+    fn acknowledging_a_replaced_key_checks_the_password_without_unlocking() {
+        let (pinned, replacement) = ("a".repeat(64), "b".repeat(64));
+        let core = FakeRawCore::start(replacement.clone());
+        let pins = Arc::new(raw_key_pin::RawKeyPins::new(
+            Box::new(MemoryPins::default()),
+        ));
+        let manager = CoreManager::new();
+        manager.serve_control_for_tests(
+            std::path::PathBuf::from("/nonexistent/astrlink-data"),
+            core.url.clone(),
+        );
+        let password =
+            |value: &str| raw_access::Proof::Password(zeroize::Zeroizing::new(value.to_string()));
+        tauri::async_runtime::block_on(async {
+            // Core only checks the password: no unlock session opens, and
+            // the key it names is pinned.
+            replace_raw_key(&pins, &manager, &core, &pinned).await;
+            let outcome =
+                acknowledge_replaced_key(&manager, &pins, &password(FakeRawCore::PASSWORD))
+                    .await
+                    .unwrap();
+            assert_eq!(outcome["outcome"], "sealing");
+            assert_eq!(outcome["status"]["unlocked"], false);
+            assert_eq!(outcome["status"]["key_replaced"], false);
+            assert!(!manager.view().raw_key_replaced);
+            assert_eq!(core.take_requests(), ["POST /control/v1/audit/raw-verify"]);
+            let after = manager.raw_sealing_status().await.unwrap();
+            assert_eq!(
+                after["unlocked"], false,
+                "an acknowledgement left raw parts unlocked"
+            );
+
+            // A wrong password pins nothing.
+            replace_raw_key(&pins, &manager, &core, &pinned).await;
+            let refused = acknowledge_replaced_key(&manager, &pins, &password("not the password"))
+                .await
+                .unwrap();
+            assert_eq!(refused["outcome"], "password_invalid");
+            assert!(manager.view().raw_key_replaced);
+            assert_eq!(core.take_requests(), ["POST /control/v1/audit/raw-verify"]);
+        });
+    }
 
     #[test]
     fn app_snapshot_serializes_as_one_flat_contract() {

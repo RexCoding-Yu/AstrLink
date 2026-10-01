@@ -26,7 +26,7 @@ const requestRecordSelectColumns = `
      FROM (SELECT kind, direction, value FROM request_record_cursors
            WHERE request_record_cursors.request_id = request_records.id
            ORDER BY kind, direction, value)) AS cursors_json, first_token_ms, model_redirect_json,
-    routing_decision_json, client_type`
+    routing_decision_json, client_type, privacy_decision, privacy_findings_json, conversion_diagnostics_json`
 
 const requestRecordInsertColumns = `
     id, parent_request_id, attempt_index, started_at, completed_at, status, input_protocol,
@@ -34,9 +34,10 @@ const requestRecordInsertColumns = `
     http_status, latency_ms, usage_json, error_json, audit_json, privacy_restore_json,
     session_id, previous_response_id, output_response_id, input_preview, events_json, created_at,
     turn_index, session_link_json, turn_user_messages, turn_user_fingerprint, recovery_json, first_token_ms,
-    model_redirect_json, routing_decision_json, client_type`
+    model_redirect_json, routing_decision_json, client_type, privacy_decision, privacy_findings_json,
+    conversion_diagnostics_json`
 
-const requestRecordInsertValues = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const requestRecordInsertValues = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (row requestRecordRow) insertArgs() []any {
 	return []any{
@@ -46,7 +47,8 @@ func (row requestRecordRow) insertArgs() []any {
 		row.errorJSON, row.auditJSON, row.privacyRestoreJSON, row.sessionID, row.previousResponseID,
 		row.outputResponseID, row.inputPreview, row.eventsJSON, row.createdAt,
 		row.turnIndex, row.sessionLinkJSON, row.turnUserMessages, row.turnUserFingerprint, row.recoveryJSON, row.firstTokenMs,
-		row.modelRedirectJSON, row.routingDecisionJSON, row.clientType,
+		row.modelRedirectJSON, row.routingDecisionJSON, row.clientType, row.privacyDecision, row.privacyFindingsJSON,
+		row.conversionDiagnosticsJSON,
 	}
 }
 
@@ -134,7 +136,10 @@ ON CONFLICT(id) DO UPDATE SET
     turn_user_fingerprint = excluded.turn_user_fingerprint,
     model_redirect_json = excluded.model_redirect_json,
     routing_decision_json = excluded.routing_decision_json,
-    client_type = excluded.client_type
+    client_type = excluded.client_type,
+    privacy_decision = excluded.privacy_decision,
+    privacy_findings_json = excluded.privacy_findings_json,
+    conversion_diagnostics_json = excluded.conversion_diagnostics_json
 WHERE request_records.status = 'pending' OR excluded.status <> 'pending'`,
 		row.insertArgs()...,
 	)
@@ -157,6 +162,9 @@ WHERE request_records.status = 'pending' OR excluded.status <> 'pending'`,
 	}
 	if err = transaction.Commit(); err != nil {
 		return fmt.Errorf("commit request upsert: %w", err)
+	}
+	if applied > 0 && record.Status != contract.RequestStatusPending {
+		store.requestEnded(record.ID)
 	}
 	return nil
 }
@@ -193,7 +201,26 @@ func (store *Store) RecoverPendingRequestRecords(ctx context.Context) (int, erro
 	if err != nil {
 		return 0, fmt.Errorf("encode interrupted request error: %w", err)
 	}
-	transaction, err := store.db.BeginTx(ctx, nil)
+	// A request body stored while its privacy inspection was still running
+	// never received a decision. Withhold it for good (plan §5.11.3); while
+	// no raw password is set, nothing raw is kept, so its content goes.
+	settlePending := `UPDATE audit_blobs SET exposure = 'raw' WHERE exposure = 'pending'`
+	if !store.keepsRawCaptures() {
+		settlePending = `UPDATE audit_blobs SET ` + dropRawContent + ` WHERE exposure = 'pending'`
+	}
+	var updated int64
+	err = store.withSecureDelete(ctx, true, func(conn *sql.Conn) (err error) {
+		updated, err = recoverPendingRequestRecords(ctx, conn, completedAt, string(errorJSON), settlePending)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return int(updated), nil
+}
+
+func recoverPendingRequestRecords(ctx context.Context, conn *sql.Conn, completedAt, errorJSON, settlePending string) (int64, error) {
+	transaction, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -204,7 +231,7 @@ SET status = 'failed',
     latency_ms = NULL,
     usage_json = CASE WHEN usage_json IS NOT NULL AND usage_json <> 'null' THEN json_set(usage_json, '$.billing_incomplete', json('true')) ELSE usage_json END,
     error_json = ?
-WHERE status = 'pending'`, completedAt, string(errorJSON))
+WHERE status = 'pending'`, completedAt, errorJSON)
 	if err != nil {
 		return 0, fmt.Errorf("recover pending request records: %w", err)
 	}
@@ -217,10 +244,13 @@ usage_json=CASE WHEN usage_json IS NOT NULL AND usage_json<>'null' THEN json_set
 WHERE terminal=0`); err != nil {
 		return 0, fmt.Errorf("recover pending billing entries: %w", err)
 	}
+	if _, err = transaction.ExecContext(ctx, settlePending); err != nil {
+		return 0, fmt.Errorf("recover pending audit exposure: %w", err)
+	}
 	if err = transaction.Commit(); err != nil {
 		return 0, err
 	}
-	return int(updated), nil
+	return updated, nil
 }
 
 func (store *Store) GetRequestRecord(ctx context.Context, id contract.RequestID) (contract.RequestRecord, error) {
@@ -318,6 +348,12 @@ func appendAccessTokenFilter(query *strings.Builder, args *[]any, ids []contract
 	}
 }
 
+// escapeLikePattern makes every character of value match itself in a LIKE
+// pattern that declares ESCAPE '\'.
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+}
+
 func (store *Store) ListRequestRecords(
 	ctx context.Context,
 	options storagecontract.RequestRecordListOptions,
@@ -351,6 +387,10 @@ FROM request_records WHERE parent_request_id IS NULL`)
 		args = append(args, options.To.UTC().Format(time.RFC3339Nano))
 	}
 	appendAccessTokenFilter(&query, &args, options.LocalAccessTokenIDs)
+	if options.Query != "" {
+		query.WriteString(` AND input_preview LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLikePattern(options.Query)+"%")
+	}
 	if options.Protocol != nil || options.ServiceID != nil || options.Status != nil {
 		query.WriteString(` AND (`)
 		directParts := make([]string, 0, 3)
@@ -565,41 +605,44 @@ WHERE parent_request_id IN (
 }
 
 type requestRecordRow struct {
-	clientType          any
-	recoveryJSON        any
-	modelRedirectJSON   any
-	routingDecisionJSON any
-	id                  string
-	parentRequestID     any
-	attemptIndex        int
-	startedAt           string
-	completedAt         any
-	status              string
-	inputProtocol       string
-	requestedModel      any
-	reasoningEffort     any
-	streaming           int
-	routeID             any
-	endpointID          any
-	localAccessTokenID  any
-	planJSON            any
-	httpStatus          any
-	latencyMs           any
-	firstTokenMs        any
-	usageJSON           any
-	errorJSON           any
-	auditJSON           string
-	privacyRestoreJSON  any
-	sessionID           any
-	previousResponseID  any
-	outputResponseID    any
-	inputPreview        any
-	eventsJSON          any
-	createdAt           string
-	turnIndex           any
-	sessionLinkJSON     any
-	turnUserMessages    any
-	turnUserFingerprint any
+	clientType                any
+	recoveryJSON              any
+	modelRedirectJSON         any
+	routingDecisionJSON       any
+	id                        string
+	parentRequestID           any
+	attemptIndex              int
+	startedAt                 string
+	completedAt               any
+	status                    string
+	inputProtocol             string
+	requestedModel            any
+	reasoningEffort           any
+	streaming                 int
+	routeID                   any
+	endpointID                any
+	localAccessTokenID        any
+	planJSON                  any
+	httpStatus                any
+	latencyMs                 any
+	firstTokenMs              any
+	usageJSON                 any
+	errorJSON                 any
+	auditJSON                 string
+	privacyRestoreJSON        any
+	sessionID                 any
+	previousResponseID        any
+	outputResponseID          any
+	inputPreview              any
+	eventsJSON                any
+	createdAt                 string
+	turnIndex                 any
+	sessionLinkJSON           any
+	turnUserMessages          any
+	turnUserFingerprint       any
+	privacyDecision           any
+	privacyFindingsJSON       any
+	conversionDiagnosticsJSON any
 }
 
 func encodeRequestRecordRow(record contract.RequestRecord, createdAt time.Time) (requestRecordRow, error) {
@@ -699,6 +742,23 @@ func encodeRequestRecordRow(record contract.RequestRecord, createdAt time.Time) 
 		}
 		row.privacyRestoreJSON = string(encoded)
 	}
+	if record.PrivacyDecision != nil {
+		row.privacyDecision = string(*record.PrivacyDecision)
+	}
+	if len(record.PrivacyFindings) > 0 {
+		encoded, err := json.Marshal(record.PrivacyFindings)
+		if err != nil {
+			return requestRecordRow{}, fmt.Errorf("encode privacy findings: %w", err)
+		}
+		row.privacyFindingsJSON = string(encoded)
+	}
+	if len(record.ConversionDiagnostics) > 0 {
+		encoded, err := json.Marshal(record.ConversionDiagnostics)
+		if err != nil {
+			return requestRecordRow{}, fmt.Errorf("encode conversion diagnostics: %w", err)
+		}
+		row.conversionDiagnosticsJSON = string(encoded)
+	}
 	if record.SessionID != nil {
 		row.sessionID = string(*record.SessionID)
 	}
@@ -743,6 +803,7 @@ type scannable interface {
 
 func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 	var recoveryJSON, modelRedirectJSON, routingDecisionJSON, clientType sql.NullString
+	var privacyDecision, privacyFindingsJSON, conversionDiagnosticsJSON sql.NullString
 	var firstTokenMs sql.NullInt64
 	var (
 		id, startedAt, status, inputProtocol, auditJSON, createdAt        string
@@ -762,7 +823,8 @@ func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 		&httpStatus, &latencyMs, &usageJSON, &errorJSON, &auditJSON, &privacyRestoreJSON,
 		&sessionID, &previousResponseID, &outputResponseID, &inputPreview, &eventsJSON,
 		&createdAt, &turnIndex, &sessionLinkJSON, &turnUserMessages, &turnUserFingerprint, &recoveryJSON, &childCount, &cursorsJSON, &firstTokenMs,
-		&modelRedirectJSON, &routingDecisionJSON, &clientType,
+		&modelRedirectJSON, &routingDecisionJSON, &clientType, &privacyDecision, &privacyFindingsJSON,
+		&conversionDiagnosticsJSON,
 	); err != nil {
 		return contract.RequestRecord{}, err
 	}
@@ -876,6 +938,20 @@ func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 			)
 		}
 		record.PrivacyRestore = &summary
+	}
+	if privacyDecision.Valid {
+		decision := contract.PrivacyDecision(privacyDecision.String)
+		record.PrivacyDecision = &decision
+	}
+	if privacyFindingsJSON.Valid && privacyFindingsJSON.String != "" {
+		if err := json.Unmarshal([]byte(privacyFindingsJSON.String), &record.PrivacyFindings); err != nil {
+			return contract.RequestRecord{}, fmt.Errorf("%w: request %q privacy_findings", storagecontract.ErrInvalidRecord, id)
+		}
+	}
+	if conversionDiagnosticsJSON.Valid && conversionDiagnosticsJSON.String != "" {
+		if err := json.Unmarshal([]byte(conversionDiagnosticsJSON.String), &record.ConversionDiagnostics); err != nil {
+			return contract.RequestRecord{}, fmt.Errorf("%w: request %q conversion_diagnostics", storagecontract.ErrInvalidRecord, id)
+		}
 	}
 	if sessionID.Valid {
 		value := contract.SessionID(sessionID.String)

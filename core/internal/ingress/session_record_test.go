@@ -90,6 +90,7 @@ type sessionHarness struct {
 	responseBody string
 	contentType  string
 	token        string
+	headers      http.Header
 }
 
 type sessionHarnessOptions struct {
@@ -139,6 +140,10 @@ func (harness *sessionHarness) serve(body, response string) contract.RequestReco
 		harness.contentType = "text/event-stream"
 	}
 	request := httptest.NewRequest(http.MethodPost, harness.path, strings.NewReader(body))
+	request.Header = harness.headers.Clone()
+	if request.Header == nil {
+		request.Header = make(http.Header)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	if harness.token != "" {
 		request.Header.Set("Authorization", "Bearer "+harness.token)
@@ -421,6 +426,64 @@ func TestInferencePlaneExplicitCursorBeatsEchoID(t *testing.T) {
 	}
 	if mixed.PreviousResponseID == nil || *mixed.PreviousResponseID != "cherry:conv-b" {
 		t.Fatalf("legacy cursor column=%v", mixed.PreviousResponseID)
+	}
+}
+
+func TestInferencePlaneForkStartsNewSessionDespiteInheritedHistory(t *testing.T) {
+	for _, cursor := range []string{"prompt_cache_key", "conversation_id"} {
+		t.Run(cursor, func(t *testing.T) {
+			harness := newSessionHarness(t, contract.ProtocolOpenAIResponses, "/v1/responses", sessionHarnessOptions{auditBlobs: &memoryAuditBlobs{}})
+			first := harness.serve(
+				`{"model":"public-alias","`+cursor+`":"parent","input":"original question"}`,
+				`{"id":"resp_parent","output":[{"type":"message","id":"msg_0a1b2c3d4e5f6a7b8c9d","role":"assistant","content":[{"type":"output_text","text":"`+longAssistantReply+`"}]}]}`,
+			)
+			forkBody := `{"model":"public-alias","` + cursor + `":"fork","input":[{"role":"user","content":"original question"},{"type":"message","id":"msg_0a1b2c3d4e5f6a7b8c9d","role":"assistant","content":"` + longAssistantReply + `"},{"role":"user","content":"fork question"}]}`
+			fork := harness.serve(forkBody, `{"id":"resp_fork","output":[]}`)
+			assertNewSession(t, first, fork)
+			assertTurn(t, fork, 1)
+			next := harness.serve(forkBody, `{"id":"resp_fork_next","output":[]}`)
+			assertSameSession(t, fork, next)
+			assertTurn(t, next, 1)
+		})
+	}
+}
+
+func TestInferencePlaneConversationCursorDoesNotAliasSharedCacheKey(t *testing.T) {
+	harness := newSessionHarness(t, contract.ProtocolOpenAIResponses, "/v1/responses", sessionHarnessOptions{})
+	first := harness.serve(`{"model":"public-alias","conversation_id":"parent","prompt_cache_key":"shared","input":"parent"}`, `{"id":"resp_parent","output":[]}`)
+	fork := harness.serve(`{"model":"public-alias","conversation_id":"fork","prompt_cache_key":"shared","input":"fork"}`, `{"id":"resp_fork","output":[]}`)
+	assertNewSession(t, first, fork)
+	unrelated := harness.serve(`{"model":"public-alias","prompt_cache_key":"shared","input":"unrelated"}`, `{"id":"resp_unrelated","output":[]}`)
+	assertNewSession(t, first, unrelated)
+	assertNewSession(t, fork, unrelated)
+	continued := harness.serve(`{"model":"public-alias","conversation_id":"parent","prompt_cache_key":"shared","input":"parent again"}`, `{"id":"resp_parent_next","output":[]}`)
+	assertSameSession(t, first, continued)
+}
+
+func TestInferencePlaneCodexHeadersSeparateForks(t *testing.T) {
+	for _, header := range []string{"Session_id", "Conversation_id"} {
+		t.Run(header, func(t *testing.T) {
+			harness := newSessionHarness(t, contract.ProtocolOpenAIResponses, "/v1/responses", sessionHarnessOptions{})
+			harness.headers = http.Header{}
+			harness.headers.Set(header, "parent")
+			first := harness.serve(`{"model":"public-alias","prompt_cache_key":"shared","input":"original question"}`, `{"id":"resp_parent","output":[]}`)
+			harness.headers.Set(header, "fork")
+			fork := harness.serve(`{"model":"public-alias","previous_response_id":"resp_parent","prompt_cache_key":"shared","input":"fork question"}`, `{"id":"resp_fork","output":[]}`)
+			assertNewSession(t, first, fork)
+			assertTurn(t, fork, 1)
+			continued := harness.serve(`{"model":"public-alias","previous_response_id":"resp_fork","prompt_cache_key":"shared","input":"next question"}`, `{"id":"resp_next","output":[]}`)
+			assertSameSession(t, fork, continued)
+			assertTurn(t, continued, 2)
+			// Reusing an earlier response in the same thread must keep the
+			// producer's turn, rather than incrementing from the latest request.
+			retried := harness.serve(`{"model":"public-alias","previous_response_id":"resp_fork","prompt_cache_key":"shared","input":"next question"}`, `{"id":"resp_retry","output":[]}`)
+			assertSameSession(t, fork, retried)
+			assertTurn(t, retried, 2)
+			harness.headers.Set(header, "parent")
+			parent := harness.serve(`{"model":"public-alias","prompt_cache_key":"shared","input":"original question"}`, `{"id":"resp_parent_next","output":[]}`)
+			assertSameSession(t, first, parent)
+			assertTurn(t, parent, 1)
+		})
 	}
 }
 

@@ -138,11 +138,16 @@ func PlaceholderStyleLocked(kind string) bool {
 // url and ip_address default to disabled: they are the dominant false-positive
 // source for coding agents, whose prompts are dense with documentation links,
 // loopback addresses, and repository URLs that carry no user PII.
+//
+// phone defaults to token although it has a reserved stand-in. A model
+// rewrites a number in the convention of whatever it is writing, and the
+// fictional block holds only 100 numbers, so a sample number the model makes up
+// can coincide with a stand-in. An opaque marker fails loudly instead.
 func DefaultPrivacyKindRules() []PolicyKindRule {
 	rules := make([]PolicyKindRule, 0, len(PrivacyKinds()))
 	for _, kind := range PrivacyKinds() {
 		style := PlaceholderStyleNatural
-		if PlaceholderStyleLocked(kind) {
+		if PlaceholderStyleLocked(kind) || kind == "phone" {
 			style = PlaceholderStyleToken
 		}
 		enabled := kind != "url" && kind != "ip_address"

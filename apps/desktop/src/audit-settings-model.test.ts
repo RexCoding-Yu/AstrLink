@@ -10,6 +10,7 @@ const settings = {
   response_content_max_bytes: 8192,
   metadata_retention_days: 30,
   content_retention_days: 7,
+  agent_raw_access_enabled: true,
 };
 
 describe("audit-settings IPC contract", () => {
@@ -31,5 +32,9 @@ describe("audit-settings IPC contract", () => {
     ).toThrow("应为布尔值");
     const { content_retention_days: _days, ...missing } = settings;
     expect(() => parseAuditSettings(missing)).toThrow("应为整数");
+    const { agent_raw_access_enabled: _raw, ...noRaw } = settings;
+    expect(() => parseAuditSettings(noRaw)).toThrow(
+      "$.agent_raw_access_enabled",
+    );
   });
 });

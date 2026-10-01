@@ -14,8 +14,10 @@ import (
 )
 
 var (
-	ErrNoEndpoint        = errors.New("no endpoint provides the requested capability")
-	ErrNoHealthyEndpoint = errors.New("no healthy endpoint is available for the requested capability")
+	ErrNoEndpoint = errors.New("no endpoint provides the requested capability")
+	// ErrNoHealthyEndpoint means every candidate is still cooling down after
+	// its upstream answered HTTP 429.
+	ErrNoHealthyEndpoint = errors.New("every candidate is rate limited by its upstream")
 	ErrUnavailable       = errors.New("endpoint resolver is unavailable")
 )
 
@@ -48,18 +50,37 @@ func (err *CapabilityUnavailableError) Unwrap() error {
 	return ErrNoEndpoint
 }
 
-// UnhealthyCandidatesError names the services skipped because their circuits
-// are open. It unwraps to ErrNoHealthyEndpoint.
-type UnhealthyCandidatesError struct {
-	Services []contract.ServiceID
+// RateLimitedCandidatesError lists the cooldowns that left no candidate to
+// attempt. It unwraps to ErrNoHealthyEndpoint.
+type RateLimitedCandidatesError struct {
+	Limits []RateLimitedCandidate
 }
 
-func (err *UnhealthyCandidatesError) Error() string {
+// RateLimitedCandidate is one route its upstream asked to wait for.
+type RateLimitedCandidate struct {
+	Service     contract.ServiceID
+	ServiceName string
+	Model       string
+	Until       time.Time
+}
+
+func (err *RateLimitedCandidatesError) Error() string {
 	return ErrNoHealthyEndpoint.Error()
 }
 
-func (err *UnhealthyCandidatesError) Unwrap() error {
+func (err *RateLimitedCandidatesError) Unwrap() error {
 	return ErrNoHealthyEndpoint
+}
+
+// RetryAt is when the earliest cooldown ends, or the zero time when none is known.
+func (err *RateLimitedCandidatesError) RetryAt() time.Time {
+	var earliest time.Time
+	for _, limit := range err.Limits {
+		if earliest.IsZero() || limit.Until.Before(earliest) {
+			earliest = limit.Until
+		}
+	}
+	return earliest
 }
 
 type ResolveRequest struct {
@@ -167,17 +188,6 @@ type RankingResolver interface {
 	ResolveRankedCandidates(context.Context, ResolveRequest) ([]Resolved, []RankedService, error)
 }
 
-// AttemptController owns transient endpoint health admission and feedback.
-// BeginAttempt must be called immediately before an upstream attempt. Exactly
-// one of RecordSuccess, RecordFailure, or AbandonAttempt should follow a
-// successful admission.
-type AttemptController interface {
-	BeginAttempt(Resolved) bool
-	RecordSuccess(Resolved)
-	RecordFailure(Resolved)
-	AbandonAttempt(Resolved)
-}
-
 // UnavailableResolver is the fail-closed fallback for composition without a
 // persistent Endpoint reader.
 type UnavailableResolver struct{}
@@ -186,5 +196,10 @@ func (UnavailableResolver) Resolve(context.Context, ResolveRequest) (Resolved, e
 	return Resolved{}, ErrUnavailable
 }
 
-// RateLimitController applies upstream-requested cooldown without treating 429 as success.
-type RateLimitController interface{ RecordRateLimit(Resolved, time.Duration) }
+// RateLimitController applies the cooldown an upstream requested with HTTP
+// 429. RateLimitedUntil is checked immediately before each attempt, when the
+// candidate carries its final upstream protocol and model.
+type RateLimitController interface {
+	RecordRateLimit(Resolved, time.Duration)
+	RateLimitedUntil(Resolved) time.Time
+}

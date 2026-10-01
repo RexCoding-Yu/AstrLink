@@ -30,9 +30,11 @@ describe("Switch", () => {
     const control = container.querySelector("[data-slot='switch']");
     expect(control?.getAttribute("data-state")).toBe("checked");
     expect(control?.className.split(/\s+/)).toContain("transition-none");
-    for (const slot of ["switch-on", "switch-off"]) {
-      const indicator = container.querySelector(`[data-slot='${slot}']`);
-      expect(indicator?.getAttribute("class")?.split(/\s+/)).toContain(
+    const thumb = container.querySelector("[data-slot='switch-thumb']");
+    expect(thumb?.getAttribute("data-state")).toBe("checked");
+    for (const slot of ["switch-thumb", "switch-star"]) {
+      const part = container.querySelector(`[data-slot='${slot}']`);
+      expect(part?.getAttribute("class")?.split(/\s+/)).toContain(
         "transition-none",
       );
     }
@@ -49,10 +51,15 @@ describe("Switch", () => {
     await act(async () => control.click());
     expect(onChange).toHaveBeenCalledWith(true);
     expect(control.className.split(/\s+/)).toContain("transition-colors");
-    for (const slot of ["switch-on", "switch-off"]) {
-      const indicator = container.querySelector(`[data-slot='${slot}']`);
-      const classes = indicator?.getAttribute("class")?.split(/\s+/);
-      expect(classes).toContain("transition-opacity");
+    const thumb = container.querySelector("[data-slot='switch-thumb']");
+    expect(thumb?.getAttribute("data-state")).toBe("checked");
+    for (const [slot, transition] of [
+      ["switch-thumb", "transition"],
+      ["switch-star", "transition-[rotate,opacity]"],
+    ]) {
+      const part = container.querySelector(`[data-slot='${slot}']`);
+      const classes = part?.getAttribute("class")?.split(/\s+/);
+      expect(classes).toContain(transition);
       expect(classes).toContain("motion-reduce:transition-none");
     }
   });

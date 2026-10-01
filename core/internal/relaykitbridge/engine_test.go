@@ -1,8 +1,10 @@
 package relaykitbridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -212,5 +214,239 @@ func TestMediaAddressPolicy(t *testing.T) {
 	}
 	if _, err := checkedMediaURL(context.Background(), "http://example.com/x"); err == nil {
 		t.Fatal("allowed non-HTTPS media URL")
+	}
+}
+
+const customToolPatch = "*** Begin Patch\n*** Add File: hello.txt\n+say \"hi\" \\ bye\n*** End Patch\n"
+
+// customToolRequest is a Codex-shaped Responses request that defines the
+// freeform apply_patch tool and a plain function tool.
+const customToolRequest = `{"model":"public-model","input":"add hello.txt","tools":[` +
+	`{"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},` +
+	`{"type":"function","name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}]}`
+
+func customToolUpstreamResponse(t *testing.T, protocol contract.ProtocolID) []byte {
+	t.Helper()
+	arguments, err := json.Marshal(map[string]string{"input": customToolPatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body any
+	switch protocol {
+	case contract.ProtocolOpenAIChat:
+		body = map[string]any{
+			"id": "chatcmpl_1", "object": "chat.completion", "model": "upstream-model",
+			"choices": []any{map[string]any{"index": 0, "finish_reason": "tool_calls", "message": map[string]any{
+				"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{
+					"id": "call_patch", "type": "function",
+					"function": map[string]any{"name": "apply_patch", "arguments": string(arguments)},
+				}},
+			}}},
+		}
+	case contract.ProtocolAnthropicMessages:
+		body = map[string]any{
+			"id": "msg_1", "type": "message", "role": "assistant", "model": "upstream-model", "stop_reason": "tool_use",
+			"content": []any{map[string]any{
+				"type": "tool_use", "id": "toolu_patch", "name": "apply_patch", "input": map[string]any{"input": customToolPatch},
+			}},
+			"usage": map[string]any{"input_tokens": 4, "output_tokens": 2},
+		}
+	case contract.ProtocolGoogleGenerateContent:
+		body = map[string]any{
+			"candidates": []any{map[string]any{"finishReason": "STOP", "content": map[string]any{"role": "model", "parts": []any{
+				map[string]any{"functionCall": map[string]any{"name": "apply_patch", "args": map[string]any{"input": customToolPatch}}},
+			}}}},
+			"usageMetadata": map[string]any{"promptTokenCount": 4, "candidatesTokenCount": 2, "totalTokenCount": 6},
+		}
+	default:
+		t.Fatalf("unsupported protocol %s", protocol)
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func customToolUpstreamStream(t *testing.T, protocol contract.ProtocolID) []ResponseEvent {
+	t.Helper()
+	arguments, err := json.Marshal(map[string]string{"input": customToolPatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	half := len(arguments) / 2
+	jsonString := func(value string) string {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	switch protocol {
+	case contract.ProtocolOpenAIChat:
+		return []ResponseEvent{
+			{Type: "data", Data: []byte(`{"id":"chatcmpl_1","object":"chat.completion.chunk","model":"upstream-model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":` + jsonString(string(arguments[:half])) + `}}]},"finish_reason":null}]}`)},
+			{Type: "data", Data: []byte(`{"id":"chatcmpl_1","object":"chat.completion.chunk","model":"upstream-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":` + jsonString(string(arguments[half:])) + `}}]},"finish_reason":"tool_calls"}]}`)},
+			{Type: "done", Data: []byte("[DONE]")},
+		}
+	case contract.ProtocolAnthropicMessages:
+		return []ResponseEvent{
+			{Type: "message_start", Data: []byte(`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"upstream-model","content":[],"usage":{"input_tokens":4,"output_tokens":0}}}`)},
+			{Type: "content_block_start", Data: []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_patch","name":"apply_patch","input":{}}}`)},
+			{Type: "content_block_delta", Data: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":` + jsonString(string(arguments[:half])) + `}}`)},
+			{Type: "content_block_delta", Data: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":` + jsonString(string(arguments[half:])) + `}}`)},
+			{Type: "content_block_stop", Data: []byte(`{"type":"content_block_stop","index":0}`)},
+			{Type: "message_delta", Data: []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}`)},
+			{Type: "message_stop", Data: []byte(`{"type":"message_stop"}`)},
+		}
+	case contract.ProtocolGoogleGenerateContent:
+		return []ResponseEvent{{Type: "data", Data: customToolUpstreamResponse(t, protocol)}}
+	default:
+		t.Fatalf("unsupported protocol %s", protocol)
+		return nil
+	}
+}
+
+func convertCustomToolRequest(t *testing.T, engine *Engine, target contract.ProtocolID, streaming bool) ConvertRequestOutput {
+	t.Helper()
+	output, err := engine.ConvertRequest(context.Background(), ConvertRequestInput{
+		From: contract.ProtocolOpenAIResponses, To: target, Body: []byte(customToolRequest),
+		PublicModel: "public-model", UpstreamModel: "upstream-model", Streaming: streaming,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(output.Body, []byte(`apply_patch`)) {
+		t.Fatalf("converted %s request lost apply_patch: %s", target, output.Body)
+	}
+	return output
+}
+
+var customToolTargets = []contract.ProtocolID{
+	contract.ProtocolOpenAIChat, contract.ProtocolAnthropicMessages, contract.ProtocolGoogleGenerateContent,
+}
+
+func TestConvertResponseRestoresCustomToolCallFromRequestState(t *testing.T) {
+	engine := NewEngine()
+	for _, target := range customToolTargets {
+		t.Run(string(target), func(t *testing.T) {
+			request := convertCustomToolRequest(t, engine, target, false)
+			convert := func(state ConversionState) map[string]any {
+				output, err := engine.ConvertResponse(context.Background(), ConvertResponseInput{
+					From: target, To: contract.ProtocolOpenAIResponses, StatusCode: 200,
+					Body: customToolUpstreamResponse(t, target), PublicModel: "public-model", UpstreamModel: "upstream-model",
+					State: state,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body struct {
+					Output []map[string]any `json:"output"`
+				}
+				if err := json.Unmarshal(output.Body, &body); err != nil {
+					t.Fatal(err)
+				}
+				for _, item := range body.Output {
+					if item["name"] == "apply_patch" {
+						return item
+					}
+				}
+				t.Fatalf("no apply_patch output item: %s", output.Body)
+				return nil
+			}
+
+			item := convert(request.State)
+			if item["type"] != "custom_tool_call" || item["input"] != customToolPatch {
+				t.Fatalf("restored item = %#v, want custom_tool_call with the original input", item)
+			}
+			// Without the request's state the call has no way back to its custom shape.
+			if item := convert(ConversionState{}); item["type"] != "function_call" {
+				t.Fatalf("stateless item type = %v, want function_call", item["type"])
+			}
+		})
+	}
+}
+
+func TestResponseStreamRestoresCustomToolCallFromRequestState(t *testing.T) {
+	engine := NewEngine()
+	for _, target := range customToolTargets {
+		t.Run(string(target), func(t *testing.T) {
+			request := convertCustomToolRequest(t, engine, target, true)
+			stream, err := engine.NewResponseStream(context.Background(), StreamOptions{
+				From: target, To: contract.ProtocolOpenAIResponses,
+				PublicModel: "public-model", UpstreamModel: "upstream-model", State: request.State,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			var events []ResponseEvent
+			for _, event := range customToolUpstreamStream(t, target) {
+				converted, err := stream.Convert(context.Background(), event)
+				if err != nil {
+					t.Fatal(err)
+				}
+				events = append(events, converted...)
+			}
+			final, err := stream.Finalize(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, final...)
+
+			var input strings.Builder
+			var done, item map[string]any
+			for _, event := range events {
+				var payload map[string]any
+				if err := json.Unmarshal(event.Data, &payload); err != nil {
+					t.Fatal(err)
+				}
+				switch event.Type {
+				case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+					t.Fatalf("custom tool streamed as a function call: %s", event.Data)
+				case "response.custom_tool_call_input.delta":
+					delta, _ := payload["delta"].(string)
+					input.WriteString(delta)
+				case "response.custom_tool_call_input.done":
+					done = payload
+				case "response.output_item.done":
+					if output, _ := payload["item"].(map[string]any); output["name"] == "apply_patch" {
+						item = output
+					}
+				}
+			}
+			if input.String() != customToolPatch {
+				t.Fatalf("custom tool input deltas = %q, want %q", input.String(), customToolPatch)
+			}
+			if done == nil || done["input"] != customToolPatch {
+				t.Fatalf("custom_tool_call_input.done = %#v", done)
+			}
+			if item == nil || item["type"] != "custom_tool_call" || item["input"] != customToolPatch {
+				t.Fatalf("output item = %#v, want custom_tool_call with the original input", item)
+			}
+		})
+	}
+}
+
+func TestConvertRequestReportsDroppedToolsWithoutFailing(t *testing.T) {
+	output, err := NewEngine().ConvertRequest(context.Background(), ConvertRequestInput{
+		From: contract.ProtocolOpenAIResponses, To: contract.ProtocolOpenAIChat,
+		Body: []byte(`{"model":"public-model","input":"list files","tools":[{"type":"local_shell"},` +
+			`{"type":"function","name":"read_file","parameters":{"type":"object"}}]}`),
+		PublicModel: "public-model",
+	})
+	if err != nil {
+		t.Fatalf("lossy conversion failed: %v", err)
+	}
+	if len(output.Diagnostics) == 0 {
+		t.Fatal("dropped local_shell tool produced no diagnostic")
+	}
+	diagnostic := output.Diagnostics[0]
+	if diagnostic.Path != "tools[0]" || diagnostic.Code == "" || diagnostic.Message == "" ||
+		(diagnostic.Severity != "warning" && diagnostic.Severity != "error") {
+		t.Fatalf("unexpected diagnostic: %#v", diagnostic)
+	}
+	if output.State != (ConversionState{}) {
+		t.Fatalf("request without custom tools recorded state: %#v", output.State)
 	}
 }

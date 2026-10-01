@@ -83,6 +83,61 @@ func TestProductionGateResolvesSQLiteEndpointAndLoadsDedicatedCredential(t *test
 	}
 }
 
+func TestCodexForkRequestSessionsInSQLite(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var currentSession, responseID string
+	const body = `{"model":"public","prompt_cache_key":"shared-cache","input":"hello"}`
+	handler := NewWithDependencies(Dependencies{
+		Resolver:       candidateResolver{candidates: []endpoint.Resolved{{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false)}}},
+		RequestRecords: store,
+		Forwarder: transport.New(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			forwarded, err := io.ReadAll(request.Body)
+			if err != nil || string(forwarded) != body || request.Header.Get("Session_id") != currentSession {
+				t.Fatal("session grouping changed the outgoing request")
+			}
+			return jsonResponse(http.StatusOK, `{"id":"`+responseID+`","output":[]}`), nil
+		})),
+	})
+	sessions := make(map[string]contract.SessionID)
+	for index, clientSession := range []string{"parent", "fork", "fork", "unrelated", "parent"} {
+		currentSession = clientSession
+		responseID = "resp_" + string(rune('a'+index))
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+		request.Header.Set("Session_id", clientSession)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("response = %d %s", response.Code, response.Body.String())
+		}
+		page, err := store.ListRequestRecords(ctx, storage.RequestRecordListOptions{Limit: 1})
+		if err != nil || len(page.Items) != 1 || page.Items[0].SessionID == nil {
+			t.Fatalf("records = %+v, err = %v", page, err)
+		}
+		record := page.Items[0]
+		if want, exists := sessions[clientSession]; exists {
+			if *record.SessionID != want {
+				t.Fatalf("%s moved from %s to %s", clientSession, want, *record.SessionID)
+			}
+		} else {
+			for other, id := range sessions {
+				if *record.SessionID == id {
+					t.Fatalf("%s merged into %s", clientSession, other)
+				}
+			}
+			sessions[clientSession] = *record.SessionID
+		}
+	}
+	page, err := store.ListRequestSessions(ctx, storage.RequestSessionListOptions{})
+	if err != nil || len(page.Items) != 3 {
+		t.Fatalf("session list = %+v, err = %v", page, err)
+	}
+}
+
 func TestProductionGateRoutesToSelectedCodexSubscriptionService(t *testing.T) {
 	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {

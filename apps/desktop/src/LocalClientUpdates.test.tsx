@@ -80,6 +80,10 @@ describe("local client updates", () => {
     await render();
     expect(container.textContent).toContain("Codex CLI");
     expect(container.textContent).toContain("Claude Code");
+    expect(container.textContent).toContain("Cursor CLI");
+    expect(container.querySelector('[data-client="pi"] h3')?.textContent).toBe(
+      "Pi",
+    );
     expect(container.textContent).toContain("1.1.0");
     await act(async () =>
       container
@@ -89,8 +93,13 @@ describe("local client updates", () => {
     expect(mocks.update).toHaveBeenCalledWith(["codex"]);
     expect(button("刷新").disabled).toBe(true);
     await act(async () => listener({ ...available(), revision: 3 }));
-    await act(async () => button("全部更新（2）").click());
-    expect(mocks.update).toHaveBeenLastCalledWith(["codex", "claude"]);
+    await act(async () => button("全部更新（4）").click());
+    expect(mocks.update).toHaveBeenLastCalledWith([
+      "codex",
+      "claude",
+      "cursor",
+      "pi",
+    ]);
   });
 
   it("subscribes before the initial check and ignores stale results", async () => {

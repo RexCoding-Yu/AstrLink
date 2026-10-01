@@ -3,10 +3,14 @@ import { useId } from "react";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
-/** A labelled capability setting for service editors. */
+/**
+ * A labelled capability setting for service editors. An optional status line
+ * reports what the setting currently holds, below the description.
+ */
 export function CapabilityToggle({
   label,
   description,
+  status,
   checked,
   disabled,
   size = "sm",
@@ -14,6 +18,7 @@ export function CapabilityToggle({
 }: {
   label: string;
   description: string;
+  status?: string;
   checked: boolean;
   disabled?: boolean;
   size?: "sm" | "default";
@@ -38,12 +43,22 @@ export function CapabilityToggle({
         >
           {description}
         </p>
+        {status ? (
+          <p
+            id={`${id}-status`}
+            className="mt-1 text-xs leading-relaxed text-foreground"
+          >
+            {status}
+          </p>
+        ) : null}
       </div>
       <Switch
         id={id}
         size={size}
         aria-label={label}
-        aria-describedby={`${id}-description`}
+        aria-describedby={
+          status ? `${id}-description ${id}-status` : `${id}-description`
+        }
         checked={checked}
         disabled={disabled}
         onCheckedChange={onCheckedChange}

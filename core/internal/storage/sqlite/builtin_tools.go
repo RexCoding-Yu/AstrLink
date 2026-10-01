@@ -21,17 +21,25 @@ func (store *Store) builtinCredential(ctx context.Context, ref secretstore.Ref, 
 		if err := validateCredential(secret); err != nil {
 			return nil, err
 		}
-		_, err := store.db.ExecContext(ctx, `INSERT INTO builtin_tool_credentials(kind, credential_value) VALUES (?, ?) ON CONFLICT(kind) DO UPDATE SET credential_value=excluded.credential_value`, kind, secret)
+		sealed, err := store.keys.sealColumn(builtinToolCredentialsTable, kind, secret)
+		if err != nil {
+			return nil, fmt.Errorf("seal tool credential: %w", err)
+		}
+		_, err = store.db.ExecContext(ctx, `INSERT INTO builtin_tool_credentials(kind, credential_value, sealed) VALUES (?, ?, 1) ON CONFLICT(kind) DO UPDATE SET credential_value=excluded.credential_value, sealed=1`, kind, sealed)
 		return nil, err
 	case "delete":
 		_, err := store.db.ExecContext(ctx, `DELETE FROM builtin_tool_credentials WHERE kind=?`, kind)
 		return nil, err
 	default:
 		var value []byte
-		err := store.db.QueryRowContext(ctx, `SELECT credential_value FROM builtin_tool_credentials WHERE kind=?`, kind).Scan(&value)
+		var sealed bool
+		err := store.db.QueryRowContext(ctx, `SELECT credential_value, sealed FROM builtin_tool_credentials WHERE kind=?`, kind).Scan(&value, &sealed)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, secretstore.ErrNotFound
 		}
-		return value, err
+		if err != nil {
+			return nil, err
+		}
+		return store.openSecret(builtinToolCredentialsTable, kind, value, sealed)
 	}
 }

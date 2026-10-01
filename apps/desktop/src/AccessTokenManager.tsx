@@ -1,3 +1,4 @@
+import type { ConversionEngineCapability } from "./core-model";
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { ActionGroup } from "@/components/ActionGroup";
 import {
@@ -9,6 +10,7 @@ import {
 } from "react";
 import {
   Check,
+  Connect as Cable,
   Copy,
   Key as KeyRound,
   LoaderCircle,
@@ -33,6 +35,8 @@ import { ListToolbar } from "@/components/ListToolbar";
 import { Panel } from "@/components/Panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -45,18 +49,24 @@ import { Input } from "@/components/ui/input";
 import { useExitSnapshot } from "@/lib/exit-snapshot";
 
 import {
+  copyAccessToken,
   createAccessToken,
   deleteAccessToken,
+  getClientConfigStatus,
   listAccessTokenUsage,
-  revealAccessToken,
+  removeClientConfig,
 } from "./bridge";
 import type { AccessTokenSummary } from "./access-token-model";
+import type { ClientConfigStatus, DirectClient } from "./client-config-model";
 import { i18n } from "./i18n";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
 import { startOfTodayIso, type ServicePerformance } from "./usage-range";
-import { CCSwitchImportDialog } from "./CCSwitchImportDialog";
-import { CCSwitchIcon } from "@/components/CCSwitchIcon";
+import {
+  ClientSetupDialog,
+  clientLabel,
+  clientSetupClients,
+} from "./ClientSetupDialog";
 
 export type AccessTokenCatalogStatus =
   | "blocked"
@@ -98,6 +108,10 @@ function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+function clientList(clients: readonly DirectClient[]): string {
+  return clients.map(clientLabel).join(i18n.language === "zh-CN" ? "、" : ", ");
+}
+
 function createdAtLabel(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return i18n.t("tokens.unknown");
@@ -118,6 +132,7 @@ function tokenCountPlaceholder(
 }
 
 export function AccessTokenManager({
+  conversionEngine,
   catalog,
   coreSessionKey,
   inferenceURL,
@@ -126,6 +141,7 @@ export function AccessTokenManager({
   onTokenCreated,
   onTokenDeleted,
 }: {
+  conversionEngine?: ConversionEngineCapability | null;
   catalog: AccessTokenCatalog;
   coreSessionKey: string | null;
   inferenceURL: string;
@@ -149,9 +165,9 @@ export function AccessTokenManager({
   );
   const [copyingID, setCopyingID] = useState<string | null>(null);
   const [copiedID, setCopiedID] = useState<string | null>(null);
-  const [importToken, setImportToken] = useState<AccessTokenSummary | null>(
-    null,
-  );
+  const [setupToken, setSetupToken] = useState<AccessTokenSummary | null>(null);
+  const [clientConfigs, setClientConfigs] = useState<ClientConfigStatus[]>([]);
+  const [removeConfigs, setRemoveConfigs] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [usageByToken, setUsageByToken] = useWorkspaceSnapshot<
     Record<string, TokenUsageStats>
@@ -173,13 +189,45 @@ export function AccessTokenManager({
     setPendingDelete(null);
     setCopyingID(null);
     setCopiedID(null);
-    setImportToken(null);
+    setSetupToken(null);
     setError(null);
   }, [coreSessionKey]);
 
   useEffect(() => {
     if (createOpen) nameInput.current?.focus();
   }, [createOpen]);
+
+  const clientGeneration = useRef(0);
+  const refreshClientConfigs = useCallback(() => {
+    const generation = ++clientGeneration.current;
+    // The client marks only annotate the list; a failed read hides them.
+    getClientConfigStatus(inferenceURL || null).then(
+      (statuses) => {
+        if (clientGeneration.current === generation) setClientConfigs(statuses);
+      },
+      () => {
+        if (clientGeneration.current === generation) setClientConfigs([]);
+      },
+    );
+  }, [inferenceURL]);
+
+  useEffect(() => {
+    refreshClientConfigs();
+    // Clients and CC Switch rewrite their configs outside AstrLink.
+    window.addEventListener("focus", refreshClientConfigs);
+    return () => {
+      clientGeneration.current += 1;
+      window.removeEventListener("focus", refreshClientConfigs);
+    };
+  }, [refreshClientConfigs]);
+
+  const clientsUsing = (tokenId: string | undefined): DirectClient[] =>
+    clientConfigs
+      .filter(
+        (status) =>
+          status.token_id === tokenId && status.state !== "not_configured",
+      )
+      .map((status) => status.client);
 
   const refreshTokenUsage = useCallback(async () => {
     const generation = usageGeneration.current + 1;
@@ -290,16 +338,6 @@ export function AccessTokenManager({
     }
   };
 
-  const copyValue = async (tokenId: string, value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopiedID(tokenId);
-    } catch {
-      setCopiedID(null);
-      setError(i18n.t("tokens.copyManual"));
-    }
-  };
-
   const copyToken = async (tokenId: string) => {
     if (!isReady || copyingID !== null) return;
 
@@ -310,14 +348,19 @@ export function AccessTokenManager({
     setCopiedID(null);
     setError(null);
     try {
-      const result = await revealAccessToken(tokenId);
+      // The host copies the token itself, so it never reaches the webview.
+      const copied = await copyAccessToken(tokenId);
       if (
         sessionGeneration.current !== session ||
         revealGeneration.current !== generation
       ) {
         return;
       }
-      await copyValue(tokenId, result.access_token);
+      if (copied) {
+        setCopiedID(tokenId);
+      } else {
+        setError(i18n.t("tokens.copyManual"));
+      }
     } catch (requestError) {
       if (
         sessionGeneration.current === session &&
@@ -345,6 +388,7 @@ export function AccessTokenManager({
   const remove = async () => {
     if (pendingDelete === null || deletingID !== null) return;
     const token = pendingDelete;
+    const configured = removeConfigs ? clientsUsing(token.id) : [];
     const generation = sessionGeneration.current;
     revealGeneration.current += 1;
     setCopyingID(null);
@@ -357,6 +401,20 @@ export function AccessTokenManager({
       onTokenDeleted(token.id);
       setPendingDelete(null);
       notify.success(i18n.t("tokens.deleted", { name: token.name }));
+      const failed: DirectClient[] = [];
+      for (const client of configured) {
+        try {
+          await removeClientConfig(client);
+        } catch {
+          failed.push(client);
+        }
+      }
+      if (failed.length > 0) {
+        notify.error(
+          i18n.t("tokens.removeConfigsFailed", { clients: clientList(failed) }),
+        );
+      }
+      if (configured.length > 0) refreshClientConfigs();
     } catch (requestError) {
       if (sessionGeneration.current === generation) {
         setError(messageOf(requestError, i18n.t("tokens.deleteFailed")));
@@ -373,10 +431,11 @@ export function AccessTokenManager({
 
   const catalogBusy =
     catalog.status === "loading" || creating || deletingID !== null;
+  const deleteClients = clientsUsing(pendingDelete?.id);
 
   return (
     <section
-      className="@container flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
+      className="@container gutter-frame flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
       aria-labelledby="token-manager-heading"
     >
       <PageHeader
@@ -486,7 +545,7 @@ export function AccessTokenManager({
       <div
         aria-busy={catalog.status === "loading"}
         aria-label={t("tokens.listLabel")}
-        className="@container/token-list min-h-0 min-w-0 flex-1 overflow-y-auto pb-1 pr-1"
+        className="@container/token-list gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto pb-1 pr-1"
       >
         {catalog.status === "blocked" && catalog.items.length === 0 ? (
           <EmptyState
@@ -556,6 +615,7 @@ export function AccessTokenManager({
               const incomplete =
                 slice?.billing &&
                 slice.billing.unpriced + slice.billing.pending > 0;
+              const usedBy = clientsUsing(token.id);
               return (
                 <DataRow
                   asChild
@@ -568,12 +628,34 @@ export function AccessTokenManager({
                         <KeyRound aria-hidden="true" className="size-4" />
                       </span>
                       <div className="grid min-w-0 gap-1">
-                        <strong
-                          className="truncate text-sm font-semibold"
-                          title={token.name}
-                        >
-                          {token.name}
-                        </strong>
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <strong
+                            className="truncate text-sm font-semibold"
+                            title={token.name}
+                          >
+                            {token.name}
+                          </strong>
+                          {usedBy.length > 0 ? (
+                            <span
+                              aria-label={t("clientSetup.configuredIn", {
+                                clients: clientList(usedBy),
+                              })}
+                              className="inline-flex shrink-0 items-center gap-1"
+                              role="img"
+                              title={t("clientSetup.configuredIn", {
+                                clients: clientList(usedBy),
+                              })}
+                            >
+                              {clientSetupClients
+                                .filter(({ id }) =>
+                                  usedBy.some((client) => client === id),
+                                )
+                                .map(({ id, Icon }) => (
+                                  <Icon key={id} aria-hidden="true" size={14} />
+                                ))}
+                            </span>
+                          ) : null}
+                        </span>
                         <code
                           className="truncate font-mono text-xs text-muted-foreground"
                           title={token.hint}
@@ -666,18 +748,18 @@ export function AccessTokenManager({
                           deletingID !== null ||
                           !inferenceURL
                         }
-                        onClick={() => setImportToken(token)}
+                        onClick={() => setSetupToken(token)}
                         type="button"
-                        aria-label={t("ccSwitch.importToken", {
+                        aria-label={t("clientSetup.configureToken", {
                           name: token.name,
                         })}
-                        title={t("ccSwitch.importToken", {
+                        title={t("clientSetup.configureToken", {
                           name: token.name,
                         })}
                       >
-                        <CCSwitchIcon size={16} />
+                        <Cable aria-hidden="true" />
                         <span className="@[720px]/token-list:sr-only @[800px]/token-list:not-sr-only">
-                          CC Switch
+                          {t("clientSetup.title")}
                         </span>
                       </Button>
                       <Button
@@ -727,6 +809,7 @@ export function AccessTokenManager({
                           setCopyingID(null);
                           setCopiedID(null);
                           setPendingDelete(token);
+                          setRemoveConfigs(true);
                           setError(null);
                         }}
                         type="button"
@@ -799,16 +882,19 @@ export function AccessTokenManager({
           </form>
         </DialogContent>
       </Dialog>
-      {importToken &&
+      {setupToken &&
         isReady &&
         catalog.status === "ready" &&
         !catalog.stale &&
-        catalog.items.some((token) => token.id === importToken.id) && (
-          <CCSwitchImportDialog
-            key={`${coreSessionKey}:${inferenceURL}:${importToken.id}`}
-            token={importToken}
+        catalog.items.some((token) => token.id === setupToken.id) && (
+          <ClientSetupDialog
+            conversionEngine={conversionEngine}
+            key={`${coreSessionKey}:${inferenceURL}:${setupToken.id}`}
+            token={setupToken}
+            tokens={catalog.items}
             inferenceURL={inferenceURL}
-            onClose={() => setImportToken(null)}
+            onClose={() => setSetupToken(null)}
+            onChanged={refreshClientConfigs}
           />
         )}
       <ConfirmDialog
@@ -826,6 +912,26 @@ export function AccessTokenManager({
                 : t("tokens.deleteBody", { name: pendingDelete?.name ?? "" })}
             </p>
             <p>{t("tokens.irreversible")}</p>
+            {deleteClients.length > 0 ? (
+              <>
+                <p>
+                  {t("tokens.usedBy", {
+                    name: pendingDelete?.name ?? "",
+                    clients: clientList(deleteClients),
+                  })}
+                </p>
+                <Label className="flex items-center gap-2 text-foreground">
+                  <Checkbox
+                    checked={removeConfigs}
+                    disabled={deletingID !== null}
+                    onCheckedChange={(checked) =>
+                      setRemoveConfigs(checked === true)
+                    }
+                  />
+                  {t("tokens.removeConfigs")}
+                </Label>
+              </>
+            ) : null}
           </>
         }
         destructive

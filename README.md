@@ -12,13 +12,15 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-**A local AI gateway for AI agents, unifying your subscriptions and API
-providers with model routing and on-device privacy protection.**
+**A local privacy gateway for AI agents: sensitive content is detected and
+redacted locally before it reaches any model provider.**
 
-AstrLink is an open-source desktop app for macOS, Windows, and Linux. Connect
-your existing subscriptions or API providers, point your agent to the local API
-endpoint, and manage models, routing, privacy policies, and request records in
-one place.
+AstrLink is an open-source desktop app for macOS, Windows, and Linux. Before a
+request goes upstream, it can detect secrets, email addresses, phone numbers,
+and other sensitive content locally, then warn, block, or redact it according to
+configured policies. Redacted values can be restored locally in the response, so
+agents keep working. It also unifies existing subscriptions and APIs, with model
+routing and request records.
 
 [Getting started](#getting-started) ·
 [On-device privacy protection](#on-device-privacy-protection) ·

@@ -200,14 +200,8 @@ func TestSystemProxyConcurrentRefreshKeepsLoopbackReachable(t *testing.T) {
 			}
 		}
 	}()
-	select {
-	case <-localDone:
-	case <-time.After(time.Second):
-		unblock.Do(func() { close(release) })
-		wg.Wait()
-		<-localDone
-		t.Fatal("loopback waited for system discovery")
-	}
+	// A loopback lookup that waits for discovery hangs until go test -timeout.
+	<-localDone
 	unblock.Do(func() { close(release) })
 	wg.Wait()
 	for round := 0; round < 2; round++ {

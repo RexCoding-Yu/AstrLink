@@ -46,7 +46,7 @@ func (e *Engine) NewResponseStream(_ context.Context, options StreamOptions) (Re
 	}
 	return &responseStream{
 		from: options.From, to: options.To, state: state,
-		meta: newMeta(options.PublicModel, upstream, options.UpstreamModel != "", true),
+		meta: newMeta(options.PublicModel, upstream, options.UpstreamModel != "", true, options.State),
 	}, nil
 }
 
@@ -112,6 +112,12 @@ func (s *responseStream) Finalize(ctx context.Context) ([]ResponseEvent, error) 
 		events = append(events, ResponseEvent{Type: "done", Data: []byte("[DONE]")})
 	}
 	return events, nil
+}
+
+func (s *responseStream) Diagnostics() []ConversionDiagnostic {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return bridgeDiagnostics(s.state.Diagnostics())
 }
 
 // Close deliberately does not finalize: an interrupted upstream must not be

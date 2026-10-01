@@ -10,4 +10,7 @@ export const notify = {
   warning(message: string) {
     toast.warning(message);
   },
+  info(message: string) {
+    toast.info(message);
+  },
 };

@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"unicode/utf8"
@@ -27,14 +28,17 @@ var extensionNamePattern = regexp.MustCompile(`^x-[a-z0-9][a-z0-9._-]{0,62}$`)
 
 // AuditSettings is the privileged global body-audit configuration document.
 type AuditSettings struct {
-	RequestBodyEnabled      bool           `json:"request_body_enabled"`
-	ResponseContentEnabled  bool           `json:"response_content_enabled"`
-	HTTPMetaEnabled         bool           `json:"http_meta_enabled"`
-	RequestBodyMaxBytes     int            `json:"request_body_max_bytes"`
-	ResponseContentMaxBytes int            `json:"response_content_max_bytes"`
-	MetadataRetentionDays   int            `json:"metadata_retention_days"`
-	ContentRetentionDays    int            `json:"content_retention_days"`
-	Extensions              map[string]any `json:"extensions,omitempty"`
+	RequestBodyEnabled      bool `json:"request_body_enabled"`
+	ResponseContentEnabled  bool `json:"response_content_enabled"`
+	HTTPMetaEnabled         bool `json:"http_meta_enabled"`
+	RequestBodyMaxBytes     int  `json:"request_body_max_bytes"`
+	ResponseContentMaxBytes int  `json:"response_content_max_bytes"`
+	MetadataRetentionDays   int  `json:"metadata_retention_days"`
+	ContentRetentionDays    int  `json:"content_retention_days"`
+	// AgentRawAccessEnabled lets agent tools ask for unfiltered request
+	// content. Each read still needs a desktop approval with proof.
+	AgentRawAccessEnabled bool           `json:"agent_raw_access_enabled"`
+	Extensions            map[string]any `json:"extensions,omitempty"`
 }
 
 // DefaultAuditSettings returns the frozen install/upgrade defaults.
@@ -49,6 +53,7 @@ func DefaultAuditSettings() AuditSettings {
 		ResponseContentMaxBytes: DefaultResponseContentMaxBytes,
 		MetadataRetentionDays:   DefaultMetadataRetentionDays,
 		ContentRetentionDays:    DefaultContentRetentionDays,
+		AgentRawAccessEnabled:   true,
 	}
 }
 
@@ -89,6 +94,7 @@ type AuditSettingsPatch struct {
 	ResponseContentMaxBytes *int           `json:"response_content_max_bytes,omitempty"`
 	MetadataRetentionDays   *int           `json:"metadata_retention_days,omitempty"`
 	ContentRetentionDays    *int           `json:"content_retention_days,omitempty"`
+	AgentRawAccessEnabled   *bool          `json:"agent_raw_access_enabled,omitempty"`
 	AuditRiskAcknowledged   *bool          `json:"audit_risk_acknowledged,omitempty"`
 	Extensions              map[string]any `json:"extensions,omitempty"`
 	ClearExtensions         bool           `json:"-"`
@@ -137,6 +143,9 @@ func (patch AuditSettingsPatch) Validate() error {
 				MinContentRetentionDays, MaxContentRetentionDays)
 		}
 	}
+	if patch.AgentRawAccessEnabled != nil {
+		present++
+	}
 	if patch.AuditRiskAcknowledged != nil {
 		present++
 	}
@@ -166,19 +175,84 @@ func (patch AuditSettingsPatch) Acknowledged() bool {
 	return patch.AuditRiskAcknowledged != nil && *patch.AuditRiskAcknowledged
 }
 
+// AuditContentView names how much of a request's audit a response carries.
+type AuditContentView string
+
+const (
+	// AuditContentViewShareable returns only parts safe to share with agent
+	// tools; raw and pending parts are withheld.
+	AuditContentViewShareable AuditContentView = "shareable"
+	// AuditContentViewFull also returns raw parts the caller has proven it
+	// may read.
+	AuditContentViewFull AuditContentView = "full"
+)
+
+func (view AuditContentView) Valid() bool {
+	return view == AuditContentViewShareable || view == AuditContentViewFull
+}
+
+// AuditPartExposure is who may read a returned part without proof.
+type AuditPartExposure string
+
+const (
+	AuditPartExposureShareable AuditPartExposure = "shareable"
+	AuditPartExposureRaw       AuditPartExposure = "raw"
+)
+
+// AuditWithheldReason explains why a part's content is not in the response.
+type AuditWithheldReason string
+
+const (
+	AuditWithheldPrivacyRedacted AuditWithheldReason = "privacy_redacted"
+	AuditWithheldPrivacyBlocked  AuditWithheldReason = "privacy_blocked"
+	AuditWithheldPrivacyRestored AuditWithheldReason = "privacy_restored"
+	AuditWithheldPrivacyFailOpen AuditWithheldReason = "privacy_fail_open"
+	AuditWithheldPrivacyPending  AuditWithheldReason = "privacy_pending"
+	// AuditWithheldPrivacyUnknown covers parts captured before decisions
+	// were recorded, or whose inspection never finished.
+	AuditWithheldPrivacyUnknown AuditWithheldReason = "privacy_unknown"
+	// AuditWithheldRawLocked is returned to the desktop until it unlocks
+	// raw reading.
+	AuditWithheldRawLocked AuditWithheldReason = "raw_locked"
+	// AuditWithheldRawNotKept covers raw parts captured while no raw
+	// password was set: only the fact of the capture was kept.
+	AuditWithheldRawNotKept AuditWithheldReason = "raw_not_kept"
+)
+
+func (reason AuditWithheldReason) Valid() bool {
+	switch reason {
+	case AuditWithheldPrivacyRedacted, AuditWithheldPrivacyBlocked, AuditWithheldPrivacyRestored,
+		AuditWithheldPrivacyFailOpen, AuditWithheldPrivacyPending, AuditWithheldPrivacyUnknown,
+		AuditWithheldRawLocked, AuditWithheldRawNotKept:
+		return true
+	default:
+		return false
+	}
+}
+
 // AuditContent is the decrypted privileged audit payload for one request.
 type AuditContent struct {
 	RequestID               RequestID         `json:"request_id"`
+	View                    AuditContentView  `json:"view"`
 	HTTPMeta                *AuditHTTPMeta    `json:"http_meta"`
 	RequestBody             *AuditContentPart `json:"request_body"`
 	ResponseContent         *AuditContentPart `json:"response_content"`
 	UpstreamHTTPMeta        *AuditHTTPMeta    `json:"upstream_http_meta"`
 	UpstreamRequestBody     *AuditContentPart `json:"upstream_request_body"`
 	UpstreamResponseContent *AuditContentPart `json:"upstream_response_content"`
+	// PrivacyFindings describes what the privacy decision found, by kind and
+	// structural path only, so a withheld part can still be explained.
+	PrivacyFindings []PrivacyFinding `json:"privacy_findings"`
 }
 
 func (content AuditContent) Validate() error {
 	if err := content.RequestID.Validate(); err != nil {
+		return err
+	}
+	if !content.View.Valid() {
+		return fmt.Errorf("view is invalid")
+	}
+	if err := validatePrivacyFindings(content.PrivacyFindings); err != nil {
 		return err
 	}
 	if content.HTTPMeta != nil {
@@ -259,12 +333,37 @@ func (meta AuditHTTPMeta) Validate() error {
 	return nil
 }
 
-// AuditContentPart is one decrypted capture direction.
+// AuditContentPart is one decrypted capture direction, or a placeholder for
+// one the caller may not read. A withheld part never carries content.
 type AuditContentPart struct {
-	MediaType     string `json:"media_type"`
-	Content       string `json:"content"`
-	Truncated     bool   `json:"truncated"`
-	CapturedBytes int    `json:"captured_bytes"`
+	MediaType     string              `json:"media_type"`
+	Content       string              `json:"content"`
+	Truncated     bool                `json:"truncated"`
+	CapturedBytes int                 `json:"captured_bytes"`
+	Exposure      AuditPartExposure   `json:"exposure,omitempty"`
+	Withheld      bool                `json:"withheld,omitempty"`
+	Reason        AuditWithheldReason `json:"reason,omitempty"`
+	// RawAvailable tells a withheld reader whether asking for the raw part
+	// can succeed: raw sealing is set up and agent requests are allowed.
+	RawAvailable *bool `json:"raw_available,omitempty"`
+}
+
+// MarshalJSON emits the withheld shape without content or exposure, so a
+// placeholder can never be mistaken for an empty body.
+func (part AuditContentPart) MarshalJSON() ([]byte, error) {
+	if part.Withheld {
+		available := part.RawAvailable != nil && *part.RawAvailable
+		return json.Marshal(struct {
+			Withheld      bool                `json:"withheld"`
+			Reason        AuditWithheldReason `json:"reason"`
+			RawAvailable  bool                `json:"raw_available"`
+			MediaType     string              `json:"media_type"`
+			Truncated     bool                `json:"truncated"`
+			CapturedBytes int                 `json:"captured_bytes"`
+		}{true, part.Reason, available, part.MediaType, part.Truncated, part.CapturedBytes})
+	}
+	type plain AuditContentPart
+	return json.Marshal(plain(part))
 }
 
 func (part AuditContentPart) Validate() error {
@@ -273,6 +372,15 @@ func (part AuditContentPart) Validate() error {
 	}
 	if part.CapturedBytes < 0 {
 		return fmt.Errorf("captured_bytes must be non-negative")
+	}
+	if part.Withheld {
+		if !part.Reason.Valid() || part.Content != "" {
+			return fmt.Errorf("withheld parts need a reason and no content")
+		}
+		return nil
+	}
+	if part.Exposure != AuditPartExposureShareable && part.Exposure != AuditPartExposureRaw {
+		return fmt.Errorf("exposure is invalid")
 	}
 	return nil
 }

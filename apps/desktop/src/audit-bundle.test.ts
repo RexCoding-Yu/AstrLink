@@ -61,6 +61,9 @@ const record: RequestRecord = {
 
 const content: AuditContent = {
   request_id: record.id,
+  view: "full",
+  withheld: {},
+  privacy_findings: [],
   http_meta: {
     method: "POST",
     url: "/v1/responses?stream=true",

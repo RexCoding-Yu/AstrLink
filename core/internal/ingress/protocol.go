@@ -154,6 +154,19 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	result.ConversationID = metadata.ConversationID
 	result.InputPreview = metadata.InputPreview
 	result.Conversation = metadata.Conversation
+	if result.Protocol == contract.ProtocolOpenAIResponses || result.Protocol == contract.ProtocolOpenAIResponsesCompact {
+		// Read the caller's identity before subscription forwarding scopes it
+		// to an upstream account. A fork can retain its parent's cache key and
+		// history, so the session header is authoritative for record grouping.
+		for _, name := range codexSessionHeaders {
+			cursor := convo.Cursor{Kind: convo.KindExplicit, Direction: convo.DirectionIn, Value: strings.TrimSpace(request.Header.Get(name))}
+			if cursor.Validate() == nil {
+				result.Conversation.SessionCursor = cursor.Value
+				result.ConversationID = cursor.Value
+				break
+			}
+		}
+	}
 	attachAutoClassifyText(&result, request, metadata.raw, maxBodyBytes)
 	return validateClassifiedRequest(result)
 }

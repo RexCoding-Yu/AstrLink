@@ -17,7 +17,7 @@ extern "C" {
     fn LSRegisterURL(url: CFURLRef, update: u8) -> i32;
 }
 
-fn bundle_for_executable(executable: &Path) -> Option<&Path> {
+pub(crate) fn bundle_for_executable(executable: &Path) -> Option<&Path> {
     let macos = executable.parent()?;
     let contents = macos.parent()?;
     let bundle = contents.parent()?;
@@ -70,7 +70,7 @@ pub fn notify(title: String, body: String) {
     // async workers, and report its actual result instead of dropping errors.
     tauri::async_runtime::spawn_blocking(move || {
         if let Err(error) = mac_notification_sys::send_notification(&title, None, &body, None) {
-            eprintln!("unable to send AstrLink tray notification: {error}");
+            eprintln!("unable to send AstrLink notification: {error}");
         }
     });
 }
@@ -122,6 +122,10 @@ fn stage_dev_bundle(executable: &Path, frameworks: &Path) -> std::io::Result<std
 <key>CFBundleIconFile</key><string>icon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>AstrLink</string>
+<key>CFBundleURLSchemes</key><array><string>astrlink</string></array>
+</dict></array>
 <key>LSMinimumSystemVersion</key><string>13.4</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
@@ -145,7 +149,7 @@ fn stage_dev_bundle(executable: &Path, frameworks: &Path) -> std::io::Result<std
         "astrlink-core",
         "astrlink-privacy-worker",
         "astrlink-classifier-worker",
-        "astrlink-mcp",
+        "astrlink-cli",
     ] {
         replace_symlink(&directory.join(name), &macos.join(name))?;
     }

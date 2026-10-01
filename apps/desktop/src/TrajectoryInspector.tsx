@@ -1,7 +1,9 @@
 import { RecoveryDetails } from "./components/RecoveryDetails";
-import { RoutingDecisionDetails } from "./components/RoutingDecisionDetails";
+import { ConversionDiagnosticsDetails } from "./components/ConversionDiagnosticsDetails";
+import { RoutingSteps } from "./components/RoutingSteps";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { LockKeyhole } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { ConversationIndicator } from "@/components/ConversationIndicator";
 import { ModelLabel } from "@/components/ModelLabel";
@@ -10,17 +12,18 @@ import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
 import { cn } from "@/lib/utils";
 
-import { AuditPartSection } from "./AuditReviewer";
+import { AuditPartSection, withheldHint } from "./AuditReviewer";
 import type { CopyFeedback } from "./copy-feedback";
 import { i18n, useT } from "./i18n";
-import type {
-  AuditContent,
-  RequestModelRedirect,
-  RequestRecord,
-  RequestStatus,
-} from "./request-record-model";
 import {
-  namedRouteSummary,
+  holdsLockedPart,
+  type AuditContent,
+  type RequestModelRedirect,
+  type RequestRecord,
+  type RequestStatus,
+} from "./request-record-model";
+import { routingSteps } from "./request-routing-model";
+import {
   requestServiceIdentity,
   type RequestServiceIdentity,
   type RequestServiceMap,
@@ -58,7 +61,8 @@ type BodyPart = Exclude<InspectorPart, "route" | "redirect">;
  *
  * `onClose` is set only where the host has no window controls of its own. A
  * detached window keeps its pin in the title bar and passes `pinned` in.
- * Clicking a chip here only switches the tab.
+ * Clicking a chip here only switches the tab. `onUnlockRaw` puts the unlock
+ * in the header while any part of this call is sealed away.
  */
 export function TrajectoryInspector({
   row,
@@ -71,6 +75,7 @@ export function TrajectoryInspector({
   copyFeedback,
   pinned = false,
   onClose,
+  onUnlockRaw,
 }: {
   row: TrajectoryRow;
   record: RequestRecord;
@@ -82,19 +87,27 @@ export function TrajectoryInspector({
   copyFeedback: CopyFeedback;
   pinned?: boolean;
   onClose?: () => void;
+  onUnlockRaw?: () => void;
 }) {
   const t = useT();
+  const locked = auditContent !== null && holdsLockedPart(auditContent);
   const chain = useMemo(() => inspectorChainRows(record), [record]);
   const tabs = useMemo(() => inspectorTabs(chain), [chain]);
   const requestedTab = tabChip(row.chip);
   const [focusChip, setFocusChip] = useState(requestedTab);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  // Only a different phase moves the tab. A poll hands down a fresh record for
+  // the same one, and a running call grows new tabs; neither may pull the
+  // operator off the tab they chose.
   useEffect(() => {
+    const current = tabsRef.current;
     setFocusChip(
-      tabs.some((item) => item.chip === requestedTab)
+      current.some((item) => item.chip === requestedTab)
         ? requestedTab
-        : (tabs[0]?.chip ?? requestedTab),
+        : (current[0]?.chip ?? requestedTab),
     );
-  }, [tabs, record.id, requestedTab]);
+  }, [record.id, row.id, requestedTab]);
   const focusRow =
     tabs.find((item) => item.chip === focusChip) ??
     tabs.find((item) => item.chip === requestedTab) ??
@@ -143,6 +156,19 @@ export function TrajectoryInspector({
             </span>
           ) : null}
         </div>
+        {locked && onUnlockRaw ? (
+          <Button
+            className="h-7"
+            data-testid="trajectory-inspector-unlock"
+            onClick={onUnlockRaw}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <LockKeyhole aria-hidden="true" className="size-3.5" />
+            {t("rawSealing.unlockTitle")}
+          </Button>
+        ) : null}
         {onClose ? (
           <Button
             className="h-7"
@@ -321,7 +347,6 @@ function InspectorSection({
           <RouteInspector
             record={record}
             routes={routes}
-            row={row}
             service={service}
             services={services}
           />
@@ -352,13 +377,11 @@ function formatCapturedBytes(bytes: number): string {
 function RouteInspector({
   record,
   routes,
-  row,
   service,
   services = {},
 }: {
   record: RequestRecord;
   routes: TrajectoryRow[];
-  row: TrajectoryRow;
   service: RequestServiceIdentity;
   services?: RequestServiceMap;
 }) {
@@ -367,46 +390,24 @@ function RouteInspector({
   const names: RequestServiceMap = service.id
     ? { [service.id]: { id: service.id, name: service.name }, ...services }
     : services;
-  // A single successful route is already the provider field below.
-  const tried =
-    routes.length > 1 || routes.some((route) => route.tone === "failed")
-      ? routes
-      : [];
+  const stepped = routingSteps(routes, record.routing_decision).length > 0;
   return (
     <>
+      <RoutingSteps
+        decision={record.routing_decision}
+        routes={routes}
+        selectedServiceId={record.service_id}
+        serviceNames={Object.fromEntries(
+          Object.entries(names).map(([id, item]) => [id, item.name]),
+        )}
+      />
       <dl className="grid gap-2 text-xs">
-        <InspectorField
-          label={t("trajectory.summary")}
-          value={namedRouteSummary(row.summary, names)}
-        />
         {record.model_redirect ? (
           <ModelRedirectFields redirect={record.model_redirect} />
         ) : null}
-        {tried.length > 0 ? (
-          <div>
-            <dt className="text-muted-foreground">
-              {t("trajectory.triedProviders")}
-            </dt>
-            <dd className="mt-0.5">
-              <ol className="grid gap-0.5" data-testid="route-attempts">
-                {tried.map((route) => (
-                  <li
-                    className={cn(
-                      "font-mono",
-                      route.tone === "failed"
-                        ? "text-destructive"
-                        : "text-foreground",
-                    )}
-                    data-tone={route.tone}
-                    key={route.id}
-                  >
-                    {namedRouteSummary(route.summary, names)}
-                  </li>
-                ))}
-              </ol>
-            </dd>
-          </div>
-        ) : null}
+        {stepped ? null : (
+          <InspectorField label={t("records.provider")} value={service.name} />
+        )}
         <InspectorField
           code
           label={t("trajectory.entry")}
@@ -419,7 +420,6 @@ function RouteInspector({
           label={t("trajectory.protocol")}
           value={record.input_protocol}
         />
-        <InspectorField label={t("records.provider")} value={service.name} />
         {service.id ? (
           <InspectorField
             code
@@ -427,17 +427,15 @@ function RouteInspector({
             value={service.id}
           />
         ) : null}
-        <InspectorField
-          label={t("trajectory.route")}
-          value={record.route_id ?? "—"}
-        />
+        {record.route_id ? (
+          <InspectorField
+            code
+            label={t("trajectory.route")}
+            value={record.route_id}
+          />
+        ) : null}
       </dl>
-      <RoutingDecisionDetails
-        serviceNames={Object.fromEntries(
-          Object.entries(names).map(([id, item]) => [id, item.name]),
-        )}
-        value={record.routing_decision}
-      />
+      <ConversionDiagnosticsDetails value={record.conversion_diagnostics} />
     </>
   );
 }
@@ -505,13 +503,22 @@ function BodyInspector({
   omitCapturedBody: boolean;
 }) {
   const captured = omitCapturedBody ? null : auditPart(auditContent, part);
-  const unrestoredHits = omitCapturedBody
-    ? extractPrivacyHits(auditPart(auditContent, part)?.content ?? "")
-    : captured
-      ? extractPrivacyHits(captured.content)
-      : [];
+  // Only the restore summary lists these; scanning a large body on every
+  // render of the other tabs would stall them.
+  const restoreSource =
+    row.chip === "RESTORE"
+      ? (auditPart(auditContent, part)?.content ?? "")
+      : "";
+  const unrestoredHits = useMemo(
+    () => extractPrivacyHits(restoreSource),
+    [restoreSource],
+  );
   const sectionKey = `trajectory-${row.chip}-${part}`;
   const missingHint = auditLoading ? null : missingBodyHint(record);
+  // Tabs with a view switch pick each view's own withheld hint.
+  const partHint =
+    withheldHint(omitCapturedBody ? null : auditContent?.withheld[part]) ??
+    missingHint;
 
   if (row.chip === "CLIENT" || row.chip === "TURN") {
     return (
@@ -538,11 +545,7 @@ function BodyInspector({
 
   if (row.chip === "RESULT") {
     return (
-      <ResultInspector
-        missingHint={missingHint}
-        part={captured}
-        record={record}
-      />
+      <ResultInspector missingHint={partHint} part={captured} record={record} />
     );
   }
 
@@ -568,7 +571,7 @@ function BodyInspector({
           className="text-xs leading-6 text-muted-foreground"
           data-testid="inspector-missing-body"
         >
-          {missingBodyHint(record)}
+          {partHint}
         </p>
       ) : null}
       {captured ? (
@@ -636,6 +639,7 @@ function ClientInspector({
             value: "request",
             label: t("audit.upstreamViews.request"),
             body,
+            withheld: auditContent?.withheld.request_body,
           },
           { value: "http", label: "HTTP", meta },
         ]}
@@ -730,6 +734,7 @@ function PolicyInspector({
           copyKey={`policy:${record.id}`}
           label={t("trajectory.redactedRequest")}
           missingHint={missingHint}
+          revealPrivacy
           scrollerRef={scrollerRef}
           testId="inspector-policy-body"
           views={[
@@ -737,6 +742,9 @@ function PolicyInspector({
               value: "request",
               label: t("trajectory.redactedRequest"),
               body,
+              withheld: redacted
+                ? auditContent?.withheld.upstream_request_body
+                : null,
             },
           ]}
         />

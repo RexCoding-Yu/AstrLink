@@ -1,4 +1,4 @@
-import { useMemo, type ComponentProps } from "react";
+import { useMemo, type ComponentProps, type ReactNode } from "react";
 
 import { ModelBrandIcon } from "@/components/ModelBrandIcon";
 import { ModelLabel } from "@/components/ModelLabel";
@@ -13,12 +13,14 @@ export function ModelSelect({
   emptyMessage,
   placeholder,
   clearLabel,
+  optionAdornment,
   ...props
 }: Omit<
   ComponentProps<typeof Combobox>,
   "emptyMessage" | "leadingIcon" | "renderOption"
 > & {
   emptyMessage?: string;
+  optionAdornment?: (model: string) => ReactNode;
 }) {
   const t = useT();
   const models = useMemo(
@@ -41,7 +43,12 @@ export function ModelSelect({
           <Search className="size-3.5" />
         )
       }
-      renderOption={(model) => <ModelLabel model={model} />}
+      renderOption={(model) => (
+        <span className="flex min-w-0 items-center gap-2">
+          <ModelLabel model={model} className="flex-1" />
+          {optionAdornment?.(model)}
+        </span>
+      )}
     />
   );
 }

@@ -23,11 +23,14 @@ export function useOnboarding({
   catalog,
   tokenCatalog,
   usage,
+  passwordReady,
 }: {
   isReady: boolean;
   catalog: ServiceCatalog;
   tokenCatalog: AccessTokenCatalog;
   usage: UsageState;
+  /** Raw protection is set up (D11); unknown counts as not yet. */
+  passwordReady: boolean;
 }) {
   const [status, setStatus] = useState(readStatus);
   const [showResumeHint, setShowResumeHint] = useState(false);
@@ -83,11 +86,21 @@ export function useOnboarding({
   const tokenReady = tokenCatalog.items.length > 0;
   const requestReady =
     usage.status === "ready" && (usage.summary?.totals.requests ?? 0) > 0;
-  const step = !serviceReady ? 0 : !tokenReady ? 1 : 2;
+  const step = !passwordReady ? 0 : !serviceReady ? 1 : !tokenReady ? 2 : 3;
+  // Whether the guide opens is known: it was decided before, or the reads
+  // that decide a first visit have landed or failed.
+  const settled =
+    status !== null ||
+    firstVisit ||
+    (isReady &&
+      [catalog.status, tokenCatalog.status, usage.status].includes("error")) ||
+    (catalogsReady && usage.status !== "loading");
 
   return {
     active: status === "active" || firstVisit,
+    settled,
     catalogsReady,
+    passwordReady,
     serviceReady,
     tokenReady,
     requestReady,

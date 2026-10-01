@@ -215,6 +215,46 @@ describe("model redirect metadata", () => {
   });
 });
 
+describe("upstream error", () => {
+  const failed = {
+    ...fullRecord,
+    status: "failed",
+    http_status: 500,
+    error: {
+      category: "upstream",
+      code: "upstream_http_error",
+      message: "new_api_error: 模型 claude-haiku-4-5 的可用渠道不存在",
+      retryable: true,
+      upstream: {
+        status: 500,
+        content_type: "application/json",
+        body: '{"error":{"type":"new_api_error","message":"模型 claude-haiku-4-5 的可用渠道不存在"}}',
+        truncated: false,
+      },
+    },
+  };
+
+  it("keeps the provider's response verbatim", () => {
+    expect(parseRequestRecord(failed).error).toStrictEqual(failed.error);
+  });
+
+  it("accepts older errors without it", () => {
+    const { upstream: _upstream, ...older } = failed.error;
+    expect(
+      parseRequestRecord({ ...failed, error: older }).error,
+    ).not.toHaveProperty("upstream");
+  });
+
+  it("rejects a malformed response", () => {
+    expect(() =>
+      parseRequestRecord({
+        ...failed,
+        error: { ...failed.error, upstream: { status: 500 } },
+      }),
+    ).toThrow();
+  });
+});
+
 describe("routing decision metadata", () => {
   const decision = {
     selected: "failover",
@@ -275,6 +315,57 @@ describe("routing decision metadata", () => {
     ] as const) {
       expect(() =>
         parseRequestRecord({ ...fullRecord, routing_decision }),
+      ).toThrow(message);
+    }
+  });
+});
+
+describe("conversion diagnostics", () => {
+  const diagnostics = [
+    {
+      phase: "request",
+      severity: "error",
+      code: "unsupported_hosted_tool",
+      path: "tools[0]",
+      message:
+        'OpenAI Chat Completions cannot represent hosted tool "local_shell"',
+    },
+    {
+      phase: "response",
+      severity: "warning",
+      code: "hosted_tool_event_unrepresentable",
+      message: "",
+    },
+  ];
+
+  it("keeps what the conversion dropped or rewrote", () => {
+    expect(
+      parseRequestRecord({ ...fullRecord, conversion_diagnostics: diagnostics })
+        .conversion_diagnostics,
+    ).toStrictEqual(diagnostics);
+  });
+
+  it("leaves the key out when nothing was lost", () => {
+    for (const conversion_diagnostics of [null, undefined, []]) {
+      expect(
+        parseRequestRecord({ ...fullRecord, conversion_diagnostics }),
+      ).not.toHaveProperty("conversion_diagnostics");
+    }
+  });
+
+  it("rejects diagnostics it cannot show", () => {
+    const valid = diagnostics[0];
+    for (const [conversion_diagnostics, message] of [
+      [valid, "应为数组"],
+      [["tools[0]"], "应为对象"],
+      [[{ ...valid, phase: "routing" }], "转换阶段无效"],
+      [[{ ...valid, severity: "fatal" }], "影响程度无效"],
+      [[{ ...valid, code: "" }], "不得为空"],
+      [[{ ...valid, path: 0 }], "应为字符串"],
+      [Array.from({ length: 65 }, () => valid), "条目过多"],
+    ] as const) {
+      expect(() =>
+        parseRequestRecord({ ...fullRecord, conversion_diagnostics }),
       ).toThrow(message);
     }
   });
@@ -558,6 +649,7 @@ describe("request-record IPC contract", () => {
       }),
     ).toEqual({
       request_id: fullRecord.id,
+      view: "full",
       // An older core sidecar that omits the key entirely maps to null.
       http_meta: null,
       request_body: null,
@@ -570,10 +662,89 @@ describe("request-record IPC contract", () => {
       upstream_http_meta: null,
       upstream_request_body: null,
       upstream_response_content: null,
+      withheld: {},
+      privacy_findings: [],
     });
     expect(
       parsePurgeResult({ deleted_records: 3, deleted_audit_blobs: 1 }),
     ).toEqual({ deleted_records: 3, deleted_audit_blobs: 1 });
+  });
+
+  it("keeps withheld parts out of the readable body fields", () => {
+    const parsed = parseAuditContent({
+      request_id: fullRecord.id,
+      view: "full",
+      http_meta: null,
+      request_body: {
+        withheld: true,
+        reason: "raw_locked",
+        raw_available: false,
+        media_type: "application/json",
+        truncated: false,
+        captured_bytes: 42,
+      },
+      response_content: null,
+      upstream_http_meta: null,
+      upstream_request_body: {
+        media_type: "application/json",
+        content: '{"content":"<EMAIL_1>"}',
+        truncated: false,
+        captured_bytes: 23,
+        exposure: "shareable",
+      },
+      upstream_response_content: null,
+      privacy_findings: [
+        { kind: "email", json_path: "/messages/0/content", count: 1 },
+      ],
+    });
+    expect(parsed.request_body).toBeNull();
+    expect(parsed.withheld).toEqual({
+      request_body: {
+        reason: "raw_locked",
+        raw_available: false,
+        media_type: "application/json",
+        truncated: false,
+        captured_bytes: 42,
+      },
+    });
+    expect(parsed.upstream_request_body?.exposure).toBe("shareable");
+    expect(parsed.privacy_findings).toEqual([
+      { kind: "email", json_path: "/messages/0/content", count: 1 },
+    ]);
+
+    const withheld = {
+      withheld: true,
+      reason: "privacy_redacted",
+      raw_available: true,
+      media_type: "application/json",
+      truncated: false,
+      captured_bytes: 1,
+    };
+    const parse = (request_body: unknown, extra: object = {}) =>
+      parseAuditContent({ request_id: fullRecord.id, request_body, ...extra });
+    // A placeholder that carries content could pass for a readable body.
+    expect(() => parse({ ...withheld, content: "secret" })).toThrow(
+      "$.request_body.content",
+    );
+    expect(() => parse({ ...withheld, reason: "because" })).toThrow(
+      "$.request_body.reason",
+    );
+    expect(() => parse({ ...withheld, withheld: false })).toThrow(
+      "$.request_body.withheld",
+    );
+    expect(() =>
+      parse({
+        media_type: "text/plain",
+        content: "x",
+        truncated: false,
+        captured_bytes: 1,
+        exposure: "public",
+      }),
+    ).toThrow("$.request_body.exposure");
+    expect(() => parse(null, { view: "raw" })).toThrow("$.view");
+    expect(() => parse(null, { privacy_findings: {} })).toThrow(
+      "$.privacy_findings",
+    );
   });
 
   it("parses http metadata with ordered redacted headers", () => {

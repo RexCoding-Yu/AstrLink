@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  compareReleaseVersions,
   defaultPrivacyKindRules,
   isResourceHeavyVariant,
   localModelActive,
@@ -61,6 +62,8 @@ const catalogModel = {
   languages: ["en"],
   adapter: "hf_token_classification",
   variants: [variant],
+  version: null,
+  recommended: false,
 } as const;
 const readyInstallation = {
   id: installationID,
@@ -414,6 +417,25 @@ describe("privacy-policy IPC contract", () => {
     expect(parsePrivacyModelCatalog({ items: [catalogModel] })).toEqual({
       items: [catalogModel],
     });
+    const released = { ...catalogModel, version: "0.10.0", recommended: true };
+    expect(parsePrivacyModelCatalog({ items: [released] })).toEqual({
+      items: [released],
+    });
+    for (const version of ["v0.2.0", "0.02.0", "0.2", 2]) {
+      expect(() =>
+        parsePrivacyModelCatalog({ items: [{ ...catalogModel, version }] }),
+      ).toThrow("release version");
+    }
+    expect(() =>
+      parsePrivacyModelCatalog({
+        items: [{ ...catalogModel, recommended: "yes" }],
+      }),
+    ).toThrow("recommended");
+    const { recommended: _recommended, ...unmarked } = catalogModel;
+    expect(() => parsePrivacyModelCatalog({ items: [unmarked] })).toThrow();
+    expect(compareReleaseVersions("0.10.0", "0.2.0")).toBe(1);
+    expect(compareReleaseVersions("0.2.0", "0.2.0")).toBe(0);
+    expect(compareReleaseVersions("0.2.0", "1.0.0")).toBe(-1);
     const probe = {
       repo_id: catalogModel.repo_id,
       requested_revision: "main",

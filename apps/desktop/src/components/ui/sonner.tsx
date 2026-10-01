@@ -8,11 +8,57 @@ import {
   BadgeAlert as TriangleAlertIcon,
   X,
 } from "@/components/icons";
+import { useEffect } from "react";
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 import { useResolvedTheme } from "@/theme";
 
+// Passive toasts ignore the pointer (see globals.css), so :hover never matches
+// them. Mark the toasts under the pointer so they can fade out of the way.
+function useMarkToastsUnderPointer() {
+  useEffect(() => {
+    let frame = 0;
+    let point: { x: number; y: number } | null = null;
+    const mark = () => {
+      frame = 0;
+      for (const toast of document.querySelectorAll<HTMLElement>(
+        "[data-sonner-toast]",
+      )) {
+        const rect = toast.getBoundingClientRect();
+        toast.toggleAttribute(
+          "data-pointer-over",
+          point !== null &&
+            point.x >= rect.left &&
+            point.x <= rect.right &&
+            point.y >= rect.top &&
+            point.y <= rect.bottom,
+        );
+      }
+    };
+    const schedule = () => {
+      if (frame === 0) frame = requestAnimationFrame(mark);
+    };
+    const move = (event: PointerEvent) => {
+      point = { x: event.clientX, y: event.clientY };
+      schedule();
+    };
+    const leave = (event: PointerEvent) => {
+      if (event.relatedTarget !== null) return;
+      point = null;
+      schedule();
+    };
+    document.addEventListener("pointermove", move, { passive: true });
+    document.addEventListener("pointerout", leave);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerout", leave);
+    };
+  }, []);
+}
+
 const Toaster = ({ ...props }: ToasterProps) => {
   const theme = useResolvedTheme();
+  useMarkToastsUnderPointer();
   return (
     <Sonner
       theme={theme}

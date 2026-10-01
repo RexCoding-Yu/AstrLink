@@ -177,6 +177,10 @@ type PrivacyModelCatalogItem struct {
 	Languages []string                  `json:"languages"`
 	Adapter   PrivacyModelAdapter       `json:"adapter"`
 	Variants  []PrivacyModelVariant     `json:"variants"`
+	// Version is the published release tag without its leading "v"; only
+	// models that ship through versioned Hugging Face tags carry one.
+	Version     *string `json:"version"`
+	Recommended bool    `json:"recommended"`
 }
 
 type PrivacyModelCatalogResponse struct {

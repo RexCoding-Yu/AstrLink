@@ -30,8 +30,8 @@ import { i18n, useT } from "./i18n";
 import { useLiveClock } from "./live-clock";
 import { formatDuration } from "./request-live-model";
 import type { AuditContent, RequestRecord } from "./request-record-model";
+import { readableRouteRows } from "./request-routing-model";
 import {
-  namedRouteSummary,
   requestServiceIdentity,
   routeServices,
   type RequestServiceIdentity,
@@ -39,9 +39,11 @@ import {
 } from "./request-service-model";
 import {
   extendPendingTimeline,
+  foldTimelineColumns,
   listScrollForTimeline,
   timelineScrollForList,
   timelineWeight,
+  trajectoryListLayout,
   trajectoryListSummaries,
   trajectoryRows,
   trajectoryTimeline,
@@ -112,6 +114,7 @@ export function RequestTrajectory({
   auditError,
   copyFeedback,
   services = NO_SERVICES,
+  onUnlockRaw,
 }: {
   turns: RequestRecord[];
   childrenByRoot: Record<string, RequestRecord[]>;
@@ -122,6 +125,8 @@ export function RequestTrajectory({
   auditError: string | null;
   copyFeedback: CopyFeedback;
   services?: RequestServiceMap;
+  /** Opens the raw unlock from the overlay inspector. */
+  onUnlockRaw?: () => void;
 }) {
   const t = useT();
   const serviceByRequest = useMemo(
@@ -134,42 +139,54 @@ export function RequestTrajectory({
       ),
     [turns, childrenByRoot, services],
   );
-  const rows = useMemo(
-    () =>
-      trajectoryRows(turns, childrenByRoot).map((row) =>
-        // Keep the original event metadata; translate only service IDs for display.
-        row.chip === "ROUTE"
-          ? { ...row, summary: namedRouteSummary(row.summary, services) }
-          : row,
-      ),
-    [childrenByRoot, turns, services],
-  );
+  const rows = useMemo(() => {
+    const records = new Map(
+      [...turns, ...Object.values(childrenByRoot).flat()].map((record) => [
+        record.id,
+        record,
+      ]),
+    );
+    // Keep the original event metadata; only the route text is for display.
+    return readableRouteRows(
+      trajectoryRows(turns, childrenByRoot),
+      records,
+      services,
+    );
+  }, [childrenByRoot, turns, services]);
   const listSummaries = useMemo(() => trajectoryListSummaries(rows), [rows]);
   // Resolving a row id by scanning `rows` costs nothing once, and used to cost
   // a full scan inside every phase mark of every lane: 1300 marks against 1400
   // rows is close to two million comparisons per paint.
   const rowIndex = useMemo(() => {
     const byId = new Map<string, TrajectoryRow>();
-    const positionById = new Map<string, number>();
     const firstPhaseByRequestId = new Map<string, TrajectoryRow>();
-    rows.forEach((row, position) => {
+    for (const row of rows) {
       byId.set(row.id, row);
-      positionById.set(row.id, position);
       if (row.chip !== "TURN" && !firstPhaseByRequestId.has(row.requestId)) {
         firstPhaseByRequestId.set(row.requestId, row);
       }
-    });
-    return { byId, positionById, firstPhaseByRequestId };
+    }
+    return { byId, firstPhaseByRequestId };
   }, [rows]);
   // The strip advances its own open calls, so the settled layout is built once
   // per turn set instead of once per clock tick. See `extendPendingTimeline`.
   const timeline = useMemo(() => trajectoryTimeline(rows, Date.now()), [rows]);
-  const turnKey = useMemo(
-    () => turns.map((turn) => turn.id).join(","),
-    [turns],
-  );
   const sessionKey = turns[0]?.session_id ?? turns[0]?.id ?? "";
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+  // Only the turns the operator opened or closed by hand. Every other turn
+  // follows `trajectoryListLayout`: the latest one open, the rest folded.
+  const [turnOverrides, setTurnOverrides] = useState<
+    ReadonlyMap<string, boolean>
+  >(() => new Map());
+  const listLayout = useMemo(
+    () => trajectoryListLayout(rows, turnOverrides, selectedRowId),
+    [rows, turnOverrides, selectedRowId],
+  );
+  const listRows = listLayout.rows;
+  const listPositionById = useMemo(
+    () => new Map(listRows.map((row, position) => [row.id, position])),
+    [listRows],
+  );
   const [overlayOpen, setOverlayOpen] = useState(true);
   const [highlightedRequestId, setHighlightedRequestId] = useState<
     string | null
@@ -182,14 +199,24 @@ export function RequestTrajectory({
   const followSelectionOnStripRef = useRef(false);
   const syncFromRef = useRef<"list" | "strip" | null>(null);
   const syncFrameRef = useRef<number | null>(null);
-  const rowsRef = useRef(rows);
-  rowsRef.current = rows;
+  // The scroll sync maps the rows the list draws, not every row.
+  const rowsRef = useRef(listRows);
+  rowsRef.current = listRows;
+  const listLayoutRef = useRef(listLayout);
+  listLayoutRef.current = listLayout;
+  const selectedRowIdRef = useRef(selectedRowId);
+  selectedRowIdRef.current = selectedRowId;
 
+  // No row id means "the latest row", so an untouched list follows new turns.
+  // A row the operator picked stays picked when a turn lands: resetting it on
+  // every new turn moved the list and the open inspector window off the call
+  // being read.
   useEffect(() => {
-    setSelectedRowId(rows[rows.length - 1]?.id ?? null);
+    setSelectedRowId(null);
+    setTurnOverrides(new Map());
     setOverlayOpen(true);
     setHighlightedRequestId(null);
-  }, [turnKey]);
+  }, [sessionKey]);
 
   const selectedRow =
     (selectedRowId === null ? undefined : rowIndex.byId.get(selectedRowId)) ??
@@ -217,6 +244,20 @@ export function RequestTrajectory({
 
   const selectRow = useCallback(
     (row: TrajectoryRow, options?: { reveal?: boolean; inspect?: boolean }) => {
+      const { openTurns, turnByRowId } = listLayoutRef.current;
+      const previous = turnByRowId.get(selectedRowIdRef.current ?? "");
+      setTurnOverrides((current) =>
+        withTurnsOpen(current, [
+          turnByRowId.get(row.id),
+          // The turn the last pick held open stays open: folding it would pull
+          // the rows below it up under the cursor. One folded by hand stays so.
+          previous !== undefined &&
+          !current.has(previous) &&
+          openTurns.has(previous)
+            ? previous
+            : undefined,
+        ]),
+      );
       setSelectedRowId(row.id);
       onSelectRequest(row.requestId);
       // The timeline lands on a call. Highlight every phase of that request
@@ -250,12 +291,22 @@ export function RequestTrajectory({
       services,
     ],
   );
+  // A header folds and unfolds its turn; it no longer opens the inspector,
+  // since its first call's client row already does.
+  const toggleTurn = useCallback((row: TrajectoryRow) => {
+    const open = listLayoutRef.current.openTurns.has(row.id);
+    setTurnOverrides((current) => new Map(current).set(row.id, !open));
+  }, []);
   const selectListRow = useCallback(
     (row: TrajectoryRow) => {
+      if (row.chip === "TURN") {
+        toggleTurn(row);
+        return;
+      }
       followSelectionOnStripRef.current = true;
       selectRow(row);
     },
-    [selectRow],
+    [selectRow, toggleTurn],
   );
   const revealRow = useCallback(
     (row: TrajectoryRow) => selectRow(row, { reveal: true, inspect: false }),
@@ -263,14 +314,16 @@ export function RequestTrajectory({
   );
 
   const virtualizer = useVirtualizer({
-    count: rows.length,
+    count: listRows.length,
     estimateSize: () => LIST_ROW_ESTIMATE_PX,
-    getItemKey: (position) => rows[position]?.id ?? position,
+    getItemKey: (position) => listRows[position]?.id ?? position,
     getScrollElement: () => listRef.current,
     overscan: LIST_OVERSCAN_ROWS,
   });
-  const virtualized = rows.length >= LIST_VIRTUALIZE_MIN_ROWS;
+  const virtualized = listRows.length >= LIST_VIRTUALIZE_MIN_ROWS;
   const virtualRows = virtualized ? virtualizer.getVirtualItems() : null;
+  const turnExpanded = (row: TrajectoryRow) =>
+    row.chip === "TURN" ? listLayout.openTurns.has(row.id) : undefined;
   const virtualizerRef = useRef(virtualizer);
   virtualizerRef.current = virtualizer;
 
@@ -278,7 +331,10 @@ export function RequestTrajectory({
     const list = listRef.current;
     const scroller = scrollerRef.current;
     if (!list || !scroller) return;
-    const columns = measureTimelineColumns(scroller);
+    const columns = foldTimelineColumns(
+      measureTimelineColumns(scroller),
+      listLayoutRef.current.anchorByRequestId,
+    );
     const maxScroll = scroller.scrollWidth - scroller.clientWidth;
     const next = Math.round(
       timelineScrollForList(
@@ -298,7 +354,10 @@ export function RequestTrajectory({
     const list = listRef.current;
     const scroller = scrollerRef.current;
     if (!list || !scroller) return;
-    const columns = measureTimelineColumns(scroller);
+    const columns = foldTimelineColumns(
+      measureTimelineColumns(scroller),
+      listLayoutRef.current.anchorByRequestId,
+    );
     // A resize can remove horizontal overflow. It must not reset the list.
     const timelineMaxScroll = scroller.scrollWidth - scroller.clientWidth;
     if (timelineMaxScroll <= 0) return;
@@ -352,7 +411,7 @@ export function RequestTrajectory({
       rowIndex.byId.get(selectedRowId ?? "");
     if (!first) return;
     if (virtualized) {
-      const position = rowIndex.positionById.get(first.id);
+      const position = listPositionById.get(first.id);
       if (position === undefined) return;
       suppressStripFromListUntilRef.current = Date.now() + REVEAL_SUPPRESS_MS;
       virtualizer.scrollToIndex(position, { align: "start" });
@@ -523,8 +582,9 @@ export function RequestTrajectory({
               ? virtualRows.map((item) => (
                   <TrajectoryRowView
                     key={item.key}
+                    expanded={turnExpanded(listRows[item.index]!)}
                     highlighted={chainHighlighted(
-                      rows[item.index]!,
+                      listRows[item.index]!,
                       highlightedRequestId,
                       selectedRow?.chip === "TURN",
                     )}
@@ -532,15 +592,16 @@ export function RequestTrajectory({
                     offsetPx={item.start}
                     onSelect={selectListRow}
                     position={item.index}
-                    row={rows[item.index]!}
-                    summary={listSummaries.get(rows[item.index]!.id) ?? ""}
-                    service={serviceByRequest[rows[item.index]!.requestId]}
-                    selected={rows[item.index]!.id === selectedRow?.id}
+                    row={listRows[item.index]!}
+                    summary={listSummaries.get(listRows[item.index]!.id) ?? ""}
+                    service={serviceByRequest[listRows[item.index]!.requestId]}
+                    selected={listRows[item.index]!.id === selectedRow?.id}
                   />
                 ))
-              : rows.map((row, position) => (
+              : listRows.map((row, position) => (
                   <TrajectoryRowView
                     key={row.id}
+                    expanded={turnExpanded(row)}
                     highlighted={chainHighlighted(
                       row,
                       highlightedRequestId,
@@ -583,6 +644,7 @@ export function RequestTrajectory({
               }
               copyFeedback={copyFeedback}
               onClose={() => setOverlayOpen(false)}
+              onUnlockRaw={onUnlockRaw}
               record={selection.record}
               row={selection.row}
               service={selection.service}
@@ -983,6 +1045,20 @@ function chainHighlighted(
   return row.chip !== "TURN" || includeTurn;
 }
 
+/** `current` with each turn opened, or `current` itself if all already were. */
+function withTurnsOpen(
+  current: ReadonlyMap<string, boolean>,
+  turns: readonly (string | undefined)[],
+): ReadonlyMap<string, boolean> {
+  const closed = turns.filter(
+    (turn): turn is string => turn !== undefined && current.get(turn) !== true,
+  );
+  if (closed.length === 0) return current;
+  const next = new Map(current);
+  for (const turn of closed) next.set(turn, true);
+  return next;
+}
+
 function findRecord(
   turns: RequestRecord[],
   childrenByRoot: Record<string, RequestRecord[]>,
@@ -1008,6 +1084,7 @@ const TrajectoryRowView = memo(function TrajectoryRowView({
   service,
   selected,
   highlighted,
+  expanded,
   position,
   offsetPx,
   measureRef,
@@ -1018,6 +1095,8 @@ const TrajectoryRowView = memo(function TrajectoryRowView({
   service?: RequestServiceIdentity;
   selected: boolean;
   highlighted: boolean;
+  /** Set only on a turn header: whether its calls are listed below it. */
+  expanded?: boolean;
   position: number;
   /** Set only while the list is windowed, where rows are placed by transform. */
   offsetPx?: number;
@@ -1054,6 +1133,7 @@ const TrajectoryRowView = memo(function TrajectoryRowView({
     >
       <Button
         aria-current={selected ? "true" : undefined}
+        aria-expanded={expanded}
         className={cn(
           ROW_COLUMNS,
           "group relative h-8 w-full shrink-0 items-center rounded-none border-b border-border/60 bg-transparent px-2 py-0 text-left text-xs font-normal text-foreground shadow-none hover:bg-muted focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-ring focus-visible:ring-0",
@@ -1078,7 +1158,14 @@ const TrajectoryRowView = memo(function TrajectoryRowView({
         variant="ghost"
       >
         {row.chip === "TURN" ? (
-          <span className="flex items-center gap-1.5 text-micro text-muted-foreground">
+          <span className="flex items-center gap-1 text-micro text-muted-foreground">
+            <ChevronRight
+              aria-hidden="true"
+              className={cn(
+                "size-3 transition-transform",
+                expanded && "rotate-90",
+              )}
+            />
             <MessageSquare aria-hidden="true" className="size-3" />
             {t("trajectory.chips.TURN")}
           </span>
@@ -1155,13 +1242,18 @@ const TrajectoryRowView = memo(function TrajectoryRowView({
         >
           {duration}
         </span>
-        <ChevronRight
-          aria-hidden="true"
-          className={cn(
-            "size-3 text-muted-foreground/40 group-hover:text-foreground",
-            selected && "text-primary",
-          )}
-        />
+        {/* A header folds its turn instead of opening the inspector. */}
+        {row.chip === "TURN" ? (
+          <span />
+        ) : (
+          <ChevronRight
+            aria-hidden="true"
+            className={cn(
+              "size-3 text-muted-foreground/40 group-hover:text-foreground",
+              selected && "text-primary",
+            )}
+          />
+        )}
       </Button>
     </li>
   );

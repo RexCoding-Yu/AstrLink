@@ -135,8 +135,8 @@ type Decision struct {
 	// has no user turns. Hosts store it and hand it back through Match.Turn.
 	Turn *TurnState
 	// Inbound lists every cursor the request carried, in layer order. Hosts
-	// should persist the KindExplicit entries (see PersistentInbound); the
-	// others are lookup keys only.
+	// should persist only the first KindExplicit entry (see PersistentInbound)
+	// so lower-priority hints cannot alias separate conversations.
 	Inbound []Cursor
 }
 
@@ -147,6 +147,7 @@ func (decision Decision) PersistentInbound() []Cursor {
 	for _, cursor := range decision.Inbound {
 		if cursor.Kind == KindExplicit {
 			kept = append(kept, cursor)
+			break
 		}
 	}
 	return kept

@@ -41,11 +41,7 @@ func TestNotifyContextCancelsWhenParentChanges(t *testing.T) {
 	defer cancel()
 
 	pid.Store(7)
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("context was not cancelled after parent PID changed")
-	}
+	<-ctx.Done()
 }
 
 func TestNotifyContextRejectsInitialParentMismatch(t *testing.T) {
@@ -71,11 +67,7 @@ func TestNotifyContextUnsupportedPlatformUsesParentContext(t *testing.T) {
 	defer cancel()
 
 	stopParent()
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("context did not follow its parent")
-	}
+	<-ctx.Done()
 }
 
 func TestNotifyContextRejectsInvalidConfiguration(t *testing.T) {

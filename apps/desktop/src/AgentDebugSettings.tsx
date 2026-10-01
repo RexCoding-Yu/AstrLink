@@ -10,6 +10,7 @@ import { HelpDisclosure } from "@/components/HelpDisclosure";
 import { HelpPopover } from "@/components/HelpPopover";
 import { RefreshCw, ShieldCheck } from "@/components/icons";
 import { Panel, PanelFooter, PanelHeader } from "@/components/Panel";
+import { ScrollWorkspace } from "@/components/ScrollWorkspace";
 import { StatusBadge } from "@/components/StatusBadge";
 import { StatusDot } from "@/components/StatusDot";
 import { Button } from "@/components/ui/button";
@@ -29,18 +30,125 @@ import {
   installAgentDebug,
   uninstallAgentDebug,
 } from "./bridge";
-import type { AgentInstallStatus, AgentToolId } from "./agent-install-model";
+import {
+  SKILL_IDS,
+  type AgentInstallStatus,
+  type AgentSkillId,
+  type AgentToolId,
+  type AgentToolStatus,
+} from "./agent-install-model";
 import { i18n, useT } from "./i18n";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
 
-const toolIds = ["cursor", "claude", "codex", "grok"] as const;
+const toolIds = ["cursor", "claude", "codex", "grok", "pi"] as const;
+
+// Codex and Pi both read ~/.agents/skills, so installing for one installs for
+// the other.
+const sharedSkillTools: readonly AgentToolId[] = ["codex", "pi"];
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : i18n.t("agentDebug.failed");
 }
 
-export function AgentDebugSettings() {
+function skillInstalled(
+  tool: AgentToolStatus | undefined,
+  id: AgentSkillId,
+): boolean {
+  return Boolean(
+    tool?.skills.some((skill) => skill.id === id && skill.installed),
+  );
+}
+
+function anySkillInstalled(tool: AgentToolStatus | undefined): boolean {
+  return Boolean(tool?.skills.some((skill) => skill.installed));
+}
+
+type ToolPart = AgentSkillId | "cliAccess" | "guard";
+
+// Every skill counts, and once the debug skill is there so do the host rules
+// that let it run the CLI and keep agents out of AstrLink's files. Hosts that
+// ask on first run, never ask, or have no guard location need no rule.
+function missingParts(tool: AgentToolStatus): ToolPart[] {
+  const missing: ToolPart[] = SKILL_IDS.filter(
+    (id) => !skillInstalled(tool, id),
+  );
+  if (skillInstalled(tool, "astrlink-debug")) {
+    if (
+      (tool.cli_access === "allow_rules" ||
+        tool.cli_access === "exec_policy") &&
+      !tool.cli_access_installed
+    )
+      missing.push("cliAccess");
+    if (tool.guard !== "skill_only" && !tool.guard_installed)
+      missing.push("guard");
+  }
+  return missing;
+}
+
+function isInstalled(tool: AgentToolStatus): boolean {
+  return missingParts(tool).length === 0;
+}
+
+function AgentSetupCell({
+  checked,
+  tool,
+}: {
+  checked: boolean;
+  tool: AgentToolStatus | undefined;
+}) {
+  const t = useT();
+  if (!tool?.detected && !anySkillInstalled(tool)) {
+    return (
+      <span
+        className="text-muted-foreground"
+        aria-label={t(
+          checked ? "agentDebug.notDetected" : "agentDebug.unavailable",
+        )}
+      >
+        —
+      </span>
+    );
+  }
+  if (!tool || !anySkillInstalled(tool)) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        {t("agentDebug.notInstalled")}
+      </span>
+    );
+  }
+  const missing = missingParts(tool);
+  if (missing.length === 0) {
+    return (
+      <StatusBadge tone="positive">{t("agentDebug.installed")}</StatusBadge>
+    );
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
+      <span className="text-xs text-muted-foreground">
+        {t("agentDebug.missing", {
+          items: missing
+            .map((part) =>
+              part === "cliAccess" || part === "guard"
+                ? t(`agentDebug.parts.${part}`)
+                : t(`agentDebug.skills.${part}.short`),
+            )
+            .join(t("agentDebug.partsSeparator")),
+        })}
+      </span>
+      <StatusBadge tone="pending">{t("agentDebug.partial")}</StatusBadge>
+    </span>
+  );
+}
+
+export interface AgentDebugSettingsProps {
+  /** Opens the install dialog with only this skill selected once status loads. */
+  preselectSkill?: AgentSkillId;
+}
+
+export function AgentDebugSettings({
+  preselectSkill,
+}: AgentDebugSettingsProps) {
   const t = useT();
   const [status, setStatus] = useWorkspaceSnapshot<AgentInstallStatus | null>(
     "agent-tools",
@@ -51,6 +159,10 @@ export function AgentDebugSettings() {
   const [checking, setChecking] = useState(status === null);
   const [busy, setBusy] = useState<"install" | "uninstall" | null>(null);
   const [confirm, setConfirm] = useState<"install" | "uninstall" | null>(null);
+  const [selectedSkills, setSelectedSkills] = useState<AgentSkillId[]>([]);
+  // The cached snapshot may predate a tool install; preselection waits for a
+  // fresh status.
+  const [fresh, setFresh] = useState(false);
   const [selectedTools, setSelectedTools] = useState<AgentToolId[]>([]);
 
   const refreshGeneration = useRef(0);
@@ -66,6 +178,7 @@ export function AgentDebugSettings() {
       const next = await getAgentDebugStatus();
       if (!current()) return false;
       setStatus(next);
+      setFresh(true);
       setError(null);
       return true;
     } catch (next) {
@@ -85,14 +198,22 @@ export function AgentDebugSettings() {
   }, []);
 
   const run = async (operation: "install" | "uninstall"): Promise<void> => {
-    if (operation === "install" && selectedTools.length === 0) return;
+    if (
+      operation === "install" &&
+      (selectedSkills.length === 0 || selectedTools.length === 0)
+    )
+      return;
     refreshGeneration.current += 1;
     setBusy(operation);
     setConfirm(null);
     setError(null);
     try {
-      if (operation === "install") await installAgentDebug(selectedTools);
-      else await uninstallAgentDebug();
+      if (operation === "install") {
+        await installAgentDebug(
+          SKILL_IDS.filter((id) => selectedSkills.includes(id)),
+          selectedTools,
+        );
+      } else await uninstallAgentDebug();
       if (await refresh()) {
         notify.success(
           i18n.t(
@@ -110,58 +231,92 @@ export function AgentDebugSettings() {
   };
 
   const detected = status?.tools.filter((tool) => tool.detected) ?? [];
-  const configured = detected.filter(
-    (tool) => tool.skill_installed && tool.mcp_installed,
-  );
+  const installed = detected.filter(isInstalled);
   const anyInstalled = Boolean(
-    status?.canonical_skill ||
-      status?.mcp_binary ||
-      status?.tools.some((tool) => tool.skill_installed || tool.mcp_installed),
+    status?.cli_binary ||
+      status?.tools.some(
+        (tool) => anySkillInstalled(tool) || tool.cli_access_installed,
+      ),
   );
   const installLabel = t(
     anyInstalled ? "agentDebug.manage" : "agentDebug.install",
   );
   const locked = busy !== null || checking;
+  const detectedShared = sharedSkillTools.filter((id) =>
+    detected.some((tool) => tool.id === id),
+  );
+  const withShared = (ids: AgentToolId[]): AgentToolId[] =>
+    ids.some((id) => detectedShared.includes(id))
+      ? [...ids, ...detectedShared.filter((id) => !ids.includes(id))]
+      : ids;
+  const toggleTool = (id: AgentToolId, checked: boolean): void => {
+    const group = withShared([id]);
+    setSelectedTools((current) =>
+      checked
+        ? withShared([...current, id])
+        : current.filter((item) => !group.includes(item)),
+    );
+  };
   const previewPaths =
-    status && selectedTools.length > 0
+    status && selectedSkills.length > 0 && selectedTools.length > 0
       ? [
           ...new Set([
             ...status.shared_paths,
             ...status.tools
               .filter((tool) => selectedTools.includes(tool.id))
-              .flatMap((tool) => tool.preview_paths),
+              .flatMap((tool) => tool.skills)
+              .filter((skill) => selectedSkills.includes(skill.id))
+              .flatMap((skill) => skill.preview_paths),
           ]),
         ]
       : [];
 
-  const openInstall = (): void => {
+  // Every skill starts selected, and reopening keeps the tools that already
+  // have one, so an update does not silently narrow the setup. A preselected
+  // skill starts alone, on every detected tool when nothing is installed yet.
+  const openInstall = (skill?: AgentSkillId): void => {
+    const configured = detected.filter(
+      (tool) => anySkillInstalled(tool) || tool.cli_access_installed,
+    );
+    setSelectedSkills(skill ? [skill] : [...SKILL_IDS]);
     setSelectedTools(
-      detected
-        .filter((tool) => tool.skill_installed || tool.mcp_installed)
-        .map((tool) => tool.id),
+      withShared(
+        (skill && configured.length === 0 ? detected : configured).map(
+          (tool) => tool.id,
+        ),
+      ),
     );
     setConfirm("install");
   };
 
-  return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <PageHeader
-        title={t("agentDebug.title")}
-        variant="compact"
-        actions={
-          <div className="flex items-center gap-1 text-xs text-muted-foreground">
-            <ShieldCheck aria-hidden="true" className="size-3.5" />
-            <span>{t("agentDebug.readOnly")}</span>
-            <HelpPopover label={t("agentDebug.permissionsTitle")}>
-              {t("agentDebug.permissionsBody")}
-            </HelpPopover>
-          </div>
-        }
-      />
+  const preselectHandled = useRef(false);
+  useEffect(() => {
+    if (!preselectSkill || preselectHandled.current || !fresh) return;
+    preselectHandled.current = true;
+    if (detected.length > 0) openInstall(preselectSkill);
+  }, [preselectSkill, fresh]);
 
-      <div
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2"
-        data-slot="agent-tools-content"
+  return (
+    <>
+      <ScrollWorkspace
+        className="gap-0"
+        contentClassName="pb-2"
+        contentSlot="agent-tools-content"
+        header={
+          <PageHeader
+            title={t("agentDebug.title")}
+            variant="compact"
+            actions={
+              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                <ShieldCheck aria-hidden="true" className="size-3.5" />
+                <span>{t("agentDebug.readOnly")}</span>
+                <HelpPopover label={t("agentDebug.permissionsTitle")}>
+                  {t("agentDebug.permissionsBody")}
+                </HelpPopover>
+              </div>
+            }
+          />
+        }
       >
         <p className="mb-4 text-sm text-text-secondary">
           {t("agentDebug.description")}
@@ -172,7 +327,7 @@ export function AgentDebugSettings() {
           </FormMessage>
         ) : null}
 
-        <div className="grid items-start gap-4 @min-[680px]/workspace-surface:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+        <div className="grid items-start gap-4 @min-[680px]/workspace-surface:grid-cols-2">
           <div className="grid min-w-0 gap-4">
             <Panel aria-labelledby="agent-install-heading">
               <PanelHeader
@@ -208,8 +363,8 @@ export function AgentDebugSettings() {
                   className="mt-1 text-xs text-muted-foreground"
                 >
                   {status
-                    ? t("agentDebug.configuredCount", {
-                        count: configured.length,
+                    ? t("agentDebug.installedCount", {
+                        count: installed.length,
                         total: detected.length,
                       })
                     : t("agentDebug.statusHint")}
@@ -222,8 +377,9 @@ export function AgentDebugSettings() {
                     <TableHead className="pl-4">
                       {t("agentDebug.toolColumn")}
                     </TableHead>
-                    <TableHead>Skill</TableHead>
-                    <TableHead className="pr-4">MCP</TableHead>
+                    <TableHead className="pr-4 text-right">
+                      {t("agentDebug.statusColumn")}
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -261,34 +417,12 @@ export function AgentDebugSettings() {
                             </span>
                           </span>
                         </TableCell>
-                        {(["skill_installed", "mcp_installed"] as const).map(
-                          (part) => (
-                            <TableCell className="last:pr-4" key={part}>
-                              {tool?.detected || tool?.[part] ? (
-                                <StatusBadge
-                                  tone={tool[part] ? "positive" : "pending"}
-                                >
-                                  {t(
-                                    tool[part]
-                                      ? "agentDebug.installed"
-                                      : "agentDebug.notInstalled",
-                                  )}
-                                </StatusBadge>
-                              ) : (
-                                <span
-                                  className="text-muted-foreground"
-                                  aria-label={t(
-                                    status
-                                      ? "agentDebug.notDetected"
-                                      : "agentDebug.unavailable",
-                                  )}
-                                >
-                                  —
-                                </span>
-                              )}
-                            </TableCell>
-                          ),
-                        )}
+                        <TableCell className="pr-4 text-right">
+                          <AgentSetupCell
+                            checked={status !== null}
+                            tool={tool}
+                          />
+                        </TableCell>
                       </TableRow>
                     );
                   })}
@@ -299,7 +433,11 @@ export function AgentDebugSettings() {
                 <FormMessage className="mx-4 mb-3">
                   {t("agentDebug.noTools")}
                 </FormMessage>
-              ) : status && !status.mcp_binary && configured.length > 0 ? (
+              ) : status &&
+                !status.cli_binary &&
+                detected.some((tool) =>
+                  skillInstalled(tool, "astrlink-debug"),
+                ) ? (
                 <FormMessage className="mx-4 mb-3" tone="warning">
                   {t("agentDebug.missingRuntime")}
                 </FormMessage>
@@ -324,7 +462,7 @@ export function AgentDebugSettings() {
                     ) : null}
                     <Button
                       disabled={locked || !status || detected.length === 0}
-                      onClick={openInstall}
+                      onClick={() => openInstall()}
                       type="button"
                     >
                       {busy === "install"
@@ -337,7 +475,10 @@ export function AgentDebugSettings() {
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <span>{t("agentDebug.installScopeShort")}</span>
                   <HelpPopover label={t("agentDebug.installScopeTitle")}>
-                    {t("agentDebug.installScopeBody")}
+                    <div className="grid gap-2">
+                      <p>{t("agentDebug.installScopeBody")}</p>
+                      <p>{t("agentDebug.installScopeHosts")}</p>
+                    </div>
                   </HelpPopover>
                 </div>
               </PanelFooter>
@@ -389,8 +530,8 @@ export function AgentDebugSettings() {
               <HelpDisclosure title={t("agentDebug.help.installTitle")}>
                 <p>{t("agentDebug.help.installBody")}</p>
               </HelpDisclosure>
-              <HelpDisclosure title={t("agentDebug.help.loginTitle")}>
-                <p>{t("agentDebug.help.loginBody")}</p>
+              <HelpDisclosure title={t("agentDebug.help.connectTitle")}>
+                <p>{t("agentDebug.help.connectBody")}</p>
               </HelpDisclosure>
               <HelpDisclosure title={t("agentDebug.help.bodyTitle")}>
                 <p>{t("agentDebug.help.bodyBody")}</p>
@@ -398,7 +539,7 @@ export function AgentDebugSettings() {
             </div>
           </Panel>
         </div>
-      </div>
+      </ScrollWorkspace>
 
       <ConfirmDialog
         confirmLabel={
@@ -406,13 +547,54 @@ export function AgentDebugSettings() {
             ? t("agentDebug.remove")
             : t("agentDebug.installSelected", { count: selectedTools.length })
         }
-        confirmDisabled={confirm === "install" && selectedTools.length === 0}
+        confirmDisabled={
+          confirm === "install" &&
+          (selectedSkills.length === 0 || selectedTools.length === 0)
+        }
         description={
           confirm === "uninstall" ? (
             <p>{t("agentDebug.removeBody")}</p>
           ) : (
             <div className="grid gap-3">
               <p>{t("agentDebug.installBody")}</p>
+              <fieldset
+                className="grid min-w-0 gap-2 text-left"
+                disabled={locked}
+              >
+                <legend className="mb-2 text-sm font-medium text-foreground">
+                  {t("agentDebug.selectSkills")}
+                </legend>
+                <div className="grid gap-3">
+                  {SKILL_IDS.map((id) => (
+                    <Label
+                      className="min-w-0 items-start gap-2"
+                      htmlFor={`agent-skill-${id}`}
+                      key={id}
+                    >
+                      <Checkbox
+                        checked={selectedSkills.includes(id)}
+                        disabled={locked}
+                        id={`agent-skill-${id}`}
+                        onCheckedChange={(checked) =>
+                          setSelectedSkills((current) =>
+                            checked === true
+                              ? [...current, id]
+                              : current.filter((item) => item !== id),
+                          )
+                        }
+                      />
+                      <span className="grid min-w-0 gap-0.5">
+                        <span className="text-foreground">
+                          {t(`agentDebug.skills.${id}.name`)}
+                        </span>
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {t(`agentDebug.skills.${id}.scope`)}
+                        </span>
+                      </span>
+                    </Label>
+                  ))}
+                </div>
+              </fieldset>
               <fieldset
                 className="grid min-w-0 gap-2 text-left"
                 disabled={locked}
@@ -434,11 +616,7 @@ export function AgentDebugSettings() {
                           disabled={locked || !tool?.detected}
                           id={`agent-install-${id}`}
                           onCheckedChange={(checked) =>
-                            setSelectedTools((current) =>
-                              checked === true
-                                ? [...current, id]
-                                : current.filter((item) => item !== id),
-                            )
+                            toggleTool(id, checked === true)
                           }
                         />
                         <span className="grid min-w-0 gap-0.5">
@@ -449,9 +627,11 @@ export function AgentDebugSettings() {
                             {t(
                               !tool?.detected
                                 ? "agentDebug.notDetected"
-                                : tool.skill_installed && tool.mcp_installed
+                                : isInstalled(tool)
                                   ? "agentDebug.installed"
-                                  : "agentDebug.detected",
+                                  : anySkillInstalled(tool)
+                                    ? "agentDebug.partial"
+                                    : "agentDebug.detected",
                             )}
                           </span>
                         </span>
@@ -459,6 +639,11 @@ export function AgentDebugSettings() {
                     );
                   })}
                 </div>
+                {detectedShared.length > 1 ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t("agentDebug.sharedSkills")}
+                  </p>
+                ) : null}
               </fieldset>
               <p>{t("agentDebug.selectionHint")}</p>
               {previewPaths.length ? (
@@ -488,6 +673,6 @@ export function AgentDebugSettings() {
             : "agentDebug.installTitle",
         )}
       />
-    </section>
+    </>
   );
 }

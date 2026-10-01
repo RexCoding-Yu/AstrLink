@@ -125,3 +125,18 @@ export const browserUpdateSnapshot = (): UpdateSnapshot => ({
 export function updateBusy(snapshot: UpdateSnapshot): boolean {
   return ["checking", "downloading", "installing"].includes(snapshot.phase);
 }
+export type UpdateNotice = "available" | "manual" | "ready";
+/** Mirrors the host's native-notification rule; `available` only counts while
+ * it waits on the operator, since automatic download soon reaches `ready`. */
+export function updateNotice(snapshot: UpdateSnapshot): UpdateNotice | null {
+  if (!snapshot.release) return null;
+  switch (snapshot.phase) {
+    case "available":
+      return snapshot.preferences.auto_download ? null : "available";
+    case "manual":
+    case "ready":
+      return snapshot.phase;
+    default:
+      return null;
+  }
+}

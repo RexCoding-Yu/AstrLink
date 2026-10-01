@@ -1,4 +1,4 @@
-export const LOCAL_CLIENT_IDS = ["codex", "claude"] as const;
+export const LOCAL_CLIENT_IDS = ["codex", "claude", "cursor", "pi"] as const;
 export type LocalClientId = (typeof LOCAL_CLIENT_IDS)[number];
 export const LOCAL_CLIENT_PHASES = [
   "idle",
@@ -12,12 +12,23 @@ export const LOCAL_CLIENT_PHASES = [
   "error",
 ] as const;
 export type LocalClientPhase = (typeof LOCAL_CLIENT_PHASES)[number];
+const LOCAL_CLIENT_INSTALL_METHODS = [
+  "native",
+  "npm",
+  "bun",
+  "pnpm",
+  "yarn",
+  "homebrew",
+  "unknown",
+] as const;
+export type LocalClientInstallMethod =
+  (typeof LOCAL_CLIENT_INSTALL_METHODS)[number];
 export interface LocalClientStatus {
   id: LocalClientId;
   phase: LocalClientPhase;
   current_version: string | null;
   latest_version: string | null;
-  install_method: "native" | "npm" | "homebrew" | "unknown";
+  install_method: LocalClientInstallMethod;
   executable: string | null;
   other_installations: string[];
   can_update: boolean;
@@ -30,12 +41,23 @@ export interface LocalClientSnapshot {
   busy: boolean;
   clients: LocalClientStatus[];
 }
-export const localClientLabel = (id: LocalClientId) =>
-  id === "codex" ? "Codex CLI" : "Claude Code";
-export const localClientGuide = (id: LocalClientId) =>
-  id === "codex"
-    ? "https://developers.openai.com/codex/cli/"
-    : "https://code.claude.com/docs/en/setup";
+const LOCAL_CLIENTS = {
+  codex: {
+    label: "Codex CLI",
+    guide: "https://developers.openai.com/codex/cli/",
+  },
+  claude: {
+    label: "Claude Code",
+    guide: "https://code.claude.com/docs/en/setup",
+  },
+  cursor: {
+    label: "Cursor CLI",
+    guide: "https://cursor.com/docs/cli/installation",
+  },
+  pi: { label: "Pi", guide: "https://pi.dev/docs/latest/quickstart" },
+} satisfies Record<LocalClientId, { label: string; guide: string }>;
+export const localClientLabel = (id: LocalClientId) => LOCAL_CLIENTS[id].label;
+export const localClientGuide = (id: LocalClientId) => LOCAL_CLIENTS[id].guide;
 
 export function emptyLocalClients(): LocalClientSnapshot {
   return {
@@ -69,7 +91,7 @@ export function parseLocalClients(value: unknown): LocalClientSnapshot {
     (root.revision as number) < 0 ||
     typeof root.busy !== "boolean" ||
     !Array.isArray(root.clients) ||
-    root.clients.length !== 2
+    root.clients.length !== LOCAL_CLIENT_IDS.length
   ) {
     throw new Error("Invalid local client snapshot");
   }
@@ -80,8 +102,8 @@ export function parseLocalClients(value: unknown): LocalClientSnapshot {
       !LOCAL_CLIENT_IDS.includes(client.id as LocalClientId) ||
       ids.has(client.id) ||
       !LOCAL_CLIENT_PHASES.includes(client.phase as LocalClientPhase) ||
-      !["native", "npm", "homebrew", "unknown"].includes(
-        String(client.install_method),
+      !LOCAL_CLIENT_INSTALL_METHODS.includes(
+        client.install_method as LocalClientInstallMethod,
       ) ||
       typeof client.can_update !== "boolean"
     )

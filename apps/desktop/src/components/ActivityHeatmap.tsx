@@ -164,7 +164,7 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
   return (
     <div
       ref={frame}
-      className="grid min-w-0 gap-4"
+      className="grid min-w-0 gap-1"
       data-slot="activity-heatmap"
     >
       <div

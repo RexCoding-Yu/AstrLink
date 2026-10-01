@@ -94,12 +94,36 @@ export interface Preferences {
   updates: UpdatePreferences;
 }
 
+/** A `*.bak*` file in the data directory; possibly a plain-text copy. */
+export interface DataBackupFile {
+  name: string;
+  size_bytes: number;
+  modified_unix: number | null;
+}
+
+/**
+ * Where Core's local key lives: the macOS keychain on signed builds, a key file
+ * elsewhere, or a key file because a signed build could not use the keychain.
+ */
+export type LocalKeyStorage = "keychain" | "file" | "keychain_unavailable";
+
+const LOCAL_KEY_STORAGE: readonly LocalKeyStorage[] = [
+  "keychain",
+  "file",
+  "keychain_unavailable",
+];
+
 export interface SettingsSnapshot {
   values: Preferences;
   load_warning: string | null;
   autostart_actual: boolean | null;
   autostart_error: string | null;
+  data_backups: DataBackupFile[];
+  /** `null` until Core has started once. */
+  local_key_storage: LocalKeyStorage | null;
 }
+
+const MAX_DATA_BACKUPS = 100;
 
 function invalid(path: string, detail: string): never {
   throw new Error(`Invalid AstrLink preferences IPC at ${path}: ${detail}`);
@@ -185,7 +209,14 @@ export function parseSettingsSnapshot(value: unknown): SettingsSnapshot {
   const root = objectAt(value, "$");
   exactKeys(
     root,
-    ["values", "load_warning", "autostart_actual", "autostart_error"],
+    [
+      "values",
+      "load_warning",
+      "autostart_actual",
+      "autostart_error",
+      "data_backups",
+      "local_key_storage",
+    ],
     "$",
   );
   const values = objectAt(root.values, "$.values");
@@ -291,5 +322,52 @@ export function parseSettingsSnapshot(value: unknown): SettingsSnapshot {
     load_warning: nullableString(root.load_warning, "$.load_warning"),
     autostart_actual: root.autostart_actual as boolean | null,
     autostart_error: nullableString(root.autostart_error, "$.autostart_error"),
+    data_backups: parseDataBackups(root.data_backups),
+    local_key_storage: parseLocalKeyStorage(root.local_key_storage),
   };
+}
+
+function parseLocalKeyStorage(value: unknown): LocalKeyStorage | null {
+  if (value === null) return null;
+  if (
+    typeof value !== "string" ||
+    !LOCAL_KEY_STORAGE.includes(value as LocalKeyStorage)
+  ) {
+    return invalid(
+      "$.local_key_storage",
+      `expected null or one of ${LOCAL_KEY_STORAGE.join(", ")}`,
+    );
+  }
+  return value as LocalKeyStorage;
+}
+
+function nonNegativeInteger(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    return invalid(path, "expected a non-negative integer");
+  }
+  return value;
+}
+
+function parseDataBackups(value: unknown): DataBackupFile[] {
+  if (!Array.isArray(value) || value.length > MAX_DATA_BACKUPS) {
+    return invalid(
+      "$.data_backups",
+      `expected an array of at most ${MAX_DATA_BACKUPS} files`,
+    );
+  }
+  return value.map((item, index) => {
+    const path = `$.data_backups[${index}]`;
+    const file = objectAt(item, path);
+    exactKeys(file, ["name", "size_bytes", "modified_unix"], path);
+    const name = nullableString(file.name, `${path}.name`);
+    if (name === null) invalid(`${path}.name`, "expected a file name");
+    return {
+      name,
+      size_bytes: nonNegativeInteger(file.size_bytes, `${path}.size_bytes`),
+      modified_unix:
+        file.modified_unix === null
+          ? null
+          : nonNegativeInteger(file.modified_unix, `${path}.modified_unix`),
+    };
+  });
 }

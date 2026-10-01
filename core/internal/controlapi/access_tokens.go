@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
+	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
@@ -38,8 +39,17 @@ type accessTokenRevealResponse struct {
 }
 
 func (handler *Handler) registerAccessTokenRoutes() {
-	handler.mux.HandleFunc(AccessTokensPath, handler.authenticated(handler.accessTokenCollection))
-	handler.mux.HandleFunc(AccessTokensPath+"/", handler.authenticated(handler.accessTokenItem))
+	handler.mux.HandleFunc(AccessTokensPath, handler.authenticated(handler.accessTokenCollection, RoleObserver))
+	handler.mux.HandleFunc(AccessTokensPath+"/", handler.authenticatedBy(handler.accessTokenItem, accessTokenItemRole))
+}
+
+// accessTokenItemRole keeps the secret reveal operator-only; listing token
+// metadata stays observable.
+func accessTokenItemRole(request *http.Request) Role {
+	if isSafeMethod(request.Method) && !strings.HasSuffix(request.URL.Path, "/secret") {
+		return RoleObserver
+	}
+	return RoleOperator
 }
 
 func (handler *Handler) accessTokenCollection(writer http.ResponseWriter, request *http.Request) {
@@ -183,6 +193,9 @@ func (handler *Handler) writeAccessTokenError(writer http.ResponseWriter, err er
 		writeError(writer, http.StatusConflict, "access_token_limit", "the maximum number of access tokens has been reached")
 	case errors.Is(err, accesstoken.ErrInvalidName), errors.Is(err, storage.ErrInvalidArgument):
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_access_token", "access token name violates the contract")
+	case errors.Is(err, secretstore.ErrUnavailable):
+		// The token still authenticates; only its saved copy is unreadable.
+		writeError(writer, http.StatusConflict, "access_token_unreadable", "the saved access token does not decrypt on this device; create a new token to see its value")
 	case errors.Is(err, storage.ErrInvalidRecord):
 		writeError(writer, http.StatusInternalServerError, "persisted_state_invalid", "persisted access token state failed validation")
 	default:

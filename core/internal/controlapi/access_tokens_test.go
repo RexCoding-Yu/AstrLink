@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
+	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
@@ -194,6 +196,11 @@ func TestAccessTokenControlAPISanitizesManagerErrors(t *testing.T) {
 	response = accessTokenRequest(t, handler, http.MethodGet, AccessTokensPath+"/token_missing/secret", "", "")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("missing reveal status=%d body=%s", response.Code, response.Body.String())
+	}
+	manager.revealErr = fmt.Errorf("%w: local_access_token_secrets token_01 does not decrypt on this device", secretstore.ErrUnavailable)
+	response = accessTokenRequest(t, handler, http.MethodGet, AccessTokensPath+"/token_01/secret", "", "")
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"access_token_unreadable"`) {
+		t.Fatalf("unreadable reveal status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -10,6 +11,37 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 )
+
+func TestClassifyCodexSessionHeaders(t *testing.T) {
+	for _, test := range []struct {
+		name, path, session, conversation, want string
+	}{
+		{"session", "/v1/responses", "thread-new", "", "thread-new"},
+		{"conversation fallback", "/v1/responses", "", "thread-new", "thread-new"},
+		{"session wins", "/v1/responses", "thread-new", "thread-old", "thread-new"},
+		{"compact", "/v1/responses/compact", "thread-new", "", "thread-new"},
+		{"trimmed", "/v1/responses", "  thread-new  ", "", "thread-new"},
+		{"control rejected", "/v1/responses", "thread\x00new", "", ""},
+		{"long rejected", "/v1/responses", strings.Repeat("x", 257), "", ""},
+		{"invalid fallback", "/v1/responses", "thread\x00new", "thread-valid", "thread-valid"},
+		{"other protocol", "/v1/chat/completions", "thread-new", "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const body = `{"model":"public","prompt_cache_key":"shared","input":"hello"}`
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(body))
+			request.Header.Set("Session_id", test.session)
+			request.Header.Set("Conversation_id", test.conversation)
+			classified, err := classify(request, 0)
+			if err != nil || classified.Conversation.SessionCursor != test.want {
+				t.Fatalf("session cursor = %q, want %q, err = %v", classified.Conversation.SessionCursor, test.want, err)
+			}
+			preserved, err := io.ReadAll(request.Body)
+			if err != nil || string(preserved) != body || request.Header.Get("Session_id") != test.session || request.Header.Get("Conversation_id") != test.conversation {
+				t.Fatal("session inspection changed the caller's request")
+			}
+		})
+	}
+}
 
 func TestInputPreviewIsNewestVisibleUserText(t *testing.T) {
 	tests := []struct {

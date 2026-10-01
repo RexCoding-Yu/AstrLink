@@ -15,6 +15,8 @@ import (
 
 type fakePrivacyModelRegistry struct {
 	catalog        contract.PrivacyModelCatalogResponse
+	releases       contract.PrivacyModelCatalogResponse
+	releasesErr    error
 	probeResponse  contract.PrivacyModelProbeResponse
 	probeErr       error
 	installErr     error
@@ -30,6 +32,12 @@ type fakePrivacyModelRegistry struct {
 
 func (registry *fakePrivacyModelRegistry) Catalog() contract.PrivacyModelCatalogResponse {
 	return registry.catalog
+}
+
+func (registry *fakePrivacyModelRegistry) CatalogReleases(
+	context.Context,
+) (contract.PrivacyModelCatalogResponse, error) {
+	return registry.releases, registry.releasesErr
 }
 
 func (registry *fakePrivacyModelRegistry) Probe(
@@ -214,8 +222,45 @@ func TestPrivacyModelCollectionRoutesAndSelectedDeleteGuard(t *testing.T) {
 	}
 	var catalog contract.PrivacyModelCatalogResponse
 	decode(t, response, &catalog)
-	if len(catalog.Items) != 1 || catalog.Items[0].ID != privacymodel.CatalogPPLXPIITracer {
+	if len(catalog.Items) != 2 ||
+		catalog.Items[0].ID != privacymodel.CatalogAstrLinkGuard ||
+		!catalog.Items[0].Recommended ||
+		catalog.Items[1].ID != privacymodel.CatalogPPLXPIITracer {
 		t.Fatalf("catalog=%#v", catalog)
+	}
+
+	registry.releases = contract.PrivacyModelCatalogResponse{
+		Items: catalog.Items[:1],
+	}
+	response = policyRequest(
+		t,
+		handler,
+		http.MethodGet,
+		PrivacyModelReleasesPath,
+		"",
+		"",
+		"",
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("releases status=%d body=%s", response.Code, response.Body.String())
+	}
+	var releases contract.PrivacyModelCatalogResponse
+	decode(t, response, &releases)
+	if len(releases.Items) != 1 || releases.Items[0].Version == nil {
+		t.Fatalf("releases=%#v", releases)
+	}
+	registry.releasesErr = privacymodel.ErrRemoteMetadata
+	response = policyRequest(
+		t,
+		handler,
+		http.MethodGet,
+		PrivacyModelReleasesPath,
+		"",
+		"",
+		"",
+	)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("releases failure status=%d body=%s", response.Code, response.Body.String())
 	}
 
 	license := "apache-2.0"
@@ -396,6 +441,8 @@ func TestPrivacyModelRoutesRejectQueriesUnknownFieldsAndWrongMethods(t *testing.
 	}{
 		{http.MethodGet, PrivacyModelCatalogPath + "?x=1", "", "", http.StatusBadRequest},
 		{http.MethodPost, PrivacyModelCatalogPath, "", "", http.StatusMethodNotAllowed},
+		{http.MethodGet, PrivacyModelReleasesPath + "?x=1", "", "", http.StatusBadRequest},
+		{http.MethodPost, PrivacyModelReleasesPath, "", "", http.StatusMethodNotAllowed},
 		{http.MethodGet, PrivacyModelProbePath, "", "", http.StatusMethodNotAllowed},
 		{http.MethodGet, PrivacyModelLocalProbePath, "", "", http.StatusMethodNotAllowed},
 		{http.MethodPost, PrivacyModelLocalProbePath + "?x=1", "application/json", `{}`, http.StatusBadRequest},

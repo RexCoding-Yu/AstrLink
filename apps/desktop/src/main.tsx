@@ -17,6 +17,8 @@ import App from "./App";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { getPreferences } from "./bridge";
 import { applyLocale, i18n, useT } from "./i18n";
+import { RawAccessApprovalWindow } from "./RawAccessApprovalWindow";
+import { isRawAccessApprovalWindow } from "./raw-access-approval-window";
 import { TrajectoryInspectorWindow } from "./TrajectoryInspectorWindow";
 import { isTrajectoryInspectorWindow } from "./trajectory-inspector-window";
 import { TrayPopoverWindow } from "./TrayPopover";
@@ -31,6 +33,7 @@ import {
 } from "./quota-display";
 import { isThemePreference } from "./theme-model";
 import { initializeScrollbarAutoHide } from "./lib/scrollbar-auto-hide";
+import { initializeScrollbarGutter } from "./lib/scrollbar-gutter";
 import "./styles/globals.css";
 
 const root = document.getElementById("root");
@@ -48,6 +51,7 @@ if (trayPopover) document.documentElement.dataset.surface = "tray-popover";
 
 initializeTheme();
 initializeScrollbarAutoHide();
+initializeScrollbarGutter();
 
 async function loadPreferences(): Promise<void> {
   let themeUpdated = false;
@@ -92,6 +96,8 @@ const surface = trayPopover ? (
   <TrayPopoverWindow />
 ) : isTrajectoryInspectorWindow() ? (
   <TrajectoryInspectorWindow />
+) : isRawAccessApprovalWindow() ? (
+  <RawAccessApprovalWindow />
 ) : (
   <App />
 );

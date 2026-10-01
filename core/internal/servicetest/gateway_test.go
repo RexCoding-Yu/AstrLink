@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/ingress"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
+	"github.com/QuantumNous/astrlink/core/internal/storage/rawseal"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
 )
@@ -173,14 +174,55 @@ func TestGatewayPrivacyAndRecords(t *testing.T) {
 	}
 }
 
+// gatewayRawKey gives the store a raw sealing key a raw password protects,
+// so raw captures are kept, and returns its private key.
+func gatewayRawKey(t *testing.T, store *sqlite.Store) []byte {
+	t.Helper()
+	private, public, err := rawseal.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const keyID = 7
+	kdf := rawseal.KDFParams{Algorithm: "argon2id", Version: 19, Time: 1, MemoryKiB: 64, Threads: 1}
+	wrapped, err := rawseal.WrapPassword(private, []byte("gateway raw password"), kdf, keyID, public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdfJSON, err := wrapped.KDFJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRawSealingKey(context.Background(), storage.NewRawSealingKey{
+		KeyID: keyID, PublicKey: public,
+		Envelopes: []storage.RawKeyEnvelope{{
+			Kind: rawseal.KindPassword, KDFJSON: kdfJSON, Salt: wrapped.Salt, Nonce: wrapped.Nonce, Wrapped: wrapped.Wrapped,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return private
+}
+
 func TestGatewayAuditUsesExistingCaptureSettings(t *testing.T) {
-	for _, capture := range []bool{false, true} {
-		t.Run(fmt.Sprint(capture), func(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		capture, password bool
+	}{
+		{name: "off"},
+		{name: "on without raw password", capture: true},
+		{name: "on with raw password", capture: true, password: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capture := test.capture
 			store := gatewayStore(t)
 			settings := contract.DefaultAuditSettings()
 			settings.RequestBodyEnabled, settings.ResponseContentEnabled = capture, capture
 			if err := store.UpdateAuditSettings(context.Background(), settings); err != nil {
 				t.Fatal(err)
+			}
+			var rawPrivate []byte
+			if test.password {
+				rawPrivate = gatewayRawKey(t, store)
 			}
 			deps := gatewayDependencies(t, store)
 			deps.PrivacyFilter = gatewayPrivacy(t, privacy.Policy{Enabled: true, Mode: privacy.ModeRegex, Action: privacy.ActionRedact, ResponseRestore: true})
@@ -209,26 +251,57 @@ func TestGatewayAuditUsesExistingCaptureSettings(t *testing.T) {
 				t.Fatal(err)
 			}
 			plain := map[storage.AuditDirection]string{}
+			var notKept []storage.AuditDirection
 			for _, blob := range blobs {
 				if bytes.Contains(blob.Ciphertext, []byte("alice@example.com")) {
 					t.Fatal("plaintext audit storage")
 				}
-				body, err := storage.OpenAuditBlob(key, blob.Nonce, blob.Ciphertext)
+				partKey := key
+				switch blob.Sealing {
+				case storage.AuditSealingNone:
+					// Raw parts captured while no raw password is set are
+					// not kept.
+					notKept = append(notKept, blob.Direction)
+					continue
+				case storage.AuditSealingRawV1:
+					if rawPrivate == nil {
+						t.Fatalf("%s is sealed to a raw key without a raw password", blob.Direction)
+					}
+					partKey, err = rawseal.OpenBlobKey(rawPrivate, rawseal.BlobKeyInfo(string(blob.RequestID), string(blob.Direction)), blob.WrappedKey)
+					if err != nil {
+						t.Fatal(err)
+					}
+				default:
+					if blob.Exposure == storage.AuditExposureRaw {
+						t.Fatalf("%s is raw but kept under the audit key", blob.Direction)
+					}
+				}
+				body, err := storage.OpenAuditBlob(partKey, blob.Nonce, blob.Ciphertext)
 				if err != nil {
 					t.Fatal(err)
 				}
 				plain[blob.Direction] = string(body)
 			}
-			if len(plain) != 2 && !capture || len(plain) != 6 && capture {
-				t.Fatalf("capture=%t audit directions=%v", capture, plain)
+			wantKept, wantNotKept := 2, 0
+			if capture && test.password {
+				wantKept = 6
+			} else if capture {
+				// The client request holds the address and the response
+				// restored it: both are raw.
+				wantKept, wantNotKept = 4, 2
+			}
+			if len(plain) != wantKept || len(notKept) != wantNotKept {
+				t.Fatalf("capture=%t password=%t audit directions=%v not kept=%v", capture, test.password, plain, notKept)
+			}
+			if test.password && (!strings.Contains(plain[storage.AuditDirectionRequest], "alice@example.com") ||
+				plain[storage.AuditDirectionResponse] != result.RawResponse) {
+				t.Fatalf("raw audit sides differ from actual gateway bodies: %v", plain)
 			}
 			if strings.Contains(plain[storage.AuditDirectionUpstreamHTTPMeta], "test-secret-value") {
 				t.Fatal("credential leaked to metadata")
 			}
-			if capture && (!strings.Contains(plain[storage.AuditDirectionRequest], "alice@example.com") ||
-				strings.Contains(plain[storage.AuditDirectionUpstreamRequest], "alice@example.com") ||
-				!strings.Contains(plain[storage.AuditDirectionUpstreamResponse], "PRIVATE_EMAIL_") ||
-				plain[storage.AuditDirectionResponse] != result.RawResponse) {
+			if capture && (strings.Contains(plain[storage.AuditDirectionUpstreamRequest], "alice@example.com") ||
+				!strings.Contains(plain[storage.AuditDirectionUpstreamResponse], "PRIVATE_EMAIL_")) {
 				t.Fatalf("audit sides differ from actual gateway bodies: %v", plain)
 			}
 		})

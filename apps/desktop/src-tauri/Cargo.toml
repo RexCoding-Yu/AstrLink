@@ -18,8 +18,16 @@ base64 = "=0.22.1"
 minisign-verify = "=0.2.4"
 semver = "=1.0.28"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+# Canonical Windows paths without the \\?\ prefix, which Node cannot load as a
+# main script.
+dunce = "=1.0.5"
 getrandom = "=0.2.17"
+# http + hyper-util: the same system-proxy matcher reqwest (and Codex) uses,
+# read for the client proxy self-check.
+http = "=1.4.2"
+hyper-util = { version = "=0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
 iana-time-zone = "=0.1.65"
+jsonc-parser = { version = "=0.34.0", features = ["cst"] }
 reqwest = { version = "=0.12.23", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
@@ -31,17 +39,27 @@ toml_edit = "=0.22.22"
 tauri = { version = "=2.11.5", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-autostart = "=2.5.1"
 tauri-plugin-clipboard-manager = "=2.3.3"
+tauri-plugin-deep-link = "=2.4.10"
 tauri-plugin-dialog = "=2.5.0"
 tauri-plugin-notification = "=2.4.0"
 tauri-plugin-opener = "=2.5.4"
-tauri-plugin-single-instance = "=2.4.3"
+# deep-link: a second launch forwards its astrlink:// link to the running app.
+tauri-plugin-single-instance = { version = "=2.4.3", features = ["deep-link"] }
 tauri-plugin-shell = "=2.3.5"
 tauri-plugin-updater = "=2.12.0"
 tokio = { version = "=1.47.1", features = ["sync", "time", "macros"] }
+zeroize = { version = "=1.9.0", features = ["serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "=0.10.1"
 mac-notification-sys = "=0.6.15"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "libc",
+  "NSRunningApplication",
+  "NSWorkspace",
+] }
+security-framework = "=3.7.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
@@ -51,6 +69,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Storage_FileSystem",
+  "Win32_System_Registry",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }

@@ -1,0 +1,19 @@
+# Keep SHA-pinned workflow actions current. Go, Rust and npm dependencies are
+# covered by the vulnerability scans in CI instead.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Let a fresh release age before adopting it.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    ignore:
+      # Pinned to its untagged `stable` branch; bump the SHA by hand.
+      - dependency-name: dtolnay/rust-toolchain

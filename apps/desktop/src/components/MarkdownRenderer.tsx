@@ -1,6 +1,10 @@
+import type { ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { useT } from "@/i18n";
+import { cn } from "@/lib/utils";
+import { openInSystemBrowser } from "./ExternalLink";
 import { Checkbox } from "./ui/checkbox";
 import {
   Table,
@@ -10,6 +14,98 @@ import {
   TableHeader,
   TableRow,
 } from "./ui/table";
+
+const alertTones = {
+  note: {
+    box: "border-violet bg-violet-wash",
+    title: "text-violet-foreground",
+  },
+  tip: {
+    box: "border-success bg-success-wash",
+    title: "text-success-foreground",
+  },
+  important: {
+    box: "border-primary bg-accent",
+    title: "text-accent-foreground",
+  },
+  warning: {
+    box: "border-warning bg-warning-wash",
+    title: "text-warning-foreground",
+  },
+  caution: {
+    box: "border-destructive bg-danger-wash",
+    title: "text-danger-foreground",
+  },
+};
+type AlertKind = keyof typeof alertTones;
+
+function isAlertKind(value: unknown): value is AlertKind {
+  return typeof value === "string" && Object.hasOwn(alertTones, value);
+}
+
+const alertMarker =
+  /^\[!(note|tip|important|warning|caution)\][^\S\r\n]*(\r?\n)?/i;
+
+type MarkdownNode = {
+  type: string;
+  value?: string;
+  children?: MarkdownNode[];
+  data?: { hProperties?: Record<string, unknown> };
+};
+
+// GitHub alerts: a blockquote whose first line is only `[!NOTE]` (or TIP,
+// IMPORTANT, WARNING, CAUTION). The marker is removed and the kind is passed
+// to the blockquote renderer as `data-alert`.
+function remarkAlerts() {
+  return function mark(node: MarkdownNode) {
+    node.children?.forEach(mark);
+    if (node.type !== "blockquote" || !node.children) return;
+    const paragraph = node.children[0];
+    const lines = paragraph?.type === "paragraph" ? paragraph.children : null;
+    const text = lines?.[0];
+    if (!lines || text?.type !== "text" || text.value === undefined) return;
+    const match = alertMarker.exec(text.value);
+    if (!match) return;
+    const rest = text.value.slice(match[0].length);
+    const lineEnds =
+      match[2] !== undefined ||
+      (rest === "" && (lines.length === 1 || lines[1].type === "break"));
+    if (!lineEnds) return;
+    text.value = rest;
+    if (rest === "") lines.shift();
+    if (lines[0]?.type === "break") lines.shift();
+    if (lines.length === 0) node.children.shift();
+    node.data = {
+      ...node.data,
+      hProperties: {
+        ...node.data?.hProperties,
+        dataAlert: match[1].toLowerCase(),
+      },
+    };
+  };
+}
+
+function MarkdownAlert({
+  kind,
+  children,
+}: {
+  kind: AlertKind;
+  children: ReactNode;
+}) {
+  const t = useT();
+  const tone = alertTones[kind];
+  return (
+    <div
+      data-alert={kind}
+      className={cn("space-y-1 rounded-r-md border-l-2 px-3 py-2", tone.box)}
+    >
+      <p className={cn("text-xs font-semibold", tone.title)}>
+        {t(`markdownContent.alert.${kind}`)}
+      </p>
+      {children}
+    </div>
+  );
+}
 
 const components: Components = {
   h1: ({ children }) => <h3 className="text-base font-semibold">{children}</h3>,
@@ -28,11 +124,16 @@ const components: Components = {
     </ol>
   ),
   li: ({ children }) => <li className="[&>p]:inline">{children}</li>,
-  blockquote: ({ children }) => (
-    <blockquote className="border-l-2 pl-3 text-muted-foreground">
-      {children}
-    </blockquote>
-  ),
+  blockquote: ({ children, node }) => {
+    const alert = node?.properties.dataAlert;
+    return isAlertKind(alert) ? (
+      <MarkdownAlert kind={alert}>{children}</MarkdownAlert>
+    ) : (
+      <blockquote className="border-l-2 pl-3 text-muted-foreground">
+        {children}
+      </blockquote>
+    );
+  },
   pre: ({ children }) => (
     <pre className="max-w-full overflow-x-auto rounded-md border bg-background p-3 text-xs [&>code]:bg-transparent [&>code]:p-0">
       {children}
@@ -52,6 +153,7 @@ const components: Components = {
         target="_blank"
         rel="noopener noreferrer"
         className="text-primary underline underline-offset-2"
+        onClick={(event) => openInSystemBrowser(event, href)}
       >
         {children}
       </a>
@@ -81,7 +183,10 @@ export default function MarkdownRenderer({ content }: { content: string }) {
   return (
     <div className="min-w-0 space-y-3">
       {/* Keep raw HTML as text and retain react-markdown's safe URL handling. */}
-      <Markdown remarkPlugins={[remarkGfm]} components={components}>
+      <Markdown
+        remarkPlugins={[remarkGfm, remarkAlerts]}
+        components={components}
+      >
         {content}
       </Markdown>
     </div>

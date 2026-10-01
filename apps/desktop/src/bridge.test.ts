@@ -13,9 +13,19 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("./download-text-file", () => downloadMocks);
 
 import {
+  acknowledgeRawKey,
+  decideRawAccess,
+  getLocalDataStatus,
+  getRawSealingStatus,
+  listRawAccess,
+  revokeRawGrant,
+  lockRaw,
+  setRawPassword,
+  unlockRaw,
   cancelPrivacyModelInstallation,
   pausePrivacyModelInstallation,
   resumePrivacyModelInstallation,
+  copyAccessToken,
   createAccessToken,
   createService,
   deleteAccessToken,
@@ -25,6 +35,7 @@ import {
   getCoreStatus,
   getPreferences,
   getPrivacyModelCatalog,
+  getPrivacyModelReleases,
   getPrivacyModelInstallation,
   getPrivacyPolicy,
   getService,
@@ -48,7 +59,6 @@ import {
   probeServiceProxy,
   testService,
   probePrivacyModel,
-  revealAccessToken,
   restartCore,
   updateService,
   updatePrivacyPolicy,
@@ -58,7 +68,17 @@ import {
   listServiceRiskEvents,
   logoutService,
   openAuthorizationURL,
+  isCCSwitchInstalled,
   openCCSwitchImport,
+  getClientConfigStatus,
+  checkClientProxy,
+  applyClientConfig,
+  removeClientConfig,
+  previewClientConfigSnippet,
+  copyClientConfigSnippet,
+  confirmProviderImport,
+  dismissProviderImport,
+  getPendingProviderImport,
   saveTextFile,
   getAgentDebugStatus,
   installAgentDebug,
@@ -78,6 +98,7 @@ function validSnapshot(): Record<string, unknown> {
       control_api_version: "v1",
       protocol_contract_version: "v1",
       inference_url: "http://127.0.0.1:8317",
+      client_inference_url: "http://localhost:8317",
       control_url: "http://127.0.0.1:49152",
     },
     last_error: null,
@@ -96,6 +117,226 @@ function validSnapshot(): Record<string, unknown> {
 }
 
 describe("desktop bridge contract", () => {
+  it("lists raw access requests and forwards a decision's proof once", async () => {
+    const grant = {
+      grant_id: "rawgrant_0123456789abcdef",
+      request_id: "request_1",
+      status: "pending",
+      reason: "the upstream rejected the email field",
+      client_name: "claude-code",
+      created_at: "2026-09-28T10:00:00Z",
+      expires_at: "2026-09-28T10:10:00Z",
+    };
+    const running = {
+      ...grant,
+      grant_id: "rawgrant_fedcba9876543210",
+      status: "approved",
+      decision: "window_1h",
+      scope: "all_requests",
+    };
+    invokeMock.mockResolvedValueOnce({
+      items: [grant],
+      active: [running],
+      unlocked: true,
+    });
+    await expect(listRawAccess()).resolves.toEqual({
+      pending: [{ ...grant, decision: null, scope: null }],
+      active: [running],
+      unlocked: true,
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("list_raw_access");
+
+    invokeMock.mockResolvedValueOnce({
+      outcome: "decided",
+      grant: { ...grant, status: "approved", decision: "once" },
+    });
+    await expect(
+      decideRawAccess(grant.grant_id, "once", {
+        kind: "password",
+        password: "correct horse",
+      }),
+    ).resolves.toMatchObject({
+      outcome: "decided",
+      grant: { status: "approved", decision: "once" },
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("decide_raw_access", {
+      grantId: grant.grant_id,
+      decision: "once",
+      proof: { kind: "password", password: "correct horse" },
+    });
+
+    // A denial never carries a proof, even if the caller passes one.
+    invokeMock.mockResolvedValueOnce({ outcome: "not_pending" });
+    await expect(
+      decideRawAccess(grant.grant_id, "deny", {
+        kind: "password",
+        password: "correct horse",
+      }),
+    ).resolves.toEqual({ outcome: "not_pending" });
+    expect(invokeMock).toHaveBeenLastCalledWith("decide_raw_access", {
+      grantId: grant.grant_id,
+      decision: "deny",
+      proof: null,
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      outcome: "backoff",
+      retry_after_seconds: 8,
+    });
+    await expect(
+      decideRawAccess(grant.grant_id, "window_5m", {
+        kind: "password",
+        password: "wrong",
+      }),
+    ).resolves.toEqual({ outcome: "backoff", retry_after_seconds: 8 });
+
+    // While Core is unlocked an approval carries no proof; Core asks for one
+    // if it locked in the meantime.
+    invokeMock.mockResolvedValueOnce({ outcome: "proof_required" });
+    await expect(decideRawAccess(grant.grant_id, "window_1h")).resolves.toEqual(
+      { outcome: "proof_required" },
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("decide_raw_access", {
+      grantId: grant.grant_id,
+      decision: "window_1h",
+      proof: null,
+    });
+
+    invokeMock.mockResolvedValueOnce({ ...running, status: "revoked" });
+    await expect(revokeRawGrant(running.grant_id)).resolves.toMatchObject({
+      status: "revoked",
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("revoke_raw_grant", {
+      grantId: running.grant_id,
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      items: [{ ...grant, grant_id: "x" }],
+      active: [],
+      unlocked: false,
+    });
+    await expect(listRawAccess()).rejects.toThrow("$.items[0].grant_id");
+    invokeMock.mockResolvedValueOnce({ items: [], unlocked: false });
+    await expect(listRawAccess()).rejects.toThrow("$.active");
+    invokeMock.mockResolvedValueOnce({ outcome: "approved" });
+    await expect(decideRawAccess(grant.grant_id, "deny")).rejects.toThrow(
+      "$.outcome",
+    );
+  });
+
+  it("reads raw sealing state and forwards unlock and password proofs", async () => {
+    const status = {
+      raw_available: true,
+      configured: true,
+      password_set: true,
+      password_required: false,
+      envelopes: ["password"],
+      key_verified: true,
+      unlocked: false,
+      unlock_expires_at: null,
+      unlock_idle_seconds: 900,
+      retry_after_seconds: 0,
+      password_min_length: 8,
+      password_max_length: 128,
+      key_replaced: false,
+    };
+    invokeMock.mockResolvedValueOnce(status);
+    await expect(getRawSealingStatus()).resolves.toEqual(status);
+    expect(invokeMock).toHaveBeenLastCalledWith("raw_sealing_status");
+
+    const unlocked = {
+      ...status,
+      unlocked: true,
+      unlock_expires_at: "2026-09-28T10:15:00Z",
+    };
+    invokeMock.mockResolvedValueOnce({ outcome: "sealing", status: unlocked });
+    await expect(
+      unlockRaw({ kind: "password", password: "correct horse" }),
+    ).resolves.toEqual({
+      outcome: "sealing",
+      status: unlocked,
+      reset: null,
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("unlock_raw", {
+      proof: { kind: "password", password: "correct horse" },
+    });
+
+    invokeMock.mockResolvedValueOnce(status);
+    await expect(lockRaw()).resolves.toEqual(status);
+    expect(invokeMock).toHaveBeenLastCalledWith("lock_raw");
+
+    invokeMock.mockResolvedValueOnce({ outcome: "sealing", status });
+    await expect(
+      acknowledgeRawKey({ kind: "password", password: "terminal passphrase" }),
+    ).resolves.toEqual({
+      outcome: "sealing",
+      status,
+      reset: null,
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("acknowledge_raw_key", {
+      proof: { kind: "password", password: "terminal passphrase" },
+    });
+
+    invokeMock.mockResolvedValueOnce(status);
+    await expect(getRawSealingStatus()).resolves.toMatchObject({
+      key_replaced: false,
+    });
+    const { key_replaced: _verdict, ...withoutVerdict } = status;
+    invokeMock.mockResolvedValueOnce(withoutVerdict);
+    await expect(lockRaw()).resolves.toEqual(status);
+    invokeMock.mockResolvedValueOnce({ ...status, key_replaced: "yes" });
+    await expect(lockRaw()).rejects.toThrow("$.key_replaced");
+
+    invokeMock.mockResolvedValueOnce({ outcome: "password_invalid" });
+    await expect(
+      setRawPassword("change", "new passphrase", {
+        kind: "password",
+        password: "old passphrase",
+      }),
+    ).resolves.toEqual({ outcome: "password_invalid" });
+    expect(invokeMock).toHaveBeenLastCalledWith("set_raw_password", {
+      action: "change",
+      password: "new passphrase",
+      proof: { kind: "password", password: "old passphrase" },
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      outcome: "sealing",
+      status: { ...status, reset: { deleted_parts: 4, affected_records: 2 } },
+    });
+    await expect(setRawPassword("reset")).resolves.toEqual({
+      outcome: "sealing",
+      status,
+      reset: { deleted_parts: 4, affected_records: 2 },
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("set_raw_password", {
+      action: "reset",
+      password: null,
+      proof: null,
+    });
+
+    invokeMock.mockResolvedValueOnce({ ...status, envelopes: ["local"] });
+    await expect(getRawSealingStatus()).rejects.toThrow("$.envelopes[0]");
+    invokeMock.mockResolvedValueOnce({ outcome: "decided" });
+    await expect(
+      unlockRaw({ kind: "password", password: "correct horse" }),
+    ).rejects.toThrow("$.outcome");
+  });
+
+  it("reads which saved data no longer decrypts", async () => {
+    const status = {
+      unreadable_credentials: 2,
+      unreadable_access_tokens: 1,
+      audit_key_missing: true,
+    };
+    invokeMock.mockResolvedValueOnce(status);
+    await expect(getLocalDataStatus()).resolves.toEqual(status);
+    expect(invokeMock).toHaveBeenLastCalledWith("local_data_status");
+
+    invokeMock.mockResolvedValueOnce({ ...status, service_ids: ["a"] });
+    await expect(getLocalDataStatus()).rejects.toThrow("service_ids");
+  });
+
   it("validates proxy probe responses without persisting draft credentials", async () => {
     const input = {
       proxy: {
@@ -363,6 +604,32 @@ describe("desktop bridge contract", () => {
   });
 
   it.each([
+    "http://localhost:8318",
+    "http://[::1]:8317",
+    "http://localhost:8317/",
+    "http://127.0.0.1:49152",
+  ])(
+    "rejects a client inference URL %s off the inference port",
+    async (url) => {
+      const wireSnapshot = validSnapshot();
+      (wireSnapshot.ready as any).client_inference_url = url;
+      invokeMock.mockResolvedValueOnce(wireSnapshot);
+
+      await expect(getCoreStatus()).rejects.toThrow("client_inference_url");
+    },
+  );
+
+  it("accepts an IPv4-only client inference URL", async () => {
+    const wireSnapshot = validSnapshot();
+    (wireSnapshot.ready as any).client_inference_url = "http://127.0.0.1:8317";
+    invokeMock.mockResolvedValueOnce(wireSnapshot);
+
+    await expect(getCoreStatus()).resolves.toMatchObject({
+      ready: { client_inference_url: "http://127.0.0.1:8317" },
+    });
+  });
+
+  it.each([
     [
       "ready control version",
       (snapshot: any) => (snapshot.ready.control_api_version = "v2"),
@@ -527,21 +794,22 @@ describe("desktop bridge contract", () => {
       name: "VS Code",
     });
 
-    invokeMock.mockResolvedValueOnce({
-      access_token: secret,
-    });
-    await expect(revealAccessToken("token_01")).resolves.toEqual({
-      access_token: secret,
-    });
-    expect(invokeMock).toHaveBeenLastCalledWith("reveal_access_token", {
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(copyAccessToken("token_01")).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenLastCalledWith("copy_access_token", {
       tokenId: "token_01",
     });
 
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(isCCSwitchInstalled()).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenLastCalledWith("cc_switch_installed");
+    invokeMock.mockResolvedValueOnce("yes");
+    await expect(isCCSwitchInstalled()).resolves.toBe(false);
+
     const ccSwitchInput = {
       tokenId: "token_01",
-      client: "codex" as const,
-      name: "AstrLink",
-      models: { model: "gpt-5" },
+      client: "gemini" as const,
+      models: { model: "gemini-2.5-pro" },
       inferenceUrl: "http://127.0.0.1:8317",
     };
     invokeMock.mockResolvedValueOnce(undefined);
@@ -549,6 +817,106 @@ describe("desktop bridge contract", () => {
     expect(invokeMock).toHaveBeenLastCalledWith(
       "open_cc_switch_import",
       ccSwitchInput,
+    );
+
+    const statuses = [
+      {
+        client: "claude",
+        detected: true,
+        paths: ["/Users/me/.claude/settings.json"],
+        state: "configured",
+        token_id: "token_01",
+      },
+      {
+        client: "codex",
+        detected: false,
+        paths: ["/Users/me/.codex/config.toml"],
+        state: "not_configured",
+        token_id: null,
+      },
+    ];
+    invokeMock.mockResolvedValueOnce(statuses);
+    await expect(
+      getClientConfigStatus("http://127.0.0.1:8317"),
+    ).resolves.toEqual(statuses);
+    expect(invokeMock).toHaveBeenLastCalledWith("client_config_status", {
+      inferenceUrl: "http://127.0.0.1:8317",
+    });
+    invokeMock.mockResolvedValueOnce([statuses[1], statuses[0]]);
+    await expect(getClientConfigStatus(null)).rejects.toThrow(
+      "Invalid client-config IPC response",
+    );
+
+    const proxyCheck = {
+      client: { route: "blocked", proxy: "127.0.0.1:7892" },
+      numeric: null,
+    };
+    invokeMock.mockResolvedValueOnce(proxyCheck);
+    await expect(checkClientProxy("http://localhost:8317")).resolves.toEqual(
+      proxyCheck,
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("check_client_proxy", {
+      inferenceUrl: "http://localhost:8317",
+    });
+    invokeMock.mockResolvedValueOnce({ client: { route: "direct" } });
+    await expect(checkClientProxy("http://localhost:8317")).rejects.toThrow(
+      "Invalid client-config IPC response",
+    );
+
+    const target = {
+      tokenId: "token_01",
+      client: "codex" as const,
+      models: { model: "gpt-5" },
+      inferenceUrl: "http://127.0.0.1:8317",
+    };
+    invokeMock.mockResolvedValueOnce({
+      status: "needs_confirmation",
+      keys: ["model_provider"],
+    });
+    await expect(
+      applyClientConfig({ ...target, replace: false }),
+    ).resolves.toEqual({
+      status: "needs_confirmation",
+      keys: ["model_provider"],
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("apply_client_config", {
+      ...target,
+      replace: false,
+    });
+    invokeMock.mockResolvedValueOnce({ status: "applied" });
+    await expect(
+      applyClientConfig({ ...target, replace: true }),
+    ).resolves.toEqual({ status: "applied" });
+    invokeMock.mockResolvedValueOnce({ status: "applied", keys: [] });
+    await expect(
+      applyClientConfig({ ...target, replace: true }),
+    ).rejects.toThrow("unexpected field");
+
+    invokeMock.mockResolvedValueOnce(undefined);
+    await removeClientConfig("claude");
+    expect(invokeMock).toHaveBeenLastCalledWith("remove_client_config", {
+      client: "claude",
+    });
+
+    invokeMock.mockResolvedValueOnce(
+      'experimental_bearer_token = "astr_…abcd"',
+    );
+    await expect(previewClientConfigSnippet(target)).resolves.toContain(
+      "astr_…abcd",
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      "preview_client_config_snippet",
+      target,
+    );
+    invokeMock.mockResolvedValueOnce(`token = "${secret}"`);
+    await expect(previewClientConfigSnippet(target)).rejects.toThrow(
+      "must show the token hint",
+    );
+    invokeMock.mockResolvedValueOnce(false);
+    await expect(copyClientConfigSnippet(target)).resolves.toBe(false);
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      "copy_client_config_snippet",
+      target,
     );
 
     invokeMock.mockResolvedValueOnce(undefined);
@@ -604,6 +972,8 @@ describe("desktop bridge contract", () => {
       languages: ["en"],
       adapter: "hf_token_classification",
       variants: [variant],
+      version: null,
+      recommended: false,
     };
     const installation = {
       id: installationId,
@@ -700,6 +1070,17 @@ describe("desktop bridge contract", () => {
       items: [catalogModel],
     });
     expect(invokeMock).toHaveBeenLastCalledWith("get_privacy_model_catalog");
+
+    const release = { ...catalogModel, version: "0.2.0", recommended: true };
+    invokeMock.mockResolvedValueOnce({ items: [release] });
+    await expect(getPrivacyModelReleases()).resolves.toEqual({
+      items: [release],
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("get_privacy_model_releases");
+    invokeMock.mockResolvedValueOnce({
+      items: [{ ...release, version: "v0.2.0" }],
+    });
+    await expect(getPrivacyModelReleases()).rejects.toThrow("version");
 
     const probe = {
       repo_id: catalogModel.repo_id,
@@ -918,6 +1299,49 @@ describe("desktop bridge contract", () => {
       updateService(service.id, etag, { name: "Codex personal" }),
     ).resolves.toEqual({ service, etag });
 
+    const importID = "0123456789abcdef0123456789abcdef";
+    const importInput = {
+      name: "Relay",
+      kind: "openai_compatible" as const,
+      enabled: true,
+      models: [],
+      http: {
+        base_url: "https://relay.example/v1",
+        auth: { scheme: "bearer" as const },
+      },
+      capabilities: [
+        { protocol: "openai.chat", mode: "native" as const, streaming: true },
+      ],
+    };
+    invokeMock.mockResolvedValueOnce({ service, etag });
+    await expect(confirmProviderImport(importID, importInput)).resolves.toEqual(
+      { service, etag },
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("confirm_provider_import", {
+      id: importID,
+      input: importInput,
+    });
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(getPendingProviderImport()).resolves.toBeNull();
+    invokeMock.mockResolvedValueOnce({
+      status: "invalid",
+      id: importID,
+      reason: "missing_parameter",
+      field: "base_url",
+    });
+    await expect(getPendingProviderImport()).resolves.toEqual({
+      status: "invalid",
+      id: importID,
+      reason: "missing_parameter",
+      field: "base_url",
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("pending_provider_import");
+    invokeMock.mockResolvedValueOnce(undefined);
+    await dismissProviderImport(importID);
+    expect(invokeMock).toHaveBeenLastCalledWith("dismiss_provider_import", {
+      id: importID,
+    });
+
     const session = {
       id: "authorization_01",
       provider: "openai_codex",
@@ -1051,38 +1475,51 @@ describe("desktop bridge contract", () => {
 
   it("parses agent debug install status and receipt", async () => {
     const status = {
-      canonical_skill: false,
-      mcp_binary: false,
-      mcp_command: "/tmp/astrlink-mcp",
+      cli_binary: false,
       tools: [
         {
           id: "cursor",
           detected: true,
-          skill_installed: false,
-          mcp_installed: false,
-          preview_paths: [
-            "/tmp/.cursor/skills/astrlink-debug",
-            "/tmp/.cursor/mcp.json",
+          skills: [
+            {
+              id: "astrlink-debug",
+              installed: false,
+              preview_paths: [
+                "/tmp/.cursor/skills/astrlink-debug",
+                "/tmp/.astrlink/bin/astrlink",
+              ],
+            },
+            {
+              id: "redaction-placeholders",
+              installed: false,
+              preview_paths: ["/tmp/.cursor/skills/redaction-placeholders"],
+            },
           ],
+          cli_access: "prompt",
+          cli_access_installed: false,
+          guard: "skill_only",
+          guard_installed: false,
         },
       ],
-      shared_paths: ["/tmp/astrlink-mcp"],
+      shared_paths: ["/tmp/.astrlink/agent-installs.json"],
     };
     invokeMock.mockResolvedValueOnce(status);
     await expect(getAgentDebugStatus()).resolves.toEqual(status);
     expect(invokeMock).toHaveBeenLastCalledWith("agent_debug_status");
 
     const receipt = {
-      version: 1,
-      bundle: "astrlink-debug",
-      bundle_version: "0.1.0",
+      version: 2,
+      skills: [{ id: "redaction-placeholders", version: "0.1.0" }],
       installed_at_unix: 1,
-      mcp_binary: "/tmp/astrlink-mcp",
+      cli_binary: null,
       files: ["/tmp/a"],
     };
     invokeMock.mockResolvedValueOnce(receipt);
-    await expect(installAgentDebug(["grok"])).resolves.toEqual(receipt);
+    await expect(
+      installAgentDebug(["redaction-placeholders"], ["grok"]),
+    ).resolves.toEqual(receipt);
     expect(invokeMock).toHaveBeenLastCalledWith("install_agent_debug", {
+      skillIds: ["redaction-placeholders"],
       toolIds: ["grok"],
     });
 

@@ -7,6 +7,8 @@ use crate::{
     protocol::DetectedSpan,
 };
 
+pub mod offset_contract;
+
 const OPENAI_LABEL_COUNT: usize = 33;
 const MAX_LABEL_COUNT: usize = 256;
 
@@ -59,6 +61,7 @@ pub struct Decoder {
     biases: TransitionBiases,
     sensitive: Option<SensitiveCalibration>,
     pplx_biases: Option<(f32, f32)>,
+    offset_consistency: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +146,7 @@ impl Decoder {
             biases,
             sensitive: None,
             pplx_biases: None,
+            offset_consistency: false,
         })
     }
 
@@ -161,6 +165,7 @@ impl Decoder {
             biases: TransitionBiases::default(),
             sensitive: None,
             pplx_biases: None,
+            offset_consistency: false,
         })
     }
 
@@ -296,7 +301,11 @@ impl Decoder {
         } else {
             logits
         };
-        let path = self.viterbi(logits, offsets.len())?;
+        let path = if self.offset_consistency {
+            self.viterbi_offset_consistent(logits, offsets)?
+        } else {
+            self.viterbi(logits, offsets.len())?
+        };
         if self.pplx_biases.is_some() {
             return self.pplx_spans(text_id, logits, offsets, &path, text);
         }
@@ -310,6 +319,15 @@ impl Decoder {
                 )
             })
             .collect::<Vec<_>>();
+        if self.offset_consistency {
+            return offset_contract::decode_offset_spans(
+                text_id,
+                &self.labels,
+                &path,
+                offsets,
+                &probabilities,
+            );
+        }
 
         match self.scheme {
             TagScheme::Bio => decode_bio(

@@ -77,6 +77,24 @@ type officialCodexModel struct {
 // `{models:[{slug,visibility}]}` and the OpenAI-compatible `{data:[{id}]}`
 // shape used by older tests and gateways.
 func DecodeCodexModels(body []byte) (ModelList, error) {
+	list, err := DecodeCodexCatalog(body)
+	if err != nil {
+		return ModelList{}, err
+	}
+	// Codex's auto-review model may be omitted or hidden in the upstream catalog.
+	for _, model := range list.Data {
+		if model.ID == "codex-auto-review" {
+			return list, nil
+		}
+	}
+	list.Data = append(list.Data, ModelRecord{ID: "codex-auto-review", Object: "model"})
+	return list, nil
+}
+
+// DecodeCodexCatalog retains each visible model's complete catalog entry.
+// Unlike subscription discovery, a generic proxy catalog must not invent a
+// subscription-only auto-review model.
+func DecodeCodexCatalog(body []byte) (ModelList, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return ModelList{}, fmt.Errorf("decode codex models: %w", err)
@@ -96,13 +114,6 @@ func DecodeCodexModels(body []byte) (ModelList, error) {
 	if err != nil {
 		return ModelList{}, err
 	}
-	// Codex's auto-review model may be omitted or hidden in the upstream catalog.
-	for _, model := range list.Data {
-		if model.ID == "codex-auto-review" {
-			return list, nil
-		}
-	}
-	list.Data = append(list.Data, ModelRecord{ID: "codex-auto-review", Object: "model"})
 	return list, nil
 }
 
@@ -110,17 +121,21 @@ func decodeOfficialCodexModels(raw json.RawMessage) (ModelList, error) {
 	if !jsonArray(raw) {
 		return ModelList{}, fmt.Errorf("decode codex models: models is not an array")
 	}
-	var models []officialCodexModel
+	var models []json.RawMessage
 	if err := json.Unmarshal(raw, &models); err != nil {
 		return ModelList{}, fmt.Errorf("decode codex models: %w", err)
 	}
 	list := ModelList{Object: "list", Data: make([]ModelRecord, 0, len(models))}
-	for _, model := range models {
+	for _, entry := range models {
+		var model officialCodexModel
+		if err := json.Unmarshal(entry, &model); err != nil {
+			return ModelList{}, fmt.Errorf("decode codex models: %w", err)
+		}
 		slug := strings.TrimSpace(model.Slug)
 		if slug == "" || hiddenCodexVisibility(model.Visibility) {
 			continue
 		}
-		list.Data = append(list.Data, ModelRecord{ID: slug, Object: "model"})
+		list.Data = append(list.Data, ModelRecord{ID: slug, Object: "model", CodexCatalog: entry})
 	}
 	return list, nil
 }

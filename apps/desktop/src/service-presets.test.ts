@@ -8,6 +8,7 @@ import {
   httpServicePresetLabel,
   localConversionTargets,
   protocolEntryPath,
+  serviceSiteForBaseURL,
   supportsLocalConversion,
 } from "./service-presets";
 
@@ -167,11 +168,11 @@ describe("HTTP service product presets", () => {
         mode: "native",
         streaming: true,
       });
-      expect(
-        preset.capabilities.some(
-          ({ protocol }) => protocol === "openai.responses",
-        ),
-      ).toBe(kind !== "glm");
+      expect(preset.capabilities).toContainEqual({
+        protocol: "openai.responses",
+        mode: "native",
+        streaming: true,
+      });
       expect(
         preset.capabilities.some(
           ({ protocol }) => protocol === "openai.responses.compact",
@@ -189,6 +190,95 @@ describe("HTTP service product presets", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it("gives coding plans every native surface behind one bearer key", () => {
+    for (const [kind, baseURL, protocols] of [
+      [
+        "kimi_coding",
+        "https://api.kimi.ai/coding",
+        [
+          "openai.responses",
+          "anthropic.messages",
+          "openai.chat",
+          "openai.models",
+        ],
+      ],
+      [
+        "glm_coding",
+        "https://open.bigmodel.cn/api/coding/paas/v4",
+        ["openai.responses", "anthropic.messages", "openai.chat"],
+      ],
+      [
+        "minimax_coding",
+        "https://api.minimax.cn/v1",
+        [
+          "openai.responses",
+          "anthropic.messages",
+          "openai.chat",
+          "openai.models",
+        ],
+      ],
+    ] as const) {
+      const preset = httpServicePreset(kind);
+      expect(codingPlanPresetIDs).toContain(kind);
+      expect(preset).toMatchObject({ baseURL, authScheme: "bearer" });
+      expect(preset.capabilities.map(({ protocol }) => protocol)).toEqual(
+        protocols,
+      );
+      expect(
+        preset.capabilities.every(
+          ({ mode, convert_to }) =>
+            mode === "native" && convert_to === undefined,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("offers vendor sites so users pick a region instead of typing an address", () => {
+    for (const [kind, global] of [
+      ["glm_coding", "https://api.z.ai/api/coding/paas/v4"],
+      ["minimax_coding", "https://api.minimax.io/v1"],
+      ["qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"],
+      ["moonshot", "https://api.moonshot.ai/v1"],
+      ["glm", "https://api.z.ai/api/paas/v4"],
+      ["minimax", "https://api.minimax.io/v1"],
+    ] as const) {
+      const preset = httpServicePreset(kind);
+      expect(preset.sites.map(({ id }) => id)).toEqual(["cn", "global"]);
+      expect(preset.sites[0]?.baseURL).toBe(preset.baseURL);
+      expect(preset.sites[1]?.baseURL).toBe(global);
+    }
+    for (const kind of httpServicePresetIDs) {
+      const preset = httpServicePreset(kind);
+      expect(preset.sites.length > 0).toBe(preset.baseURL !== "");
+      if (preset.sites.length > 0) {
+        expect(preset.sites[0]?.baseURL).toBe(preset.baseURL);
+      }
+    }
+
+    const minimax = httpServicePreset("minimax_coding");
+    // Saved vendor paths and legacy hosts still belong to their site.
+    expect(
+      serviceSiteForBaseURL(minimax, "https://api.minimax.cn/anthropic"),
+    ).toBe("cn");
+    expect(
+      serviceSiteForBaseURL(minimax, "https://api.minimaxi.com/anthropic"),
+    ).toBe("cn");
+    expect(serviceSiteForBaseURL(minimax, "https://api.minimax.io/v1")).toBe(
+      "global",
+    );
+    expect(
+      serviceSiteForBaseURL(minimax, "https://proxy.example/minimax"),
+    ).toBeNull();
+    expect(serviceSiteForBaseURL(minimax, "not a url")).toBeNull();
+    expect(
+      serviceSiteForBaseURL(
+        httpServicePreset("kimi_coding"),
+        "https://api.kimi.com/coding",
+      ),
+    ).toBe("official");
+    expect(httpServicePreset("newapi").sites).toEqual([]);
   });
 
   it("lists local conversion targets and enables only advertised edges", () => {
@@ -240,5 +330,222 @@ describe("HTTP service product presets", () => {
       capabilities: [],
       advancedOnStart: true,
     });
+  });
+});
+
+describe("default protocol conversions", () => {
+  // Today's core edge table, deliberately confined to the test fixture.
+  const protocols = [
+    "openai.responses",
+    "openai.chat",
+    "anthropic.messages",
+    "google.generate_content",
+  ];
+  const engine = {
+    available: true,
+    edges: protocols.flatMap((from, i) =>
+      protocols
+        .filter((to) => to !== from)
+        .map((to) => ({
+          from,
+          to,
+          streaming: true,
+          quality:
+            i < 2 && protocols.indexOf(to) < 2
+              ? ("good" as const)
+              : i >= 2 && protocols.indexOf(to) >= 2
+                ? ("discouraged" as const)
+                : ("fair" as const),
+        })),
+    ),
+  };
+  it("snapshots every preset with the advertised engine", () => {
+    expect(
+      Object.fromEntries(
+        httpServicePresetIDs.map((id) => [
+          id,
+          httpServicePreset(id, [], engine).capabilities.map(
+            (row) =>
+              `${row.protocol}:${row.mode}:${row.streaming}${row.convert_to ? ` → ${row.convert_to}` : ""}`,
+          ),
+        ]),
+      ),
+    ).toMatchInlineSnapshot(`
+      {
+        "anthropic": [
+          "anthropic.messages:native:true",
+          "openai.models:native:false",
+          "openai.responses:native:true → anthropic.messages",
+          "openai.chat:native:true → anthropic.messages",
+        ],
+        "custom": [],
+        "deepseek": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "openai.models:native:false",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "doubao": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "gemini": [
+          "google.generate_content:native:true",
+          "google.models:native:false",
+          "openai.chat:native:true → google.generate_content",
+          "openai.responses:native:true → google.generate_content",
+        ],
+        "glm": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "glm_coding": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "kimi_coding": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "openai.models:native:false",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "minimax": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "openai.models:native:false",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "minimax_coding": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "openai.models:native:false",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "moonshot": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "openai.models:native:false",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "newapi": [
+          "openai.responses:native:true",
+          "openai.responses.compact:native:false",
+          "anthropic.messages:native:true",
+          "google.generate_content:native:true",
+          "openai.chat:native:true",
+          "openai.completions:native:true",
+          "openai.models:native:false",
+          "google.models:native:false",
+        ],
+        "openai": [
+          "openai.responses:native:true",
+          "openai.responses.compact:native:false",
+          "openai.chat:native:true",
+          "openai.completions:native:true",
+          "openai.models:native:false",
+          "anthropic.messages:native:true → openai.responses",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "openai_compatible": [
+          "openai.chat:native:true",
+          "openai.completions:native:true",
+          "openai.models:native:false",
+          "openai.responses:native:true → openai.chat",
+          "anthropic.messages:native:true → openai.chat",
+          "google.generate_content:native:true → openai.chat",
+        ],
+        "opencode_go": [
+          "openai.responses:native:true",
+          "openai.chat:native:true",
+          "anthropic.messages:native:true",
+          "openai.models:native:false",
+        ],
+        "opencode_zen": [
+          "openai.responses:native:true",
+          "openai.chat:native:true",
+          "anthropic.messages:native:true",
+          "openai.models:native:false",
+        ],
+        "qwen": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "google.generate_content:native:true → openai.responses",
+        ],
+        "xai": [
+          "openai.responses:native:true",
+          "openai.responses.compact:native:false",
+          "anthropic.messages:native:true",
+          "openai.chat:native:true",
+          "openai.completions:native:true",
+          "openai.models:native:false",
+          "google.generate_content:native:true → openai.responses",
+        ],
+      }
+    `);
+  });
+  it.each(httpServicePresetIDs)(
+    "only appends supported conversion rows to %s",
+    (id) => {
+      const original = httpServicePreset(id).capabilities;
+      const current = httpServicePreset(id, [], engine).capabilities;
+      expect(current.slice(0, original.length)).toEqual(original);
+      expect(httpServicePreset(id, [], null).capabilities).toEqual(original);
+      expect(
+        httpServicePreset(id, [], { ...engine, available: false }).capabilities,
+      ).toEqual(original);
+      for (const row of current.slice(original.length)) {
+        expect(engine.edges).toContainEqual({
+          from: row.protocol,
+          to: row.convert_to,
+          quality: expect.stringMatching(/^(good|fair)$/),
+          streaming: true,
+        });
+        expect(original).toContainEqual({
+          protocol: row.convert_to,
+          mode: "native",
+          streaming: true,
+        });
+      }
+      if (["opencode_go", "opencode_zen", "custom", "newapi"].includes(id))
+        expect(current).toEqual(original);
+    },
+  );
+  it("responds to revised Messages/Gemini ratings without changing presets", () => {
+    const revised = {
+      ...engine,
+      edges: engine.edges.map((edge) => ({
+        ...edge,
+        quality:
+          edge.quality === "discouraged" ? ("fair" as const) : edge.quality,
+      })),
+    };
+    for (const [id, from, to] of [
+      ["anthropic", "google.generate_content", "anthropic.messages"],
+      ["gemini", "anthropic.messages", "google.generate_content"],
+    ] as const) {
+      expect(
+        httpServicePreset(id, [], engine).capabilities.some(
+          (row) => row.protocol === from,
+        ),
+      ).toBe(false);
+      expect(httpServicePreset(id, [], revised).capabilities).toContainEqual({
+        protocol: from,
+        mode: "native",
+        streaming: true,
+        convert_to: to,
+      });
+    }
   });
 });

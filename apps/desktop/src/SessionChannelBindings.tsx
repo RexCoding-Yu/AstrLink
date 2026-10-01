@@ -129,7 +129,7 @@ export function SessionChannelBindings({
 
   return (
     <div
-      className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-3"
+      className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-3 [scrollbar-gutter:stable]"
       data-testid="channel-binding-scroll"
     >
       <div className="grid gap-3">

@@ -2,15 +2,20 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AuditPartSection,
   AuditResultSection,
+  AuditWireView,
   HTTPMetaSection,
 } from "./AuditReviewer";
 import type { CopyFeedback } from "./copy-feedback";
-import type { AuditContentPart, AuditHTTPMeta } from "./request-record-model";
+import type {
+  AuditContentPart,
+  AuditHTTPMeta,
+  AuditWithheldPart,
+} from "./request-record-model";
 
 const noopFeedback: CopyFeedback = {
   activeKey: null,
@@ -252,9 +257,9 @@ describe("AuditReviewer sections", () => {
     expect(marks).toHaveLength(1);
     expect(marks[0]?.textContent).toBe("<PRIVATE_EMAIL_aaaaaaaaaaaaaaaa>");
     expect(marks[0]?.getAttribute("data-kind")).toBe("email");
-    expect(marks[0]?.closest("pre")?.textContent).toContain(
-      "alice@example.com",
-    );
+    expect(
+      marks[0]?.closest('[data-testid="json-tree"]')?.textContent,
+    ).toContain("alice@example.com");
     expect(marks[0]?.textContent).not.toContain("alice@");
 
     const copyButton = [...container.querySelectorAll("button")].find(
@@ -301,6 +306,58 @@ describe("AuditReviewer sections", () => {
     ).toHaveLength(2);
   });
 
+  it("parses a large truncated JSON body in slices into a folded tree", async () => {
+    const prompt = `${"long prompt ".repeat(40_000)}prompt-tail`;
+    const content = JSON.stringify({
+      model: "gpt-4.1",
+      input: [{ role: "user", content: prompt }],
+      metadata: { note: "cut-before-this" },
+    }).slice(0, -30);
+    const part: AuditContentPart = {
+      media_type: "application/json",
+      content,
+      truncated: true,
+      captured_bytes: content.length,
+    };
+    await act(async () => {
+      root.render(<AuditWireView mode="structured" part={part} />);
+    });
+    // Past the one-shot size the parse runs in slices off the render.
+    for (let round = 0; round < 50; round += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      if (container.querySelector('[data-testid="json-tree"]')) break;
+    }
+    const tree = container.querySelector('[data-testid="json-tree"]');
+    expect(tree?.textContent).toContain('"model": "gpt-4.1"');
+    expect(tree?.textContent).toContain(
+      `${prompt.length.toLocaleString()} 字符`,
+    );
+    expect(tree?.textContent).not.toContain("prompt-tail");
+    expect(tree?.textContent).toContain("此处截断");
+    expect(container.querySelector('[data-testid="audit-raw"]')).toBeNull();
+  });
+
+  it("falls back to the original text for malformed JSON", async () => {
+    const content = '{"model": "gpt-4.1",, "input": []}';
+    const part: AuditContentPart = {
+      media_type: "application/json",
+      content,
+      truncated: false,
+      captured_bytes: content.length,
+    };
+    await act(async () => {
+      root.render(<AuditWireView mode="structured" part={part} />);
+    });
+    expect(container.textContent).toContain("JSON 无效");
+    expect(container.querySelector('[data-testid="json-tree"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="audit-raw"] pre')?.textContent,
+    ).toBe(content);
+  });
+
   it("renders redacted headers distinctly and reports missing capture", async () => {
     const meta: AuditHTTPMeta = {
       method: "POST",
@@ -334,5 +391,81 @@ describe("AuditReviewer sections", () => {
       await Promise.resolve();
     });
     expect(container.textContent).toContain("此记录未捕获 HTTP 元数据");
+  });
+
+  it("marks a raw-locked part and offers the unlock", async () => {
+    const onUnlock = vi.fn();
+    const withheld: AuditWithheldPart = {
+      reason: "raw_locked",
+      raw_available: true,
+      media_type: "application/json",
+      truncated: false,
+      captured_bytes: 64,
+    };
+    await act(async () => {
+      root.render(
+        <AuditPartSection
+          copyFeedback={noopFeedback}
+          onUnlock={onUnlock}
+          part={null}
+          protocol="openai.responses"
+          sectionKey="request-body"
+          title="客户端请求"
+          withheld={withheld}
+        />,
+      );
+    });
+
+    const body = container.querySelector('[data-slot="audit-part-withheld"]');
+    expect(body?.textContent).toContain("已锁定");
+    expect(body?.textContent).toContain(
+      "原文已封存，输入原文口令解锁后才能查看。",
+    );
+    const unlock = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent?.trim() === "解锁",
+    );
+    await act(async () => unlock?.click());
+    expect(onUnlock).toHaveBeenCalledOnce();
+  });
+
+  it("tells a withheld part apart from one that was never captured", async () => {
+    await act(async () => {
+      root.render(
+        <AuditPartSection
+          copyFeedback={noopFeedback}
+          onUnlock={() => undefined}
+          part={null}
+          protocol="openai.responses"
+          sectionKey="request-body"
+          title="客户端请求"
+          withheld={{
+            reason: "privacy_redacted",
+            raw_available: false,
+            media_type: "application/json",
+            truncated: false,
+            captured_bytes: 64,
+          }}
+        />,
+      );
+    });
+    const body = container.querySelector('[data-slot="audit-part-withheld"]');
+    expect(body?.textContent).toContain("此部分已捕获，当前视图不显示。");
+    expect(body?.textContent).not.toContain("已锁定");
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+
+    await act(async () => {
+      root.render(
+        <AuditPartSection
+          copyFeedback={noopFeedback}
+          part={null}
+          protocol="openai.responses"
+          sectionKey="request-body"
+          title="客户端请求"
+        />,
+      );
+    });
+    expect(
+      container.querySelector('[data-slot="audit-part-withheld"]'),
+    ).toBeNull();
   });
 });

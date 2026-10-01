@@ -44,7 +44,7 @@ func (e *Engine) ConvertRequest(ctx context.Context, in ConvertRequestInput) (Co
 		return ConvertRequestOutput{}, fmt.Errorf("convert request %s to %s: %w", in.From, in.To, err)
 	}
 	setRequestModel(request, upstreamModel)
-	meta := newMeta(publicModel, upstreamModel, in.UpstreamModel != "", in.Streaming || streamed)
+	meta := newMeta(publicModel, upstreamModel, in.UpstreamModel != "", in.Streaming || streamed, ConversionState{})
 	meta.ReasoningConversion = reasoningState
 	result, err := relayconvert.ConvertRequest(ctx, meta, target, request)
 	if err != nil {
@@ -54,7 +54,11 @@ func (e *Engine) ConvertRequest(ctx context.Context, in ConvertRequestInput) (Co
 	if err != nil {
 		return ConvertRequestOutput{}, fmt.Errorf("marshal converted request: %w", err)
 	}
-	return ConvertRequestOutput{ContentType: "application/json", Body: body}, nil
+	return ConvertRequestOutput{
+		ContentType: "application/json", Body: body,
+		State:       ConversionState{responsesTools: meta.ResponsesToolState()},
+		Diagnostics: bridgeDiagnostics(result.Diagnostics),
+	}, nil
 }
 
 func (e *Engine) ConvertResponse(ctx context.Context, in ConvertResponseInput) (ConvertResponseOutput, error) {
@@ -67,7 +71,7 @@ func (e *Engine) ConvertResponse(ctx context.Context, in ConvertResponseInput) (
 		return ConvertResponseOutput{}, err
 	}
 	upstream := firstNonEmpty(in.UpstreamModel, in.PublicModel)
-	meta := newMeta(in.PublicModel, upstream, in.UpstreamModel != "", false)
+	meta := newMeta(in.PublicModel, upstream, in.UpstreamModel != "", false, in.State)
 	result, err := relayconvert.ConvertResponse(ctx, meta, target, response)
 	if err != nil {
 		return ConvertResponseOutput{}, fmt.Errorf("convert response %s to %s: %w", in.From, in.To, err)
@@ -80,19 +84,40 @@ func (e *Engine) ConvertResponse(ctx context.Context, in ConvertResponseInput) (
 	if status == 0 {
 		status = 200
 	}
-	return ConvertResponseOutput{StatusCode: status, ContentType: "application/json", Body: body}, nil
+	return ConvertResponseOutput{
+		StatusCode: status, ContentType: "application/json", Body: body,
+		Diagnostics: bridgeDiagnostics(result.Diagnostics),
+	}, nil
 }
 
-func newMeta(publicModel, upstreamModel string, override, streaming bool) *convmeta.Values {
+// newMeta builds the RelayKit view of one conversion. A response conversion
+// is seeded with the state its request conversion recorded, so tool calls the
+// request encoded for the upstream protocol are restored to their client shape.
+func newMeta(publicModel, upstreamModel string, override, streaming bool, state ConversionState) *convmeta.Values {
 	return &convmeta.Values{
 		OriginModelName:     publicModel,
 		UpstreamModelName:   upstreamModel,
 		ChannelMetaAttached: override,
 		IsStream:            streaming,
+		ResponsesTools:      state.responsesTools,
 		Options: &convmeta.Options{Claude: convmeta.ClaudeOptions{
 			DefaultMaxTokens: func(string) int { return 8192 },
 		}},
 	}
+}
+
+func bridgeDiagnostics(diagnostics []types.ConversionDiagnostic) []ConversionDiagnostic {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	result := make([]ConversionDiagnostic, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		result = append(result, ConversionDiagnostic{
+			Code: diagnostic.Code, Path: diagnostic.Path, Message: diagnostic.Message,
+			Severity: string(diagnostic.Severity),
+		})
+	}
+	return result
 }
 
 // splitReasoningSuffix keeps the reasoning-suffix behaviour RelayKit applied

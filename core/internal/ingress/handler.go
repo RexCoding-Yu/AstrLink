@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,7 +125,7 @@ type Handler struct {
 	auditSettings            AuditSettingsProvider
 	auditBlobs               AuditBlobPersister
 	recordLogger             func(string, ...any)
-	allowedHost              string
+	allowedHosts             []string
 	responseStartTimeout     time.Duration
 	metadataSlots            chan struct{}
 	maxRequestBodyBytes      int64
@@ -174,6 +176,15 @@ func ValidateResponseStartTimeoutSeconds(n int) error {
 const PolicyWarningHeader = "X-AstrLink-Policy-Warning"
 
 const PrivacyWarningHeader = PolicyWarningHeader
+
+// ReachabilityPath answers a token-less, unrecorded probe so the desktop can
+// tell whether a client's HTTP stack (including any system proxy) reaches
+// this gateway. It reveals nothing beyond the marker header.
+const ReachabilityPath = "/astrlink/reachability"
+
+// ReachabilityHeader marks a reachability response as coming from this
+// gateway rather than from an intercepting proxy.
+const ReachabilityHeader = "X-AstrLink-Reachable"
 
 type accessTokenIDContextKey struct{}
 
@@ -227,7 +238,7 @@ func NewWithDependencies(dependencies Dependencies) *Handler {
 		auditSettings:         dependencies.AuditSettings,
 		auditBlobs:            dependencies.AuditBlobs,
 		recordLogger:          dependencies.RecordLogger,
-		allowedHost:           dependencies.AllowedHost,
+		allowedHosts:          allowedHostAliases(dependencies.AllowedHost),
 		responseStartTimeout:  dependencies.ResponseStartTimeout,
 		metadataSlots:         make(chan struct{}, metadataInspectionLimit(dependencies.MaxConcurrentInspections)),
 		maxRequestBodyBytes:   int64(dependencies.MaxRequestBodyMiB) << 20,
@@ -242,6 +253,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	// The policy warning header is owned by this local response boundary.
 	// Strip any client-supplied value so it cannot be spoofed upstream.
 	request.Header.Del(PolicyWarningHeader)
+	if builtinInternalFrom(request.Context()) == nil && request.URL.Path == ReachabilityPath {
+		handler.serveReachability(writer, request)
+		return
+	}
 	if builtinInternalFrom(request.Context()) == nil && !handler.allowInferenceBoundary(writer, request) {
 		return
 	}
@@ -345,10 +360,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if err != nil {
 		// No attempt will read the body, so capture it for the audit now.
 		session.captureUnreadRequestBody(request)
-		var unhealthy *endpoint.UnhealthyCandidatesError
-		if errors.As(err, &unhealthy) {
-			for _, id := range unhealthy.Services {
-				session.noteCandidateRejected(id, "circuit_open")
+		var limited *endpoint.RateLimitedCandidatesError
+		if errors.As(err, &limited) {
+			for _, limit := range limited.Limits {
+				session.noteCandidateRejected(limit.Service, string(contract.RoutingSkipRateLimited))
 			}
 		}
 		handler.writeResolveError(outWriter, request, classified, err)
@@ -412,6 +427,7 @@ func (handler *Handler) applyPrivacy(
 	session.beginPrivacyAttempt()
 	if handler.privacyFilter == nil {
 		session.notePrivacyDecision("allow", contract.RequestStatusSucceeded)
+		session.notePrivacyOutcome(contract.PrivacyDecisionNone, nil)
 		return func() {}, privacyOutcome{}, nil
 	}
 	accessTokenID, _ := AccessTokenIDFromContext(request.Context())
@@ -428,6 +444,7 @@ func (handler *Handler) applyPrivacy(
 		// This branch deliberately does not read, replace, or otherwise touch
 		// request.Body. Disabled policy preserves the original byte path.
 		session.notePrivacyDecision("allow", contract.RequestStatusSucceeded)
+		session.notePrivacyOutcome(contract.PrivacyDecisionNone, nil)
 		return func() {}, privacyOutcome{}, nil
 	}
 	encoding := strings.ToLower(strings.TrimSpace(request.Header.Get("Content-Encoding")))
@@ -468,6 +485,7 @@ func (handler *Handler) applyPrivacy(
 	switch result.Decision {
 	case privacy.DecisionAllow:
 		session.notePrivacyDecision("allow", contract.RequestStatusSucceeded)
+		session.notePrivacyOutcome(contract.PrivacyDecisionAllow, nil)
 		return finish, privacyOutcome{}, nil
 	case privacy.DecisionWarn:
 		// This is a response-only signal. Never add it to request.Header, where
@@ -482,9 +500,11 @@ func (handler *Handler) applyPrivacy(
 			)
 		}
 		session.notePrivacyDecision("warn", contract.RequestStatusSucceeded)
+		session.notePrivacyOutcome(contract.PrivacyDecisionWarn, nil)
 		return finish, privacyOutcome{}, nil
 	case privacy.DecisionBlock:
 		session.notePrivacyDecision("block", contract.RequestStatusBlocked)
+		session.notePrivacyOutcome(contract.PrivacyDecisionBlock, result.Findings)
 		return finish, privacyOutcome{}, errPrivacyBlocked
 	case privacy.DecisionRedact:
 		if buffered == nil {
@@ -494,6 +514,7 @@ func (handler *Handler) applyPrivacy(
 			return finish, privacyOutcome{}, errMetadataTooLarge
 		}
 		buffered.Replace(result.Body)
+		session.notePrivacyOutcome(contract.PrivacyDecisionRedact, result.Findings)
 		mappingCount := uniqueRedactionMappingCount(result.Redactions)
 		session.notePrivacyMapping(
 			policy.ResponseRestore,
@@ -501,7 +522,7 @@ func (handler *Handler) applyPrivacy(
 			privacyHitCounts(result.Redactions),
 		)
 		session.notePrivacyDecision(
-			privacyDecisionSummary(mappingCount, result.NoticeInjected),
+			privacyDecisionSummary(mappingCount, result.NoticeInjected, result.SkillListed),
 			contract.RequestStatusSucceeded,
 		)
 		if !policy.ResponseRestore || len(result.Redactions) == 0 {
@@ -565,11 +586,17 @@ func detectorFailure(err error) (detail, message string) {
 	}
 }
 
-func privacyDecisionSummary(mappingCount int, noticeInjected bool) string {
-	if noticeInjected {
+// privacyDecisionSummary records which path explained the placeholders: the
+// injected notice, or a placeholder skill the client already listed.
+func privacyDecisionSummary(mappingCount int, noticeInjected, skillListed bool) string {
+	switch {
+	case noticeInjected:
 		return fmt.Sprintf("redact · %d · notice", mappingCount)
+	case skillListed:
+		return fmt.Sprintf("redact · %d · skill", mappingCount)
+	default:
+		return fmt.Sprintf("redact · %d", mappingCount)
 	}
-	return fmt.Sprintf("redact · %d", mappingCount)
 }
 
 func (handler *Handler) writePrivacyError(writer http.ResponseWriter, request *http.Request, err error) {
@@ -703,13 +730,54 @@ func (body *privacyBufferedBody) Close() {
 	}
 }
 
-func (handler *Handler) allowInferenceBoundary(writer http.ResponseWriter, request *http.Request) bool {
+// allowedHostAliases accepts the loopback names that reach the same port:
+// clients are configured with localhost, which resolves to either family.
+func allowedHostAliases(allowedHost string) []string {
+	if allowedHost == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(allowedHost)
+	if err != nil || host != "127.0.0.1" {
+		return []string{allowedHost}
+	}
+	return []string{allowedHost, net.JoinHostPort("localhost", port), net.JoinHostPort("::1", port)}
+}
+
+func (handler *Handler) hostAllowed(host string) bool {
+	if handler.allowedHosts == nil {
+		return true
+	}
+	return slices.Contains(handler.allowedHosts, strings.ToLower(host))
+}
+
+func (handler *Handler) allowLocalCaller(writer http.ResponseWriter, request *http.Request) bool {
 	if hasBrowserOrigin(request.Header) {
 		handler.writeRecordedInferenceError(writer, request, http.StatusForbidden, "origin_forbidden", "browser origins cannot call the inference plane", false, nil)
 		return false
 	}
-	if handler.allowedHost != "" && request.Host != handler.allowedHost {
+	if !handler.hostAllowed(request.Host) {
 		handler.writeRecordedInferenceError(writer, request, http.StatusMisdirectedRequest, "host_forbidden", "request Host does not match the inference listener", false, nil)
+		return false
+	}
+	return true
+}
+
+func (handler *Handler) serveReachability(writer http.ResponseWriter, request *http.Request) {
+	if !handler.allowLocalCaller(writer, request) {
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		writer.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writer.Header().Set(ReachabilityHeader, "1")
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *Handler) allowInferenceBoundary(writer http.ResponseWriter, request *http.Request) bool {
+	if !handler.allowLocalCaller(writer, request) {
 		return false
 	}
 	if handler.accessTokenAuthenticator != nil {
@@ -766,6 +834,7 @@ func (handler *Handler) startRecordSession(request *http.Request, classified Req
 	accessTokenID, _ := AccessTokenIDFromContext(request.Context())
 	session := newRecordSession(classified, accessTokenID, handler.loadAuditSettings(request.Context()))
 	session.clientType = detectClientType(request.Header)
+	session.privacyGated = handler.privacyFilter != nil
 	session.bindPersistence(handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 	if handler.requestRecords != nil {
 		session.fingerprinter = handler.sessionFingerprints.get(request.Context(), handler.auditBlobs, handler.recordLogger)
@@ -932,7 +1001,7 @@ func (handler *Handler) writeResolveError(writer http.ResponseWriter, request *h
 	var capabilityErr *endpoint.CapabilityUnavailableError
 	switch {
 	case errors.As(err, &capabilityErr):
-		writeMissingCapability(
+		message := writeMissingCapability(
 			writer,
 			capabilityErr.Protocol,
 			// The resolver saw the routing model; report what the client sent.
@@ -940,13 +1009,9 @@ func (handler *Handler) writeResolveError(writer http.ResponseWriter, request *h
 			capabilityErr.Modes,
 			capabilityErr.Streaming,
 		)
-		session.noteFailed(errorSummaryFromInference(
-			"missing_protocol_capability",
-			"no endpoint provides the requested protocol capability",
-			false,
-		))
+		session.noteFailed(errorSummaryFromInference("missing_protocol_capability", message, false))
 	case errors.Is(err, endpoint.ErrNoEndpoint):
-		writeMissingCapability(
+		message := writeMissingCapability(
 			writer,
 			classified.Protocol,
 			classified.Model,
@@ -956,22 +1021,11 @@ func (handler *Handler) writeResolveError(writer http.ResponseWriter, request *h
 			},
 			classified.Streaming,
 		)
-		session.noteFailed(errorSummaryFromInference(
-			"missing_protocol_capability",
-			"no endpoint provides the requested protocol capability",
-			false,
-		))
+		session.noteFailed(errorSummaryFromInference("missing_protocol_capability", message, false))
 	case errors.Is(err, endpoint.ErrNoHealthyEndpoint):
-		writeInferenceError(writer, http.StatusServiceUnavailable, "upstream_unavailable", fmt.Sprintf(
-			"all endpoints providing protocol %q in native or delegated mode with streaming=%t are temporarily unhealthy",
-			classified.Protocol,
-			classified.Streaming,
-		), true, []errorDetail{{
-			Protocol:          string(classified.Protocol),
-			Reason:            fmt.Sprintf("required mode=native or delegated; streaming=%t", classified.Streaming),
-			RequiredPlanTypes: []string{string(contract.PlanTypeNative), string(contract.PlanTypeDelegated)},
-		}})
-		session.noteFailed(errorSummaryFromInference("upstream_unavailable", "all capable endpoints are temporarily unhealthy", true))
+		var limited *endpoint.RateLimitedCandidatesError
+		_ = errors.As(err, &limited)
+		session.noteFailed(writeRateLimited(writer, classified, limited, time.Now()))
 	case errors.Is(err, endpoint.ErrUnavailable):
 		writeInferenceError(writer, http.StatusServiceUnavailable, "endpoint_resolver_unavailable", "upstream endpoint configuration is not available yet", true, []errorDetail{{
 			Protocol: string(classified.Protocol), RequiredPlanTypes: []string{string(contract.PlanTypeNative), string(contract.PlanTypeDelegated)},
@@ -985,13 +1039,14 @@ func (handler *Handler) writeResolveError(writer http.ResponseWriter, request *h
 	}
 }
 
+// writeMissingCapability returns the message it wrote, for the record.
 func writeMissingCapability(
 	writer http.ResponseWriter,
 	protocol contract.ProtocolID,
 	model string,
 	modes []contract.CapabilityMode,
 	streaming bool,
-) {
+) string {
 	modeDescription, planTypes := capabilityModeDescription(modes)
 	message := fmt.Sprintf(
 		"no enabled endpoint provides protocol %q in %s mode with streaming=%t",
@@ -1016,6 +1071,7 @@ func writeMissingCapability(
 			RequiredPlanTypes: planTypes,
 		}},
 	)
+	return message
 }
 
 func writePlannerCapability(writer http.ResponseWriter, capability *planner.CapabilityUnavailableError) {
@@ -1063,11 +1119,16 @@ func capabilityModeDescription(modes []contract.CapabilityMode) (string, []strin
 }
 
 type errorEnvelope struct {
+	// Type is "error" for Anthropic clients.
+	Type      string         `json:"type,omitempty"`
 	Error     inferenceError `json:"error"`
 	RequestID string         `json:"request_id"`
 }
 
 type inferenceError struct {
+	// Type and Status carry the client protocol's own error classification.
+	Type      string        `json:"type,omitempty"`
+	Status    string        `json:"status,omitempty"`
 	Code      string        `json:"code"`
 	Message   string        `json:"message"`
 	Retryable bool          `json:"retryable"`
@@ -1079,6 +1140,57 @@ type errorDetail struct {
 	ServiceID         string   `json:"service_id,omitempty"`
 	Reason            string   `json:"reason,omitempty"`
 	RequiredPlanTypes []string `json:"required_plan_types,omitempty"`
+	RetryAfterSeconds int      `json:"retry_after_seconds,omitempty"`
+}
+
+// writeRateLimited reports that every route is waiting out the delay its
+// upstream asked for with HTTP 429, so nothing was sent upstream. The record
+// keeps the same text the client received.
+func writeRateLimited(
+	writer http.ResponseWriter,
+	classified Request,
+	limited *endpoint.RateLimitedCandidatesError,
+	now time.Time,
+) contract.ErrorSummary {
+	details := make([]errorDetail, 0)
+	routes := make([]string, 0)
+	retryAfter := 0
+	if limited != nil {
+		for _, limit := range limited.Limits {
+			seconds := max(int(math.Ceil(limit.Until.Sub(now).Seconds())), 1)
+			name := limit.ServiceName
+			if name == "" {
+				name = string(limit.Service)
+			}
+			details = append(details, errorDetail{
+				Protocol:          string(classified.Protocol),
+				ServiceID:         string(limit.Service),
+				Reason:            fmt.Sprintf("upstream answered HTTP 429 for model %q", limit.Model),
+				RetryAfterSeconds: seconds,
+			})
+			routes = append(routes, fmt.Sprintf("%s (model %q, %ds left)", name, limit.Model, seconds))
+		}
+		if retryAt := limited.RetryAt(); !retryAt.IsZero() {
+			retryAfter = max(int(math.Ceil(retryAt.Sub(now).Seconds())), 1)
+		}
+	}
+	subject := "this request"
+	if classified.Model != "" {
+		subject = fmt.Sprintf("model %q", classified.Model)
+	}
+	message := fmt.Sprintf(
+		"every provider for %s answered HTTP 429 and is waiting out the retry delay it asked for; nothing was sent upstream",
+		subject,
+	)
+	if len(routes) > 0 {
+		message += ": " + strings.Join(routes, ", ")
+	}
+	message = contract.ClampRunes(message, 1024)
+	if retryAfter > 0 {
+		writer.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	}
+	writeInferenceError(writer, http.StatusTooManyRequests, "upstream_rate_limited", message, true, details)
+	return errorSummaryFromInference("upstream_rate_limited", message, true)
 }
 
 func writeInferenceError(writer http.ResponseWriter, status int, code, message string, retryable bool, details []errorDetail) {
@@ -1089,11 +1201,89 @@ func writeInferenceError(writer http.ResponseWriter, status int, code, message s
 	header.Set("Cache-Control", "no-store")
 	header.Set("Content-Type", "application/json")
 	header.Set("X-Content-Type-Options", "nosniff")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(errorEnvelope{
+	envelope := errorEnvelope{
 		Error:     inferenceError{Code: code, Message: message, Retryable: retryable, Details: details},
 		RequestID: newRequestID(),
-	})
+	}
+	if session := recordSessionFromWriter(writer); session != nil {
+		// The id the client sees is the record the operator looks up.
+		envelope.RequestID = string(session.id)
+		switch session.classified.Protocol {
+		case contract.ProtocolAnthropicMessages:
+			// Anthropic SDKs classify errors by error.type.
+			envelope.Type = "error"
+			envelope.Error.Type = anthropicErrorType(status)
+		case contract.ProtocolGoogleGenerateContent, contract.ProtocolGoogleModels, contract.ProtocolGoogleEmbeddings:
+			envelope.Error.Status = googleErrorStatus(status)
+		}
+	}
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(envelope)
+}
+
+// recordSessionFromWriter finds the request record behind writer's wrappers.
+func recordSessionFromWriter(writer http.ResponseWriter) *recordSession {
+	for writer != nil {
+		if recorded, ok := writer.(*recordStatusWriter); ok {
+			return recorded.session
+		}
+		wrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil
+		}
+		writer = wrapper.Unwrap()
+	}
+	return nil
+}
+
+func anthropicErrorType(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusPaymentRequired:
+		return "billing_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusGatewayTimeout:
+		return "timeout_error"
+	}
+	if status >= http.StatusInternalServerError {
+		return "api_error"
+	}
+	return "invalid_request_error"
+}
+
+func googleErrorStatus(status int) string {
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return "INVALID_ARGUMENT"
+	case http.StatusUnauthorized:
+		return "UNAUTHENTICATED"
+	case http.StatusForbidden:
+		return "PERMISSION_DENIED"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusConflict:
+		return "ABORTED"
+	case http.StatusTooManyRequests:
+		return "RESOURCE_EXHAUSTED"
+	case http.StatusNotImplemented:
+		return "UNIMPLEMENTED"
+	case http.StatusServiceUnavailable:
+		return "UNAVAILABLE"
+	case http.StatusGatewayTimeout:
+		return "DEADLINE_EXCEEDED"
+	}
+	if status >= http.StatusInternalServerError {
+		return "INTERNAL"
+	}
+	return "FAILED_PRECONDITION"
 }
 
 func newRequestID() string {

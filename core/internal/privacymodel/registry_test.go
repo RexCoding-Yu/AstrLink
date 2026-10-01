@@ -18,7 +18,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
@@ -209,6 +208,8 @@ func TestRegistryRetriesTransientAssetFailuresAndLogsSanitizedReason(t *testing.
 	repository.transientFailures["model_int8.onnx"] = 2
 	var logMu sync.Mutex
 	var logs []string
+	// The ready line is logged after the status is published.
+	readyLogged := make(chan struct{})
 	registry, err := NewRegistry(context.Background(), RegistryConfig{
 		RootDirectory:        filepath.Join(t.TempDir(), "models"),
 		MetadataBaseURL:      repository.server.URL,
@@ -218,6 +219,9 @@ func TestRegistryRetriesTransientAssetFailuresAndLogsSanitizedReason(t *testing.
 			logMu.Lock()
 			defer logMu.Unlock()
 			logs = append(logs, fmt.Sprintf(format, arguments...))
+			if strings.HasPrefix(format, "privacy model download ready:") {
+				close(readyLogged)
+			}
 		},
 	})
 	if err != nil {
@@ -243,6 +247,7 @@ func TestRegistryRetriesTransientAssetFailuresAndLogsSanitizedReason(t *testing.
 	if attempts := repository.assetAttemptCount("model_int8.onnx"); attempts != 3 {
 		t.Fatalf("model attempts=%d, want 3", attempts)
 	}
+	<-readyLogged
 	logMu.Lock()
 	joined := strings.Join(logs, "\n")
 	logMu.Unlock()
@@ -660,11 +665,7 @@ func TestRegistryDeleteTombstoneBlocksConcurrentRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-repository.blockStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("download did not reach blocked model asset")
-	}
+	<-repository.blockStarted
 	deleteResult := make(chan error, 1)
 	go func() {
 		deleteResult <- registry.DeleteInstallation(
@@ -672,11 +673,7 @@ func TestRegistryDeleteTombstoneBlocksConcurrentRetry(t *testing.T) {
 			started.ID,
 		)
 	}()
-	select {
-	case <-blockingStore.deleteStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("delete did not reach persistent tombstone window")
-	}
+	<-blockingStore.deleteStarted
 	if _, err := registry.Install(
 		context.Background(),
 		request,
@@ -684,13 +681,8 @@ func TestRegistryDeleteTombstoneBlocksConcurrentRetry(t *testing.T) {
 		t.Fatalf("concurrent retry error = %v, want ErrBusy", err)
 	}
 	close(blockingStore.releaseDelete)
-	select {
-	case err := <-deleteResult:
-		if err != nil {
-			t.Fatalf("delete: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("delete did not finish")
+	if err := <-deleteResult; err != nil {
+		t.Fatalf("delete: %v", err)
 	}
 	if _, err := registry.GetInstallation(started.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("installation survived delete: %v", err)
@@ -906,19 +898,22 @@ func waitForInstallation(
 	id contract.PrivacyModelID,
 ) contract.PrivacyModelInstallation {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		installation, err := registry.GetInstallation(id)
-		if err != nil {
-			t.Fatalf("GetInstallation: %v", err)
-		}
-		if installation.Status != contract.PrivacyModelStatusDownloading {
-			return installation
-		}
-		time.Sleep(5 * time.Millisecond)
+	// Wait for the install goroutine itself rather than a wall-clock deadline,
+	// which slow CI disks can exceed.
+	registry.mu.Lock()
+	operation := registry.operations[id]
+	registry.mu.Unlock()
+	if operation != nil {
+		<-operation.done
 	}
-	t.Fatalf("installation %s did not finish", id)
-	return contract.PrivacyModelInstallation{}
+	installation, err := registry.GetInstallation(id)
+	if err != nil {
+		t.Fatalf("GetInstallation: %v", err)
+	}
+	if installation.Status == contract.PrivacyModelStatusDownloading {
+		t.Fatalf("installation %s did not finish", id)
+	}
+	return installation
 }
 
 func emailMapping() map[string]*contract.CanonicalKind {

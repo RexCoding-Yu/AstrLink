@@ -269,11 +269,7 @@ func TestResponsesWebSocketDisconnectCancelsUpstreamWithoutReplay(t *testing.T) 
 	sendWS(t, client, `{"type":"response.create","model":"test"}`)
 	readWS(t, client)
 	client.Close()
-	select {
-	case <-ended:
-	case <-time.After(2 * time.Second):
-		t.Fatal("upstream was not cancelled")
-	}
+	<-ended
 	if attempts.Load() != 1 {
 		t.Fatal("turn replayed")
 	}

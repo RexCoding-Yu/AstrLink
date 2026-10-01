@@ -15,7 +15,7 @@
       {
         "label": "main",
         "title": "AstrLink",
-        "width": 900,
+        "width": 950,
         "height": 600,
         "minWidth": 760,
         "minHeight": 600,
@@ -38,7 +38,7 @@
       "binaries/astrlink-core",
       "binaries/astrlink-privacy-worker",
       "binaries/astrlink-classifier-worker",
-      "binaries/astrlink-mcp"
+      "binaries/astrlink-cli"
     ],
     "resources": {
       "../../../LICENSE": "licenses/LICENSE",
@@ -63,6 +63,11 @@
     "targets": "all"
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["astrlink"]
+      }
+    },
     "updater": {
       "pubkey": "",
       "windows": {

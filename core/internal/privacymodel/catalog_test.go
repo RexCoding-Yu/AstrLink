@@ -8,13 +8,24 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 )
 
-func TestBuiltinCatalogOnlyAdvertisesPPLXAndRetainsLegacyProvenance(t *testing.T) {
+func TestBuiltinCatalogRecommendsGuardAndRetainsLegacyProvenance(t *testing.T) {
 	catalog := BuiltinCatalog()
-	if len(catalog.Items) != 1 || catalog.Items[0].ID != CatalogPPLXPIITracer ||
-		catalog.Items[0].Adapter != contract.PrivacyModelAdapterPPLXBIOES ||
-		len(catalog.Items[0].Variants) != 1 || !catalog.Items[0].Variants[0].Recommended ||
-		catalog.Items[0].Variants[0].Quantization != "int4" {
+	if len(catalog.Items) != 2 {
 		t.Fatalf("catalog item count = %d", len(catalog.Items))
+	}
+	guard, pplx := catalog.Items[0], catalog.Items[1]
+	if guard.ID != CatalogAstrLinkGuard || !guard.Recommended ||
+		guard.Source != contract.PrivacyModelCatalogSourceOfficial ||
+		guard.Adapter != contract.PrivacyModelAdapterHFToken ||
+		guard.Version == nil || *guard.Version != "0.1.0" ||
+		!guard.Variants[0].Recommended || guard.Variants[1].Recommended {
+		t.Fatalf("guard catalog item = %#v", guard)
+	}
+	if pplx.ID != CatalogPPLXPIITracer || pplx.Recommended || pplx.Version != nil ||
+		pplx.Adapter != contract.PrivacyModelAdapterPPLXBIOES ||
+		len(pplx.Variants) != 1 || !pplx.Variants[0].Recommended ||
+		pplx.Variants[0].Quantization != "int4" {
+		t.Fatalf("PII-Tracer catalog item = %#v", pplx)
 	}
 	catalog.Items = append(catalog.Items, legacyCatalogEntries()...)
 	expected := []struct {
@@ -23,6 +34,12 @@ func TestBuiltinCatalogOnlyAdvertisesPPLXAndRetainsLegacyProvenance(t *testing.T
 		revision string
 		variants []string
 	}{
+		{
+			CatalogAstrLinkGuard,
+			"QuantumNous/astrlink-guard",
+			"49e8b7b83d34fd75a86cf07698bd80972d444ff3",
+			[]string{"cpu_int8", "cpu_fp32"},
+		},
 		{
 			CatalogPPLXPIITracer,
 			"QuantumNous/astrlink-pii-tracer-int4",
@@ -92,7 +109,7 @@ func TestBuiltinCatalogOnlyAdvertisesPPLXAndRetainsLegacyProvenance(t *testing.T
 }
 
 func TestPPLXINT4ManifestIncludesLicenseAndDoesNotReplaceFP32Provenance(t *testing.T) {
-	item := BuiltinCatalog().Items[0]
+	item := BuiltinCatalog().Items[1]
 	plan, exists := builtinVariantPlan(item.RepoID, item.Revision, "cpu_int4")
 	if !exists {
 		t.Fatal("INT4 plan missing")

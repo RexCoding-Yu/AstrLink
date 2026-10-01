@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs";
 
@@ -71,5 +71,68 @@ describe("TabsContent", () => {
 
     expect(workspace.scrollTop).toBe(96);
     expect(workspace.scrollLeft).toBe(12);
+  });
+
+  async function renderNestedPanels() {
+    await act(async () => {
+      root.render(
+        <Tabs defaultValue="models">
+          <TabsList>
+            <TabsTrigger type="button" value="models">
+              模型
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="models">
+            <Tabs defaultValue="catalog">
+              <TabsList>
+                <TabsTrigger type="button" value="catalog">
+                  内置
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="catalog">catalog</TabsContent>
+            </Tabs>
+          </TabsContent>
+        </Tabs>,
+      );
+    });
+    const [outer, inner] = container.querySelectorAll<HTMLElement>(
+      "[data-slot='tabs-content']",
+    );
+    const finish = vi.fn();
+    inner.getAnimations = () => [
+      { animationName: "panel-reveal", finish } as unknown as Animation,
+    ];
+    return { outer, inner, finish };
+  }
+
+  function startReveal(panel: HTMLElement) {
+    act(() => {
+      panel.dispatchEvent(
+        new AnimationEvent("animationstart", {
+          animationName: "panel-reveal",
+          bubbles: true,
+        }),
+      );
+    });
+  }
+
+  it("lets an outer panel's reveal carry a nested panel", async () => {
+    const { outer, inner, finish } = await renderNestedPanels();
+    outer.getAnimations = () => [
+      { animationName: "panel-reveal" } as unknown as Animation,
+    ];
+
+    startReveal(inner);
+
+    expect(finish).toHaveBeenCalledOnce();
+  });
+
+  it("reveals a nested panel when only its own tabs change", async () => {
+    const { outer, inner, finish } = await renderNestedPanels();
+    outer.getAnimations = () => [];
+
+    startReveal(inner);
+
+    expect(finish).not.toHaveBeenCalled();
   });
 });

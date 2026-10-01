@@ -36,15 +36,15 @@ type AutoClassifier interface {
 func (handler *Handler) registerAutoClassifierRoutes() {
 	handler.mux.HandleFunc(
 		AutoClassifierLocalProbePath,
-		handler.authenticated(handler.autoClassifierLocalProbe),
+		handler.authenticated(handler.autoClassifierLocalProbe, RoleObserver),
 	)
 	handler.mux.HandleFunc(
 		AutoClassifierClassifyPreviewPath,
-		handler.authenticated(handler.autoClassifierClassifyPreview),
+		handler.authenticated(handler.autoClassifierClassifyPreview, RoleObserver),
 	)
 	handler.mux.HandleFunc(
 		AutoClassifierPath,
-		handler.authenticated(handler.autoClassifierCollection),
+		handler.authenticated(handler.autoClassifierCollection, RoleObserver),
 	)
 }
 

@@ -25,6 +25,7 @@ import {
 import { FormMessage } from "@/components/FormMessage";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ScrollWorkspace } from "@/components/ScrollWorkspace";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "./PageHeader";
 import { LocalClientUpdates } from "./LocalClientUpdates";
@@ -156,310 +157,316 @@ export function About({
   );
 
   return (
-    <section
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
-      data-slot="about-page"
-    >
-      <PageHeader title={t("about.title")} />
-      <div
-        className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col gap-3 overflow-y-auto"
-        data-slot="about-workspace"
+    <>
+      <ScrollWorkspace
+        className="gap-0"
+        contentSlot="about-workspace"
+        data-slot="about-page"
+        header={<PageHeader title={t("about.title")} />}
       >
-        <Panel
-          className={cn(
-            "flex flex-col",
-            snapshot.release ? "min-h-64 flex-1" : "shrink-0",
-          )}
-          data-slot="about-update-panel"
-        >
-          <PanelHeader
-            className="shrink-0 flex-wrap items-center gap-3 px-5 py-4"
-            actions={
-              <>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    void open("https://github.com/Calcium-Ion/AstrLink")
-                  }
-                >
-                  {t("about.project")}
-                  <ArrowUpRight aria-hidden="true" />
-                </Button>
-                {!snapshot.release ? checkButton : null}
-              </>
-            }
-          >
-            <div
-              className="flex items-center gap-4"
-              aria-label={t("about.application")}
-            >
-              <img src={logo} alt="" className="size-14 shrink-0" />
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-xl font-semibold tracking-tight">
-                    AstrLink
-                  </h2>
-                  {snapshot.development ? (
-                    <Badge variant="secondary">
-                      {t("about.developmentBadge")}
-                    </Badge>
-                  ) : null}
-                </div>
-                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                  <span>{device}</span>
-                </div>
-              </div>
-            </div>
-          </PanelHeader>
-          <PanelBody
+        {/* Center the column inside the full-width scrollport, so its scrollbar
+            stays at the workspace edge like every other page. */}
+        <div className="mx-auto flex w-full max-w-5xl flex-col gap-3">
+          <Panel
             className={cn(
-              "space-y-3 px-5 pt-3",
-              snapshot.release ? "pb-4" : "pb-0",
-              !snapshot.release && "flex-none",
+              "flex flex-col",
+              snapshot.release ? "min-h-64 flex-1" : "shrink-0",
             )}
-            data-slot="about-update-content"
+            data-slot="about-update-panel"
           >
-            <div
-              className="grid grid-cols-2 gap-x-6 gap-y-4 @min-[640px]/workspace-surface:grid-cols-3"
-              aria-live="polite"
-            >
-              <DataField
-                label={t("about.currentVersion")}
-                value={
-                  <span className="font-mono text-xl font-medium">
-                    {snapshot.current_version}
-                  </span>
-                }
-              />
-              <DataField
-                label={t("about.latestVersion")}
-                value={
-                  <span className="font-mono text-xl font-medium">
-                    {snapshot.latest_version ??
-                      snapshot.release?.version ??
-                      "—"}
-                  </span>
-                }
-              />
-              <DataField
-                className="col-span-2 @min-[640px]/workspace-surface:col-span-1"
-                label={t("about.updateStatus")}
-                value={
-                  <StatusBadge
-                    tone={
-                      snapshot.phase === "error"
-                        ? "negative"
-                        : successful
-                          ? "positive"
-                          : working || snapshot.release
-                            ? "pending"
-                            : "neutral"
-                    }
-                  >
-                    {t(`about.phase.${snapshot.phase}`)}
-                  </StatusBadge>
-                }
-              />
-            </div>
-            {loadError || error ? (
-              <FormMessage tone="error">{loadError || error}</FormMessage>
-            ) : null}
-            {snapshot.error_code ? (
-              <FormMessage tone="error">
-                <p>{t(`about.errors.${snapshot.error_code}`)}</p>
-                {snapshot.error_detail ? (
-                  <details className="mt-1 text-xs">
-                    <summary className="cursor-pointer">
-                      {t("about.errorDetails")}
-                    </summary>
-                    <p className="mt-2 break-words">{snapshot.error_detail}</p>
-                  </details>
-                ) : null}
-              </FormMessage>
-            ) : null}
-            {snapshot.phase === "downloading" ? (
-              <div className="space-y-2">
-                <Progress
-                  value={progress}
-                  aria-label={t("about.phase.downloading")}
-                />
-                <p className="font-mono text-xs text-muted-foreground">
-                  {(snapshot.downloaded_bytes / 1024 / 1024).toFixed(1)} MB
-                  {snapshot.total_bytes
-                    ? ` / ${(snapshot.total_bytes / 1024 / 1024).toFixed(1)} MB`
-                    : ""}
-                </p>
-              </div>
-            ) : null}
-            {snapshot.release ? (
-              <div className="flex flex-wrap items-center gap-2">
-                {ready ? (
-                  <Button disabled={working} onClick={() => setConfirm(true)}>
-                    {t("about.install")}
-                  </Button>
-                ) : null}
-                {hasDownload ? (
+            <PanelHeader
+              className="shrink-0 flex-wrap items-center gap-3 px-5 py-4"
+              actions={
+                <>
                   <Button
-                    disabled={working}
+                    variant="ghost"
+                    size="sm"
                     onClick={() =>
-                      void run(
-                        [
-                          "network",
-                          "manifest",
-                          "missing_artifact",
-                          "rate_limit",
-                        ].includes(snapshot.error_code ?? "")
-                          ? checkAppUpdate
-                          : downloadAppUpdate,
-                      )
+                      void open("https://github.com/Calcium-Ion/AstrLink")
                     }
                   >
-                    <ArrowDown aria-hidden="true" />
-                    {t(
-                      snapshot.phase === "error"
-                        ? "about.retry"
-                        : "about.download",
-                    )}
-                  </Button>
-                ) : null}
-                {snapshot.release ? (
-                  <Button
-                    variant={canInstall ? "ghost" : "default"}
-                    onClick={() => void open(snapshot.release!.url)}
-                  >
-                    {t("about.releasePage")}
+                    {t("about.project")}
                     <ArrowUpRight aria-hidden="true" />
                   </Button>
-                ) : null}
-                {checkButton}
-              </div>
-            ) : null}
-            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs leading-relaxed text-muted-foreground">
-              {notice ? <p>{notice}</p> : null}
-              {snapshot.last_checked_at ? (
-                <p>
-                  {t("about.lastChecked", {
-                    time: new Date(snapshot.last_checked_at).toLocaleString(
-                      undefined,
-                      {
-                        month: "short",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      },
-                    ),
-                  })}
-                </p>
-              ) : null}
-            </div>
-            <div className="-mx-5 border-t" data-slot="about-preferences">
-              <Button
-                variant="ghost"
-                className="h-auto w-full justify-start gap-2 rounded-none px-5 py-2"
-                aria-label={t("about.preferences")}
-                aria-expanded={expanded}
-                aria-controls={`${id}-preferences`}
-                onClick={() => setPreferencesOpen(!expanded)}
+                  {!snapshot.release ? checkButton : null}
+                </>
+              }
+            >
+              <div
+                className="flex items-center gap-4"
+                aria-label={t("about.application")}
               >
-                <SlidersHorizontal
-                  aria-hidden="true"
-                  className="text-muted-foreground"
+                <img src={logo} alt="" className="size-14 shrink-0" />
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-xl font-semibold tracking-tight">
+                      AstrLink
+                    </h2>
+                    {snapshot.development ? (
+                      <Badge variant="secondary">
+                        {t("about.developmentBadge")}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span>{device}</span>
+                  </div>
+                </div>
+              </div>
+            </PanelHeader>
+            <PanelBody
+              className={cn(
+                "space-y-3 px-5 pt-3",
+                snapshot.release ? "pb-4" : "pb-0",
+                !snapshot.release && "flex-none",
+              )}
+              data-slot="about-update-content"
+            >
+              <div
+                className="grid grid-cols-2 gap-x-6 gap-y-4 @min-[640px]/workspace-surface:grid-cols-3"
+                aria-live="polite"
+              >
+                <DataField
+                  label={t("about.currentVersion")}
+                  value={
+                    <span className="font-mono text-xl font-medium">
+                      {snapshot.current_version}
+                    </span>
+                  }
                 />
-                <span className="text-sm font-medium">
-                  {t("about.preferences")}
-                </span>
-                {!expanded ? (
-                  <span className="ml-auto text-xs font-normal text-muted-foreground">
-                    {t(`about.${snapshot.preferences.channel}`)}
-                  </span>
-                ) : null}
-                <ChevronDown
-                  aria-hidden="true"
-                  className={cn(
-                    "transition-transform",
-                    expanded && "ml-auto rotate-180",
-                  )}
+                <DataField
+                  label={t("about.latestVersion")}
+                  value={
+                    <span className="font-mono text-xl font-medium">
+                      {snapshot.latest_version ??
+                        snapshot.release?.version ??
+                        "—"}
+                    </span>
+                  }
                 />
-              </Button>
-              {expanded ? (
-                <div id={`${id}-preferences`} className="border-t">
-                  <DataRow>
-                    <div className="min-w-0 flex-1">
-                      <Label
-                        htmlFor={`${id}-channel`}
-                        className="text-sm font-normal"
-                      >
-                        {t("about.channel")}
-                      </Label>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {t(`about.channelHint.${snapshot.preferences.channel}`)}
-                      </p>
-                    </div>
-                    <Select
-                      value={snapshot.preferences.channel}
-                      disabled={preferencesDisabled}
-                      onValueChange={(channel) =>
-                        save({
-                          channel: channel as UpdatePreferences["channel"],
-                        })
+                <DataField
+                  className="col-span-2 @min-[640px]/workspace-surface:col-span-1"
+                  label={t("about.updateStatus")}
+                  value={
+                    <StatusBadge
+                      tone={
+                        snapshot.phase === "error"
+                          ? "negative"
+                          : successful
+                            ? "positive"
+                            : working || snapshot.release
+                              ? "pending"
+                              : "neutral"
                       }
                     >
-                      <SelectTrigger
-                        id={`${id}-channel`}
-                        aria-label={t("about.channel")}
-                        className="w-28 shrink-0"
-                      >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="stable">
-                          {t("about.stable")}
-                        </SelectItem>
-                        <SelectItem value="preview">
-                          {t("about.preview")}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </DataRow>
-                  {(["auto_check", "auto_download"] as const).map((key) => (
-                    <DataRow key={key}>
-                      <div className="min-w-0 flex-1">
-                        <Label
-                          htmlFor={`${id}-${key}`}
-                          className="text-sm font-normal"
-                        >
-                          {t(`about.${key}`)}
-                        </Label>
-                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                          {t(`about.preferenceHint.${key}`)}
-                        </p>
-                      </div>
-                      <Switch
-                        id={`${id}-${key}`}
-                        checked={snapshot.preferences[key]}
-                        disabled={preferencesDisabled}
-                        onCheckedChange={(value) => save({ [key]: value })}
-                      />
-                    </DataRow>
-                  ))}
-                </div>
-              ) : null}
-            </div>{" "}
-            {snapshot.release ? (
-              <div className="space-y-3 border-t pt-4">
-                <h4 className="text-xs font-medium text-muted-foreground">
-                  {t("about.releaseNotes")}
-                </h4>
-                <MarkdownContent
-                  content={snapshot.release.notes || t("about.noNotes")}
+                      {t(`about.phase.${snapshot.phase}`)}
+                    </StatusBadge>
+                  }
                 />
               </div>
-            ) : null}
-          </PanelBody>
-        </Panel>
-        <LocalClientUpdates compact={Boolean(snapshot.release)} />
-      </div>
+              {loadError || error ? (
+                <FormMessage tone="error">{loadError || error}</FormMessage>
+              ) : null}
+              {snapshot.error_code ? (
+                <FormMessage tone="error">
+                  <p>{t(`about.errors.${snapshot.error_code}`)}</p>
+                  {snapshot.error_detail ? (
+                    <details className="mt-1 text-xs">
+                      <summary className="cursor-pointer">
+                        {t("about.errorDetails")}
+                      </summary>
+                      <p className="mt-2 break-words">
+                        {snapshot.error_detail}
+                      </p>
+                    </details>
+                  ) : null}
+                </FormMessage>
+              ) : null}
+              {snapshot.phase === "downloading" ? (
+                <div className="space-y-2">
+                  <Progress
+                    value={progress}
+                    aria-label={t("about.phase.downloading")}
+                  />
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {(snapshot.downloaded_bytes / 1024 / 1024).toFixed(1)} MB
+                    {snapshot.total_bytes
+                      ? ` / ${(snapshot.total_bytes / 1024 / 1024).toFixed(1)} MB`
+                      : ""}
+                  </p>
+                </div>
+              ) : null}
+              {snapshot.release ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  {ready ? (
+                    <Button disabled={working} onClick={() => setConfirm(true)}>
+                      {t("about.install")}
+                    </Button>
+                  ) : null}
+                  {hasDownload ? (
+                    <Button
+                      disabled={working}
+                      onClick={() =>
+                        void run(
+                          [
+                            "network",
+                            "manifest",
+                            "missing_artifact",
+                            "rate_limit",
+                          ].includes(snapshot.error_code ?? "")
+                            ? checkAppUpdate
+                            : downloadAppUpdate,
+                        )
+                      }
+                    >
+                      <ArrowDown aria-hidden="true" />
+                      {t(
+                        snapshot.phase === "error"
+                          ? "about.retry"
+                          : "about.download",
+                      )}
+                    </Button>
+                  ) : null}
+                  {snapshot.release ? (
+                    <Button
+                      variant={canInstall ? "ghost" : "default"}
+                      onClick={() => void open(snapshot.release!.url)}
+                    >
+                      {t("about.releasePage")}
+                      <ArrowUpRight aria-hidden="true" />
+                    </Button>
+                  ) : null}
+                  {checkButton}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs leading-relaxed text-muted-foreground">
+                {notice ? <p>{notice}</p> : null}
+                {snapshot.last_checked_at ? (
+                  <p>
+                    {t("about.lastChecked", {
+                      time: new Date(snapshot.last_checked_at).toLocaleString(
+                        undefined,
+                        {
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        },
+                      ),
+                    })}
+                  </p>
+                ) : null}
+              </div>
+              <div className="-mx-5 border-t" data-slot="about-preferences">
+                <Button
+                  variant="ghost"
+                  className="h-auto w-full justify-start gap-2 rounded-none px-5 py-2"
+                  aria-label={t("about.preferences")}
+                  aria-expanded={expanded}
+                  aria-controls={`${id}-preferences`}
+                  onClick={() => setPreferencesOpen(!expanded)}
+                >
+                  <SlidersHorizontal
+                    aria-hidden="true"
+                    className="text-muted-foreground"
+                  />
+                  <span className="text-sm font-medium">
+                    {t("about.preferences")}
+                  </span>
+                  {!expanded ? (
+                    <span className="ml-auto text-xs font-normal text-muted-foreground">
+                      {t(`about.${snapshot.preferences.channel}`)}
+                    </span>
+                  ) : null}
+                  <ChevronDown
+                    aria-hidden="true"
+                    className={cn(
+                      "transition-transform",
+                      expanded && "ml-auto rotate-180",
+                    )}
+                  />
+                </Button>
+                {expanded ? (
+                  <div id={`${id}-preferences`} className="border-t">
+                    <DataRow>
+                      <div className="min-w-0 flex-1">
+                        <Label
+                          htmlFor={`${id}-channel`}
+                          className="text-sm font-normal"
+                        >
+                          {t("about.channel")}
+                        </Label>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {t(
+                            `about.channelHint.${snapshot.preferences.channel}`,
+                          )}
+                        </p>
+                      </div>
+                      <Select
+                        value={snapshot.preferences.channel}
+                        disabled={preferencesDisabled}
+                        onValueChange={(channel) =>
+                          save({
+                            channel: channel as UpdatePreferences["channel"],
+                          })
+                        }
+                      >
+                        <SelectTrigger
+                          id={`${id}-channel`}
+                          aria-label={t("about.channel")}
+                          className="w-28 shrink-0"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="stable">
+                            {t("about.stable")}
+                          </SelectItem>
+                          <SelectItem value="preview">
+                            {t("about.preview")}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </DataRow>
+                    {(["auto_check", "auto_download"] as const).map((key) => (
+                      <DataRow key={key}>
+                        <div className="min-w-0 flex-1">
+                          <Label
+                            htmlFor={`${id}-${key}`}
+                            className="text-sm font-normal"
+                          >
+                            {t(`about.${key}`)}
+                          </Label>
+                          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                            {t(`about.preferenceHint.${key}`)}
+                          </p>
+                        </div>
+                        <Switch
+                          id={`${id}-${key}`}
+                          checked={snapshot.preferences[key]}
+                          disabled={preferencesDisabled}
+                          onCheckedChange={(value) => save({ [key]: value })}
+                        />
+                      </DataRow>
+                    ))}
+                  </div>
+                ) : null}
+              </div>{" "}
+              {snapshot.release ? (
+                <div className="space-y-3 border-t pt-4">
+                  <h4 className="text-xs font-medium text-muted-foreground">
+                    {t("about.releaseNotes")}
+                  </h4>
+                  <MarkdownContent
+                    content={snapshot.release.notes || t("about.noNotes")}
+                  />
+                </div>
+              ) : null}
+            </PanelBody>
+          </Panel>
+          <LocalClientUpdates compact={Boolean(snapshot.release)} />
+        </div>
+      </ScrollWorkspace>
       <ConfirmDialog
         open={confirm}
         title={t("about.install")}
@@ -478,6 +485,6 @@ export function About({
           void run(installAppUpdate);
         }}
       />
-    </section>
+    </>
   );
 }

@@ -293,6 +293,7 @@ impl PreferencesStore {
         fallback_locale: Locale,
     ) -> Self {
         let path = config_directory.join(FILE_NAME);
+        tighten_existing_mode(&path);
         // Older installations may have run without ever saving preferences.
         let has_existing_data = data_directory.join("astrlink.db").exists();
         let fallback = |locale| Preferences {
@@ -404,6 +405,22 @@ impl PreferencesStore {
     }
 }
 
+/// Earlier releases wrote the file 0644. Saving rewrites it 0600, but a user
+/// who never saves again would keep the old mode, so load narrows it too.
+fn tighten_existing_mode(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            if metadata.is_file() && metadata.permissions().mode() & 0o077 != 0 {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 fn persist_atomic(path: &Path, values: &Preferences) -> Result<(), String> {
     let locale = values.locale;
     let parent = path
@@ -429,17 +446,21 @@ fn persist_atomic(path: &Path, values: &Preferences) -> Result<(), String> {
         TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|error| {
-                i18n::t(
-                    locale,
-                    "host.preferences.createTempFailed",
-                    &[("error", &error.to_string())],
-                )
-            })?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        // Preferences sit next to the database; keep them owner-only like it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| {
+            i18n::t(
+                locale,
+                "host.preferences.createTempFailed",
+                &[("error", &error.to_string())],
+            )
+        })?;
         file.write_all(&bytes)
             .and_then(|_| file.write_all(b"\n"))
             .and_then(|_| file.sync_all())
@@ -476,12 +497,12 @@ fn persist_atomic(path: &Path, values: &Preferences) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(source, destination)
 }
 
 #[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -550,6 +571,31 @@ mod tests {
             reloaded.values.updates,
             crate::updates::UpdatePreferences::default()
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_preferences_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = temporary_directory("mode");
+        let store = load(&directory);
+        let mut values = store.snapshot().values;
+        values.inference_port = 9877;
+        store.replace(values).unwrap();
+        let mode = fs::metadata(directory.join(FILE_NAME))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        fs::set_permissions(directory.join(FILE_NAME), fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(load(&directory).snapshot().values.inference_port, 9877);
+        let mode = fs::metadata(directory.join(FILE_NAME))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
         fs::remove_dir_all(directory).unwrap();
     }
 

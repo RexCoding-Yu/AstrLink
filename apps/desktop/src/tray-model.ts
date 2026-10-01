@@ -1,5 +1,12 @@
 import type { CorePhase, InferencePortFallback } from "./core-model";
-import { parseTrayPreferences, type TrayPreferences } from "./preferences-model";
+import {
+  parseTrayPreferences,
+  type TrayPreferences,
+} from "./preferences-model";
+import {
+  subscriptionKinds as subscriptionServiceKinds,
+  type ServiceKind,
+} from "./service-model";
 
 /**
  * What the tray popover renders. Mirrors `TrayStateSnapshot` in
@@ -14,9 +21,46 @@ export interface TrayCoreView {
   last_error: string | null;
   recovery_attempt: number;
   recovery_scheduled: boolean;
-  /** An agent is reading records through the MCP bridge right now. */
+  /** An agent is reading records through the CLI right now. */
   observer_active: boolean;
+  /** How far that agent's latest read reached, while it is active. */
+  observer_read_level: TrayObserverReadLevel | null;
+  /** Agent requests for raw audit content awaiting the operator. */
+  pending_raw_access: number;
+  /** Timed agent grants to raw content still running. */
+  active_raw_grants: number;
+  /** No raw password is set; only the main window sets one up. */
+  raw_password_required: boolean;
+  /** The latest raw password or key change this Core recorded. */
+  raw_key_event: TrayRawKeyEvent | null;
+  /** The raw key differs from the desktop's pin; only the main window resolves it. */
+  raw_key_replaced: boolean;
 }
+
+export type TrayObserverReadLevel = "metadata" | "shareable" | "raw";
+
+export type TrayRawKeyEventKind =
+  | "raw_password_set"
+  | "raw_password_changed"
+  | "raw_key_reset";
+
+export interface TrayRawKeyEvent {
+  kind: TrayRawKeyEventKind;
+  /** RFC 3339, from Core. */
+  at: string;
+}
+
+const rawKeyEventKinds = new Set<TrayRawKeyEventKind>([
+  "raw_password_set",
+  "raw_password_changed",
+  "raw_key_reset",
+]);
+
+const observerReadLevels = new Set<TrayObserverReadLevel>([
+  "metadata",
+  "shareable",
+  "raw",
+]);
 
 export interface TrayUsageTotals {
   requests: number;
@@ -54,8 +98,18 @@ export interface TrayWindow {
 
 export interface TraySubscription {
   name: string;
+  kind: ServiceKind;
   windows: TrayWindow[];
 }
+
+/** Plan-backed kinds the host lists; mirrors `SUBSCRIPTION_KINDS` in `tray.rs`. */
+const subscriptionKinds = new Set<ServiceKind>([
+  ...subscriptionServiceKinds,
+  "kimi_coding",
+  "glm_coding",
+  "minimax_coding",
+  "opencode_go",
+]);
 
 export interface TrayUsageDigest {
   today: TrayUsageTotals | null;
@@ -87,6 +141,7 @@ export type TrayAction =
   | { kind: "copy_address" }
   | { kind: "core"; op: "start" | "stop" | "restart" }
   | { kind: "refresh" }
+  | { kind: "raw_access" }
   | { kind: "quit" };
 
 const phases = new Set<CorePhase>([
@@ -111,7 +166,11 @@ function objectAt(value: unknown, path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[], path: string): void {
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  path: string,
+): void {
   const keys = new Set(expected);
   for (const key of Object.keys(value)) {
     if (!keys.has(key)) invalid(`${path}.${key}`, "unexpected field");
@@ -128,7 +187,11 @@ function stringAt(value: unknown, path: string, max = 1024): string {
   return value;
 }
 
-function nullableStringAt(value: unknown, path: string, max = 1024): string | null {
+function nullableStringAt(
+  value: unknown,
+  path: string,
+  max = 1024,
+): string | null {
   return value === null ? null : stringAt(value, path, max);
 }
 
@@ -176,29 +239,104 @@ function parseView(value: unknown, path: string): TrayCoreView {
       "recovery_attempt",
       "recovery_scheduled",
       "observer_active",
+      "observer_read_level",
+      "pending_raw_access",
+      "active_raw_grants",
+      "raw_password_required",
+      "raw_key_event",
+      "raw_key_replaced",
     ],
     path,
   );
   if (typeof view.phase !== "string" || !phases.has(view.phase as CorePhase)) {
     invalid(`${path}.phase`, "unknown Core phase");
   }
-  const fallback = nullable(view.inference_port_fallback, `${path}.inference_port_fallback`, (raw, rawPath) => {
-    const object = objectAt(raw, rawPath);
-    exactKeys(object, ["requested_port", "active_port"], rawPath);
-    return {
-      requested_port: countAt(object.requested_port, `${rawPath}.requested_port`),
-      active_port: countAt(object.active_port, `${rawPath}.active_port`),
-    };
-  });
+  const fallback = nullable(
+    view.inference_port_fallback,
+    `${path}.inference_port_fallback`,
+    (raw, rawPath) => {
+      const object = objectAt(raw, rawPath);
+      exactKeys(object, ["requested_port", "active_port"], rawPath);
+      return {
+        requested_port: countAt(
+          object.requested_port,
+          `${rawPath}.requested_port`,
+        ),
+        active_port: countAt(object.active_port, `${rawPath}.active_port`),
+      };
+    },
+  );
   return {
     phase: view.phase as CorePhase,
-    inference_url: nullableStringAt(view.inference_url, `${path}.inference_url`, 256),
-    core_version: nullableStringAt(view.core_version, `${path}.core_version`, 64),
+    inference_url: nullableStringAt(
+      view.inference_url,
+      `${path}.inference_url`,
+      256,
+    ),
+    core_version: nullableStringAt(
+      view.core_version,
+      `${path}.core_version`,
+      64,
+    ),
     inference_port_fallback: fallback,
     last_error: nullableStringAt(view.last_error, `${path}.last_error`, 4096),
-    recovery_attempt: countAt(view.recovery_attempt, `${path}.recovery_attempt`),
-    recovery_scheduled: booleanAt(view.recovery_scheduled, `${path}.recovery_scheduled`),
+    recovery_attempt: countAt(
+      view.recovery_attempt,
+      `${path}.recovery_attempt`,
+    ),
+    recovery_scheduled: booleanAt(
+      view.recovery_scheduled,
+      `${path}.recovery_scheduled`,
+    ),
     observer_active: booleanAt(view.observer_active, `${path}.observer_active`),
+    observer_read_level: nullable(
+      view.observer_read_level,
+      `${path}.observer_read_level`,
+      (raw, rawPath) => {
+        if (
+          typeof raw !== "string" ||
+          !observerReadLevels.has(raw as TrayObserverReadLevel)
+        ) {
+          invalid(rawPath, "unknown read level");
+        }
+        return raw as TrayObserverReadLevel;
+      },
+    ),
+    pending_raw_access: countAt(
+      view.pending_raw_access,
+      `${path}.pending_raw_access`,
+    ),
+    active_raw_grants: countAt(
+      view.active_raw_grants,
+      `${path}.active_raw_grants`,
+    ),
+    raw_password_required: booleanAt(
+      view.raw_password_required,
+      `${path}.raw_password_required`,
+    ),
+    raw_key_event: nullable(
+      view.raw_key_event,
+      `${path}.raw_key_event`,
+      (raw, rawPath) => {
+        const event = objectAt(raw, rawPath);
+        exactKeys(event, ["kind", "at"], rawPath);
+        if (
+          typeof event.kind !== "string" ||
+          !rawKeyEventKinds.has(event.kind as TrayRawKeyEventKind)
+        ) {
+          invalid(`${rawPath}.kind`, "unknown raw key event");
+        }
+        const at = nullableStringAt(event.at, `${rawPath}.at`, 64);
+        if (at === null || Number.isNaN(Date.parse(at))) {
+          invalid(`${rawPath}.at`, "expected an RFC 3339 time");
+        }
+        return { kind: event.kind as TrayRawKeyEventKind, at };
+      },
+    ),
+    raw_key_replaced: booleanAt(
+      view.raw_key_replaced,
+      `${path}.raw_key_replaced`,
+    ),
   };
 }
 
@@ -229,76 +367,156 @@ function parseDigest(value: unknown, path: string): TrayUsageDigest {
   );
   const today = nullable(digest.today, `${path}.today`, (raw, rawPath) => {
     const totals = objectAt(raw, rawPath);
-    exactKeys(totals, ["requests", "failed", "total_tokens", "input_tokens", "cache_read_tokens"], rawPath);
+    exactKeys(
+      totals,
+      [
+        "requests",
+        "failed",
+        "total_tokens",
+        "input_tokens",
+        "cache_read_tokens",
+      ],
+      rawPath,
+    );
     return {
       requests: countAt(totals.requests, `${rawPath}.requests`),
       failed: countAt(totals.failed, `${rawPath}.failed`),
       total_tokens: countAt(totals.total_tokens, `${rawPath}.total_tokens`),
       input_tokens: countAt(totals.input_tokens, `${rawPath}.input_tokens`),
-      cache_read_tokens: countAt(totals.cache_read_tokens, `${rawPath}.cache_read_tokens`),
+      cache_read_tokens: countAt(
+        totals.cache_read_tokens,
+        `${rawPath}.cache_read_tokens`,
+      ),
     };
   });
-  if (!Array.isArray(digest.hourly_tokens) || (digest.hourly_tokens.length !== 0 && digest.hourly_tokens.length !== 24)) {
+  if (
+    !Array.isArray(digest.hourly_tokens) ||
+    (digest.hourly_tokens.length !== 0 && digest.hourly_tokens.length !== 24)
+  ) {
     invalid(`${path}.hourly_tokens`, "expected 0 or 24 entries");
   }
   const hourly = (digest.hourly_tokens as unknown[]).map((tokens, index) =>
     countAt(tokens, `${path}.hourly_tokens[${index}]`),
   );
-  const cost = nullable(digest.cost_today, `${path}.cost_today`, (raw, rawPath) => {
-    const object = objectAt(raw, rawPath);
-    exactKeys(object, ["amount_usd", "unpriced"], rawPath);
-    const amount = numberAt(object.amount_usd, `${rawPath}.amount_usd`);
-    if (amount < 0) invalid(`${rawPath}.amount_usd`, "expected a non-negative amount");
-    return { amount_usd: amount, unpriced: countAt(object.unpriced, `${rawPath}.unpriced`) };
-  });
-  const last = nullable(digest.last_request, `${path}.last_request`, (raw, rawPath) => {
-    const object = objectAt(raw, rawPath);
-    exactKeys(object, ["started_at", "model", "latency_ms", "failed"], rawPath);
-    const startedAt = stringAt(object.started_at, `${rawPath}.started_at`, 64);
-    if (Number.isNaN(Date.parse(startedAt))) invalid(`${rawPath}.started_at`, "expected a timestamp");
-    return {
-      started_at: startedAt,
-      model: nullableStringAt(object.model, `${rawPath}.model`, 256),
-      latency_ms: nullableCountAt(object.latency_ms, `${rawPath}.latency_ms`),
-      failed: booleanAt(object.failed, `${rawPath}.failed`),
-    };
-  });
-  if (!Array.isArray(digest.subscriptions) || digest.subscriptions.length > 16) {
+  const cost = nullable(
+    digest.cost_today,
+    `${path}.cost_today`,
+    (raw, rawPath) => {
+      const object = objectAt(raw, rawPath);
+      exactKeys(object, ["amount_usd", "unpriced"], rawPath);
+      const amount = numberAt(object.amount_usd, `${rawPath}.amount_usd`);
+      if (amount < 0)
+        invalid(`${rawPath}.amount_usd`, "expected a non-negative amount");
+      return {
+        amount_usd: amount,
+        unpriced: countAt(object.unpriced, `${rawPath}.unpriced`),
+      };
+    },
+  );
+  const last = nullable(
+    digest.last_request,
+    `${path}.last_request`,
+    (raw, rawPath) => {
+      const object = objectAt(raw, rawPath);
+      exactKeys(
+        object,
+        ["started_at", "model", "latency_ms", "failed"],
+        rawPath,
+      );
+      const startedAt = stringAt(
+        object.started_at,
+        `${rawPath}.started_at`,
+        64,
+      );
+      if (Number.isNaN(Date.parse(startedAt)))
+        invalid(`${rawPath}.started_at`, "expected a timestamp");
+      return {
+        started_at: startedAt,
+        model: nullableStringAt(object.model, `${rawPath}.model`, 256),
+        latency_ms: nullableCountAt(object.latency_ms, `${rawPath}.latency_ms`),
+        failed: booleanAt(object.failed, `${rawPath}.failed`),
+      };
+    },
+  );
+  if (
+    !Array.isArray(digest.subscriptions) ||
+    digest.subscriptions.length > 16
+  ) {
     invalid(`${path}.subscriptions`, "expected a bounded array");
   }
-  const subscriptions = (digest.subscriptions as unknown[]).map((raw, index) => {
-    const subscriptionPath = `${path}.subscriptions[${index}]`;
-    const object = objectAt(raw, subscriptionPath);
-    exactKeys(object, ["name", "windows"], subscriptionPath);
-    if (!Array.isArray(object.windows) || object.windows.length === 0 || object.windows.length > 8) {
-      invalid(`${subscriptionPath}.windows`, "expected 1 through 8 windows");
-    }
-    return {
-      name: stringAt(object.name, `${subscriptionPath}.name`, 256),
-      windows: (object.windows as unknown[]).map((rawWindow, windowIndex) => {
-        const windowPath = `${subscriptionPath}.windows[${windowIndex}]`;
-        const window = objectAt(rawWindow, windowPath);
-        exactKeys(window, ["label", "limit_window_seconds", "secondary", "used_percent", "reset_at"], windowPath);
-        const used = numberAt(window.used_percent, `${windowPath}.used_percent`);
-        if (used < 0) invalid(`${windowPath}.used_percent`, "expected a non-negative percent");
-        const resetAt = nullableStringAt(window.reset_at, `${windowPath}.reset_at`, 64);
-        if (resetAt !== null && Number.isNaN(Date.parse(resetAt))) {
-          invalid(`${windowPath}.reset_at`, "expected a timestamp");
-        }
-        return {
-          label: nullableStringAt(window.label, `${windowPath}.label`, 64),
-          limit_window_seconds: nullableCountAt(window.limit_window_seconds, `${windowPath}.limit_window_seconds`),
-          secondary: booleanAt(window.secondary, `${windowPath}.secondary`),
-          used_percent: used,
-          reset_at: resetAt,
-        };
-      }),
-    };
-  });
+  const subscriptions = (digest.subscriptions as unknown[]).map(
+    (raw, index) => {
+      const subscriptionPath = `${path}.subscriptions[${index}]`;
+      const object = objectAt(raw, subscriptionPath);
+      exactKeys(object, ["name", "kind", "windows"], subscriptionPath);
+      if (
+        typeof object.kind !== "string" ||
+        !subscriptionKinds.has(object.kind as ServiceKind)
+      ) {
+        invalid(`${subscriptionPath}.kind`, "unknown subscription kind");
+      }
+      if (
+        !Array.isArray(object.windows) ||
+        object.windows.length === 0 ||
+        object.windows.length > 8
+      ) {
+        invalid(`${subscriptionPath}.windows`, "expected 1 through 8 windows");
+      }
+      return {
+        name: stringAt(object.name, `${subscriptionPath}.name`, 256),
+        kind: object.kind as ServiceKind,
+        windows: (object.windows as unknown[]).map((rawWindow, windowIndex) => {
+          const windowPath = `${subscriptionPath}.windows[${windowIndex}]`;
+          const window = objectAt(rawWindow, windowPath);
+          exactKeys(
+            window,
+            [
+              "label",
+              "limit_window_seconds",
+              "secondary",
+              "used_percent",
+              "reset_at",
+            ],
+            windowPath,
+          );
+          const used = numberAt(
+            window.used_percent,
+            `${windowPath}.used_percent`,
+          );
+          if (used < 0)
+            invalid(
+              `${windowPath}.used_percent`,
+              "expected a non-negative percent",
+            );
+          const resetAt = nullableStringAt(
+            window.reset_at,
+            `${windowPath}.reset_at`,
+            64,
+          );
+          if (resetAt !== null && Number.isNaN(Date.parse(resetAt))) {
+            invalid(`${windowPath}.reset_at`, "expected a timestamp");
+          }
+          return {
+            label: nullableStringAt(window.label, `${windowPath}.label`, 64),
+            limit_window_seconds: nullableCountAt(
+              window.limit_window_seconds,
+              `${windowPath}.limit_window_seconds`,
+            ),
+            secondary: booleanAt(window.secondary, `${windowPath}.secondary`),
+            used_percent: used,
+            reset_at: resetAt,
+          };
+        }),
+      };
+    },
+  );
   return {
     today,
     hourly_tokens: hourly,
-    yesterday_tokens: nullableCountAt(digest.yesterday_tokens, `${path}.yesterday_tokens`),
+    yesterday_tokens: nullableCountAt(
+      digest.yesterday_tokens,
+      `${path}.yesterday_tokens`,
+    ),
     top_model: nullable(digest.top_model, `${path}.top_model`, parseShare),
     cost_today: cost,
     top_client: nullable(digest.top_client, `${path}.top_client`, parseShare),
@@ -310,7 +528,19 @@ function parseDigest(value: unknown, path: string): TrayUsageDigest {
 
 export function parseTrayState(value: unknown): TrayState {
   const root = objectAt(value, "$");
-  exactKeys(root, ["app_version", "platform", "view", "digest", "digest_age_ms", "tray", "popover_below"], "$");
+  exactKeys(
+    root,
+    [
+      "app_version",
+      "platform",
+      "view",
+      "digest",
+      "digest_age_ms",
+      "tray",
+      "popover_below",
+    ],
+    "$",
+  );
   return {
     app_version: stringAt(root.app_version, "$.app_version", 64),
     platform: stringAt(root.platform, "$.platform", 32),

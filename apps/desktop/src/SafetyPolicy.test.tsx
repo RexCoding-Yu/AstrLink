@@ -10,9 +10,12 @@ const bridgeMocks = vi.hoisted(() => ({
   dryRunPrivacyPolicy: vi.fn(),
   getPrivacyModelCatalog: vi.fn(),
   getPrivacyModelInstallation: vi.fn(),
+  getPrivacyModelReleases: vi.fn(),
   getPrivacyPolicy: vi.fn(),
   getPrivacyRegexBuiltinRules: vi.fn(),
+  getRawSealingStatus: vi.fn(),
   installPrivacyModel: vi.fn(),
+  listenRawSealingChanged: vi.fn(async () => () => {}),
   listPrivacyModelInstallations: vi.fn(),
   pausePrivacyModelInstallation: vi.fn(),
   resumePrivacyModelInstallation: vi.fn(),
@@ -39,6 +42,26 @@ import type {
   PrivacyModelProbe,
   PrivacyPolicyRecord,
 } from "./privacy-policy-model";
+import type { RawSealingState } from "./raw-sealing-model";
+
+function rawSealing(overrides: Partial<RawSealingState> = {}): RawSealingState {
+  return {
+    raw_available: false,
+    configured: true,
+    password_set: true,
+    password_required: overrides.password_set === false,
+    envelopes: ["password"],
+    key_verified: true,
+    unlocked: false,
+    unlock_expires_at: null,
+    unlock_idle_seconds: 900,
+    retry_after_seconds: 0,
+    password_min_length: 8,
+    password_max_length: 128,
+    key_replaced: false,
+    ...overrides,
+  };
+}
 
 const etag = `"sha256:${"a".repeat(64)}"`;
 const revision = "53d55aa8dbb28efaa4e9cf6b4b6015d00e43c088";
@@ -51,9 +74,11 @@ const catalogModel: PrivacyCatalogModel = {
   source: "community",
   repo_id: "sheltron-ai/privacy-filter-ettin-32m",
   revision,
+  version: null,
   license: "apache-2.0",
   languages: ["en"],
   adapter: "hf_token_classification",
+  recommended: false,
   variants: [
     {
       id: "cpu_int8",
@@ -278,7 +303,9 @@ describe("SafetyPolicy", () => {
     bridgeMocks.getPrivacyModelCatalog.mockResolvedValue({
       items: [catalogModel],
     });
+    bridgeMocks.getPrivacyModelReleases.mockResolvedValue({ items: [] });
     bridgeMocks.listPrivacyModelInstallations.mockResolvedValue({ items: [] });
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(rawSealing());
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -298,6 +325,44 @@ describe("SafetyPolicy", () => {
     });
     await flush();
   }
+
+  it("keeps the raw password one click away in the page header", async () => {
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(
+      rawSealing({ configured: false, password_set: false, envelopes: [] }),
+    );
+    await renderPolicy();
+
+    const header = container.querySelector('[data-slot="page-header"]');
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-slot="raw-password-entry"]',
+    );
+    expect(entry?.textContent).toContain("原文保护");
+    expect(entry?.querySelector(".sr-only")?.textContent).toBe("未设置");
+    expect(header?.contains(entry ?? null)).toBe(true);
+    await act(async () => {
+      entry?.click();
+      await Promise.resolve();
+    });
+    const missing = document.querySelector(
+      '[data-slot="raw-password-missing"]',
+    );
+    expect(missing?.textContent).toContain("新请求的原文不会保存");
+    const set = [...(missing?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "开始设置",
+    );
+    await act(async () => {
+      set?.click();
+      await Promise.resolve();
+    });
+    const dialog = document.querySelector('[data-slot="proof-confirm-dialog"]');
+    expect(dialog?.textContent).toContain("保护请求原文");
+    // Opened from the page, the dialog can be cancelled.
+    expect(
+      [...(dialog?.querySelectorAll("button") ?? [])].some(
+        (button) => button.textContent === "取消",
+      ),
+    ).toBe(true);
+  });
 
   it("uses backend values and rolls an optimistic ETag patch back on failure", async () => {
     const pending = deferred<PrivacyPolicyRecord>();
@@ -609,6 +674,119 @@ describe("SafetyPolicy", () => {
       });
     },
   );
+
+  describe("AstrLink Guard releases", () => {
+    const guard: PrivacyCatalogModel = {
+      ...catalogModel,
+      id: "catalog_astrlink_guard",
+      name: "AstrLink Guard",
+      source: "official",
+      repo_id: "QuantumNous/astrlink-guard",
+      version: "0.1.0",
+      languages: ["zh", "en"],
+      recommended: true,
+    };
+    const releaseRevision = "1".repeat(40);
+    const release: PrivacyCatalogModel = {
+      ...guard,
+      revision: releaseRevision,
+      version: "0.2.0",
+      variants: [{ ...guard.variants[0], bytes_total: 40_000_000 }],
+    };
+    const installedGuard = () =>
+      installation({
+        catalog_id: guard.id,
+        catalog_source: "official",
+        name: guard.name,
+        repo_id: guard.repo_id,
+        status: "ready",
+        bytes_downloaded: guard.variants[0].bytes_total,
+        installed_at: "2026-09-30T10:30:00Z",
+      });
+
+    beforeEach(() => {
+      bridgeMocks.getPrivacyModelCatalog.mockResolvedValue({ items: [guard] });
+    });
+
+    it("recommends Guard and installs the pinned release while offline", async () => {
+      bridgeMocks.getPrivacyModelReleases.mockRejectedValueOnce(
+        new Error("offline"),
+      );
+      bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+        items: [installedGuard()],
+      });
+      await renderPolicy();
+      await openModels();
+
+      expect(container.textContent).toContain("AstrLink Guard推荐");
+      expect(container.textContent).toContain("官方 · apache-2.0 · v0.1.0");
+      expect(container.textContent).not.toContain("有新版本");
+      expect(button("查看已就绪")).toBeTruthy();
+      await act(async () => button("已安装 1").click());
+      expect(container.textContent).toContain("CPU INT8 · int8 · v0.1.0");
+      expect(container.textContent).not.toContain("更新到");
+    });
+
+    it("offers a newer tag and installs it by commit", async () => {
+      bridgeMocks.getPrivacyModelReleases.mockResolvedValueOnce({
+        items: [release],
+      });
+      bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+        items: [installedGuard()],
+      });
+      await renderPolicy();
+      await openModels();
+
+      expect(container.textContent).toContain("官方 · apache-2.0 · v0.2.0");
+      expect(container.textContent).toContain("有新版本 v0.2.0");
+      expect(container.textContent).toContain("下载 38 MB");
+      await act(async () => button("已安装 1").click());
+      expect(container.textContent).toContain("CPU INT8 · int8 · v0.1.0");
+      expect(container.textContent).toContain("有新版本 v0.2.0");
+
+      bridgeMocks.probePrivacyModel.mockResolvedValueOnce(
+        probe({
+          repo_id: guard.repo_id,
+          requested_revision: releaseRevision,
+          revision: releaseRevision,
+          name: guard.name,
+          variants: release.variants,
+          labels: [{ label: "email", suggested_kind: "email" }],
+          requires_label_mapping: false,
+        }),
+      );
+      bridgeMocks.installPrivacyModel.mockResolvedValueOnce(
+        installation({
+          id: "model_cccccccccccccccccccccccccccccccc",
+          catalog_id: guard.id,
+          name: guard.name,
+          repo_id: guard.repo_id,
+          revision: releaseRevision,
+        }),
+      );
+      await act(async () => {
+        actionButton("更新到 v0.2.0").click();
+        await Promise.resolve();
+      });
+      expect(bridgeMocks.probePrivacyModel).toHaveBeenCalledWith({
+        repo_id: guard.repo_id,
+        revision: releaseRevision,
+      });
+      expect(bridgeMocks.installPrivacyModel).toHaveBeenCalledWith({
+        repo_id: guard.repo_id,
+        revision: releaseRevision,
+        variant_id: "cpu_int8",
+        label_mapping: { email: "email" },
+      });
+      expect(notifyMocks.success).toHaveBeenCalledWith(
+        "新版本已开始下载，完成后请在“已安装”中改用新版本。",
+      );
+      // The policy keeps the installed version until the user switches.
+      expect(container.textContent).toContain("CPU INT8 · int8 · v0.2.0");
+      expect(container.textContent).not.toContain("有新版本");
+      expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
+    });
+  });
 
   it("installs a catalog variant and polls its per-installation progress", async () => {
     vi.useFakeTimers();
@@ -1594,6 +1772,37 @@ describe("SafetyPolicy", () => {
     );
   });
 
+  it("offers the privacy redaction skill beside the notice switch", async () => {
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(policyRecord());
+    const install = vi.fn();
+    await act(async () => {
+      root.render(
+        <SafetyPolicy
+          coreSessionKey="session-1"
+          isReady
+          onInstallPlaceholderSkill={install}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    const notice = container.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="注入占位符约定说明"]',
+    );
+    const row = notice?.closest("label")?.parentElement;
+    expect(row?.textContent).toContain("安装隐私脱敏 Skill");
+    const button = [...(row?.querySelectorAll("button") ?? [])].find(
+      (item) => item.textContent === "安装 Skill",
+    );
+    // The button sits outside the switch's label, so it leaves the policy alone.
+    expect(button?.closest("label")).toBeNull();
+    await act(async () => button?.click());
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(notice?.getAttribute("aria-checked")).toBe("true");
+    expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
+  });
+
   it("keeps the two tool declaration switches independent", async () => {
     bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(policyRecord());
     bridgeMocks.updatePrivacyPolicy
@@ -1670,9 +1879,9 @@ describe("SafetyPolicy", () => {
       dialog?.querySelector("#streaming-restore-demo-title")?.textContent,
     ).toBe("流式响应还原演示");
     expect(dialog?.textContent).toContain("请求侧脱敏");
-    expect(dialog?.textContent).toContain("占位符还原");
-    expect(dialog?.textContent).toContain("不对响应正文或 SSE");
-    expect(dialog?.textContent).toContain("固定示例");
+    expect(dialog?.textContent).toContain("还原占位符");
+    expect(dialog?.textContent).toContain("不审核响应内容");
+    expect(dialog?.textContent).toContain("固定值");
     expect(dialog?.textContent).toContain("alice@example.com");
     expect(dialog?.textContent).toContain("<PRIVATE_EMAIL_7f3a91c04d28be56>");
     expect(dialog?.textContent).toContain(

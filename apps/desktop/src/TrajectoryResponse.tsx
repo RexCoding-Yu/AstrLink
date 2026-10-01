@@ -18,6 +18,7 @@ import {
   responseErrors,
   useResponsePreview,
   wireStructuredLabel,
+  withheldHint,
   type WireViewMode,
 } from "./AuditReviewer";
 import { copyButtonLabel, type CopyFeedback } from "./copy-feedback";
@@ -29,6 +30,7 @@ import {
   type AuditContent,
   type AuditContentPart,
   type AuditHTTPMeta,
+  type AuditWithheldPart,
   type RequestRecord,
   type RequestStatus,
 } from "./request-record-model";
@@ -179,6 +181,7 @@ export function UpstreamInspector({
             value: "response",
             label: t("audit.upstreamViews.response"),
             body: response,
+            withheld: auditContent?.withheld.upstream_response_content,
             lead:
               errors.length > 0 ? (
                 <Diagnosis errors={errors} tone="error" />
@@ -188,6 +191,7 @@ export function UpstreamInspector({
             value: "request",
             label: t("audit.upstreamViews.request"),
             body: request,
+            withheld: auditContent?.withheld.upstream_request_body,
           },
           { value: "http", label: "HTTP", meta },
         ]}
@@ -228,6 +232,8 @@ export type CaptureView =
       value: string;
       label: string;
       body: AuditContentPart | null;
+      /** Why a captured body is left out of this read, if it is. */
+      withheld?: AuditWithheldPart | null;
       /** Shown above the body, such as the error the provider sent. */
       lead?: ReactNode;
     }
@@ -248,6 +254,7 @@ export function CapturePane({
   missingHint,
   testId,
   scrollerRef,
+  revealPrivacy,
 }: {
   label: string;
   /** Names the view switch; defaults to the pane's label. */
@@ -259,6 +266,8 @@ export function CapturePane({
   missingHint: string | null;
   testId: string;
   scrollerRef?: Ref<HTMLDivElement>;
+  /** Unfolds JSON strings that carry privacy placeholders, for finding them. */
+  revealPrivacy?: boolean;
 }) {
   const t = useT();
   const [value, setValue] = useState(views[0]?.value ?? "");
@@ -267,6 +276,7 @@ export function CapturePane({
   if (!view) return null;
   const meta = "meta" in view ? view.meta : null;
   const body = "body" in view ? view.body : null;
+  const hint = ("body" in view && withheldHint(view.withheld)) || missingHint;
   const structuredLabel = body ? wireStructuredLabel(body) : null;
   const viewCopyKey = `${copyKey}:${view.value}`;
   const copyValue =
@@ -340,13 +350,14 @@ export function CapturePane({
             key={`${view.value}:${mode}`}
             mode={structuredLabel ? mode : "raw"}
             part={body}
+            revealPrivacy={revealPrivacy}
           />
-        ) : missingHint ? (
+        ) : hint ? (
           <p
             className="text-xs leading-6 text-muted-foreground"
             data-testid="inspector-missing-body"
           >
-            {missingHint}
+            {hint}
           </p>
         ) : null}
       </div>

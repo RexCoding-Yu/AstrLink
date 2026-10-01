@@ -16,7 +16,7 @@ export function RouteManager({
   return (
     <section
       aria-labelledby="route-manager-title"
-      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      className="gutter-frame flex min-h-0 flex-1 flex-col overflow-hidden"
     >
       <PageHeader
         variant="compact"

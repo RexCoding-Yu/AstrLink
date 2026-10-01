@@ -4,6 +4,7 @@ import {
   parseUpdatePreferences,
   parseUpdateSnapshot,
   updateBusy,
+  updateNotice,
 } from "./update-model";
 
 describe("update IPC", () => {
@@ -58,5 +59,30 @@ describe("update IPC", () => {
       parseUpdateSnapshot({ ...value, latest_version: undefined })
         .latest_version,
     ).toBeNull();
+  });
+  it("only announces update states that wait on the operator", () => {
+    const release = {
+      version: "1.1.0",
+      notes: "",
+      published_at: null,
+      url: "https://github.com/Calcium-Ion/AstrLink/releases/tag/v1.1.0",
+    };
+    const base = { ...browserUpdateSnapshot(), release };
+    const manualDownload = {
+      ...base.preferences,
+      auto_download: false,
+    };
+    expect(updateNotice({ ...base, phase: "available" })).toBeNull();
+    expect(
+      updateNotice({
+        ...base,
+        phase: "available",
+        preferences: manualDownload,
+      }),
+    ).toBe("available");
+    expect(updateNotice({ ...base, phase: "manual" })).toBe("manual");
+    expect(updateNotice({ ...base, phase: "ready" })).toBe("ready");
+    expect(updateNotice({ ...base, phase: "downloading" })).toBeNull();
+    expect(updateNotice({ ...base, phase: "ready", release: null })).toBeNull();
   });
 });

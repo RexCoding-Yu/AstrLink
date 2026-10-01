@@ -26,6 +26,8 @@ const valid = {
   load_warning: null,
   autostart_actual: false,
   autostart_error: null,
+  data_backups: [],
+  local_key_storage: null,
 };
 
 describe("preferences IPC contract", () => {
@@ -170,5 +172,48 @@ describe("preferences IPC contract", () => {
     });
     expect(parsed.autostart_actual).toBeNull();
     expect(parsed.autostart_error).toBe("系统 API 不可用");
+  });
+
+  it("accepts only the known local key storage values", () => {
+    for (const local_key_storage of [
+      null,
+      "keychain",
+      "file",
+      "keychain_unavailable",
+    ] as const) {
+      expect(
+        parseSettingsSnapshot({ ...valid, local_key_storage })
+          .local_key_storage,
+      ).toBe(local_key_storage);
+    }
+    for (const local_key_storage of [undefined, "", "vault", 1]) {
+      expect(() =>
+        parseSettingsSnapshot({ ...valid, local_key_storage }),
+      ).toThrow("$.local_key_storage");
+    }
+  });
+
+  it("validates reported data-directory backups", () => {
+    const file = {
+      name: "astrlink.db.bak-20260924",
+      size_bytes: 2_147_483_648,
+      modified_unix: 1_790_000_000,
+    };
+    expect(
+      parseSettingsSnapshot({ ...valid, data_backups: [file] }).data_backups,
+    ).toEqual([file]);
+    for (const data_backups of [
+      undefined,
+      null,
+      [{ ...file, size_bytes: -1 }],
+      [{ ...file, name: "" }],
+      [{ ...file, modified_unix: "yesterday" }],
+      [{ ...file, extra: true }],
+      Array.from({ length: 101 }, () => file),
+    ]) {
+      expect(() => parseSettingsSnapshot({ ...valid, data_backups })).toThrow(
+        "$.data_backups",
+      );
+    }
   });
 });

@@ -1,0 +1,2 @@
+# Skill files ship verbatim through include_str!; keep LF on Windows checkouts.
+agent-bundle/** text eol=lf

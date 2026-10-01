@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 )
@@ -262,13 +261,9 @@ func TestReplayReadCloserSupportsConcurrentReadAndClose(t *testing.T) {
 	if err := body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-readDone:
-		if !errors.Is(err, http.ErrBodyReadAfterClose) {
-			t.Fatalf("concurrent Read error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Close did not unblock Read")
+	err := <-readDone
+	if !errors.Is(err, http.ErrBodyReadAfterClose) {
+		t.Fatalf("concurrent Read error = %v", err)
 	}
 	if _, err := body.Read(make([]byte, 1)); !errors.Is(err, http.ErrBodyReadAfterClose) {
 		t.Fatalf("Read after Close error = %v", err)

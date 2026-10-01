@@ -1,3 +1,4 @@
+import type { ConversionEngineSnapshot } from "./service-presets";
 import {
   parseServiceProxy,
   type ServiceProxy,
@@ -50,12 +51,42 @@ export interface ServiceCapability {
   convert_to?: string;
 }
 
+/** Prefer advertised, non-discouraged edges to an actual upstream protocol. */
+export function bestConversionTarget(
+  from: string,
+  upstreamProtocols: readonly string[],
+  engine?: ConversionEngineSnapshot | null,
+): string | undefined {
+  if (engine?.available !== true) return undefined;
+  const preference = [
+    "openai.responses",
+    "openai.chat",
+    "anthropic.messages",
+    "google.generate_content",
+  ];
+  return engine.edges
+    .filter(
+      (edge) =>
+        edge.from === from &&
+        edge.to !== from &&
+        preference.includes(edge.to) &&
+        upstreamProtocols.includes(edge.to) &&
+        edge.quality !== "discouraged",
+    )
+    .sort(
+      (a, b) =>
+        Number(b.quality === "good") - Number(a.quality === "good") ||
+        preference.indexOf(a.to) - preference.indexOf(b.to),
+    )[0]?.to;
+}
+
 export type ModelDiscoveryProtocol = "openai.models" | "google.models";
 
 export type SubscriptionServiceKind =
   | "codex_subscription"
   | "claude_subscription"
-  | "grok_subscription";
+  | "grok_subscription"
+  | "antigravity_subscription";
 export type ServiceKind = SubscriptionServiceKind | HTTPServiceKind;
 
 /** Provider owning each subscription kind; mirrors contract.ServiceKind.SubscriptionProvider. */
@@ -66,6 +97,7 @@ export const subscriptionKindProviders: Record<
   codex_subscription: "openai_codex",
   claude_subscription: "claude_code",
   grok_subscription: "xai_grok",
+  antigravity_subscription: "antigravity",
 };
 
 /** Fixed native capabilities; mirrors contract.SubscriptionProvider.Capabilities. */
@@ -80,6 +112,11 @@ export const subscriptionNativeCapabilities: Record<
   ],
   claude_subscription: [
     { protocol: "anthropic.messages", mode: "native", streaming: true },
+    { protocol: "openai.models", mode: "native", streaming: false },
+  ],
+  antigravity_subscription: [
+    { protocol: "google.generate_content", mode: "native", streaming: true },
+    { protocol: "google.models", mode: "native", streaming: false },
     { protocol: "openai.models", mode: "native", streaming: false },
   ],
   grok_subscription: [
@@ -100,6 +137,7 @@ export const subscriptionConversionTargets: Record<
   codex_subscription: ["openai.responses"],
   claude_subscription: ["anthropic.messages"],
   grok_subscription: ["openai.responses", "openai.chat"],
+  antigravity_subscription: ["google.generate_content"],
 };
 
 export const subscriptionKinds = Object.keys(
@@ -144,6 +182,8 @@ export interface HTTPServiceConnection {
   auth: ServiceAuth;
   credential_ref?: string;
   model_list_path?: string;
+  /** Saved key's last characters ("…a1b2"); only on a single-service read. */
+  credential_hint?: string;
 }
 
 export interface SubscriptionServiceConnection {
@@ -295,6 +335,10 @@ const resourceIDPattern = /^[a-z][a-z0-9_-]{2,95}$/;
 const protocolIDPattern = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const headerNamePattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const localCredentialRefPattern = /^local:\/\/service\/[a-z][a-z0-9_-]{2,95}$/;
+// Accounts keep their OAuth tokens sealed in Core's database; accounts not
+// migrated yet still name the OS keystore.
+const subscriptionCredentialRefPattern =
+  /^local:\/\/subscription\/[a-z][a-z0-9_-]{2,95}$/;
 const keyringCredentialRefPattern =
   /^keyring:\/\/[A-Za-z0-9._~-]+\/[A-Za-z0-9._~!$&'()*+,;=:@/-]*[A-Za-z0-9._~!$&'()*+,;=:@-]$/;
 const rfc3339Pattern =
@@ -471,7 +515,7 @@ function parseHTTPConnection(
   keysAt(
     connection,
     ["base_url", "auth"],
-    ["credential_ref", "model_list_path"],
+    ["credential_ref", "model_list_path", "credential_hint"],
     path,
   );
   const baseURL = stringAt(connection.base_url, `${path}.base_url`, 1, 2048);
@@ -511,11 +555,24 @@ function parseHTTPConnection(
       512,
     );
   }
+  let credentialHint: string | undefined;
+  if (Object.hasOwn(connection, "credential_hint")) {
+    credentialHint = stringAt(
+      connection.credential_hint,
+      `${path}.credential_hint`,
+      2,
+      16,
+    );
+    if (!credentialRef || !credentialHint.startsWith("…")) {
+      invalid(`${path}.credential_hint`, "must be a saved-key display hint");
+    }
+  }
   return {
     base_url: baseURL,
     auth: parseAuth(connection.auth, `${path}.auth`),
     ...(credentialRef ? { credential_ref: credentialRef } : {}),
     ...(modelListPath ? { model_list_path: modelListPath } : {}),
+    ...(credentialHint ? { credential_hint: credentialHint } : {}),
   };
 }
 
@@ -718,7 +775,8 @@ function parseSubscriptionConnection(
   if (
     subscription.provider !== "openai_codex" &&
     subscription.provider !== "claude_code" &&
-    subscription.provider !== "xai_grok"
+    subscription.provider !== "xai_grok" &&
+    subscription.provider !== "antigravity"
   ) {
     invalid(`${path}.provider`, "unknown subscription provider");
   }
@@ -752,8 +810,14 @@ function parseSubscriptionConnection(
       1,
       512,
     );
-    if (!keyringCredentialRefPattern.test(credentialRef)) {
-      invalid(`${path}.credential_ref`, "must use keyring://");
+    if (
+      !subscriptionCredentialRefPattern.test(credentialRef) &&
+      !keyringCredentialRefPattern.test(credentialRef)
+    ) {
+      invalid(
+        `${path}.credential_ref`,
+        "must use local://subscription/<id> or keyring://",
+      );
     }
     result.credential_ref = credentialRef;
   }

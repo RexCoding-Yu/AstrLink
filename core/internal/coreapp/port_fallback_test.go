@@ -147,9 +147,10 @@ func TestInferencePortFallbackIsOptInAndOnlyHandlesAddressInUse(t *testing.T) {
 	}
 }
 
-func TestInferenceHandlerSetupFailureClosesBothListenersWithoutReady(t *testing.T) {
+func TestInferenceHandlerSetupFailureClosesEveryListenerWithoutReady(t *testing.T) {
 	config := DefaultConfig("0.1.0-test", "abc1234")
 	inference := newBlockingListener(config.InferenceListen)
+	inferenceIPv6 := newBlockingListener("[::1]:18317")
 	control := newBlockingListener("127.0.0.1:54321")
 	listeners := []*blockingListener{inference, control}
 	var ready bytes.Buffer
@@ -158,6 +159,8 @@ func TestInferenceHandlerSetupFailureClosesBothListenersWithoutReady(t *testing.
 		listener := listeners[0]
 		listeners = listeners[1:]
 		return listener, nil
+	}, func(_, _ string) (net.Listener, error) {
+		return inferenceIPv6, nil
 	}, Dependencies{NewInferenceHandler: func(address string) (http.Handler, error) {
 		if address != config.InferenceListen {
 			t.Fatalf("factory address = %s", address)
@@ -167,7 +170,7 @@ func TestInferenceHandlerSetupFailureClosesBothListenersWithoutReady(t *testing.
 	if !errors.Is(err, forced) || ready.Len() != 0 {
 		t.Fatalf("error = %v, ready = %s", err, ready.String())
 	}
-	for _, listener := range []*blockingListener{inference, control} {
+	for _, listener := range []*blockingListener{inference, inferenceIPv6, control} {
 		select {
 		case <-listener.closed:
 		default:

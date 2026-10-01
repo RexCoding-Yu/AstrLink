@@ -1,6 +1,10 @@
 package contract
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestDefaultAuditSettingsAreValid(t *testing.T) {
 	settings := DefaultAuditSettings()
@@ -100,12 +104,55 @@ func TestAuditSettingsPatchAckAndRanges(t *testing.T) {
 }
 
 func TestAuditContentPartValidation(t *testing.T) {
-	part := AuditContentPart{MediaType: "application/json", Content: "{}", CapturedBytes: 2}
+	part := AuditContentPart{MediaType: "application/json", Content: "{}", CapturedBytes: 2, Exposure: AuditPartExposureShareable}
 	if err := part.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	part.MediaType = ""
 	if err := part.Validate(); err == nil {
 		t.Fatal("expected media_type error")
+	}
+	part.MediaType = "application/json"
+	part.Exposure = ""
+	if err := part.Validate(); err == nil {
+		t.Fatal("expected exposure error")
+	}
+}
+
+func TestAuditWithheldPartOmitsContent(t *testing.T) {
+	available := true
+	part := AuditContentPart{
+		MediaType: "application/json", Content: "must not leak", CapturedBytes: 13,
+		Withheld: true, Reason: AuditWithheldPrivacyRedacted, RawAvailable: &available,
+	}
+	encoded, err := json.Marshal(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"withheld":true,"reason":"privacy_redacted","raw_available":true,` +
+		`"media_type":"application/json","truncated":false,"captured_bytes":13}`
+	if string(encoded) != want {
+		t.Fatalf("withheld json=%s", encoded)
+	}
+	if err := part.Validate(); err == nil {
+		t.Fatal("withheld part with content accepted")
+	}
+	part.Content = ""
+	part.RawAvailable = nil
+	if err := part.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if encoded, _ = json.Marshal(part); !strings.Contains(string(encoded), `"raw_available":false`) {
+		t.Fatalf("withheld json=%s", encoded)
+	}
+	part.Reason = "because"
+	if err := part.Validate(); err == nil {
+		t.Fatal("unknown reason accepted")
+	}
+
+	shared := AuditContentPart{MediaType: "text/plain", Content: "", Exposure: AuditPartExposureShareable}
+	if encoded, _ = json.Marshal(shared); string(encoded) !=
+		`{"media_type":"text/plain","content":"","truncated":false,"captured_bytes":0,"exposure":"shareable"}` {
+		t.Fatalf("shared json=%s", encoded)
 	}
 }

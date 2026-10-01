@@ -33,16 +33,26 @@ func TestCodingPlanForwardingPathsHeadersAndStreams(t *testing.T) {
 		model, prefix, path string
 		protocol            contract.ProtocolID
 		auth                contract.AuthScheme
+		// upstream and sent default to the joined prefix/path and auth.
+		upstream string
+		sent     contract.AuthScheme
 	}{
-		{contract.ServiceKindClaudeSubscription, "claude-sonnet-4-5", "", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer},
-		{contract.ServiceKindGrokSubscription, "grok-4.5", "", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer},
-		{contract.ServiceKindGrokSubscription, "grok-composer-2.5-fast", "", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer},
-		{contract.ServiceKindKimiCoding, "kimi-for-coding", "/coding", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeAnthropicAPIKey},
-		{contract.ServiceKindGLMCoding, "glm-5.3", "/api/anthropic", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer},
-		{contract.ServiceKindMiniMaxCoding, "MiniMax-M3", "/anthropic", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer},
-		{contract.ServiceKindOpenCodeGo, "minimax-m3", "/zen/go/v1", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer},
-		{contract.ServiceKindOpenCodeGo, "gpt-5.6-luna", "/zen/go/v1", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer},
-		{contract.ServiceKindOpenCodeZen, "minimax-m3", "/zen/v1", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer},
+		{contract.ServiceKindClaudeSubscription, "claude-sonnet-4-5", "", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer, "", ""},
+		{contract.ServiceKindGrokSubscription, "grok-4.5", "", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "", ""},
+		{contract.ServiceKindGrokSubscription, "grok-composer-2.5-fast", "", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer, "", ""},
+		{contract.ServiceKindKimiCoding, "kimi-for-coding", "/coding", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeAnthropicAPIKey, "", ""},
+		{contract.ServiceKindGLMCoding, "glm-5.3", "/api/anthropic", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer, "", ""},
+		{contract.ServiceKindMiniMaxCoding, "MiniMax-M3", "/anthropic", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer, "", ""},
+		// Bases saved for Messages still reach each plan's OpenAI surface.
+		{contract.ServiceKindKimiCoding, "kimi-for-coding", "/coding", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeAnthropicAPIKey, "", contract.AuthSchemeBearer},
+		{contract.ServiceKindKimiCoding, "kimi-for-coding", "/coding", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeAnthropicAPIKey, "", contract.AuthSchemeBearer},
+		{contract.ServiceKindGLMCoding, "glm-5.3", "/api/anthropic", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer, "/api/coding/paas/v4/chat/completions", ""},
+		{contract.ServiceKindGLMCoding, "glm-5.3", "/api/coding/paas/v4", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "/api/v1/responses", ""},
+		{contract.ServiceKindMiniMaxCoding, "MiniMax-M3", "/anthropic", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer, "/v1/chat/completions", ""},
+		{contract.ServiceKindMiniMaxCoding, "MiniMax-M3", "/v1", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "/v1/responses", ""},
+		{contract.ServiceKindOpenCodeGo, "minimax-m3", "/zen/go/v1", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer, "", ""},
+		{contract.ServiceKindOpenCodeGo, "gpt-5.6-luna", "/zen/go/v1", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "", ""},
+		{contract.ServiceKindOpenCodeZen, "minimax-m3", "/zen/v1", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer, "", ""},
 	} {
 		t.Run(string(test.kind)+"/"+test.model, func(t *testing.T) {
 			for _, streaming := range []bool{false, true} {
@@ -55,6 +65,9 @@ func TestCodingPlanForwardingPathsHeadersAndStreams(t *testing.T) {
 					upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 						called.Store(true)
 						wantPath := strings.TrimSuffix(test.prefix, "/v1") + test.path
+						if test.upstream != "" {
+							wantPath = test.upstream
+						}
 						if request.URL.Path != wantPath {
 							t.Errorf("path = %q, want %q", request.URL.Path, wantPath)
 						}
@@ -62,7 +75,11 @@ func TestCodingPlanForwardingPathsHeadersAndStreams(t *testing.T) {
 						if test.kind.IsSubscription() {
 							authorization = "Bearer subscription-token"
 						}
-						if test.auth == contract.AuthSchemeAnthropicAPIKey {
+						sent := test.auth
+						if test.sent != "" {
+							sent = test.sent
+						}
+						if sent == contract.AuthSchemeAnthropicAPIKey {
 							authorization, apiKey = "", "plan-key"
 						}
 						if request.Header.Get("Authorization") != authorization || request.Header.Get("X-Api-Key") != apiKey {
@@ -93,7 +110,7 @@ func TestCodingPlanForwardingPathsHeadersAndStreams(t *testing.T) {
 						}
 						if test.kind == contract.ServiceKindGrokSubscription {
 							if request.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || request.Header.Get("X-Grok-Client-Version") == "" ||
-								!strings.HasPrefix(request.UserAgent(), "xai-grok-workspace/") {
+								!strings.HasPrefix(request.UserAgent(), "grok-shell/") {
 								t.Errorf("missing Grok CLI identity: %v", request.Header)
 							}
 						} else if request.Header.Get("X-XAI-Token-Auth") != "" {
@@ -203,7 +220,7 @@ func TestSubscriptionIdentityOptOutReachesUpstream(t *testing.T) {
 			request.Header.Set("User-Agent", test.clientUA)
 			request.Header.Set("Authorization", "Bearer local-token")
 			request.Header.Set("X-Api-Key", "local-key")
-			request.Header.Set("X-Grok-Client-Version", "0.0.1")
+			request.Header.Set("X-Grok-Client-Version", "invalid")
 			request.Header.Set("X-AstrLink-Debug", "local-only")
 			request.Header.Set("X-Client-Feature", "keep")
 			request.Header.Set("Anthropic-Beta", "client-feature,oauth-2025-04-20")

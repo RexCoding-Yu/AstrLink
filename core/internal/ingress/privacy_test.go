@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
@@ -303,12 +302,10 @@ func TestBufferedResponseRestoreDiscardsInterruptedAttemptBeforeFallback(t *test
 	second.ID = "endpoint_second"
 	second.BaseURL = "https://second.example"
 	attempts := 0
-	resolver := &healthTrackingCandidateResolver{
-		candidateResolver: candidateResolver{candidates: []endpoint.Resolved{
-			{Endpoint: first},
-			{Endpoint: second},
-		}},
-	}
+	resolver := candidateResolver{candidates: []endpoint.Resolved{
+		{Endpoint: first},
+		{Endpoint: second},
+	}}
 	handler := NewWithDependencies(Dependencies{
 		Resolver:      resolver,
 		PrivacyFilter: filter,
@@ -362,16 +359,6 @@ func TestBufferedResponseRestoreDiscardsInterruptedAttemptBeforeFallback(t *test
 	}
 	if strings.Contains(response.Body.String(), "<PRIVATE_") {
 		t.Fatalf("partial first response leaked: %q", response.Body.String())
-	}
-	if len(resolver.failures) != 1 || resolver.failures[0] != "endpoint_first" ||
-		len(resolver.successes) != 1 || resolver.successes[0] != "endpoint_second" ||
-		len(resolver.abandons) != 0 {
-		t.Fatalf(
-			"health outcomes failures=%v successes=%v abandons=%v",
-			resolver.failures,
-			resolver.successes,
-			resolver.abandons,
-		)
 	}
 }
 
@@ -688,6 +675,21 @@ func TestPrivacyRetryDoesNotAccumulateNotice(t *testing.T) {
 	}
 }
 
+func TestPrivacyDecisionSummaryNamesTheExplanationPath(t *testing.T) {
+	for _, test := range []struct {
+		notice, skill bool
+		want          string
+	}{
+		{false, false, "redact · 3"},
+		{true, false, "redact · 3 · notice"},
+		{false, true, "redact · 3 · skill"},
+	} {
+		if got := privacyDecisionSummary(3, test.notice, test.skill); got != test.want {
+			t.Fatalf("summary(notice=%t, skill=%t) = %q, want %q", test.notice, test.skill, got, test.want)
+		}
+	}
+}
+
 func TestInspectedRetryBodyBorrowsOnePrivacyResidencyPermit(t *testing.T) {
 	filter := testPrivacyEngine(t, privacy.Policy{
 		Enabled: true,
@@ -737,26 +739,14 @@ func TestInspectedRetryBodyBorrowsOnePrivacyResidencyPermit(t *testing.T) {
 		start()
 	}
 	for range DefaultMaxConcurrentInspections {
-		select {
-		case <-entered:
-		case <-time.After(time.Second):
-			t.Fatal("privacy inspection deadlocked while borrowing the retry-body permit")
-		}
+		<-entered
 	}
 
 	start()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("extra concurrent request stayed queued behind in-flight streams")
-	}
+	<-entered
 	releaseOnce.Do(func() { close(release) })
 	for range DefaultMaxConcurrentInspections + 1 {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("privacy request did not finish")
-		}
+		<-done
 	}
 }
 
@@ -1156,25 +1146,13 @@ func TestPrivacyReusesFourBufferedBodyPermitsForGemini(t *testing.T) {
 		start()
 	}
 	for range DefaultMaxConcurrentInspections {
-		select {
-		case <-entered:
-		case <-time.After(time.Second):
-			t.Fatal("privacy-buffered request did not reach forwarder")
-		}
+		<-entered
 	}
 	start()
-	select {
-	case <-entered:
-	case <-time.After(time.Second):
-		t.Fatal("extra privacy-buffered request stayed queued behind in-flight streams")
-	}
+	<-entered
 	releaseOnce.Do(func() { close(releaseForwarders) })
 	for range DefaultMaxConcurrentInspections + 1 {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("privacy-buffered request did not finish")
-		}
+		<-done
 	}
 }
 

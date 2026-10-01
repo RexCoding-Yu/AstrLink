@@ -43,6 +43,58 @@ export interface RateLimitResetCredits {
   available_count: number;
 }
 
+export interface ResetCreditsDetails extends RateLimitResetCredits {
+  credits: { expires_at?: string }[];
+}
+
+export function resetCreditExpiryWarning(
+  details: ResetCreditsDetails,
+  now: number,
+) {
+  const day = 24 * 60 * 60_000;
+  const expiries = details.credits
+    .map((credit) =>
+      credit.expires_at ? Date.parse(credit.expires_at) : Infinity,
+    )
+    .filter((expiry) => expiry > now && expiry <= now + 3 * day);
+  const count = Math.min(details.available_count, expiries.length);
+  if (count === 0) return null;
+  const expiresAt = Math.min(...expiries);
+  return { count, expiresAt, urgent: expiresAt <= now + day };
+}
+
+export function formatResetCreditExpiry(expiresAt: number, now: number) {
+  const minutes = Math.max(1, Math.ceil((expiresAt - now) / 60_000));
+  const unit = minutes >= 1440 ? "day" : minutes >= 60 ? "hour" : "minute";
+  const value = Math.ceil(
+    minutes / (unit === "day" ? 1440 : unit === "hour" ? 60 : 1),
+  );
+  return new Intl.RelativeTimeFormat(i18n.language).format(value, unit);
+}
+
+export function parseResetCreditsDetails(value: unknown): ResetCreditsDetails {
+  const details = objectAt(value, "$");
+  keysAt(details, ["available_count", "credits"], [], "$");
+  if (!Array.isArray(details.credits) || details.credits.length > 1000)
+    return invalid("$.credits", "expected at most 1000 credits");
+  return {
+    available_count: intAt(
+      details.available_count,
+      "$.available_count",
+      0,
+      1000,
+    ),
+    credits: details.credits.map((value, index) => {
+      const path = `$.credits[${index}]`;
+      const credit = objectAt(value, path);
+      keysAt(credit, [], ["expires_at"], path);
+      return Object.hasOwn(credit, "expires_at")
+        ? { expires_at: timestampAt(credit.expires_at, `${path}.expires_at`) }
+        : {};
+    }),
+  };
+}
+
 export interface SubscriptionUsage {
   service_id: string;
   fetched_at: string;
@@ -58,7 +110,10 @@ export interface SubscriptionUsage {
 }
 
 export type UsageResetOutcome =
-  "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed";
+  | "reset"
+  | "nothing_to_reset"
+  | "no_credit"
+  | "already_redeemed";
 
 export interface SubscriptionUsageReset {
   service_id: string;
@@ -297,11 +352,11 @@ export function parseSubscriptionUsage(value: unknown): SubscriptionUsage {
   if (Object.hasOwn(usage, "additional_rate_limits")) {
     if (
       !Array.isArray(usage.additional_rate_limits) ||
-      usage.additional_rate_limits.length > 16
+      usage.additional_rate_limits.length > 256
     ) {
       invalid(
         "$.additional_rate_limits",
-        "expected an array with at most 16 items",
+        "expected an array with at most 256 items",
       );
     }
     parsed.additional_rate_limits = usage.additional_rate_limits.map(
@@ -390,10 +445,11 @@ export function parseSubscriptionUsageReset(
 }
 
 const planTypeLabels: Record<SubscriptionProvider, Record<string, string>> = {
+  antigravity: {},
   openai_codex: {
     plus: "Plus",
-    pro: "Pro 20x",
-    prolite: "Pro 5x",
+    pro: "Pro 20×",
+    prolite: "Pro 5×",
     go: "Go",
     free: "Free",
     team: "Team",
@@ -450,9 +506,11 @@ export function windowLabel(
     : i18n.t("usage.rollingLimit");
 }
 
+/** `short` drops the verb for a column already headed "resets". */
 export function formatResetCountdown(
   window: RateLimitWindow,
   now: Date,
+  { short = false }: { short?: boolean } = {},
 ): string | null {
   let target: Date | null = null;
   if (window.reset_at) {
@@ -462,14 +520,15 @@ export function formatResetCountdown(
     target = new Date(now.getTime() + window.reset_after_seconds * 1000);
   }
   if (!target) return null;
+  const key = (name: string) => `usage.${name}${short ? "Short" : ""}`;
   const deltaMs = Math.max(0, target.getTime() - now.getTime());
   const minutes = Math.floor(deltaMs / 60_000);
-  if (minutes < 1) return i18n.t("usage.resetSoon");
-  if (minutes < 60) return i18n.t("usage.resetInMinutes", { count: minutes });
+  if (minutes < 1) return i18n.t(key("resetSoon"));
+  if (minutes < 60) return i18n.t(key("resetInMinutes"), { count: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return i18n.t("usage.resetInHours", { count: hours });
+  if (hours < 24) return i18n.t(key("resetInHours"), { count: hours });
   const days = Math.round(hours / 24);
-  return i18n.t("usage.resetInDays", { count: days });
+  return i18n.t(key("resetInDays"), { count: days });
 }
 
 export function formatQuotaExpiry(quota: UsageQuota, now: Date): string | null {

@@ -26,7 +26,7 @@ CLI 代理。它与 xAI 开放平台 API Key 相互独立。
 ## 添加提供商
 
 1. 打开 **API 提供商 → 添加 API 提供商**，选择账号类型和厂商。
-2. 核对 API 地址，填写密钥，或完成订阅账号授权。
+2. 厂商预设选择账号所在的站点（国内站或国际站），网关类型填写网关地址；然后填写密钥，或完成订阅账号授权。
 3. 拉取或手动添加需要使用的模型，核对入口协议，然后保存。
 4. 在提供商列表中打开测试窗口，确认模型可以正常回复。操作见[测试 API 提供商与模型](provider-testing.md)。
 
@@ -35,36 +35,41 @@ Key 仅供 AstrLink 连接 API 提供商使用。
 
 ## 按量付费 API
 
-选择 **按量付费 API**
-后，AstrLink 会按厂商填入预设地址。使用其他地域或国际站账号时，请改为账号控制台提供的地址。
+厂商预设不需要填写 API 地址：在 **API 地址**
+中选择账号所在的站点即可。只有经反向代理或其他地域接入时，才需要选择
+**自定义地址** 并填写。认证方式也由预设决定，只有 **自定义** 类型需要选择。
 
-| 厂商             | 默认 API 地址                                       | 模型列表                                       |
-| ---------------- | --------------------------------------------------- | ---------------------------------------------- |
-| OpenAI           | `https://api.openai.com/v1`                         | 拉取或手动添加                                 |
-| Anthropic        | `https://api.anthropic.com`                         | 拉取或手动添加                                 |
-| Gemini           | `https://generativelanguage.googleapis.com`         | 拉取或手动添加                                 |
-| DeepSeek         | `https://api.deepseek.com/v1`                       | 拉取或手动添加                                 |
-| 千问（百炼）     | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 手动添加                                       |
-| Kimi（Moonshot） | `https://api.moonshot.cn/v1`                        | 拉取或手动添加                                 |
-| 智谱 GLM         | `https://open.bigmodel.cn/api/paas/v4`              | 手动添加                                       |
-| MiniMax          | `https://api.minimax.cn/v1`                         | 拉取或手动添加                                 |
-| 豆包（火山方舟） | `https://ark.cn-beijing.volces.com/api/v3`          | 手动添加模型 ID 或以 `ep-` 开头的推理接入点 ID |
-| xAI（Grok）      | `https://api.x.ai/v1`                               | 拉取或手动添加                                 |
-| OpenCode Zen     | `https://opencode.ai/zen/v1`                        | 拉取或手动添加                                 |
+| 厂商             | 国内站 / 官方地址                                   | 国际站                                                   | 模型列表                                       |
+| ---------------- | --------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------- |
+| OpenAI           | `https://api.openai.com/v1`                         | —                                                        | 拉取或手动添加                                 |
+| Anthropic        | `https://api.anthropic.com`                         | —                                                        | 拉取或手动添加                                 |
+| Gemini           | `https://generativelanguage.googleapis.com`         | —                                                        | 拉取或手动添加                                 |
+| DeepSeek         | `https://api.deepseek.com/v1`                       | —                                                        | 拉取或手动添加                                 |
+| 千问（百炼）     | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | 手动添加                                       |
+| Kimi（Moonshot） | `https://api.moonshot.cn/v1`                        | `https://api.moonshot.ai/v1`                             | 拉取或手动添加                                 |
+| 智谱 GLM         | `https://open.bigmodel.cn/api/paas/v4`              | `https://api.z.ai/api/paas/v4`                           | 手动添加                                       |
+| MiniMax          | `https://api.minimax.cn/v1`                         | `https://api.minimax.io/v1`                              | 拉取或手动添加                                 |
+| 豆包（火山方舟） | `https://ark.cn-beijing.volces.com/api/v3`          | —                                                        | 手动添加模型 ID 或以 `ep-` 开头的推理接入点 ID |
+| xAI（Grok）      | `https://api.x.ai/v1`                               | —                                                        | 拉取或手动添加                                 |
+| OpenCode Zen     | `https://opencode.ai/zen/v1`                        | —                                                        | 拉取或手动添加                                 |
 
 “拉取”是否成功取决于提供商是否支持模型发现接口，以及账号是否有权限。无法拉取时，请按控制台中的实际模型 ID 手动添加。
 
-百炼预设使用北京地域，密钥需与地域或业务空间匹配。Moonshot 国际账号通常使用
-`https://api.moonshot.ai/v1`，MiniMax 国际账号使用 `https://api.minimax.io/v1`。
+百炼的国内站为北京地域，国际站为新加坡地域，密钥需与地域或业务空间匹配。
 
 ## Coding Plan
 
-| API 提供商          | 默认地址                                 |
-| ------------------- | ---------------------------------------- |
-| OpenCode Go         | `https://opencode.ai/zen/go/v1`          |
-| Kimi Coding         | `https://api.kimi.ai/coding`             |
-| GLM Coding Plan     | `https://open.bigmodel.cn/api/anthropic` |
-| MiniMax Coding Plan | `https://api.minimax.cn/anthropic`       |
+| API 提供商          | 国内站 / 官方地址                             | 国际站                                | 原生入口协议                                     |
+| ------------------- | --------------------------------------------- | ------------------------------------- | ------------------------------------------------ |
+| OpenCode Go         | `https://opencode.ai/zen/go/v1`               | —                                     | 按模型选择 Responses、Anthropic Messages 或 Chat |
+| Kimi Coding         | `https://api.kimi.ai/coding`                  | —                                     | Responses、Anthropic Messages、Chat、Models      |
+| GLM Coding Plan     | `https://open.bigmodel.cn/api/coding/paas/v4` | `https://api.z.ai/api/coding/paas/v4` | Responses、Anthropic Messages、Chat              |
+| MiniMax Coding Plan | `https://api.minimax.cn/v1`                   | `https://api.minimax.io/v1`           | Responses、Anthropic Messages、Chat、Models      |
+
+选择站点后即可使用该订阅的全部原生协议，AstrLink 会按请求协议切换到厂商对应的路径。已保存的厂商 Claude
+Code 地址（如 `…/anthropic`）同样有效。GLM Coding Plan 的 Chat 请求固定发往
+`/api/coding/paas/v4`，以免消耗开放平台余额；Responses 请求发往智谱统一的
+`/api/v1`。
 
 使用订阅控制台提供的凭据，并核对当前套餐支持的模型。API 提供商预设不会改变你的订阅权益或额度。
 
@@ -73,7 +78,9 @@ Key 仅供 AstrLink 连接 API 提供商使用。
 选择 **New API** 或对应兼容类型，填写网关地址和该网关颁发的 API
 Key。支持模型和协议取决于网关实际配置，不能仅凭预设判断所有接口都可用。
 
-选择 **New API** 类型时，列表的「订阅额度」列会显示该密钥的已用和剩余额度，按网关公布的额度单位折算为美元。New API 限制了额度查询频率，因此数据最多缓存 5 分钟。
+选择 **New API**
+类型时，列表的「订阅额度」列会显示该密钥的已用和剩余额度，按网关公布的额度单位折算为美元。New
+API 限制了额度查询频率，因此数据最多缓存 5 分钟。
 
 ## 选择客户端协议
 
@@ -88,7 +95,7 @@ Completions 接口调用，由 AstrLink 转换为 Gemini 请求。协议转换�
 
 | 问题       | 检查内容                                                                 |
 | ---------- | ------------------------------------------------------------------------ |
-| 401 / 403  | 账号、密钥、地域，以及 API / Coding Plan 类型是否对应                    |
+| 401 / 403  | 账号、密钥、站点或地域，以及 API / Coding Plan 类型是否对应              |
 | 模型不可用 | 模型 ID、账号权限和 AstrLink 中的模型列表；火山方舟可能需要推理接入点 ID |
 | 协议不支持 | 客户端接口与提供商入口配置是否匹配，是否需要启用可用的协议转换           |
 | 连接失败   | 提供商地址、系统代理，以及请求记录中的具体失败原因                       |

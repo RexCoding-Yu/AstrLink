@@ -161,7 +161,7 @@ func TestNoticePreservesExistingJSONBytes(t *testing.T) {
 			if !bytes.Equal(body, []byte(wrap(test.before))) {
 				t.Fatal("notice insertion mutated the source bytes used for retries")
 			}
-			assertOnlyRedactionsChanged(t, strings.ReplaceAll(wrap(test.after), "__NOTICE__", placeholderNotice), result)
+			assertOnlyRedactionsChanged(t, strings.ReplaceAll(wrap(test.after), "__NOTICE__", placeholderNoticeUnrestored), result)
 		})
 	}
 }
@@ -186,7 +186,7 @@ func TestNoticeAppendsMissingFieldsWithoutReorderingExistingFields(t *testing.T)
 			if err != nil || result.Decision != DecisionRedact || !result.NoticeInjected {
 				t.Fatalf("inspect: decision=%s notice=%t err=%v", result.Decision, result.NoticeInjected, err)
 			}
-			want := prefix + "," + strings.ReplaceAll(test.added, "__NOTICE__", placeholderNotice) + "}\t\n"
+			want := prefix + "," + strings.ReplaceAll(test.added, "__NOTICE__", placeholderNoticeUnrestored) + "}\t\n"
 			assertOnlyRedactionsChanged(t, want, result)
 		})
 	}

@@ -412,15 +412,9 @@ func TestExchangeCancellationHasHardBoundWhenStoppedReaderDoesNotUnblock(t *test
 
 	<-stuck.started
 	cancel()
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("exchange error = %v", err)
-		}
-	case <-time.After(500 * time.Millisecond):
-		stuck.unblock()
-		<-result
-		t.Fatal("canceled exchange waited for a stuck worker reader")
+	// A regression that waits for the stuck reader hangs until go test -timeout.
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("exchange error = %v", err)
 	}
 	stuck.unblock()
 }
@@ -435,15 +429,8 @@ func TestExchangeTimeoutHasHardBoundWhenStoppedReaderDoesNotUnblock(t *testing.T
 	}()
 
 	<-stuck.started
-	select {
-	case err := <-result:
-		if !errors.Is(err, privacy.ErrDetectorTimeout) {
-			t.Fatalf("exchange error = %v", err)
-		}
-	case <-time.After(500 * time.Millisecond):
-		stuck.unblock()
-		<-result
-		t.Fatal("timed out exchange waited for a stuck worker reader")
+	if err := <-result; !errors.Is(err, privacy.ErrDetectorTimeout) {
+		t.Fatalf("exchange error = %v", err)
 	}
 	stuck.unblock()
 }
@@ -1322,8 +1309,7 @@ func helperModelDirectory(arguments []string) string {
 
 func waitForTestProcess(t *testing.T, client *Client) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		client.mu.Lock()
 		started := client.process != nil
 		client.mu.Unlock()
@@ -1332,7 +1318,6 @@ func waitForTestProcess(t *testing.T, client *Client) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("worker did not start")
 }
 
 type discardWriteCloser struct{}

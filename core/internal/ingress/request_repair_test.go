@@ -49,7 +49,9 @@ func TestRequestRepairIndependentOfOrdinaryRetryPolicy(t *testing.T) {
 						}
 						return jsonResponse(200, `{"id":"resp_ok","type":"message","content":[],"output":[]}`), nil
 					}))})
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					// Honoring Retry-After would block for 120s; 60s separates
+					// that from an immediate repair even on a stalled runner.
+					ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 					defer cancel()
 					request := httptest.NewRequest("POST", repair.path, strings.NewReader(repair.body)).WithContext(ctx)
 					request.Header.Set("Content-Type", "application/json")

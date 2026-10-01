@@ -13,6 +13,7 @@ const bridgeMocks = vi.hoisted(() => ({
   builtinToolAction: vi.fn().mockResolvedValue({ configured: false }),
   cancelPrivacyModelInstallation: vi.fn(),
   createAccessToken: vi.fn(),
+  decideRawAccess: vi.fn(),
   createService: vi.fn(),
   deleteAccessToken: vi.fn(),
   deleteService: vi.fn(),
@@ -20,6 +21,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getAgentDebugStatus: vi.fn(),
   getAuditSettings: vi.fn(),
   getCoreStatus: vi.fn(),
+  getLocalDataStatus: vi.fn(),
   getPreferences: vi.fn(),
   getTrayState: vi
     .fn()
@@ -31,6 +33,10 @@ const bridgeMocks = vi.hoisted(() => ({
     .mockResolvedValue({ service_ids: [], etag: '"order"' }),
   updateServiceOrder: vi.fn(),
   installAgentDebug: vi.fn(),
+  isCCSwitchInstalled: vi.fn().mockResolvedValue(false),
+  getClientConfigStatus: vi.fn().mockResolvedValue([]),
+  previewClientConfigSnippet: vi.fn().mockResolvedValue("{}"),
+  copyClientConfigSnippet: vi.fn(),
   uninstallAgentDebug: vi.fn(),
   getService: vi.fn(),
   getServiceAuthorization: vi.fn(),
@@ -42,6 +48,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getRequestAuditContent: vi.fn(),
   installPrivacyModel: vi.fn(),
   listAccessTokens: vi.fn(),
+  listRawAccess: vi.fn().mockResolvedValue([]),
   listAccessTokenUsage: vi.fn().mockResolvedValue({ items: [] }),
   listServices: vi.fn(),
   listPrivacyModelInstallations: vi.fn(),
@@ -52,7 +59,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getRequestSession: vi.fn(),
   probePrivacyModel: vi.fn(),
   purgeRequestRecords: vi.fn(),
-  revealAccessToken: vi.fn(),
+  copyAccessToken: vi.fn(),
   restartCore: vi.fn(),
   startCore: vi.fn(),
   stopCore: vi.fn(),
@@ -70,6 +77,11 @@ const bridgeMocks = vi.hoisted(() => ({
   openAuthorizationURL: vi.fn(),
   probeDraftServiceModels: vi.fn(),
   probeServiceModels: vi.fn(),
+  getRawSealingStatus: vi.fn(),
+  listenRawSealingChanged: vi.fn(async () => () => {}),
+  lockRaw: vi.fn(),
+  setRawPassword: vi.fn(),
+  unlockRaw: vi.fn(),
 }));
 
 const updateMocks = vi.hoisted(() => ({
@@ -109,6 +121,7 @@ const readySnapshot: AppSnapshot = {
     control_api_version: "v1",
     protocol_contract_version: "v1",
     inference_url: "http://127.0.0.1:8317",
+    client_inference_url: "http://localhost:8317",
     control_url: "http://127.0.0.1:43117",
   },
   health: { status: "ok" },
@@ -186,34 +199,86 @@ async function setInput(selector: string, value: string): Promise<void> {
   });
 }
 
-async function chooseOption(label: string, option: string): Promise<void> {
-  const trigger = document.querySelector<HTMLButtonElement>(
-    `button[role="combobox"][aria-label="${label}"]`,
+/** Picks a card in the open provider-type dialog. */
+async function chooseKindCard(option: string): Promise<void> {
+  const card = [
+    ...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'),
+  ].find(
+    (candidate) =>
+      candidate.querySelector('[data-slot="dialog-picker-label"]')
+        ?.textContent === option,
   );
-  if (!trigger) throw new Error(`Missing select trigger: ${label}`);
+  if (!card) throw new Error(`Missing API provider type: ${option}`);
   await act(async () => {
-    trigger.dispatchEvent(
-      new PointerEvent("pointerdown", {
-        bubbles: true,
-        button: 0,
-        pointerType: "mouse",
-      }),
+    card.click();
+    await Promise.resolve();
+  });
+}
+
+/** A raw password unless `overrides` says otherwise. */
+function rawSealing(overrides: Record<string, unknown> = {}) {
+  return {
+    raw_available: true,
+    configured: true,
+    password_set: true,
+    password_required: false,
+    envelopes: ["password"],
+    key_verified: true,
+    unlocked: false,
+    unlock_expires_at: null,
+    unlock_idle_seconds: 900,
+    retry_after_seconds: 0,
+    password_min_length: 8,
+    password_max_length: 128,
+    ...overrides,
+  };
+}
+
+/** Nothing opens the raw key yet: no password, no keychain key. */
+const noRawPassword = rawSealing({
+  raw_available: false,
+  configured: false,
+  password_set: false,
+  password_required: true,
+  envelopes: [],
+  key_verified: false,
+});
+
+function proofDialog(): HTMLElement | null {
+  return document.querySelector('[data-slot="proof-confirm-dialog"]');
+}
+
+function queryButton(label: string, scope: ParentNode): HTMLElement | null {
+  return (
+    [...scope.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent?.trim() === label,
+    ) ?? null
+  );
+}
+
+async function typeNewPassword(password: string): Promise<void> {
+  const inputs = document.querySelectorAll<HTMLInputElement>(
+    'input[autocomplete="new-password"]',
+  );
+  if (inputs.length !== 2) throw new Error("Missing new password fields");
+  const valueSetter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  if (!valueSetter) throw new Error("Missing HTMLInputElement value setter");
+  for (const input of inputs) {
+    await act(async () => {
+      valueSetter.call(input, password);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+}
+
+async function pressEscape(): Promise<void> {
+  await act(async () => {
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
     );
-    await Promise.resolve();
-  });
-  const item = [
-    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
-  ].find((candidate) => {
-    const label = candidate.cloneNode(true) as HTMLElement;
-    label
-      .querySelectorAll('[aria-hidden="true"]')
-      .forEach((icon) => icon.remove());
-    return label.textContent?.trim() === option;
-  });
-  if (!item) throw new Error(`Missing select option: ${option}`);
-  await act(async () => {
-    item.click();
-    await Promise.resolve();
   });
 }
 
@@ -233,6 +298,13 @@ describe("App workspace navigation", () => {
       }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    bridgeMocks.getLocalDataStatus.mockResolvedValue({
+      unreadable_credentials: 0,
+      unreadable_access_tokens: 0,
+      audit_key_missing: false,
+    });
+    // A raw password is set, so the required dialog stays away (D11).
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(rawSealing());
     bridgeMocks.getRoutingSettings.mockResolvedValue({
       default_failure_policy: defaultFailurePolicy(),
       allow_unmatched_failover: false,
@@ -386,32 +458,41 @@ describe("App workspace navigation", () => {
       response_content_max_bytes: 8192,
       metadata_retention_days: 30,
       content_retention_days: 7,
+      agent_raw_access_enabled: true,
     });
+    const agentSkills = (debug: boolean) => [
+      { id: "astrlink-debug", installed: debug, preview_paths: [] },
+      { id: "redaction-placeholders", installed: false, preview_paths: [] },
+    ];
     bridgeMocks.getAgentDebugStatus.mockResolvedValue({
-      canonical_skill: false,
-      mcp_binary: false,
-      mcp_command: null,
+      cli_binary: false,
       tools: [
         {
           id: "cursor",
           detected: true,
-          skill_installed: false,
-          mcp_installed: false,
-          preview_paths: [],
+          skills: agentSkills(false),
+          cli_access: "prompt",
+          cli_access_installed: false,
+          guard: "skill_only",
+          guard_installed: false,
         },
         {
           id: "claude",
           detected: false,
-          skill_installed: false,
-          mcp_installed: false,
-          preview_paths: [],
+          skills: agentSkills(false),
+          cli_access: "allow_rules",
+          cli_access_installed: false,
+          guard: "deny_rules",
+          guard_installed: false,
         },
         {
           id: "codex",
           detected: true,
-          skill_installed: true,
-          mcp_installed: true,
-          preview_paths: [],
+          skills: agentSkills(true),
+          cli_access: "exec_policy",
+          cli_access_installed: true,
+          guard: "instructions",
+          guard_installed: true,
         },
       ],
       shared_paths: [],
@@ -499,6 +580,86 @@ describe("App workspace navigation", () => {
     expect(container.textContent).toContain("更新已就绪");
   });
 
+  it("announces downloads and manual upgrades that wait on the operator", async () => {
+    let listener: ((snapshot: UpdateSnapshot) => void) | undefined;
+    updateMocks.listen.mockImplementation(async (callback) => {
+      listener = callback;
+      return () => {};
+    });
+    await renderApp();
+    const release = {
+      version: "1.1.0",
+      notes: "New release",
+      published_at: null,
+      url: "https://github.com/Calcium-Ion/AstrLink/releases/tag/v1.1.0",
+    };
+    const base = browserUpdateSnapshot();
+    // Automatic download moves on to "ready" by itself; nothing to announce yet.
+    await act(async () =>
+      listener!({ ...base, revision: 2, phase: "available", release }),
+    );
+    expect(updateMocks.info).not.toHaveBeenCalled();
+    expect(button("关于").querySelector('[role="status"]')).toBeNull();
+    const waiting: UpdateSnapshot = {
+      ...base,
+      revision: 3,
+      phase: "available",
+      release,
+      preferences: { ...base.preferences, auto_download: false },
+    };
+    await act(async () => listener!(waiting));
+    expect(updateMocks.info).toHaveBeenCalledOnce();
+    expect(updateMocks.info.mock.calls[0][0]).toContain("可以下载");
+    expect(
+      button("关于")
+        .querySelector('[role="status"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("发现新版本");
+    // A periodic re-check of the same version stays quiet.
+    await act(async () => listener!({ ...waiting, revision: 4 }));
+    expect(updateMocks.info).toHaveBeenCalledOnce();
+    await act(async () =>
+      listener!({
+        ...base,
+        revision: 5,
+        phase: "manual",
+        release: { ...release, version: "1.2.0" },
+      }),
+    );
+    expect(updateMocks.info).toHaveBeenCalledTimes(2);
+    expect(updateMocks.info.mock.calls[1][0]).toContain("版本页面");
+    expect(
+      button("关于")
+        .querySelector('[role="status"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("有新版本可用");
+  });
+
+  it("does not toast an update state already shown on About", async () => {
+    let listener: ((snapshot: UpdateSnapshot) => void) | undefined;
+    updateMocks.listen.mockImplementation(async (callback) => {
+      listener = callback;
+      return () => {};
+    });
+    await renderApp();
+    await act(async () => button("关于").click());
+    const ready: UpdateSnapshot = {
+      ...browserUpdateSnapshot(),
+      revision: 2,
+      phase: "ready",
+      release: {
+        version: "1.1.0",
+        notes: "New release",
+        published_at: null,
+        url: "https://github.com/Calcium-Ion/AstrLink/releases/tag/v1.1.0",
+      },
+    };
+    await act(async () => listener!(ready));
+    await act(async () => button("概览").click());
+    expect(updateMocks.info).not.toHaveBeenCalled();
+    expect(button("关于").querySelector('[role="status"]')).not.toBeNull();
+  });
+
   it("starts a confirmed empty workspace with a resumable guide", async () => {
     bridgeMocks.listServices.mockResolvedValue({
       items: [],
@@ -510,10 +671,16 @@ describe("App workspace navigation", () => {
     });
     await renderApp();
     expect(workspaceHeading().textContent).toBe("开始使用 AstrLink");
-    expect(container.textContent).toContain("已完成 0 / 3 步");
+    // The raw password is set, so the guide opens on the provider step.
+    expect(container.textContent).toContain("已完成 1 / 4 步");
     expect(container.querySelector("#usage-heading")).toBeNull();
     expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBe("active");
     await act(async () => button("添加 API 提供商").click());
+    expect(container.querySelector('[data-page="create"]')).toBeNull();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      "选择 API 提供商类型",
+    );
+    await chooseKindCard("Codex 订阅");
     expect(container.querySelector('[data-page="create"]')).not.toBeNull();
     await act(async () => button("返回上手引导").click());
     expect(workspaceHeading().textContent).toBe("开始使用 AstrLink");
@@ -535,6 +702,92 @@ describe("App workspace navigation", () => {
     await act(async () => vi.advanceTimersByTime(6500));
     expect(document.body.textContent).not.toContain("稍后可点击右下角");
     expect(button("上手引导")).toBeTruthy();
+  });
+
+  it("asks a first launch for the raw password before anything else", async () => {
+    bridgeMocks.listServices.mockResolvedValue({
+      items: [],
+      next_cursor: null,
+    });
+    bridgeMocks.listAccessTokens.mockResolvedValue({
+      items: [],
+      next_cursor: null,
+    });
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(noRawPassword);
+    bridgeMocks.setRawPassword.mockResolvedValue({
+      outcome: "sealing",
+      status: rawSealing(),
+      reset: null,
+    });
+    await renderApp();
+
+    expect(workspaceHeading().textContent).toBe("开始使用 AstrLink");
+    expect(container.textContent).toContain("已完成 0 / 4 步");
+    expect(
+      container.querySelector('[aria-current="step"]')?.textContent,
+    ).toContain("保护请求原文");
+    // The guide asks in its own step, so the required dialog waits.
+    expect(proofDialog()).toBeNull();
+
+    await act(async () => button("开始设置").click());
+    expect(proofDialog()?.textContent).toContain("保护请求原文");
+    await act(async () => button("取消").click());
+    expect(proofDialog()).toBeNull();
+
+    // Skipping the guide does not skip the password.
+    await act(async () => button("稍后设置").click());
+    expect(workspaceHeading().textContent).toBe("运行概览");
+    expect(proofDialog()?.textContent).toContain("设置口令并继续");
+    expect(queryButton("取消", proofDialog()!)).toBeNull();
+
+    await typeNewPassword("correct horse");
+    await act(async () => button("设置口令并继续").click());
+    expect(bridgeMocks.setRawPassword).toHaveBeenCalledExactlyOnceWith(
+      "set",
+      "correct horse",
+      undefined,
+    );
+    expect(proofDialog()).toBeNull();
+    await act(async () => button("上手引导").click());
+    expect(container.textContent).toContain("已完成 1 / 4 步");
+    expect(
+      container.querySelector('[aria-current="step"]')?.textContent,
+    ).toContain("接入 API 提供商");
+  });
+
+  it("keeps an upgraded workspace behind the raw password until one is set", async () => {
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, "complete");
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(noRawPassword);
+    bridgeMocks.setRawPassword.mockResolvedValue({
+      outcome: "sealing",
+      status: rawSealing(),
+      reset: null,
+    });
+    await renderApp();
+
+    // The workspace is there behind it; the gateway keeps serving.
+    expect(workspaceHeading().textContent).toBe("运行概览");
+    const dialog = proofDialog();
+    expect(dialog?.textContent).toContain("设置口令并继续");
+    expect(dialog?.textContent).toContain("新请求的原文不会保存");
+    expect(dialog?.textContent).toContain("忘记后只能重置");
+    expect(queryButton("取消", dialog!)).toBeNull();
+    await pressEscape();
+    await act(async () => {
+      document
+        .querySelector('[data-slot="alert-dialog-overlay"]')
+        ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(proofDialog()).not.toBeNull();
+
+    await typeNewPassword("correct horse");
+    await act(async () => button("设置口令并继续").click());
+    expect(bridgeMocks.setRawPassword).toHaveBeenCalledExactlyOnceWith(
+      "set",
+      "correct horse",
+      undefined,
+    );
+    expect(proofDialog()).toBeNull();
   });
 
   it("resumes at token creation and continues to client setup after saving", async () => {
@@ -571,17 +824,21 @@ describe("App workspace navigation", () => {
     expect(
       container.querySelector('[aria-current="step"]')?.textContent,
     ).toContain("连接客户端");
-    expect(container.textContent).toContain("http://127.0.0.1:8317/v1");
+    expect(button("配置客户端")).toBeTruthy();
+    expect(bridgeMocks.previewClientConfigSnippet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tokenId: "token_setup", client: "claude" }),
+    );
     expect(container.textContent).not.toContain("test-secret");
   });
 
   it("uses protocol-specific client URLs and only completes after success", async () => {
     localStorage.setItem(ONBOARDING_STORAGE_KEY, "active");
     await renderApp();
-    expect(container.textContent).toContain("http://127.0.0.1:8317/v1");
+    await act(async () => button("其他工具").click());
+    expect(container.textContent).toContain("http://localhost:8317/v1");
     await act(async () => button("Anthropic 兼容").click());
-    expect(container.textContent).toContain("http://127.0.0.1:8317");
-    expect(container.textContent).not.toContain("http://127.0.0.1:8317/v1");
+    expect(container.textContent).toContain("http://localhost:8317");
+    expect(container.textContent).not.toContain("http://localhost:8317/v1");
     const summary = await bridgeMocks.getUsageSummary.mock.results[0].value;
     bridgeMocks.getUsageSummary.mockResolvedValue({
       ...summary,
@@ -658,20 +915,56 @@ describe("App workspace navigation", () => {
     },
   );
 
-  it("reveals a setup token only when copying and does not persist the secret", async () => {
+  it("has the host copy a setup token without verification", async () => {
     localStorage.setItem(ONBOARDING_STORAGE_KEY, "active");
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(navigator.clipboard, "writeText").mockImplementation(writeText);
-    bridgeMocks.revealAccessToken.mockResolvedValue({
-      access_token: "setup-secret",
-    });
+    bridgeMocks.copyAccessToken.mockResolvedValue(true);
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(rawSealing());
     await renderApp();
-    expect(bridgeMocks.revealAccessToken).not.toHaveBeenCalled();
+    expect(bridgeMocks.copyAccessToken).not.toHaveBeenCalled();
+    await act(async () => button("其他工具").click());
     await act(async () => button("复制访问令牌").click());
-    expect(bridgeMocks.revealAccessToken).toHaveBeenCalledWith("token_01");
-    expect(writeText).toHaveBeenCalledWith("setup-secret");
-    expect(container.textContent).not.toContain("setup-secret");
+    expect(
+      document.querySelector('[data-slot="proof-confirm-dialog"]'),
+    ).toBeNull();
+    expect(bridgeMocks.copyAccessToken).toHaveBeenCalledExactlyOnceWith(
+      "token_01",
+    );
+    expect(writeText).not.toHaveBeenCalled();
     expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBe("active");
+  });
+
+  it("has the host fill the token into a client's config snippet", async () => {
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, "active");
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(rawSealing());
+    bridgeMocks.previewClientConfigSnippet.mockImplementation(
+      async ({ client }: { client: string }) =>
+        client === "codex"
+          ? 'model_provider = "astrlink"\n'
+          : '{ "env": { "ANTHROPIC_AUTH_TOKEN": "astr_…abcd" } }',
+    );
+    bridgeMocks.copyClientConfigSnippet.mockResolvedValue(true);
+    await renderApp();
+    expect(container.textContent).toContain("ANTHROPIC_AUTH_TOKEN");
+    expect(container.textContent).toContain("~/.claude/settings.json");
+    await act(async () => button("Codex").click());
+    expect(container.textContent).toContain('model_provider = "astrlink"');
+    expect(bridgeMocks.previewClientConfigSnippet).toHaveBeenLastCalledWith({
+      tokenId: "token_01",
+      client: "codex",
+      models: { model: "gpt-5" },
+      inferenceUrl: "http://localhost:8317",
+    });
+    await act(async () => button("复制配置").click());
+    expect(bridgeMocks.copyClientConfigSnippet).toHaveBeenCalledExactlyOnceWith(
+      {
+        tokenId: "token_01",
+        client: "codex",
+        models: { model: "gpt-5" },
+        inferenceUrl: "http://localhost:8317",
+      },
+    );
   });
 
   it("keeps loaded page content visible while revisits revalidate slowly", async () => {
@@ -758,6 +1051,8 @@ describe("App workspace navigation", () => {
       load_warning: null,
       autostart_actual: false,
       autostart_error: null,
+      data_backups: [],
+      local_key_storage: null,
     };
     bridgeMocks.getPreferences.mockResolvedValue(preferences);
     await renderApp();
@@ -855,10 +1150,16 @@ describe("App workspace navigation", () => {
     await act(async () => {
       button("添加 API 提供商").click();
     });
+    expect(workspaceHeading().textContent).toBe("API 提供商");
+    await chooseKindCard("New API");
     expect(workspaceHeading().textContent).toBe("添加 API 提供商");
     expect(
       container.querySelector('[data-testid="service-form"]'),
     ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="API 提供商类型"]')
+        ?.textContent,
+    ).toContain("New API");
     expect(
       container.querySelector('[data-slot="workspace"]')?.className,
     ).toContain("overflow-hidden");
@@ -962,6 +1263,8 @@ describe("App workspace navigation", () => {
       load_warning: null,
       autostart_actual: false,
       autostart_error: null,
+      data_backups: [],
+      local_key_storage: null,
     });
     await renderApp();
 
@@ -977,6 +1280,75 @@ describe("App workspace navigation", () => {
     expect(container.textContent).toContain("检查并发");
     expect(container.textContent).toContain("响应头等待");
     expect(container.textContent).not.toContain("工具接入");
+    expect(
+      container.querySelector('[data-slot="local-data-notice"]'),
+    ).toBeNull();
+  });
+
+  it("points to providers when saved credentials no longer decrypt", async () => {
+    bridgeMocks.getPreferences.mockResolvedValue({
+      values: {
+        close_behavior: "hide_to_tray",
+        autostart: false,
+        core_auto_start: true,
+        core_auto_recover: true,
+        use_system_proxy: true,
+        inference_port: 8317,
+        max_concurrent_inspections: 16,
+        response_start_timeout_seconds: 0,
+        max_request_body_mib: 0,
+        locale: "zh-CN",
+        theme: "system",
+        quota_display_mode: "remaining" as const,
+        tray: defaultTrayPreferences(),
+        updates: defaultUpdatePreferences(),
+      },
+      load_warning: null,
+      autostart_actual: false,
+      autostart_error: null,
+      data_backups: [],
+      local_key_storage: null,
+    });
+    bridgeMocks.getLocalDataStatus.mockResolvedValue({
+      unreadable_credentials: 3,
+      unreadable_access_tokens: 1,
+      audit_key_missing: true,
+    });
+    await renderApp();
+    const openSettings = async () => {
+      await act(async () => {
+        button("设置").click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+    const notice = () =>
+      container.querySelector('[data-slot="local-data-notice"]');
+
+    await openSettings();
+    expect(notice()?.textContent).toContain("有 3 项本地凭据无法解密");
+    expect(notice()?.textContent).not.toContain("密钥");
+    await act(async () => {
+      button("前往提供商").click();
+      await Promise.resolve();
+    });
+    expect(workspaceHeading().textContent).toBe("API 提供商");
+
+    await openSettings();
+    await act(async () => {
+      button("本次不再提示").click();
+      await Promise.resolve();
+    });
+    expect(notice()).toBeNull();
+    const reads = bridgeMocks.getLocalDataStatus.mock.calls.length;
+    // Hiding lasts across pages until the app restarts.
+    await act(async () => {
+      button("提供商").click();
+      await Promise.resolve();
+    });
+    await openSettings();
+    expect(notice()).toBeNull();
+    expect(bridgeMocks.getLocalDataStatus).toHaveBeenCalledTimes(reads);
   });
 
   it("opens the agent tools page from the system nav", async () => {
@@ -1020,6 +1392,8 @@ describe("App workspace navigation", () => {
       load_warning: null,
       autostart_actual: false,
       autostart_error: null,
+      data_backups: [],
+      local_key_storage: null,
     });
     await renderApp();
     await act(async () => {
@@ -1211,7 +1585,7 @@ describe("App workspace navigation", () => {
 
     await act(async () => button("提供商").click());
     await act(async () => button("添加 API 提供商").click());
-    await chooseOption("API 提供商类型", "New API");
+    await chooseKindCard("New API");
     await setInput(
       '[data-testid="service-form"] input[type="url"]',
       "https://saved.example",
@@ -1241,6 +1615,7 @@ describe("App workspace navigation", () => {
     await act(async () => {
       button("添加 API 提供商").click();
     });
+    await chooseKindCard("Codex 订阅");
     await setInput("#service-name", "Unfinished service");
 
     const back = container.querySelector<HTMLButtonElement>(

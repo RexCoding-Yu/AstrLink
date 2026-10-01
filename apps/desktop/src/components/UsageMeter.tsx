@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { BadgeAlert as TriangleAlert } from "@/components/icons";
 
 import { Progress } from "@/components/ui/progress";
@@ -35,6 +35,7 @@ export function UsageMeter({
   warning,
   tone,
   compact = false,
+  className,
 }: {
   label: string;
   caption?: string | null;
@@ -44,6 +45,7 @@ export function UsageMeter({
   warning?: string;
   tone: "success" | "warning" | "destructive";
   compact?: boolean;
+  className?: string;
 }) {
   const percent = Number.isFinite(value) ? Math.max(0, value) : 0;
   const meter = (
@@ -53,6 +55,7 @@ export function UsageMeter({
         compact ? "gap-1" : "gap-1.5",
         compact &&
           "rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+        className,
       )}
       tabIndex={compact && (caption || warning) ? 0 : undefined}
     >
@@ -117,5 +120,96 @@ export function UsageMeter({
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
+  );
+}
+
+/**
+ * Column template shared by `UsageMeterRow`s (label, bar, value, caption), so
+ * the columns line up across every row and group header placed inside it.
+ * Without `captions` the caption column and its gap are dropped.
+ */
+export function UsageMeterGrid({
+  captions = true,
+  className,
+  ...props
+}: ComponentProps<"div"> & { captions?: boolean }) {
+  return (
+    <div
+      className={cn(
+        "grid items-center gap-x-2.5",
+        captions
+          ? "grid-cols-[auto_minmax(0,1fr)_auto_auto]"
+          : "grid-cols-[auto_minmax(0,1fr)_auto]",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/** One meter on a single line of a `UsageMeterGrid`, for dense lists. */
+export function UsageMeterRow({
+  label,
+  accessibleLabel = label,
+  caption,
+  captionDetail = caption,
+  value,
+  valueLabel,
+  valueText,
+  warning,
+  tone,
+  className,
+}: {
+  label: string;
+  /** Names the bar when the visible label leans on a group header. */
+  accessibleLabel?: string;
+  caption?: string | null;
+  /** Unabbreviated caption for the hover title. */
+  captionDetail?: string | null;
+  value: number;
+  valueLabel: string;
+  /** Visible value when a column header already names the unit. */
+  valueText?: string;
+  warning?: string;
+  tone: "success" | "warning" | "destructive";
+  className?: string;
+}) {
+  const percent = Number.isFinite(value) ? Math.max(0, value) : 0;
+  return (
+    <div
+      className={cn(
+        "col-span-full grid min-h-5 grid-cols-subgrid items-center text-xs",
+        className,
+      )}
+      title={[accessibleLabel, valueLabel, captionDetail, warning]
+        .filter(Boolean)
+        .join(" · ")}
+    >
+      <span className="min-w-0 truncate text-text-secondary">{label}</span>
+      <Progress
+        aria-label={accessibleLabel}
+        className="h-1.5"
+        getValueLabel={() => valueLabel}
+        tone={tone}
+        value={Math.min(100, percent)}
+      />
+      <span
+        className={cn(
+          "inline-flex items-center justify-end gap-1 font-medium tabular-nums",
+          tone === "destructive" && "text-destructive",
+          tone === "warning" && "text-warning-foreground",
+        )}
+      >
+        {warning ? (
+          <TriangleAlert aria-label={warning} className="size-3" />
+        ) : null}
+        <span aria-hidden="true">{valueText ?? valueLabel}</span>
+      </span>
+      {caption ? (
+        <span className="text-right text-micro text-muted-foreground tabular-nums">
+          {caption}
+        </span>
+      ) : null}
+    </div>
   );
 }

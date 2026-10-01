@@ -10,6 +10,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getCoreStatus: vi.fn(),
   getPreferences: vi.fn(),
   getPrivacyPolicy: vi.fn(),
+  getRawSealingStatus: vi.fn(),
   getRequestAuditContent: vi.fn(),
   getRequestRecord: vi.fn(),
   getRequestSession: vi.fn(),
@@ -18,8 +19,12 @@ const bridgeMocks = vi.hoisted(() => ({
   listRequestRecordChildren: vi.fn(),
   listRequestRecords: vi.fn(),
   listRequestSessions: vi.fn(),
+  listenRawSealingChanged: vi.fn(async () => () => {}),
+  lockRaw: vi.fn(),
   purgeRequestRecords: vi.fn(),
   saveTextFile: vi.fn(),
+  setRawPassword: vi.fn(),
+  unlockRaw: vi.fn(),
   updateAuditSettings: vi.fn(),
 }));
 
@@ -32,7 +37,24 @@ const notifyMocks = vi.hoisted(() => ({
 }));
 vi.mock("./notify", () => ({ notify: notifyMocks }));
 
+// Records which response parts reach the detail view's preview parser.
+const previewParts = vi.hoisted(() => ({ parsed: [] as string[] }));
+vi.mock("./response-preview-model", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("./response-preview-model")>();
+  return {
+    ...actual,
+    parseResponsePreview: (
+      ...args: Parameters<typeof actual.parseResponsePreview>
+    ) => {
+      previewParts.parsed.push(args[0].content);
+      return actual.parseResponsePreview(...args);
+    },
+  };
+});
+
 import type { AuditSettings } from "./audit-settings-model";
+import type { RawSealingState } from "./raw-sealing-model";
 import { RequestRecords } from "./RequestRecords";
 import {
   displayRequestStatus,
@@ -58,6 +80,26 @@ const service: RoutableService & RequestService = {
     },
   ],
 };
+
+function rawSealing(overrides: Partial<RawSealingState> = {}): RawSealingState {
+  return {
+    raw_available: true,
+    configured: true,
+    password_set: true,
+    // No password protects the key.
+    password_required: overrides.password_set === false,
+    envelopes: ["password"],
+    key_verified: true,
+    unlocked: false,
+    unlock_expires_at: null,
+    unlock_idle_seconds: 900,
+    retry_after_seconds: 0,
+    password_min_length: 8,
+    password_max_length: 128,
+    key_replaced: false,
+    ...overrides,
+  };
+}
 
 const emptyAudit = {
   request_body_captured: false,
@@ -129,6 +171,61 @@ const secondRecord: RequestRecord = {
   },
   audit: { ...emptyAudit },
 };
+
+/** A sealing status as the host returns it. */
+function rawStatus(overrides: Partial<RawSealingState> = {}) {
+  return rawSealing(overrides);
+}
+
+const rawUnconfigured: Partial<RawSealingState> = {
+  raw_available: false,
+  configured: false,
+  password_set: false,
+  envelopes: [],
+  key_verified: false,
+};
+
+function captureSwitch(): HTMLButtonElement {
+  const toggle = document.querySelector<HTMLButtonElement>(
+    '[role="switch"][aria-label="请求和响应捕获"]',
+  );
+  if (!(toggle instanceof HTMLButtonElement)) {
+    throw new Error("Missing request/response capture switch");
+  }
+  return toggle;
+}
+
+function proofDialog(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    '[data-slot="proof-confirm-dialog"]',
+  );
+}
+
+async function typeInto(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function typeNewRawPassword(password: string) {
+  const inputs = [
+    ...document.querySelectorAll<HTMLInputElement>(
+      'input[autocomplete="new-password"]',
+    ),
+  ];
+  expect(inputs).toHaveLength(2);
+  for (const input of inputs) await typeInto(input, password);
+}
+
+async function flush(times = 3) {
+  for (let index = 0; index < times; index += 1) {
+    await act(async () => await Promise.resolve());
+  }
+}
 
 function sessionFromRecord(
   record: RequestRecord,
@@ -267,7 +364,9 @@ describe("RequestRecords", () => {
       response_content_max_bytes: 8192,
       metadata_retention_days: 30,
       content_retention_days: 7,
+      agent_raw_access_enabled: true,
     });
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(rawSealing());
     bridgeMocks.getCoreStatus.mockResolvedValue({
       app_version: "0.9.0",
       version: { core_version: "0.9.0", build_commit: "abc1234" },
@@ -306,6 +405,7 @@ describe("RequestRecords", () => {
       response_content_max_bytes: 8192,
       metadata_retention_days: 30,
       content_retention_days: 7,
+      agent_raw_access_enabled: true,
       ...patch,
     }));
     bridgeMocks.purgeRequestRecords.mockResolvedValue({
@@ -322,6 +422,7 @@ describe("RequestRecords", () => {
     });
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: firstRecord.id,
+      withheld: {},
       http_meta: {
         method: "POST",
         url: "/v1/responses?stream=true",
@@ -975,17 +1076,18 @@ describe("RequestRecords", () => {
     const mounted = container.querySelectorAll(
       '[data-testid="trajectory-row"]',
     );
-    // 90 turns × (1 header + 6 phases) is 630 rows; a 600px viewport of 32px
-    // rows plus overscan is well under a hundred.
+    // Past turns fold, so 90 headers and the latest turn's 6 phases are
+    // listed: 96 rows. A 600px viewport of 32px rows plus overscan mounts
+    // fewer than that.
     expect(mounted.length).toBeGreaterThan(10);
-    expect(mounted.length).toBeLessThan(100);
+    expect(mounted.length).toBeLessThan(96);
 
-    // The scroll range still covers every row, so the scrollbar and the
-    // call-aligned strip sync keep telling the truth.
+    // The scroll range still covers every listed row, so the scrollbar and
+    // the call-aligned strip sync keep telling the truth.
     const spacer = container.querySelector(
       '[data-testid="trajectory-list"] > ol',
     ) as HTMLElement;
-    expect(Number.parseFloat(spacer.style.height)).toBeGreaterThan(630 * 30);
+    expect(Number.parseFloat(spacer.style.height)).toBeGreaterThan(96 * 30);
 
     // happy-dom reports clientHeight 0, so the open-to-latest scroll stays
     // put. Selection is still resolved from the row model, and the inspector
@@ -994,6 +1096,15 @@ describe("RequestRecords", () => {
       container.querySelector('[data-testid="trajectory-inspector"]'),
     ).not.toBeNull();
 
+    // The first turn is folded and at the top of the window; opening it
+    // mounts its phases there.
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="trajectory-row"][data-chip="TURN"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
     await act(async () => {
       (
         container.querySelector(
@@ -1596,6 +1707,7 @@ describe("RequestRecords", () => {
     const bulky = `{"input":"alice@example.com","pad":"${"x".repeat(80)}"}`;
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: firstRecord.id,
+      withheld: {},
       http_meta: null,
       request_body: null,
       response_content: {
@@ -1653,6 +1765,7 @@ describe("RequestRecords", () => {
     const body = `{"input":"alice@example.com <PRIVATE_EMAIL_aaaaaaaaaaaaaaaa>"}`;
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: firstRecord.id,
+      withheld: {},
       http_meta: null,
       request_body: null,
       response_content: null,
@@ -1717,6 +1830,7 @@ describe("RequestRecords", () => {
       `call +1-555-555-0142"}`;
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: firstRecord.id,
+      withheld: {},
       http_meta: null,
       request_body: null,
       response_content: {
@@ -1851,6 +1965,7 @@ describe("RequestRecords", () => {
     const body = '{"input":"hello"}';
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: allowed.id,
+      withheld: {},
       http_meta: null,
       request_body: {
         media_type: "application/json",
@@ -1916,6 +2031,7 @@ describe("RequestRecords", () => {
   it("explains missing capture in the inspector", async () => {
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: secondRecord.id,
+      withheld: {},
       http_meta: null,
       request_body: null,
       response_content: null,
@@ -1961,6 +2077,7 @@ describe("RequestRecords", () => {
     bridgeMocks.getRequestSession.mockResolvedValue(sessionDetail(pending));
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: pending.id,
+      withheld: {},
       http_meta: null,
       request_body: {
         media_type: "application/json",
@@ -2016,6 +2133,7 @@ describe("RequestRecords", () => {
     bridgeMocks.getRequestSession.mockResolvedValue(sessionDetail(pending));
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: pending.id,
+      withheld: {},
       http_meta: null,
       request_body: {
         media_type: "application/json",
@@ -2081,6 +2199,7 @@ describe("RequestRecords", () => {
     );
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: pending.id,
+      withheld: {},
       http_meta: null,
       request_body: null,
       response_content: null,
@@ -2114,6 +2233,7 @@ describe("RequestRecords", () => {
     latestTurn = captured;
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: pending.id,
+      withheld: {},
       http_meta: null,
       request_body: {
         media_type: "application/json",
@@ -2359,6 +2479,7 @@ describe("RequestRecords", () => {
   it("shows a friendly message for records without http metadata", async () => {
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: firstRecord.id,
+      withheld: {},
       http_meta: null,
       request_body: null,
       response_content: null,
@@ -2605,6 +2726,7 @@ describe("RequestRecords", () => {
       response_content_max_bytes: 4_194_305,
       metadata_retention_days: 30,
       content_retention_days: 7,
+      agent_raw_access_enabled: true,
     });
     await renderRecords();
     await act(async () => exactButton("审计设置").click());
@@ -2658,6 +2780,7 @@ describe("RequestRecords", () => {
         response_content_max_bytes: 8192,
         metadata_retention_days: 30,
         content_retention_days: 7,
+        agent_raw_access_enabled: true,
       });
       await Promise.resolve();
     });
@@ -2706,6 +2829,627 @@ describe("RequestRecords", () => {
     ).toBe("true");
   });
 
+  it("sets a raw password in the capture confirmation when no raw key exists", async () => {
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(
+      rawSealing(rawUnconfigured),
+    );
+    bridgeMocks.setRawPassword
+      .mockRejectedValueOnce(
+        new Error(
+          'POST /v1/raw-sealing/password returned 400 Bad Request: {"error":{"code":"validation_failed"}}',
+        ),
+      )
+      .mockResolvedValueOnce({
+        outcome: "sealing",
+        status: rawStatus(),
+        reset: null,
+      });
+    await renderRecords();
+    await flush(1);
+
+    await act(async () => {
+      captureSwitch().click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const dialog = proofDialog();
+    expect(dialog?.textContent).toContain("确认开启正文捕获");
+    expect(dialog?.textContent).toContain("开启前先设置原文保护");
+    expect(exactButton("确认开启", dialog!).disabled).toBe(true);
+
+    await typeNewRawPassword("correct horse");
+    await act(async () => {
+      exactButton("确认开启", dialog!).click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(bridgeMocks.setRawPassword).toHaveBeenLastCalledWith(
+      "set",
+      "correct horse",
+      undefined,
+    );
+    expect(proofDialog()?.textContent).toContain("口令不符合长度要求");
+    expect(bridgeMocks.updateAuditSettings).not.toHaveBeenCalled();
+    expect(
+      [
+        ...document.querySelectorAll<HTMLInputElement>(
+          'input[autocomplete="new-password"]',
+        ),
+      ].map((input) => input.value),
+    ).toEqual(["", ""]);
+
+    await typeNewRawPassword("correct horse battery");
+    await act(async () => {
+      exactButton("确认开启", proofDialog()!).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(bridgeMocks.setRawPassword).toHaveBeenLastCalledWith(
+      "set",
+      "correct horse battery",
+      undefined,
+    );
+    expect(bridgeMocks.updateAuditSettings).toHaveBeenCalledExactlyOnceWith({
+      request_body_enabled: true,
+      response_content_enabled: true,
+      audit_risk_acknowledged: true,
+    });
+    expect(notifyMocks.success).toHaveBeenCalledWith("已开启请求和响应捕获。");
+    expect(notifyMocks.success).not.toHaveBeenCalledWith("已设置口令");
+    expect(proofDialog()).toBeNull();
+    expect(captureSwitch().getAttribute("aria-checked")).toBe("true");
+    expect(document.querySelector('[data-slot="raw-password-dot"]')).toBeNull();
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps capture off when the raw sealing state cannot be read", async () => {
+    bridgeMocks.getRawSealingStatus.mockRejectedValue(
+      new Error("GET /v1/raw-sealing returned 503 Service Unavailable"),
+    );
+    await renderRecords();
+    await flush(1);
+
+    await act(async () => {
+      captureSwitch().click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(proofDialog()).toBeNull();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(bridgeMocks.updateAuditSettings).not.toHaveBeenCalled();
+    expect(notifyMocks.error).toHaveBeenCalledWith(
+      "无法读取原文封存状态，正文捕获保持关闭，请重试。",
+    );
+    expect(captureSwitch().getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("does not decide capture on a sealing state it could not refresh", async () => {
+    // The page read a raw key earlier; it may have been reset since.
+    let readable = true;
+    bridgeMocks.getRawSealingStatus.mockImplementation(async () => {
+      if (!readable) {
+        throw new Error("GET /v1/raw-sealing returned 503 Service Unavailable");
+      }
+      return rawSealing();
+    });
+    await renderRecords();
+    await flush(1);
+    readable = false;
+
+    await act(async () => {
+      captureSwitch().click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(proofDialog()).toBeNull();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(bridgeMocks.updateAuditSettings).not.toHaveBeenCalled();
+    expect(notifyMocks.error).toHaveBeenCalledWith(
+      "无法读取原文封存状态，正文捕获保持关闭，请重试。",
+    );
+    expect(captureSwitch().getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("leaves capture off when the raw password step is cancelled", async () => {
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(
+      rawSealing(rawUnconfigured),
+    );
+    await renderRecords();
+    await flush(1);
+
+    await act(async () => {
+      captureSwitch().click();
+      await Promise.resolve();
+    });
+    await flush();
+    await typeNewRawPassword("correct horse");
+    await act(async () => exactButton("取消", proofDialog()!).click());
+    await flush(1);
+
+    expect(bridgeMocks.setRawPassword).not.toHaveBeenCalled();
+    expect(bridgeMocks.updateAuditSettings).not.toHaveBeenCalled();
+    expect(notifyMocks.success).toHaveBeenCalledWith("已取消开启正文捕获。");
+    expect(captureSwitch().getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("points a capturing user without a raw password to one", async () => {
+    bridgeMocks.getAuditSettings.mockResolvedValue({
+      request_body_enabled: true,
+      response_content_enabled: true,
+      http_meta_enabled: true,
+      request_body_max_bytes: 4096,
+      response_content_max_bytes: 8192,
+      metadata_retention_days: 30,
+      content_retention_days: 7,
+      agent_raw_access_enabled: true,
+    });
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(
+      rawSealing(rawUnconfigured),
+    );
+    bridgeMocks.setRawPassword.mockResolvedValue({
+      outcome: "sealing",
+      status: rawStatus(),
+      reset: null,
+    });
+    await renderRecords();
+    await flush(1);
+
+    const settingsButton = exactButton("审计设置");
+    expect(
+      settingsButton.querySelector('[data-slot="raw-password-dot"]'),
+    ).not.toBeNull();
+    expect(settingsButton.title).toBe(
+      "设置完成前，新请求的原文不会保存。请求转发不受影响。",
+    );
+
+    await act(async () => settingsButton.click());
+    await flush();
+    let panel = document.querySelector<HTMLElement>(
+      '[data-slot="raw-password-panel"]',
+    )!;
+    expect(panel.querySelector('[data-slot="raw-password-missing"]')).not.toBe(
+      null,
+    );
+    expect(
+      panel.querySelector<HTMLButtonElement>('[role="switch"]')?.disabled,
+    ).toBe(true);
+
+    await act(async () => exactButton("开始设置", panel).click());
+    await flush(1);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(proofDialog()?.textContent).toContain("保护请求原文");
+
+    await typeNewRawPassword("correct horse");
+    await act(async () => {
+      exactButton("设置口令并继续", proofDialog()!).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(bridgeMocks.setRawPassword).toHaveBeenCalledExactlyOnceWith(
+      "set",
+      "correct horse",
+      undefined,
+    );
+    expect(notifyMocks.success).toHaveBeenCalledWith("已设置口令");
+    expect(bridgeMocks.updateAuditSettings).not.toHaveBeenCalled();
+    panel = document.querySelector<HTMLElement>(
+      '[role="dialog"] [data-slot="raw-password-panel"]',
+    )!;
+    expect(
+      panel.querySelector('[data-slot="raw-password-state"]')?.textContent,
+    ).toBe("口令");
+    expect(
+      panel.querySelector('[data-slot="raw-password-missing"]'),
+    ).toBeNull();
+    const agentSwitch =
+      panel.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(agentSwitch.disabled).toBe(false);
+    expect(agentSwitch.getAttribute("aria-checked")).toBe("true");
+    expect(
+      exactButton("审计设置").querySelector('[data-slot="raw-password-dot"]'),
+    ).toBeNull();
+  });
+
+  it("saves the agent raw access switch with the audit settings", async () => {
+    await renderRecords();
+    await act(async () => exactButton("审计设置").click());
+    await flush();
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const agentSwitch = dialog.querySelector<HTMLButtonElement>(
+      '[data-slot="raw-password-panel"] [role="switch"]',
+    )!;
+    expect(agentSwitch.getAttribute("aria-checked")).toBe("true");
+
+    await act(async () => agentSwitch.click());
+    await act(async () => exactButton("保存", dialog).click());
+    expect(bridgeMocks.updateAuditSettings).toHaveBeenCalledWith({
+      agent_raw_access_enabled: false,
+    });
+  });
+
+  it("shows a raw-locked part, unlocks it and locks it again", async () => {
+    const empty = {
+      request_id: firstRecord.id,
+      http_meta: null,
+      response_content: null,
+      upstream_http_meta: null,
+      upstream_request_body: null,
+      upstream_response_content: null,
+    };
+    bridgeMocks.getRequestAuditContent
+      .mockResolvedValueOnce({
+        ...empty,
+        request_body: null,
+        withheld: {
+          request_body: {
+            reason: "raw_locked",
+            raw_available: true,
+            media_type: "application/json",
+            truncated: false,
+            captured_bytes: 2048,
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        ...empty,
+        request_body: {
+          media_type: "application/json",
+          content: '{"prompt":"sealed secret"}',
+          truncated: false,
+          captured_bytes: 26,
+        },
+        withheld: {},
+      });
+    // Core keeps the unlock session; later status reads report it.
+    let unlocked = false;
+    bridgeMocks.getRawSealingStatus.mockImplementation(async () =>
+      rawSealing({ unlocked }),
+    );
+    bridgeMocks.unlockRaw.mockImplementation(async () => {
+      unlocked = true;
+      return {
+        outcome: "sealing",
+        status: rawStatus({ unlocked }),
+        reset: null,
+      };
+    });
+    bridgeMocks.lockRaw.mockImplementation(async () => {
+      unlocked = false;
+      return rawStatus({ unlocked });
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${firstRecord.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await flush();
+    await act(async () => exactButton("内容").click());
+    await flush(1);
+
+    const withheld = container.querySelector<HTMLElement>(
+      '[data-slot="audit-part-withheld"]',
+    );
+    expect(withheld?.textContent).toContain("已锁定");
+    expect(withheld?.textContent).toContain(
+      "原文已封存，输入原文口令解锁后才能查看。",
+    );
+
+    await act(async () => {
+      exactButton("解锁").click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(proofDialog()?.textContent).toContain("解锁原文");
+    expect(proofDialog()?.textContent).toContain("15 分钟无操作会自动锁定");
+    await typeInto(
+      proofDialog()!.querySelector<HTMLInputElement>('input[type="password"]')!,
+      "correct horse",
+    );
+    await act(async () => {
+      exactButton("解锁", proofDialog()!).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(bridgeMocks.unlockRaw).toHaveBeenCalledExactlyOnceWith({
+      kind: "password",
+      password: "correct horse",
+    });
+    expect(notifyMocks.success).toHaveBeenCalledWith("原文已解锁");
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("sealed secret");
+    expect(
+      container.querySelector('[data-slot="audit-part-withheld"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-slot="raw-unlocked"]')?.textContent,
+    ).toContain("15 分钟无操作后自动锁定");
+
+    await act(async () => {
+      exactButton("锁定").click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(bridgeMocks.lockRaw).toHaveBeenCalledOnce();
+    expect(notifyMocks.success).toHaveBeenCalledWith("原文已锁定");
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(3);
+    expect(container.querySelector('[data-slot="raw-unlocked"]')).toBeNull();
+  });
+
+  it("never caches unlocked raw parts and drops them when the unlock ends", async () => {
+    vi.setSystemTime(new Date("2026-09-29T10:00:00Z"));
+    const empty = {
+      request_id: firstRecord.id,
+      http_meta: null,
+      response_content: null,
+      upstream_http_meta: null,
+      upstream_request_body: null,
+      upstream_response_content: null,
+    };
+    let unlocked = true;
+    bridgeMocks.getRawSealingStatus.mockImplementation(async () =>
+      rawSealing(
+        unlocked
+          ? { unlocked, unlock_expires_at: "2026-09-29T10:15:00Z" }
+          : { unlocked },
+      ),
+    );
+    bridgeMocks.getRequestAuditContent.mockImplementation(async () =>
+      unlocked
+        ? {
+            ...empty,
+            request_body: {
+              media_type: "application/json",
+              content: '{"prompt":"sealed secret"}',
+              truncated: false,
+              captured_bytes: 26,
+              exposure: "raw",
+            },
+            withheld: {},
+          }
+        : {
+            ...empty,
+            request_body: null,
+            withheld: {
+              request_body: {
+                reason: "raw_locked",
+                raw_available: true,
+                media_type: "application/json",
+                truncated: false,
+                captured_bytes: 26,
+              },
+            },
+          },
+    );
+    const openContent = async () => {
+      await act(async () => {
+        (
+          container.querySelector(
+            `[data-session-id="${firstRecord.id}"]`,
+          ) as HTMLButtonElement
+        ).click();
+      });
+      await flush();
+      await act(async () => exactButton("内容").click());
+      await flush(1);
+    };
+    await renderRecords();
+    await openContent();
+    expect(container.textContent).toContain("sealed secret");
+
+    // Reopening reads Core again instead of a cached raw part.
+    await act(async () => buttonContaining("实时监控").click());
+    await openContent();
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(2);
+
+    // Core ends the idle unlock; the page checks when it was due to end.
+    unlocked = false;
+    await act(async () => {
+      vi.advanceTimersByTime(15 * 60 * 1000 + 2000);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.textContent).not.toContain("sealed secret");
+    expect(
+      container.querySelector('[data-slot="audit-part-withheld"]')?.textContent,
+    ).toContain("已锁定");
+  });
+
+  it("drops raw parts a lock ends while the detail view is closed", async () => {
+    vi.setSystemTime(new Date("2026-09-29T10:00:00Z"));
+    let unlocked = true;
+    bridgeMocks.getRawSealingStatus.mockImplementation(async () =>
+      rawSealing(
+        unlocked
+          ? { unlocked, unlock_expires_at: "2026-09-29T10:15:00Z" }
+          : { unlocked },
+      ),
+    );
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      request_id: firstRecord.id,
+      http_meta: null,
+      request_body: {
+        media_type: "application/json",
+        content: '{"prompt":"sealed secret"}',
+        truncated: false,
+        captured_bytes: 26,
+        exposure: "raw",
+      },
+      // The detail view opens on the trajectory, whose inspector starts on
+      // the last phase: the response.
+      response_content: {
+        media_type: "application/json",
+        content: '{"output_text":"sealed secret"}',
+        truncated: false,
+        captured_bytes: 31,
+        exposure: "raw",
+      },
+      upstream_http_meta: null,
+      upstream_request_body: null,
+      upstream_response_content: null,
+      withheld: {},
+    });
+    const openDetail = async () => {
+      await act(async () => {
+        (
+          container.querySelector(
+            `[data-session-id="${firstRecord.id}"]`,
+          ) as HTMLButtonElement
+        ).click();
+      });
+      await flush();
+    };
+    await renderRecords();
+    await openDetail();
+    expect(container.textContent).toContain("sealed secret");
+    await act(async () => buttonContaining("实时监控").click());
+
+    // The unlock ends while the list is showing.
+    unlocked = false;
+    await act(async () => {
+      vi.advanceTimersByTime(15 * 60 * 1000 + 2000);
+      await Promise.resolve();
+    });
+    await flush();
+
+    // Reopening must not hand the old raw part to the detail view, even for
+    // the one render before the new read starts.
+    bridgeMocks.getRequestAuditContent.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    previewParts.parsed = [];
+    await openDetail();
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(2);
+    expect(previewParts.parsed.join("\n")).not.toContain("sealed secret");
+    expect(container.textContent).not.toContain("sealed secret");
+  });
+
+  it("asks for raw protection instead of an unlock no proof can open", async () => {
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(
+      rawSealing({
+        configured: false,
+        password_set: false,
+        password_required: true,
+        envelopes: [],
+      }),
+    );
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      request_id: firstRecord.id,
+      http_meta: null,
+      request_body: null,
+      response_content: null,
+      upstream_http_meta: null,
+      upstream_request_body: null,
+      upstream_response_content: null,
+      withheld: {
+        request_body: {
+          reason: "raw_locked",
+          raw_available: true,
+          media_type: "application/json",
+          truncated: false,
+          captured_bytes: 64,
+        },
+      },
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${firstRecord.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await flush();
+    await act(async () => exactButton("内容").click());
+    await flush(1);
+
+    await act(async () => {
+      exactButton("解锁").click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    // Only the raw password unlocks raw content, so setting one is left.
+    const dialog = proofDialog();
+    expect(dialog?.textContent).toContain("保护请求原文");
+    expect(exactButton("设置口令并继续", dialog!)).toBeTruthy();
+    expect(
+      dialog?.querySelector('input[autocomplete="current-password"]'),
+    ).toBe(null);
+    expect(bridgeMocks.unlockRaw).not.toHaveBeenCalled();
+  });
+
+  it("keeps raw content locked when the sealing state cannot be read", async () => {
+    let readable = true;
+    bridgeMocks.getRawSealingStatus.mockImplementation(async () => {
+      if (!readable) {
+        throw new Error("GET /v1/raw-sealing returned 503 Service Unavailable");
+      }
+      return rawSealing();
+    });
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      request_id: firstRecord.id,
+      http_meta: null,
+      request_body: null,
+      response_content: null,
+      upstream_http_meta: null,
+      upstream_request_body: null,
+      upstream_response_content: null,
+      withheld: {
+        request_body: {
+          reason: "raw_locked",
+          raw_available: true,
+          media_type: "application/json",
+          truncated: false,
+          captured_bytes: 64,
+        },
+      },
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${firstRecord.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await flush();
+    await act(async () => exactButton("内容").click());
+    await flush(1);
+    readable = false;
+
+    await act(async () => {
+      exactButton("解锁").click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(proofDialog()).toBeNull();
+    expect(bridgeMocks.unlockRaw).not.toHaveBeenCalled();
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(1);
+    expect(notifyMocks.error).toHaveBeenCalledWith(
+      "无法读取原文封存状态，原文保持锁定，请重试。",
+    );
+
+    // Asking again reads the state again.
+    readable = true;
+    await act(async () => {
+      exactButton("解锁").click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(proofDialog()?.textContent).toContain("解锁原文");
+  });
+
   it("turns off request and response capture from the header switch", async () => {
     bridgeMocks.getAuditSettings.mockResolvedValue({
       request_body_enabled: true,
@@ -2715,6 +3459,7 @@ describe("RequestRecords", () => {
       response_content_max_bytes: 8192,
       metadata_retention_days: 30,
       content_retention_days: 7,
+      agent_raw_access_enabled: true,
     });
     await renderRecords();
     await act(async () => await Promise.resolve());

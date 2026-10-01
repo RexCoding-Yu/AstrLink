@@ -12,7 +12,7 @@ import (
 const AuditSettingsPath = "/control/v1/audit-settings"
 
 func (handler *Handler) registerAuditSettingsRoutes() {
-	handler.mux.HandleFunc(AuditSettingsPath, handler.authenticated(handler.auditSettingsResource))
+	handler.mux.HandleFunc(AuditSettingsPath, handler.authenticated(handler.auditSettingsResource, RoleObserver))
 }
 
 func (handler *Handler) auditSettingsResource(writer http.ResponseWriter, request *http.Request) {
@@ -70,6 +70,10 @@ func (handler *Handler) patchAuditSettings(writer http.ResponseWriter, request *
 	if err := handler.auditSettings.UpdateAuditSettings(request.Context(), updated); err != nil {
 		handler.writeAuditSettingsStoreError(writer, err)
 		return
+	}
+	if !updated.AgentRawAccessEnabled {
+		// Turning agent access off also takes back what was approved.
+		handler.rawGrants.revokeAll()
 	}
 	if (updated.RequestBodyEnabled || updated.ResponseContentEnabled || updated.HTTPMetaEnabled) && handler.auditKeys != nil {
 		if _, err := handler.auditKeys.GetOrCreateAuditKey(request.Context()); err != nil {
@@ -131,6 +135,17 @@ func applyAuditSettingsPatch(
 			// No risk acknowledgement: values are redacted before storage
 			// and encrypted at rest (ADR 0008).
 			settings.HTTPMetaEnabled = value
+		case "agent_raw_access_enabled":
+			if isJSONNull(raw) {
+				return settings, errors.New("agent_raw_access_enabled cannot be deleted")
+			}
+			var value bool
+			if err := strictUnmarshal(raw, &value); err != nil {
+				return settings, err
+			}
+			// Enabling only allows agents to ask; every read still needs a
+			// desktop approval with proof, so no acknowledgement applies.
+			settings.AgentRawAccessEnabled = value
 		case "request_body_max_bytes":
 			if isJSONNull(raw) {
 				return settings, errors.New("request_body_max_bytes cannot be deleted")

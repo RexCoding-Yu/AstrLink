@@ -8,7 +8,11 @@ const bridgeMocks = vi.hoisted(() => ({
   createAccessToken: vi.fn(),
   deleteAccessToken: vi.fn(),
   listAccessTokenUsage: vi.fn(),
-  revealAccessToken: vi.fn(),
+  copyAccessToken: vi.fn(),
+  getClientConfigStatus: vi.fn(),
+  removeClientConfig: vi.fn(),
+  applyClientConfig: vi.fn(),
+  isCCSwitchInstalled: vi.fn(),
   openCCSwitchImport: vi.fn(),
   listServices: vi.fn(),
   getRoutingSettings: vi.fn(),
@@ -21,6 +25,7 @@ import {
   type AccessTokenCatalog,
 } from "./AccessTokenManager";
 import type { AccessTokenSummary } from "./access-token-model";
+import type { ClientConfigStatus } from "./client-config-model";
 import {
   finishExitAnimations,
   installDialogAnimations,
@@ -41,7 +46,28 @@ const secondToken: AccessTokenSummary = {
 };
 
 const firstSecret = `astr_${"A".repeat(43)}`;
-const secondSecret = `astr_${"B".repeat(43)}`;
+
+function clientStatuses(
+  claudeToken: string | null,
+  codexToken: string | null = null,
+): ClientConfigStatus[] {
+  return [
+    {
+      client: "claude",
+      detected: true,
+      paths: ["/Users/me/.claude/settings.json"],
+      state: claudeToken ? "configured" : "not_configured",
+      token_id: claudeToken,
+    },
+    {
+      client: "codex",
+      detected: true,
+      paths: ["/Users/me/.codex/config.toml"],
+      state: codexToken ? "modified" : "not_configured",
+      token_id: codexToken,
+    },
+  ];
+}
 
 function readyCatalog(items: AccessTokenSummary[]): AccessTokenCatalog {
   return {
@@ -103,6 +129,8 @@ describe("AccessTokenManager", () => {
       value: { writeText: vi.fn().mockResolvedValue(undefined) },
     });
     bridgeMocks.listAccessTokenUsage.mockResolvedValue({ items: [] });
+    bridgeMocks.getClientConfigStatus.mockResolvedValue(clientStatuses(null));
+    bridgeMocks.isCCSwitchInstalled.mockResolvedValue(false);
     bridgeMocks.listServices.mockResolvedValue({ items: [] });
     bridgeMocks.getRoutingSettings.mockResolvedValue({ model_redirects: [] });
     container = document.createElement("div");
@@ -136,322 +164,168 @@ describe("AccessTokenManager", () => {
     });
   };
 
-  it("copies a token without rendering the secret and only keeps the latest copy", async () => {
-    bridgeMocks.revealAccessToken
-      .mockResolvedValueOnce({ access_token: firstSecret })
-      .mockResolvedValueOnce({ access_token: secondSecret });
+  it("has the host copy a token without verification and only keeps the latest copy", async () => {
+    bridgeMocks.copyAccessToken
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
     await renderManager(readyCatalog([firstToken, secondToken]));
 
     await act(async () => {
       button("复制", row(firstToken.name)).click();
       await Promise.resolve();
     });
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(firstSecret);
-    expect(container.textContent).not.toContain(firstSecret);
+    expect(
+      document.querySelector('[data-slot="proof-confirm-dialog"]'),
+    ).toBeNull();
+    expect(bridgeMocks.copyAccessToken).toHaveBeenCalledExactlyOnceWith(
+      firstToken.id,
+    );
+    // The host writes the clipboard; the secret never reaches the webview.
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
     expect(button("已复制", row(firstToken.name))).toBeTruthy();
 
     await act(async () => {
       button("复制", row(secondToken.name)).click();
       await Promise.resolve();
     });
-    expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(
-      secondSecret,
+    expect(bridgeMocks.copyAccessToken).toHaveBeenLastCalledWith(
+      secondToken.id,
     );
-    expect(container.textContent).not.toContain(secondSecret);
     expect(button("已复制", row(secondToken.name))).toBeTruthy();
     expect(button("复制", row(firstToken.name))).toBeTruthy();
   });
 
-  it("fills CC Switch with the selected token and edited model without revealing its secret", async () => {
-    bridgeMocks.openCCSwitchImport.mockResolvedValueOnce(undefined);
+  it("asks for a manual copy when the host cannot write the clipboard", async () => {
+    bridgeMocks.copyAccessToken.mockResolvedValueOnce(false);
+    await renderManager(readyCatalog([firstToken]));
+
+    await act(async () => {
+      button("复制", row(firstToken.name)).click();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("无法自动复制，请手动选择令牌。");
+    expect(button("复制", row(firstToken.name)).disabled).toBe(false);
+  });
+
+  it("offers client setup for every token without CC Switch", async () => {
+    await renderManager(readyCatalog([firstToken, secondToken]));
+    expect(bridgeMocks.isCCSwitchInstalled).not.toHaveBeenCalled();
+    expect(button("配置客户端", row(firstToken.name))).toBeTruthy();
+
+    await act(async () => button("配置客户端", row(secondToken.name)).click());
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain("Terminal");
+    expect(dialog?.textContent).toContain("astr_…7HT4");
+    expect(dialog?.textContent).not.toContain(firstSecret);
+    expect(bridgeMocks.getClientConfigStatus).toHaveBeenCalledWith(
+      "http://127.0.0.1:8317",
+    );
+    expect(bridgeMocks.copyAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("marks the clients each token is configured in and refreshes on focus", async () => {
+    bridgeMocks.getClientConfigStatus.mockResolvedValue(
+      clientStatuses(firstToken.id),
+    );
+    await renderManager(readyCatalog([firstToken, secondToken]));
+    const mark = row(firstToken.name).querySelector('[role="img"]');
+    expect(mark?.getAttribute("aria-label")).toBe("已配置到 Claude Code");
+    expect(mark?.querySelectorAll("svg")).toHaveLength(1);
+    expect(row(secondToken.name).querySelector('[role="img"]')).toBeNull();
+
+    bridgeMocks.getClientConfigStatus.mockResolvedValue(
+      clientStatuses(firstToken.id, secondToken.id),
+    );
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(
+      row(secondToken.name)
+        .querySelector('[role="img"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("已配置到 Codex");
+
+    bridgeMocks.getClientConfigStatus.mockRejectedValue(new Error("failed"));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[role="img"]')).toBeNull();
+  });
+
+  it("removes a deleted token's client configs unless asked to keep them", async () => {
+    bridgeMocks.getClientConfigStatus.mockResolvedValue(
+      clientStatuses(firstToken.id, firstToken.id),
+    );
+    bridgeMocks.deleteAccessToken.mockResolvedValue(undefined);
+    bridgeMocks.removeClientConfig
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("unable to write config.toml"));
     await renderManager(readyCatalog([firstToken, secondToken]));
 
-    await act(async () => button("CC Switch", row(secondToken.name)).click());
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-      "Terminal",
+    await act(async () => button("删除", row(firstToken.name)).click());
+    const confirmation = document.querySelector('[role="alertdialog"]');
+    expect(confirmation?.textContent).toContain(
+      "以下客户端正在使用“VS Code”：Claude Code、Codex。",
     );
-    expect(
-      document.querySelector<HTMLInputElement>("#cc-switch-model")?.value,
-    ).toBe("");
-    expect(button("填充到 CC Switch").disabled).toBe(false);
+    const checkbox = confirmation?.querySelector('[role="checkbox"]');
+    expect(checkbox?.getAttribute("aria-checked")).toBe("true");
+    await act(async () => {
+      button("确认删除").click();
+      await Promise.resolve();
+    });
+    expect(bridgeMocks.deleteAccessToken).toHaveBeenCalledWith(firstToken.id);
+    expect(bridgeMocks.removeClientConfig.mock.calls).toEqual([
+      ["claude"],
+      ["codex"],
+    ]);
+
+    bridgeMocks.removeClientConfig.mockClear();
+    bridgeMocks.getClientConfigStatus.mockResolvedValue(
+      clientStatuses(secondToken.id),
+    );
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    await act(async () => button("删除", row(secondToken.name)).click());
     await act(async () =>
       document
-        .querySelector<HTMLButtonElement>('[role="radio"][aria-label="Codex"]')
-        ?.click(),
-    );
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-      "http://127.0.0.1:8317/v1",
-    );
-    expect(button("填充到 CC Switch").disabled).toBe(true);
-    await setInput("#cc-switch-model", "my-route");
-    await act(async () => button("填充到 CC Switch").click());
-    expect(bridgeMocks.openCCSwitchImport).toHaveBeenCalledExactlyOnceWith({
-      tokenId: secondToken.id,
-      client: "codex",
-      name: "AstrLink · Terminal",
-      models: { model: "my-route" },
-      inferenceUrl: "http://127.0.0.1:8317",
-    });
-    expect(bridgeMocks.revealAccessToken).not.toHaveBeenCalled();
-    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
-  });
-
-  it("keeps failed imports retryable and hides native errors that may contain credentials", async () => {
-    bridgeMocks.openCCSwitchImport
-      .mockRejectedValueOnce(
-        new Error(`failed ccswitch://test?apiKey=${firstSecret}`),
-      )
-      .mockResolvedValueOnce(undefined);
-    await renderManager(readyCatalog([firstToken]));
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    await setInput("#cc-switch-model", "my-route");
-    await act(async () => button("填充到 CC Switch").click());
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-      "无法打开 CC Switch",
-    );
-    expect(document.body.textContent).not.toContain(firstSecret);
-    await act(async () => button("填充到 CC Switch").click());
-    expect(bridgeMocks.openCCSwitchImport).toHaveBeenCalledTimes(2);
-  });
-
-  it("exports only the Claude model slots that were filled", async () => {
-    bridgeMocks.openCCSwitchImport.mockResolvedValueOnce(undefined);
-    await renderManager(readyCatalog([firstToken]));
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    expect(
-      document.querySelectorAll('[role="dialog"] input[role="combobox"]'),
-    ).toHaveLength(4);
-    await setInput("#cc-switch-haikuModel", "  ");
-    await setInput("#cc-switch-sonnetModel", " sonnet-route ");
-    await setInput("#cc-switch-opusModel", "opus-route");
-    await act(async () => button("填充到 CC Switch").click());
-    expect(bridgeMocks.openCCSwitchImport).toHaveBeenCalledExactlyOnceWith({
-      tokenId: firstToken.id,
-      client: "claude",
-      name: "AstrLink · VS Code",
-      models: { sonnetModel: "sonnet-route", opusModel: "opus-route" },
-      inferenceUrl: "http://127.0.0.1:8317",
-    });
-  });
-
-  it("allows all Claude model slots to be empty and keeps tier choices out of other clients", async () => {
-    bridgeMocks.openCCSwitchImport.mockResolvedValue(undefined);
-    await renderManager(readyCatalog([firstToken]));
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    await act(async () => button("填充到 CC Switch").click());
-    expect(bridgeMocks.openCCSwitchImport).toHaveBeenLastCalledWith(
-      expect.objectContaining({ models: {} }),
-    );
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    await setInput("#cc-switch-opusModel", "opus-route");
-    await act(async () =>
-      document
-        .querySelector<HTMLButtonElement>('[role="radio"][aria-label="Codex"]')!
+        .querySelector<HTMLButtonElement>(
+          '[role="alertdialog"] [role="checkbox"]',
+        )!
         .click(),
     );
-    expect(button("填充到 CC Switch").disabled).toBe(true);
-    expect(document.querySelector("#cc-switch-opusModel")).toBeNull();
-    await setInput("#cc-switch-model", "codex-route");
-    await act(async () => button("填充到 CC Switch").click());
-    expect(bridgeMocks.openCCSwitchImport).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        client: "codex",
-        models: { model: "codex-route" },
-      }),
+    await act(async () => {
+      button("确认删除").click();
+      await Promise.resolve();
+    });
+    expect(bridgeMocks.deleteAccessToken).toHaveBeenLastCalledWith(
+      secondToken.id,
     );
+    expect(bridgeMocks.removeClientConfig).not.toHaveBeenCalled();
   });
 
-  it("closes the import dialog when the Core session changes and blocks stale tokens", async () => {
+  it("closes client setup when the Core session changes and blocks stale tokens", async () => {
     await renderManager(readyCatalog([firstToken]));
 
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
+    await act(async () => button("配置客户端", row(firstToken.name)).click());
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     await renderManager(
       { ...readyCatalog([firstToken]), stale: true },
       "session-2",
     );
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-
-    expect(button("CC Switch", row(firstToken.name)).disabled).toBe(true);
-    expect(bridgeMocks.openCCSwitchImport).not.toHaveBeenCalled();
-  });
-
-  it("suggests only compatible enabled models for each CC Switch client without requesting routes", async () => {
-    const protocols = [
-      "anthropic.messages",
-      "openai.responses",
-      "google.generate_content",
-      "openai.chat",
-    ];
-    bridgeMocks.listServices.mockResolvedValue({
-      items: protocols
-        .map((protocol, index) => ({
-          enabled: true,
-          models: [`model-${index}`],
-          capabilities: [{ protocol }],
-        }))
-        .concat([
-          {
-            enabled: false,
-            models: ["disabled-model"],
-            capabilities: [{ protocol: "anthropic.messages" }],
-          },
-        ]),
-    });
-    await renderManager(readyCatalog([firstToken]));
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    // Route aliases are retired, so the dialog reads only services and
-    // redirect sources; the strict bridge mock rejects any other export.
-    expect(
-      Object.entries(bridgeMocks)
-        .filter(([, mock]) => mock.mock.calls.length > 0)
-        .map(([name]) => name)
-        .sort(),
-    ).toEqual(["getRoutingSettings", "listAccessTokenUsage", "listServices"]);
-    for (const [client, expected] of [
-      ["Claude Code", ["model-0"]],
-      ["Codex", ["model-1"]],
-      ["Gemini CLI", ["model-2"]],
-      ["OpenCode", ["model-3"]],
-      ["OpenClaw", ["model-3"]],
-    ] as const) {
-      await act(async () =>
-        document
-          .querySelector<HTMLButtonElement>(
-            `[role="radio"][aria-label="${client}"]`,
-          )!
-          .click(),
-      );
-      await act(async () =>
-        document.querySelector<HTMLInputElement>("#cc-switch-model")!.click(),
-      );
-      const suggestions = [...document.querySelectorAll('[role="option"]')];
-      expect(
-        suggestions.map((option) => option.getAttribute("aria-label")),
-      ).toEqual(expected);
-      expect(suggestions.every((option) => option.querySelector("svg"))).toBe(
-        true,
-      );
-      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-        client === "Claude Code"
-          ? "按需填写；留空的模型项不会导入。"
-          : "可搜索当前客户端兼容的模型，或输入模型名。",
-      );
-      await act(async () =>
-        document
-          .querySelector<HTMLInputElement>("#cc-switch-model")!
-          .dispatchEvent(
-            new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-          ),
-      );
-    }
-  });
-
-  it("suggests enabled redirect sources whose target a compatible service lists", async () => {
-    bridgeMocks.listServices.mockResolvedValue({
-      items: [
-        {
-          enabled: true,
-          models: ["gemini-2.5-pro"],
-          capabilities: [{ protocol: "google.generate_content" }],
-        },
-        {
-          enabled: true,
-          models: ["gpt-5"],
-          capabilities: [{ protocol: "openai.responses" }],
-        },
-      ],
-    });
-    bridgeMocks.getRoutingSettings.mockResolvedValue({
-      model_redirects: [
-        { from: "gemini-pro", to: "gemini-2.5-pro", enabled: true },
-        { from: "openrouter/gemini-pro", to: "gemini-2.5-pro", enabled: true },
-        { from: "gpt-4o", to: "gpt-5", enabled: true },
-        { from: "retired-model", to: "gpt-5", enabled: false },
-        { from: "astrlink/auto", to: "gpt-5", enabled: true },
-        { from: "orphan-model", to: "unlisted-model", enabled: true },
-      ],
-    });
-    await renderManager(readyCatalog([firstToken]));
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    for (const [client, expected] of [
-      ["Gemini CLI", ["gemini-2.5-pro", "gemini-pro"]],
-      ["Codex", ["gpt-4o", "gpt-5"]],
-    ] as const) {
-      await act(async () =>
-        document
-          .querySelector<HTMLButtonElement>(
-            `[role="radio"][aria-label="${client}"]`,
-          )!
-          .click(),
-      );
-      await act(async () =>
-        document.querySelector<HTMLInputElement>("#cc-switch-model")!.click(),
-      );
-      expect(
-        [...document.querySelectorAll('[role="option"]')].map((option) =>
-          option.getAttribute("aria-label"),
-        ),
-      ).toEqual(expected);
-      await act(async () =>
-        document
-          .querySelector<HTMLInputElement>("#cc-switch-model")!
-          .dispatchEvent(
-            new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-          ),
-      );
-    }
-  });
-
-  it("keeps CC Switch service suggestions when optional redirect sources fail", async () => {
-    bridgeMocks.listServices.mockResolvedValue({
-      items: [
-        {
-          enabled: true,
-          models: ["claude-sonnet"],
-          capabilities: [{ protocol: "anthropic.messages" }],
-        },
-      ],
-    });
-    bridgeMocks.getRoutingSettings.mockRejectedValue(new Error("offline"));
-    await renderManager(readyCatalog([firstToken]));
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    await act(async () =>
-      document.querySelector<HTMLInputElement>("#cc-switch-model")!.click(),
-    );
-    expect(
-      [...document.querySelectorAll('[role="option"]')].map((option) =>
-        option.getAttribute("aria-label"),
-      ),
-    ).toEqual(["claude-sonnet"]);
-    const dialog = document.querySelector('[role="dialog"]')?.textContent;
-    expect(dialog).toContain("按需填写；留空的模型项不会导入。");
-    expect(dialog).not.toContain("部分模型未能读取");
-  });
-
-  it("reports failed CC Switch model suggestions only when services cannot load", async () => {
-    bridgeMocks.listServices.mockRejectedValue(new Error("offline"));
-    await renderManager(readyCatalog([firstToken]));
-
-    await act(async () => button("CC Switch", row(firstToken.name)).click());
-    await act(async () => Promise.resolve());
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
-      "部分模型未能读取，可手动输入模型 ID。",
-    );
+    expect(button("配置客户端", row(firstToken.name)).disabled).toBe(true);
+    expect(bridgeMocks.applyClientConfig).not.toHaveBeenCalled();
   });
 
   it("ignores a copy response from an old Core session", async () => {
-    let resolveReveal: ((value: { access_token: string }) => void) | undefined;
-    bridgeMocks.revealAccessToken.mockReturnValueOnce(
+    let resolveCopy: ((value: boolean) => void) | undefined;
+    bridgeMocks.copyAccessToken.mockReturnValueOnce(
       new Promise((resolve) => {
-        resolveReveal = resolve;
+        resolveCopy = resolve;
       }),
     );
     await renderManager(readyCatalog([firstToken]));
@@ -462,21 +336,19 @@ describe("AccessTokenManager", () => {
     });
     await renderManager(readyCatalog([firstToken]), "session-2");
     await act(async () => {
-      resolveReveal?.({ access_token: firstSecret });
+      resolveCopy?.(true);
       await Promise.resolve();
     });
 
-    expect(container.textContent).not.toContain(firstSecret);
-    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
     expect(button("复制", row(firstToken.name)).disabled).toBe(false);
   });
 
   it("cancels an in-flight copy before refreshing", async () => {
     const onRefresh = vi.fn();
-    let resolveReveal: ((value: { access_token: string }) => void) | undefined;
-    bridgeMocks.revealAccessToken.mockReturnValueOnce(
+    let resolveCopy: ((value: boolean) => void) | undefined;
+    bridgeMocks.copyAccessToken.mockReturnValueOnce(
       new Promise((resolve) => {
-        resolveReveal = resolve;
+        resolveCopy = resolve;
       }),
     );
     await act(async () => {
@@ -500,12 +372,11 @@ describe("AccessTokenManager", () => {
 
     await act(async () => button("刷新").click());
     await act(async () => {
-      resolveReveal?.({ access_token: firstSecret });
+      resolveCopy?.(true);
       await Promise.resolve();
     });
 
-    expect(container.textContent).not.toContain(firstSecret);
-    expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+    expect(button("复制", row(firstToken.name))).toBeTruthy();
     expect(onRefresh).toHaveBeenCalledOnce();
   });
 
@@ -764,7 +635,7 @@ describe("AccessTokenManager", () => {
     expect(row(firstToken.name).textContent).toContain("缓存率0.0%TPS49.0");
     expect(row(secondToken.name).textContent).toContain("缓存率—TPS—");
     expect(row(firstToken.name).textContent).toContain("创建时间");
-    expect(row(firstToken.name).textContent).toContain("CC Switch");
+    expect(row(firstToken.name).textContent).toContain("配置客户端");
     expect(row(firstToken.name).textContent).toContain("删除");
     expect(row(secondToken.name).textContent).toContain("今日消耗 · USD$0.00");
     await act(async () => button("累计").click());
@@ -775,7 +646,7 @@ describe("AccessTokenManager", () => {
     expect(bridgeMocks.listAccessTokenUsage).toHaveBeenCalledOnce();
 
     expect(row(firstToken.name).textContent).toContain("创建时间");
-    expect(button("CC Switch", row(firstToken.name))).toBeTruthy();
+    expect(button("配置客户端", row(firstToken.name))).toBeTruthy();
     expect(button("删除", row(firstToken.name))).toBeTruthy();
   });
 

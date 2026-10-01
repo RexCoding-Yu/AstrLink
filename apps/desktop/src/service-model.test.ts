@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   activeServiceRisk,
+  bestConversionTarget,
   hasPlanUsage,
   parseService,
   parseServicePage,
@@ -112,6 +113,36 @@ describe("service model", () => {
     ).toThrow(/provider does not match service kind/);
   });
 
+  it("accepts sealed account credentials and still reads keystore ones", () => {
+    const account = (credential_ref: string) =>
+      parseService({
+        id: "service_codex_personal",
+        name: "Codex",
+        kind: "codex_subscription",
+        enabled: true,
+        models: [],
+        capabilities: [],
+        subscription: {
+          provider: "openai_codex",
+          status: "connected",
+          credential_ref,
+        },
+        created_at: createdAt,
+        updated_at: createdAt,
+      });
+    expect(
+      account("local://subscription/service_codex_personal").subscription
+        ?.credential_ref,
+    ).toBe("local://subscription/service_codex_personal");
+    expect(
+      account("keyring://astrlink/subscription/service_codex_personal")
+        .subscription?.credential_ref,
+    ).toBe("keyring://astrlink/subscription/service_codex_personal");
+    expect(() => account("local://service/service_codex_personal")).toThrow(
+      /credential_ref/,
+    );
+  });
+
   it("rejects a leftover disabled_models field", () => {
     expect(() =>
       parseService({
@@ -131,6 +162,43 @@ describe("service model", () => {
         updated_at: createdAt,
       }),
     ).toThrow(/disabled_models: unexpected field/);
+  });
+
+  it("accepts a saved-key hint only next to a stored credential", () => {
+    const service = (http: Record<string, unknown>) => ({
+      id: "service_gateway",
+      name: "new-api",
+      kind: "newapi",
+      enabled: true,
+      models: [],
+      capabilities: [],
+      http: {
+        base_url: "https://gateway.example/v1",
+        auth: { scheme: "bearer" },
+        ...http,
+      },
+      created_at: createdAt,
+      updated_at: createdAt,
+    });
+    expect(
+      parseService(
+        service({
+          credential_ref: "local://service/service_gateway",
+          credential_hint: "…wxyz",
+        }),
+      ).http?.credential_hint,
+    ).toBe("…wxyz");
+    expect(() => parseService(service({ credential_hint: "…wxyz" }))).toThrow(
+      /credential_hint/,
+    );
+    expect(() =>
+      parseService(
+        service({
+          credential_ref: "local://service/service_gateway",
+          credential_hint: "sk-test-0123456789wxyz",
+        }),
+      ),
+    ).toThrow(/credential_hint/);
   });
 
   it("requires the connection variant selected by kind", () => {
@@ -514,5 +582,102 @@ describe("parseSubscriptionRiskEvents", () => {
         parseSubscriptionRiskEvents(value, "service_claude_personal"),
       ).toThrow(message);
     }
+  });
+});
+
+describe("bestConversionTarget", () => {
+  const edges = [
+    {
+      from: "openai.chat",
+      to: "anthropic.messages",
+      quality: "good" as const,
+      streaming: true,
+    },
+    {
+      from: "openai.chat",
+      to: "google.generate_content",
+      quality: "fair" as const,
+      streaming: true,
+    },
+    {
+      from: "openai.chat",
+      to: "openai.responses",
+      quality: "fair" as const,
+      streaming: true,
+    },
+  ];
+  it.each([
+    {
+      name: "quality before target order",
+      upstream: ["openai.responses", "anthropic.messages"],
+      edges,
+      available: true,
+      expected: "anthropic.messages",
+    },
+    {
+      name: "fixed order breaks fair ties",
+      upstream: ["google.generate_content", "openai.responses"],
+      edges,
+      available: true,
+      expected: "openai.responses",
+    },
+    {
+      name: "fixed order breaks good ties",
+      upstream: [
+        "google.generate_content",
+        "openai.responses",
+        "anthropic.messages",
+      ],
+      edges: edges.map((edge) => ({ ...edge, quality: "good" as const })),
+      available: true,
+      expected: "openai.responses",
+    },
+    {
+      name: "discouraged excluded",
+      upstream: ["anthropic.messages"],
+      edges: [{ ...edges[0], quality: "discouraged" as const }],
+      available: true,
+      expected: undefined,
+    },
+    {
+      name: "unadvertised edge excluded",
+      upstream: ["openai.responses"],
+      edges: [edges[0]],
+      available: true,
+      expected: undefined,
+    },
+    {
+      name: "target must be upstream",
+      upstream: ["openai.models"],
+      edges,
+      available: true,
+      expected: undefined,
+    },
+    {
+      name: "unavailable engine",
+      upstream: ["anthropic.messages"],
+      edges,
+      available: false,
+      expected: undefined,
+    },
+    {
+      name: "wrong source excluded",
+      upstream: ["anthropic.messages"],
+      edges: [{ ...edges[0], from: "openai.responses" }],
+      available: true,
+      expected: undefined,
+    },
+  ])("$name", ({ upstream, edges, available, expected }) => {
+    expect(
+      bestConversionTarget("openai.chat", upstream, { available, edges }),
+    ).toBe(expected);
+  });
+  it("does not infer edges without a snapshot", () => {
+    expect(
+      bestConversionTarget("openai.chat", ["openai.responses"], null),
+    ).toBeUndefined();
+    expect(
+      bestConversionTarget("openai.chat", ["openai.responses"]),
+    ).toBeUndefined();
   });
 });

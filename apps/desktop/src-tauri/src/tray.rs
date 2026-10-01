@@ -29,7 +29,7 @@ use crate::{
     preferences::{
         PreferencesStore, QuotaDisplayMode, TrayMenubarText, TrayPreferences, TrayUsagePreferences,
     },
-    sidecar::{CoreManager, CorePhase, CoreView},
+    sidecar::{CoreManager, CorePhase, CoreView, ObserverReadLevel},
 };
 
 pub const TRAY_ID: &str = "main";
@@ -86,11 +86,15 @@ const OBSERVER_POLL_INTERVAL: Duration = Duration::from_secs(4);
 const POPOVER_REOPEN_GUARD: Duration = Duration::from_millis(350);
 /// A blur delivered this soon after showing is the show itself settling.
 const POPOVER_BLUR_GUARD: Duration = Duration::from_millis(150);
+/// A dismissal that hands the foreground back hides the popover on the
+/// resulting blur; past this it hides regardless.
+const POPOVER_HANDOFF_TIMEOUT: Duration = Duration::from_millis(400);
 
-const SUBSCRIPTION_KINDS: [&str; 7] = [
+const SUBSCRIPTION_KINDS: [&str; 8] = [
     "codex_subscription",
     "claude_subscription",
     "grok_subscription",
+    "antigravity_subscription",
     "kimi_coding",
     "glm_coding",
     "minimax_coding",
@@ -128,7 +132,7 @@ pub enum TrayIconState {
     Ready,
     /// Anything but a running gateway: stopped, starting, stopping, failed.
     Idle,
-    /// Ready, and an agent is reading records through the MCP bridge.
+    /// Ready, and an agent is reading records through the agent CLI.
     Watched,
 }
 
@@ -184,6 +188,8 @@ pub struct WindowDigest {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SubscriptionDigest {
     pub name: String,
+    /// Service kind, one of `SUBSCRIPTION_KINDS`; the panel draws its logo.
+    pub kind: String,
     pub windows: Vec<WindowDigest>,
 }
 
@@ -222,10 +228,17 @@ pub struct TrayStateSnapshot {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrayAction {
     Open,
-    Navigate { page: String },
+    Navigate {
+        page: String,
+    },
     CopyAddress,
-    Core { op: CoreOp },
+    Core {
+        op: CoreOp,
+    },
     Refresh,
+    /// Opens the raw access approval window, which lists pending requests
+    /// and running grants.
+    RawAccess,
     Quit,
 }
 
@@ -292,7 +305,46 @@ fn status_line(view: &CoreView, locale: Locale) -> (String, TrayIconState) {
             let mut text = t("host.tray.status.ready", &[("address", &address)]);
             if view.observer_active {
                 text.push_str(" · ");
-                text.push_str(&t("host.tray.status.observed", &[]));
+                text.push_str(&t(
+                    if view.observer_read_level == Some(ObserverReadLevel::Raw) {
+                        "host.tray.status.observedRaw"
+                    } else {
+                        "host.tray.status.observed"
+                    },
+                    &[],
+                ));
+            }
+            // An agent waiting on the operator, or one holding a timed grant,
+            // is as worth noticing as one reading; all switch to the watched
+            // icon.
+            if view.pending_raw_access > 0 {
+                text.push_str(" · ");
+                text.push_str(&t(
+                    "host.tray.status.rawAccessPending",
+                    &[("count", &view.pending_raw_access.to_string())],
+                ));
+            }
+            if view.active_raw_grants > 0 {
+                text.push_str(" · ");
+                text.push_str(&t(
+                    "host.tray.status.rawGrantsActive",
+                    &[("count", &view.active_raw_grants.to_string())],
+                ));
+            }
+            // The raw password is set up only in the main window; say so
+            // where a user who closed it still looks. No agent is involved,
+            // so the icon keeps its meaning.
+            if view.raw_password_required {
+                text.push_str(" · ");
+                text.push_str(&t("host.tray.status.rawPasswordRequired", &[]));
+            }
+            // The same holds for a raw key replaced outside the desktop: the
+            // main window's warning is the only place that resolves it.
+            if view.raw_key_replaced {
+                text.push_str(" · ");
+                text.push_str(&t("host.tray.status.rawKeyReplaced", &[]));
+            }
+            if view.observer_active || view.pending_raw_access > 0 || view.active_raw_grants > 0 {
                 return (text, TrayIconState::Watched);
             }
             (text, TrayIconState::Ready)
@@ -573,7 +625,11 @@ fn window_from(
 /// Every window a plan reports: the primary/secondary pair, then any named
 /// additional limits. Some plans (Kimi monthly, Claude per-model weekly caps)
 /// only have the latter, so dropping them hid those plans entirely.
-fn subscription_from(name: &str, usage: &serde_json::Value) -> Option<SubscriptionDigest> {
+fn subscription_from(
+    name: &str,
+    kind: &str,
+    usage: &serde_json::Value,
+) -> Option<SubscriptionDigest> {
     let mut windows = Vec::new();
     if let Some(window) = usage
         .get("primary")
@@ -610,11 +666,13 @@ fn subscription_from(name: &str, usage: &serde_json::Value) -> Option<Subscripti
     windows.truncate(MAX_WINDOWS_PER_SUBSCRIPTION);
     (!windows.is_empty()).then(|| SubscriptionDigest {
         name: name.to_string(),
+        kind: kind.to_string(),
         windows,
     })
 }
 
-fn subscription_services(services: &serde_json::Value) -> Vec<(String, String)> {
+/// `(id, name, kind)` of every plan-backed service.
+fn subscription_services(services: &serde_json::Value) -> Vec<(String, String, String)> {
     services
         .get("items")
         .and_then(|items| items.as_array())
@@ -623,16 +681,15 @@ fn subscription_services(services: &serde_json::Value) -> Vec<(String, String)> 
                 .iter()
                 // Disabled providers keep their plan; the quota is worth
                 // watching even while the gateway is not routing to them.
-                .filter(|service| {
-                    service
-                        .get("kind")
-                        .and_then(|kind| kind.as_str())
-                        .is_some_and(|kind| SUBSCRIPTION_KINDS.contains(&kind))
-                })
                 .filter_map(|service| {
+                    let kind = service.get("kind")?.as_str()?;
+                    if !SUBSCRIPTION_KINDS.contains(&kind) {
+                        return None;
+                    }
                     Some((
                         service.get("id")?.as_str()?.to_string(),
                         service.get("name")?.as_str()?.to_string(),
+                        kind.to_string(),
                     ))
                 })
                 .take(MAX_SUBSCRIPTION_SERVICES)
@@ -648,11 +705,11 @@ async fn collect_subscriptions(manager: &Arc<CoreManager>, fresh: bool) -> Vec<S
         return Vec::new();
     };
     let mut handles = Vec::new();
-    for (id, name) in subscription_services(&services) {
+    for (id, name, kind) in subscription_services(&services) {
         let manager = Arc::clone(manager);
         handles.push(tauri::async_runtime::spawn(async move {
             match manager.get_service_usage_with(&id, fresh).await {
-                Ok(usage) => subscription_from(&name, &usage),
+                Ok(usage) => subscription_from(&name, &kind, &usage),
                 Err(error) => {
                     // Visible in the dev log; the panel just omits the plan
                     // until the next refresh succeeds.
@@ -927,6 +984,10 @@ struct TrayRuntime {
     popover_height: f64,
     popover_shown_at: Option<Instant>,
     popover_hidden_at: Option<Instant>,
+    /// The app the popover took the foreground from, if not AstrLink.
+    popover_return_to: Option<i32>,
+    /// A dismissal is waiting for that app to take the foreground back.
+    popover_handoff_pending: bool,
 }
 
 /// Managed state for the tray. Separate from `CoreManager` so the tray can be
@@ -1242,6 +1303,10 @@ pub fn perform(app: &AppHandle, action: TrayAction) -> Result<(), String> {
         TrayAction::Core { op } => run_core(app, op),
         // An explicit refresh means "now", plan windows included.
         TrayAction::Refresh => request_usage_refresh(app, true, PlanRefresh::Force),
+        TrayAction::RawAccess => {
+            hide_popover(app);
+            crate::raw_approval::open(app, true)?;
+        }
         TrayAction::Quit => quit(app),
     }
     Ok(())
@@ -1264,9 +1329,15 @@ fn run_core(app: &AppHandle, op: CoreOp) {
     let manager = Arc::clone(manager.inner());
     match op {
         CoreOp::Start => {
-            if let Err(error) = manager.start(app) {
-                eprintln!("unable to start astrlink-core from the tray: {error}");
-            }
+            // Off the main thread: resolving the local key may wait on a
+            // keychain prompt.
+            let app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let _lifecycle = lifecycle;
+                if let Err(error) = manager.start(&app) {
+                    eprintln!("unable to start astrlink-core from the tray: {error}");
+                }
+            });
         }
         CoreOp::Stop => {
             tauri::async_runtime::spawn(async move {
@@ -1383,7 +1454,7 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
     };
     if let Some(window) = app.get_webview_window(POPOVER_LABEL) {
         if window.is_visible().unwrap_or(false) {
-            hide_popover(app);
+            dismiss_popover(app);
             return;
         }
     }
@@ -1438,12 +1509,17 @@ fn present_popover(app: &AppHandle) {
     let Some(window) = app.get_webview_window(POPOVER_LABEL) else {
         return;
     };
+    // Read before focusing: focusing activates AstrLink.
+    let return_to = frontmost_other_app();
     if let Err(error) = window.show() {
         eprintln!("unable to show the AstrLink tray popover: {error}");
     }
     let _ = window.set_focus();
     if let Some(state) = app.try_state::<TrayState>() {
-        state.lock().popover_shown_at = Some(Instant::now());
+        let mut runtime = state.lock();
+        runtime.popover_shown_at = Some(Instant::now());
+        runtime.popover_return_to = return_to;
+        runtime.popover_handoff_pending = false;
     }
     if let Err(error) = app.emit_to(POPOVER_LABEL, STATE_EVENT, state_snapshot(app, None)) {
         eprintln!("unable to seed the AstrLink tray popover: {error}");
@@ -1460,22 +1536,95 @@ pub fn hide_popover(app: &AppHandle) {
     }
     let _ = window.hide();
     if let Some(state) = app.try_state::<TrayState>() {
-        state.lock().popover_hidden_at = Some(Instant::now());
+        let mut runtime = state.lock();
+        runtime.popover_hidden_at = Some(Instant::now());
+        runtime.popover_handoff_pending = false;
     }
+}
+
+/// Closes the popover at the operator's request: its close button, Escape,
+/// a click beside the panel or on the tray icon. Hiding the key window of
+/// the active app makes macOS raise the app's next window, so the main
+/// window would jump in front of whatever the operator was using. When the
+/// popover took the foreground from another app, that app gets it back
+/// first and the popover hides on the resulting blur.
+pub fn dismiss_popover(app: &AppHandle) {
+    if !popover_visible(app) {
+        return;
+    }
+    let Some(state) = app.try_state::<TrayState>() else {
+        hide_popover(app);
+        return;
+    };
+    let return_to = {
+        let mut runtime = state.lock();
+        if runtime.popover_handoff_pending {
+            return;
+        }
+        runtime.popover_return_to.take()
+    };
+    if !return_to.is_some_and(return_foreground) {
+        hide_popover(app);
+        return;
+    }
+    state.lock().popover_handoff_pending = true;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(POPOVER_HANDOFF_TIMEOUT).await;
+        let pending = app
+            .try_state::<TrayState>()
+            .is_some_and(|state| state.lock().popover_handoff_pending);
+        if pending {
+            hide_popover(&app);
+        }
+    });
 }
 
 /// Focus loss closes the popover, except for the blur that accompanies its
 /// own appearance.
 pub fn on_popover_blur(app: &AppHandle) {
     let settling = app.try_state::<TrayState>().is_some_and(|state| {
-        state
-            .lock()
-            .popover_shown_at
-            .is_some_and(|at| at.elapsed() < POPOVER_BLUR_GUARD)
+        let runtime = state.lock();
+        !runtime.popover_handoff_pending
+            && runtime
+                .popover_shown_at
+                .is_some_and(|at| at.elapsed() < POPOVER_BLUR_GUARD)
     });
     if !settling {
         hide_popover(app);
     }
+}
+
+/// The pid of the frontmost app when that is not AstrLink.
+#[cfg(target_os = "macos")]
+fn frontmost_other_app() -> Option<i32> {
+    let pid = objc2_app_kit::NSWorkspace::sharedWorkspace()
+        .frontmostApplication()?
+        .processIdentifier();
+    (pid > 0 && u32::try_from(pid).ok() != Some(std::process::id())).then_some(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn frontmost_other_app() -> Option<i32> {
+    None
+}
+
+/// Hands the foreground from AstrLink back to `pid`. Returns whether AstrLink
+/// is about to deactivate as a result.
+#[cfg(target_os = "macos")]
+fn return_foreground(pid: i32) -> bool {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+    if !NSRunningApplication::currentApplication().isActive() {
+        return false;
+    }
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some_and(|other| {
+        !other.isTerminated() && other.activateWithOptions(NSApplicationActivationOptions::empty())
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn return_foreground(_pid: i32) -> bool {
+    false
 }
 
 /// The popover reports its content height; the window follows it and stays
@@ -1662,8 +1811,33 @@ pub fn start(app: &AppHandle) {
     let watcher = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut was_ready = false;
+        let mut last_raw_key_event = None;
+        let mut last_pending_raw_access = 0;
         while changes.changed().await.is_ok() {
-            let ready = changes.borrow_and_update().phase == CorePhase::Ready;
+            let (ready, raw_key_event, pending_raw_access) = {
+                let view = changes.borrow_and_update();
+                (
+                    view.phase == CorePhase::Ready,
+                    view.raw_key_event.clone(),
+                    view.pending_raw_access,
+                )
+            };
+            // A new agent request opens the approval window without taking
+            // focus, with a notification in case the operator looks away.
+            if pending_raw_access > last_pending_raw_access {
+                if let Err(error) = crate::raw_approval::open(&watcher, false) {
+                    eprintln!("unable to open the raw access approval window: {error}");
+                }
+                crate::raw_approval::notify_pending(&watcher);
+            }
+            last_pending_raw_access = pending_raw_access;
+            // A key replaced while the app was closed, or through another
+            // client of this Core, is only noticed by comparing it with the
+            // pin; do so without waiting for a window to ask.
+            if ready && (!was_ready || raw_key_event != last_raw_key_event) {
+                tauri::async_runtime::spawn(crate::check_raw_key(watcher.clone()));
+            }
+            last_raw_key_event = raw_key_event;
             if ready && !was_ready {
                 // Warm the panel once so the first open is not blank.
                 request_usage_refresh(
@@ -1725,6 +1899,12 @@ mod tests {
             recovery_attempt: 0,
             recovery_scheduled: false,
             observer_active: false,
+            observer_read_level: None,
+            pending_raw_access: 0,
+            active_raw_grants: 0,
+            raw_password_required: false,
+            raw_key_event: None,
+            raw_key_replaced: false,
         }
     }
 
@@ -1752,6 +1932,7 @@ mod tests {
             month_tokens: None,
             subscriptions: vec![SubscriptionDigest {
                 name: "Codex".to_string(),
+                kind: "codex_subscription".to_string(),
                 windows: vec![WindowDigest {
                     label: None,
                     limit_window_seconds: Some(18_000),
@@ -1816,7 +1997,94 @@ mod tests {
         assert_eq!(model.icon, TrayIconState::Watched);
         assert_eq!(
             model.tooltip,
-            "AstrLink · 网关运行中 · 127.0.0.1:8317 · Agent 正在通过 MCP 读取"
+            "AstrLink · 网关运行中 · 127.0.0.1:8317 · Agent 正在通过 CLI 读取"
+        );
+        watched.observer_read_level = Some(ObserverReadLevel::Raw);
+        watched.pending_raw_access = 2;
+        let model = tray_model(
+            &watched,
+            &TrayPreferences::default(),
+            None,
+            Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
+        );
+        assert_eq!(
+            model.tooltip,
+            "AstrLink · 网关运行中 · 127.0.0.1:8317 · Agent 正在读取已批准的原文 · 2 个原文申请待批准"
+        );
+        let mut waiting = ready_view();
+        waiting.pending_raw_access = 1;
+        let model = tray_model(
+            &waiting,
+            &TrayPreferences::default(),
+            None,
+            Locale::En,
+            QuotaDisplayMode::Remaining,
+        );
+        assert_eq!(model.icon, TrayIconState::Watched);
+        assert_eq!(
+            model.tooltip,
+            "AstrLink · Gateway running · 127.0.0.1:8317 · Raw access requests awaiting you: 1"
+        );
+        // A running timed grant keeps the watched icon until it ends.
+        let mut granted = ready_view();
+        granted.active_raw_grants = 2;
+        let model = tray_model(
+            &granted,
+            &TrayPreferences::default(),
+            None,
+            Locale::En,
+            QuotaDisplayMode::Remaining,
+        );
+        assert_eq!(model.icon, TrayIconState::Watched);
+        assert_eq!(
+            model.tooltip,
+            "AstrLink · Gateway running · 127.0.0.1:8317 · Agents that may read raw content: 2"
+        );
+        // A missing raw password points at the main window's setup without
+        // pretending an agent is reading.
+        let mut gated = ready_view();
+        gated.raw_password_required = true;
+        let model = tray_model(
+            &gated,
+            &TrayPreferences::default(),
+            None,
+            Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
+        );
+        assert_eq!(model.icon, TrayIconState::Ready);
+        assert_eq!(
+            model.tooltip,
+            "AstrLink · 网关运行中 · 127.0.0.1:8317 · 请求原文还没有保护，请打开 AstrLink 设置"
+        );
+        gated.pending_raw_access = 1;
+        let model = tray_model(
+            &gated,
+            &TrayPreferences::default(),
+            None,
+            Locale::En,
+            QuotaDisplayMode::Remaining,
+        );
+        assert_eq!(model.icon, TrayIconState::Watched);
+        assert_eq!(
+            model.tooltip,
+            "AstrLink · Gateway running · 127.0.0.1:8317 · Raw access requests awaiting you: 1 · Raw request content is not protected yet; open AstrLink to set it up"
+        );
+        // A raw key replaced outside the desktop points at the main window's
+        // warning; no agent is involved either.
+        let mut replaced = ready_view();
+        replaced.raw_key_replaced = true;
+        let model = tray_model(
+            &replaced,
+            &TrayPreferences::default(),
+            None,
+            Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
+        );
+        assert_eq!(model.icon, TrayIconState::Ready);
+        assert_eq!(
+            model.tooltip,
+            "AstrLink · 网关运行中 · 127.0.0.1:8317 · 原文密钥在 AstrLink 之外被更换，请打开 AstrLink 查看"
         );
         // Only a running gateway can be read; the badge drops with it.
         watched.phase = CorePhase::Error;
@@ -1841,6 +2109,12 @@ mod tests {
             recovery_attempt: 2,
             recovery_scheduled: true,
             observer_active: false,
+            observer_read_level: None,
+            pending_raw_access: 0,
+            active_raw_grants: 0,
+            raw_password_required: false,
+            raw_key_event: None,
+            raw_key_replaced: false,
         };
         let prefs = TrayPreferences {
             menubar_text: TrayMenubarText::Tokens,
@@ -2079,8 +2353,16 @@ mod tests {
         assert_eq!(
             subscription_services(&services),
             vec![
-                ("svc_codex".to_string(), "Codex".to_string()),
-                ("svc_off".to_string(), "Off".to_string())
+                (
+                    "svc_codex".to_string(),
+                    "Codex".to_string(),
+                    "codex_subscription".to_string()
+                ),
+                (
+                    "svc_off".to_string(),
+                    "Off".to_string(),
+                    "claude_subscription".to_string()
+                )
             ]
         );
 
@@ -2089,12 +2371,18 @@ mod tests {
             "primary": {"used_percent": 62.0, "limit_window_seconds": 18000, "reset_at": "2026-09-22T12:13:00Z"},
             "secondary": {"used_percent": 18.0, "limit_window_seconds": 604800}
         });
-        let digest = subscription_from("Codex", &usage).unwrap();
+        let digest = subscription_from("Codex", "codex_subscription", &usage).unwrap();
+        assert_eq!(digest.kind, "codex_subscription");
         assert_eq!(digest.windows.len(), 2);
         assert!(digest.windows[1].secondary);
         assert!(digest.windows[0].reset_at.is_some());
         assert!(digest.windows[0].label.is_none());
-        assert!(subscription_from("Codex", &serde_json::json!({"service_id": "x"})).is_none());
+        assert!(subscription_from(
+            "Codex",
+            "codex_subscription",
+            &serde_json::json!({"service_id": "x"})
+        )
+        .is_none());
 
         // Kimi-style plans report only a named monthly limit; Claude adds
         // per-model weekly caps next to its primary pair.
@@ -2105,7 +2393,7 @@ mod tests {
                  "primary": {"used_percent": 41.5, "limit_window_seconds": 2592000}}
             ]
         });
-        let digest = subscription_from("Kimi", &monthly_only).unwrap();
+        let digest = subscription_from("Kimi", "kimi_coding", &monthly_only).unwrap();
         assert_eq!(digest.windows.len(), 1);
         assert_eq!(digest.windows[0].label.as_deref(), Some("Monthly"));
         assert_eq!(digest.windows[0].used_percent, 41.5);
@@ -2120,7 +2408,7 @@ mod tests {
                 {"limit_name": "Extra usage", "secondary": {"used_percent": 5.0}}
             ]
         });
-        let digest = subscription_from("Claude", &claude).unwrap();
+        let digest = subscription_from("Claude", "claude_subscription", &claude).unwrap();
         let labels: Vec<Option<&str>> = digest
             .windows
             .iter()
@@ -2146,6 +2434,14 @@ mod tests {
         let value = serde_json::to_value(snapshot).unwrap();
         assert_eq!(value["view"]["phase"], "ready");
         assert_eq!(value["view"]["observer_active"], false);
+        assert_eq!(
+            value["view"]["observer_read_level"],
+            serde_json::Value::Null
+        );
+        assert_eq!(value["view"]["pending_raw_access"], 0);
+        assert_eq!(value["view"]["raw_password_required"], false);
+        assert_eq!(value["view"]["raw_key_event"], serde_json::Value::Null);
+        assert_eq!(value["view"]["raw_key_replaced"], false);
         assert_eq!(value["popover_below"], true);
         assert_eq!(value["view"]["inference_url"], "http://127.0.0.1:8317");
         assert_eq!(value["digest"]["today"]["requests"], 128);
@@ -2156,6 +2452,10 @@ mod tests {
         assert_eq!(
             value["digest"]["subscriptions"][0]["windows"][0]["used_percent"],
             62.0
+        );
+        assert_eq!(
+            value["digest"]["subscriptions"][0]["kind"],
+            "codex_subscription"
         );
         assert_eq!(value["tray"]["pages"][0], "records");
 
@@ -2176,6 +2476,9 @@ mod tests {
                 page: "records".to_string()
             }
         );
+        let action: TrayAction =
+            serde_json::from_value(serde_json::json!({"kind": "raw_access"})).unwrap();
+        assert_eq!(action, TrayAction::RawAccess);
         assert!(
             serde_json::from_value::<TrayAction>(serde_json::json!({"kind": "explode"})).is_err()
         );

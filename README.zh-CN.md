@@ -13,9 +13,11 @@
 [English](README.md) | **简体中文**
 
 **为 AI
-Agent 打造的本地 AI 网关，统一接入 AI 订阅与 API，支持模型路由和本地隐私保护。**
+Agent 打造的本地隐私网关：敏感信息在发送给模型之前，先在本地完成检测和脱敏。**
 
-AstrLink 是一款开源桌面应用，支持 macOS、Windows 和 Linux。连接已有的订阅或 API 提供商，再将 Agent 指向本机 API 地址，即可在一个界面中管理模型、路由、隐私策略和调用记录。
+请求发往上游前，AstrLink 可在本地按策略识别密钥、邮箱、手机号等敏感内容，并提醒、拦截或脱敏；模型返回的脱敏内容也可在本地还原，Agent 照常工作。
+
+AstrLink 是一款开源桌面应用，支持 macOS、Windows 和 Linux，统一接入已有的订阅与 API，提供模型路由和调用记录。
 
 [开始使用](#开始使用) · [本地隐私保护](#本地隐私保护) ·
 [使用指南](docs/guides/README.md) · [参与开发](CONTRIBUTING.md)

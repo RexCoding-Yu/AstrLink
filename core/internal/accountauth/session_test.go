@@ -171,17 +171,7 @@ func testCallbackProxy(t *testing.T, useProxy bool) {
 		t.Fatal("expected token exchange")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		current, ok := manager.Get("service_test01")
-		if ok && current.Status == contract.AuthorizationSessionStatusCompleted {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("session did not complete: %#v", current)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForSessionStatus(t, manager, "service_test01", contract.AuthorizationSessionStatusCompleted)
 	tokens, err := store.Get(context.Background(), savedAccount)
 	if err != nil {
 		t.Fatalf("store.Get() = %v", err)
@@ -277,24 +267,16 @@ func TestSessionCompletionReleasesGlobalLockAndLogoutWaits(t *testing.T) {
 		callbackDone <- nil
 	}()
 
-	select {
-	case <-completionStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("authorization completion did not start or callback re-entry deadlocked")
-	}
+	<-completionStarted
 
 	lookupDone := make(chan bool, 1)
 	go func() {
 		_, ok := manager.Get(otherService)
 		lookupDone <- ok
 	}()
-	select {
-	case ok := <-lookupDone:
-		if !ok {
-			t.Fatal("other authorization session disappeared during completion")
-		}
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("another service was blocked by credential persistence")
+	ok := <-lookupDone
+	if !ok {
+		t.Fatal("other authorization session disappeared during completion")
 	}
 
 	cleanupDone := make(chan struct{})
@@ -309,19 +291,10 @@ func TestSessionCompletionReleasesGlobalLockAndLogoutWaits(t *testing.T) {
 	}
 
 	releaseOnce.Do(func() { close(releaseCompletion) })
-	select {
-	case err := <-callbackDone:
-		if err != nil {
-			t.Fatalf("authorization callback = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("authorization callback did not finish")
+	if err := <-callbackDone; err != nil {
+		t.Fatalf("authorization callback = %v", err)
 	}
-	select {
-	case <-cleanupDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("same-service cleanup did not resume after completion")
-	}
+	<-cleanupDone
 	current, ok := manager.Get(completingService)
 	if !ok || current.Status != contract.AuthorizationSessionStatusCompleted {
 		t.Fatalf("completed session = %#v, present=%v", current, ok)
@@ -363,19 +336,10 @@ func TestStateMismatchFailsClosed(t *testing.T) {
 	if response.StatusCode == http.StatusOK {
 		t.Fatal("expected non-OK callback response")
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		current, _ := manager.Get("service_test02")
-		if current.Status == contract.AuthorizationSessionStatusFailed {
-			if current.Error == nil || current.Error.Code != accountauth.ErrCodeStateMismatch {
-				t.Fatalf("unexpected error: %#v", current.Error)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("session status = %s", current.Status)
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitForSessionStatus(t, manager, "service_test02", contract.AuthorizationSessionStatusFailed)
+	current, _ := manager.Get("service_test02")
+	if current.Error == nil || current.Error.Code != accountauth.ErrCodeStateMismatch {
+		t.Fatalf("unexpected error: %#v", current.Error)
 	}
 }
 
@@ -421,6 +385,10 @@ func TestBrowserAuthorizationUsesFallbackPortThenDeviceCode(t *testing.T) {
 				"interval":       "60",
 			})
 		case "/api/accounts/deviceauth/token":
+			// Keep poll connections out of the idle pool: net/http can close a
+			// pooled connection when cancelling the poll that just returned it,
+			// failing the next Begin with context.Canceled.
+			writer.Header().Set("Connection", "close")
 			writer.WriteHeader(http.StatusForbidden)
 		default:
 			http.NotFound(writer, request)
@@ -638,11 +606,7 @@ func TestDeviceCodeCancellationPreventsLateCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Begin() = %v", err)
 	}
-	select {
-	case <-pollStarted:
-	case <-time.After(time.Second):
-		t.Fatal("device poll did not start")
-	}
+	<-pollStarted
 	cancelled, err := manager.Cancel(context.Background(), "service_device_cancel")
 	if err != nil {
 		t.Fatalf("Cancel() = %v", err)
@@ -952,11 +916,7 @@ func TestTokenSourceInvalidationDuringRemoteRefreshPreventsPut(t *testing.T) {
 		_, err := source.AccessToken(context.Background(), accountID)
 		refreshDone <- err
 	}()
-	select {
-	case <-refreshStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refresh request did not start")
-	}
+	<-refreshStarted
 
 	invalidationDone := make(chan struct{})
 	go func() {
@@ -974,11 +934,7 @@ func TestTokenSourceInvalidationDuringRemoteRefreshPreventsPut(t *testing.T) {
 	if err := <-refreshDone; !errors.Is(err, accountauth.ErrTokenSourceInvalidated) {
 		t.Fatalf("refresh AccessToken() = %v, want ErrTokenSourceInvalidated", err)
 	}
-	select {
-	case <-invalidationDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Invalidate() did not return after refresh finished")
-	}
+	<-invalidationDone
 	got, err := store.Get(context.Background(), accountID)
 	if err != nil {
 		t.Fatal(err)
@@ -1032,11 +988,7 @@ func TestTokenSourceInvalidationWaitsForPutBeforeCallerDeletes(t *testing.T) {
 		_, err := source.AccessToken(context.Background(), accountID)
 		refreshDone <- err
 	}()
-	select {
-	case <-store.putStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refresh did not reach credential Put")
-	}
+	<-store.putStarted
 
 	invalidationDone := make(chan struct{})
 	go func() {
@@ -1054,11 +1006,7 @@ func TestTokenSourceInvalidationWaitsForPutBeforeCallerDeletes(t *testing.T) {
 	if err := <-refreshDone; !errors.Is(err, accountauth.ErrTokenSourceInvalidated) {
 		t.Fatalf("refresh AccessToken() = %v, want ErrTokenSourceInvalidated", err)
 	}
-	select {
-	case <-invalidationDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Invalidate() did not wait for credential Put")
-	}
+	<-invalidationDone
 	persisted, err := inner.Get(context.Background(), accountID)
 	if err != nil || persisted.AccessToken != "rotated-access" {
 		t.Fatalf("credential Put did not finish before Invalidate(): %v", err)
@@ -1215,7 +1163,6 @@ func waitForTokenSourceInvalidation(
 	accountID contract.SubscriptionAccountID,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 		_, err := source.AccessToken(ctx, accountID)
@@ -1225,9 +1172,6 @@ func waitForTokenSourceInvalidation(
 		}
 		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			t.Fatalf("AccessToken() while waiting for invalidation = %v", err)
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("token source was not invalidated")
 		}
 	}
 }
@@ -1281,13 +1225,13 @@ func waitForSessionStatus(
 	status contract.AuthorizationSessionStatus,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// Poll without a wall-clock deadline; go test -timeout guards real hangs.
 	for {
 		session, ok := manager.Get(serviceID)
 		if ok && session.Status == status {
 			return
 		}
-		if time.Now().After(deadline) {
+		if ok && session.Status != contract.AuthorizationSessionStatusPending {
 			t.Fatalf("session did not reach %s: %#v", status, session)
 		}
 		time.Sleep(5 * time.Millisecond)

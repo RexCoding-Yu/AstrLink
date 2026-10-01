@@ -405,9 +405,12 @@ export function aggregateUsageRecords(
       record.usage,
       status === "failed",
     );
+    // Match Core and billing: group by the model sent upstream.
     addUsageGroup(
       modelMap,
-      record.requested_model,
+      record.recovery?.upstream_model ||
+        record.model_redirect?.to ||
+        record.requested_model,
       record.usage,
       status === "failed",
     );

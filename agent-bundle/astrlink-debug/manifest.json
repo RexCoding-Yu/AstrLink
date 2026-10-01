@@ -1,6 +1,5 @@
 {
   "name": "astrlink-debug",
-  "version": "0.1.4",
-  "mcp_server": "astrlink",
-  "adapters": ["cursor", "claude", "codex", "grok"]
+  "version": "0.3.0",
+  "adapters": ["cursor", "claude", "codex", "grok", "pi"]
 }

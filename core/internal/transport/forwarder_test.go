@@ -86,7 +86,7 @@ func TestForwardPreservesNativeRequestAndFiltersHopByHopHeaders(t *testing.T) {
 		if request.Header.Get("Authorization") != "Bearer upstream-secret" {
 			t.Errorf("Authorization = %q", request.Header.Get("Authorization"))
 		}
-		for _, name := range []string{"Cookie", "X-Api-Key", "X-Goog-Api-Key", localPolicyWarningHeader} {
+		for _, name := range []string{"Cookie", "X-Api-Key", "X-Goog-Api-Key", localPolicyWarningHeader, "X-AstrLink-Raw-Grant"} {
 			if value := request.Header.Get(name); value != "" {
 				t.Errorf("inbound credential header %s = %q", name, value)
 			}
@@ -132,6 +132,8 @@ func TestForwardPreservesNativeRequestAndFiltersHopByHopHeaders(t *testing.T) {
 	request.Header.Set("X-Goog-Api-Key", "client-google-key")
 	request.Header.Set(localPolicyWarningHeader, "spoofed=999")
 	request.Header["x-aStRlInK-debug"] = []string{"local-only"}
+	// The control-plane raw-audit grant must never leave the machine.
+	request.Header.Set("X-AstrLink-Raw-Grant", "local-grant-token")
 	request.Header.Set("Connection", "X-Request-Hop")
 	request.Header.Set("X-Request-Hop", "remove-me")
 	request.Header.Set("Keep-Alive", "timeout=5")
@@ -141,6 +143,7 @@ func TestForwardPreservesNativeRequestAndFiltersHopByHopHeaders(t *testing.T) {
 		BaseURL: baseURL,
 		RequestHeaders: http.Header{
 			"X-AstrLink-Trace":       {"local-overlay"},
+			"X-AstrLink-Raw-Grant":   {"local-overlay"},
 			localPolicyWarningHeader: {"local-overlay"},
 			"Authorization":          {"Bearer upstream-secret"},
 			"Connection":             {"X-Unsafe-Target-Hop"},
@@ -214,13 +217,9 @@ func TestForwardFlushesSSEChunksBeforeCompletion(t *testing.T) {
 		firstChunk <- line
 	}()
 
-	select {
-	case line := <-firstChunk:
-		if line != "data: first\n" {
-			t.Fatalf("first SSE line = %q", line)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("first SSE chunk was buffered until upstream completion")
+	line := <-firstChunk
+	if line != "data: first\n" {
+		t.Fatalf("first SSE line = %q", line)
 	}
 }
 
@@ -256,17 +255,9 @@ func TestForwardPropagatesCancellationToUpstream(t *testing.T) {
 	}
 	defer response.Body.Close()
 
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("upstream request did not start")
-	}
+	<-started
 	cancel()
-	select {
-	case <-cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("upstream context was not cancelled")
-	}
+	<-cancelled
 }
 
 func TestDefaultForwarderReusesUpstreamConnections(t *testing.T) {

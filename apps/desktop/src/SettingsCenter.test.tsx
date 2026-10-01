@@ -35,7 +35,10 @@ import { applyTheme } from "./theme";
 
 const snapshot = {
   phase: "ready",
-  ready: { inference_url: "http://127.0.0.1:8317" },
+  ready: {
+    inference_url: "http://127.0.0.1:8317",
+    client_inference_url: "http://localhost:8317",
+  },
   inference_port_fallback: null,
   recovery_attempt: 0,
   recovery_scheduled_in_ms: null,
@@ -62,6 +65,8 @@ const settings = {
   load_warning: null,
   autostart_actual: false,
   autostart_error: null,
+  data_backups: [],
+  local_key_storage: null,
 };
 
 describe("SettingsCenter", () => {
@@ -109,6 +114,66 @@ describe("SettingsCenter", () => {
     expect(
       container.querySelector('[data-testid="upstream-identity-settings"]'),
     ).toBeNull();
+  });
+
+  it("points out data-directory backups without offering to delete them", async () => {
+    bridge.getPreferences.mockResolvedValue({
+      ...settings,
+      data_backups: [
+        {
+          name: "astrlink.db.bak-20260924-migration-34-repair",
+          size_bytes: 2 * 1024 * 1024 * 1024,
+          modified_unix: 1_790_000_000,
+        },
+        { name: "notes.bak", size_bytes: 512, modified_unix: null },
+      ],
+    });
+    await act(async () =>
+      root.render(
+        <SettingsCenter
+          snapshot={snapshot}
+          onCoreSnapshot={() => {}}
+          onDirtyChange={() => {}}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain(
+      "数据目录中有 2 个备份文件（共 2.0 GB",
+    );
+    expect(container.textContent).toContain("AstrLink 不会删除它们");
+    expect(
+      container.querySelector("button[aria-label='数据目录中的备份文件']"),
+    ).not.toBeNull();
+    expect(
+      [...container.querySelectorAll("button")].some((button) =>
+        button.textContent?.includes("删除"),
+      ),
+    ).toBe(false);
+  });
+
+  it("shows one status line only when the keychain could not hold the local key", async () => {
+    const text = "无法使用 macOS 钥匙串";
+    for (const [local_key_storage, shown] of [
+      ["keychain_unavailable", true],
+      ["keychain", false],
+      ["file", false],
+    ] as const) {
+      bridge.getPreferences.mockResolvedValue({
+        ...settings,
+        local_key_storage,
+      });
+      await act(async () =>
+        root.render(
+          <SettingsCenter
+            key={local_key_storage}
+            snapshot={snapshot}
+            onCoreSnapshot={() => {}}
+            onDirtyChange={() => {}}
+          />,
+        ),
+      );
+      expect(container.textContent?.includes(text)).toBe(shown);
+    }
   });
 
   it("replaces the loading screen with the desktop timeout error", async () => {
@@ -196,7 +261,8 @@ describe("SettingsCenter", () => {
       ),
     );
     expect(container.textContent).toContain("端口 9000 已被占用");
-    expect(container.textContent).toContain("http://127.0.0.1:8317");
+    // Clients are told the address AstrLink writes for them.
+    expect(container.textContent).toContain("http://localhost:8317");
     expect(container.textContent).toContain("请同步修改客户端 API 地址");
     expect(container.textContent).not.toContain("入口修改尚未生效");
     expect(bridge.updatePreferences).not.toHaveBeenCalled();

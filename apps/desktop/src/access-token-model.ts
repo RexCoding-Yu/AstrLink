@@ -33,10 +33,6 @@ export interface AccessTokenCreateResult {
   access_token: string;
 }
 
-export interface AccessTokenRevealResult {
-  access_token: string;
-}
-
 type JsonObject = Record<string, unknown>;
 
 const resourceIDPattern = /^[a-z][a-z0-9_-]{2,95}$/;
@@ -201,12 +197,8 @@ export function parseAccessTokenCreateResult(
   };
 }
 
-export function parseAccessTokenRevealResult(
-  value: unknown,
-): AccessTokenRevealResult {
-  const result = objectAt(value, "$");
-  exactKeys(result, ["access_token"], "$");
-  return {
-    access_token: accessTokenAt(result.access_token, "$.access_token"),
-  };
+/** Parses `copy_access_token`: false when the clipboard refused the token. */
+export function parseAccessTokenCopied(value: unknown): boolean {
+  if (typeof value !== "boolean") invalid("$", "expected a boolean");
+  return value;
 }

@@ -43,19 +43,13 @@ func TestResolveLayerOrderAndScopes(t *testing.T) {
 	if decision.Matched {
 		t.Fatal("no hits must not match")
 	}
-	if len(calls) != 3 {
-		t.Fatalf("expected 3 lookups, got %d", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("an unmatched explicit identity must stop lookups, got %d", len(calls))
 	}
 	if calls[0].kind != KindExplicit || calls[0].scope != (Scope{}) {
 		t.Fatalf("explicit layer scope = %+v", calls[0])
 	}
 	wantScope := Scope{SamePrincipal: true, NotBefore: now.Add(-policy.Window)}
-	if calls[1].kind != KindEchoID || calls[1].scope != wantScope {
-		t.Fatalf("echo layer = %+v", calls[1])
-	}
-	if calls[2].kind != KindFingerprint || calls[2].scope != wantScope || calls[2].values[0] != fp.Fingerprint(digest) {
-		t.Fatalf("fingerprint layer = %+v", calls[2])
-	}
 	if decision.Turn == nil || decision.Turn.Index != 1 || decision.Turn.UserMessages != 2 || decision.Turn.LastUserFingerprint != "" {
 		t.Fatalf("Turn = %+v, want index 1 with 2 user messages (no user digest to fingerprint)", decision.Turn)
 	}
@@ -90,17 +84,29 @@ func TestResolveLayerOrderAndScopes(t *testing.T) {
 		t.Fatal("Inbound must still list every layer")
 	}
 
-	// Echo hit when explicit misses.
+	// Echo and fingerprint fallbacks apply only without an explicit identity.
+	summary.ExplicitCursors = nil
 	calls = nil
 	decision, _ = policy.Resolve(context.Background(), summary, fp, recordingLookup(&calls, map[Kind]Match{KindEchoID: {SessionID: "s2"}}), now)
-	if decision.Match.SessionID != "s2" || decision.Match.Kind != KindEchoID || len(calls) != 2 {
+	if decision.Match.SessionID != "s2" || decision.Match.Kind != KindEchoID || len(calls) != 1 {
 		t.Fatalf("decision = %+v calls = %d", decision, len(calls))
+	}
+	if calls[0].scope != wantScope {
+		t.Fatalf("echo layer = %+v", calls[0])
+	}
+	calls = nil
+	decision, _ = policy.Resolve(context.Background(), summary, fp, recordingLookup(&calls, map[Kind]Match{KindFingerprint: {SessionID: "s3"}}), now)
+	if decision.Match.SessionID != "s3" || decision.Match.Kind != KindFingerprint || len(calls) != 2 {
+		t.Fatalf("decision = %+v calls = %d", decision, len(calls))
+	}
+	if calls[1].scope != wantScope || calls[1].values[0] != fp.Fingerprint(digest) {
+		t.Fatalf("fingerprint layer = %+v", calls[1])
 	}
 
 	// Fingerprint layer is skipped without a fingerprinter.
 	calls = nil
 	policy.Resolve(context.Background(), summary, nil, recordingLookup(&calls, nil), now)
-	if len(calls) != 2 {
+	if len(calls) != 1 {
 		t.Fatalf("nil fingerprinter must skip the fingerprint layer, got %d calls", len(calls))
 	}
 
@@ -109,8 +115,39 @@ func TestResolveLayerOrderAndScopes(t *testing.T) {
 	unbounded.Window = 0
 	calls = nil
 	unbounded.Resolve(context.Background(), summary, nil, recordingLookup(&calls, nil), now)
-	if !calls[1].scope.NotBefore.IsZero() || !calls[1].scope.SamePrincipal {
-		t.Fatalf("zero window scope = %+v", calls[1].scope)
+	if !calls[0].scope.NotBefore.IsZero() || !calls[0].scope.SamePrincipal {
+		t.Fatalf("zero window scope = %+v", calls[0].scope)
+	}
+}
+
+func TestResolveUsesOnlyAuthoritativeExplicitCursor(t *testing.T) {
+	policy := DefaultPolicy()
+	fp := NewFingerprinter([]byte("key"))
+	for _, sessionCursor := range []string{"", "header-session"} {
+		for _, found := range []bool{false, true} {
+			summary := RequestSummary{
+				SessionCursor: sessionCursor, ExplicitCursors: []string{"conversation", "shared-cache"},
+				EchoIDs: []string{"call_7f3a9c2e1b4d4e8fa1c2"}, AssistantDigest: DigestText(goroutineAnswerZH, true),
+				HasUserMessage: true, UserTurnCount: 2,
+			}
+			want := "conversation"
+			if sessionCursor != "" {
+				want = sessionCursor
+			}
+			lookup := func(_ context.Context, kind Kind, values []string, _ Scope) (Match, bool, error) {
+				if kind != KindExplicit || !reflect.DeepEqual(values, []string{want}) {
+					t.Fatalf("lower-priority cursor queried: %s %v", kind, values)
+				}
+				return Match{SessionID: "session_selected", Value: want}, found, nil
+			}
+			decision, err := policy.Resolve(context.Background(), summary, fp, lookup, time.Now())
+			if err != nil || decision.Matched != found {
+				t.Fatalf("decision = %+v, err = %v", decision, err)
+			}
+			if got := decision.PersistentInbound(); !reflect.DeepEqual(got, []Cursor{{KindExplicit, DirectionIn, want}}) {
+				t.Fatalf("persisted aliases = %+v", got)
+			}
+		}
 	}
 }
 

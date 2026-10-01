@@ -32,6 +32,9 @@ func testGrokProxyLifecycle(t *testing.T, useProxy bool) {
 		base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user_grok_42","email":"grok@example.com"}`)) + ".x"
 	providerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if !strings.HasPrefix(r.UserAgent(), "grok-shell/1.0.50 (") || r.Header.Get("X-Grok-Client-Version") != "1.0.50" {
+			t.Errorf("learned identity not used on %s: %q / %q", r.URL.Path, r.UserAgent(), r.Header.Get("X-Grok-Client-Version"))
+		}
 		switch r.URL.Path {
 		case "/oauth2/device/code":
 			body, _ := io.ReadAll(r.Body)
@@ -62,7 +65,7 @@ func testGrokProxyLifecycle(t *testing.T, useProxy bool) {
 			io.WriteString(w, `{"access_token":"grok-access-secret","refresh_token":"grok-refresh-secret","expires_in":1,"id_token":"`+idToken+`"}`)
 		case "/v1/models", "/v1/billing":
 			if r.Header.Get("Authorization") != "Bearer grok-rotated-secret" || r.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" ||
-				r.Header.Get("X-Grok-Client-Version") == "" || r.Header.Get("ChatGPT-Account-ID") != "" || r.Header.Get("Anthropic-Beta") != "" {
+				r.Header.Get("X-Grok-Client-Identifier") != "grok-shell" || r.Header.Get("ChatGPT-Account-ID") != "" || r.Header.Get("Anthropic-Beta") != "" {
 				t.Errorf("wrong provider authentication on %s: %v", r.URL.Path, r.Header)
 			}
 			if r.URL.Path == "/v1/models" {
@@ -98,9 +101,13 @@ func testGrokProxyLifecycle(t *testing.T, useProxy bool) {
 		t.Cleanup(proxy.Close)
 		proxyInput = `,"proxy":{"mode":"custom","url":"` + proxy.URL + `"}`
 	}
+	identities := accountauth.NewIdentityRegistry(store, store)
+	if changed, err := identities.LearnGrok(ctx, http.Header{"User-Agent": {"grok-shell/1.0.50"}}); !changed || err != nil {
+		t.Fatalf("learn Grok: %t, %v", changed, err)
+	}
 	credentials := accountauth.NewMemoryCredentialStore()
 	manager, err := subscription.NewManager(subscription.StorageAccountStore{Store: store}, credentials,
-		accountauth.OAuthConfig{HTTPClient: upstream.Client(), ResolveProxy: networkproxy.Resolver(store, store)},
+		accountauth.OAuthConfig{HTTPClient: upstream.Client(), Identities: identities, ResolveProxy: networkproxy.Resolver(store, store)},
 		accountauth.OAuthConfig{Provider: contract.SubscriptionProviderXAIGrok, Issuer: baseURL, APIBaseURL: baseURL,
 			HTTPClient: upstream.Client(), DevicePollMinInterval: 5 * time.Millisecond, DevicePollMaxInterval: 5 * time.Millisecond})
 	if err != nil {
@@ -147,7 +154,6 @@ func testGrokProxyLifecycle(t *testing.T, useProxy bool) {
 		session.DeviceCode == nil || session.DeviceCode.UserCode != "GROK-CODE" || session.DeviceCode.VerificationURL != "https://accounts.x.ai/oauth2/device" {
 		t.Fatalf("invalid authorization session: %#v", session)
 	}
-	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if err := json.Unmarshal(call("GET", path+"/authorization", "", 200), &session); err != nil {
 			t.Fatal(err)
@@ -155,7 +161,7 @@ func testGrokProxyLifecycle(t *testing.T, useProxy bool) {
 		if session.Status == contract.AuthorizationSessionStatusCompleted {
 			break
 		}
-		if session.Status != contract.AuthorizationSessionStatusPending || time.Now().After(deadline) {
+		if session.Status != contract.AuthorizationSessionStatusPending {
 			t.Fatalf("device session did not complete: %#v", session)
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -165,7 +171,7 @@ func testGrokProxyLifecycle(t *testing.T, useProxy bool) {
 		t.Fatal(err)
 	}
 	if connected.Subscription.Status != contract.SubscriptionStatusConnected || connected.Subscription.ProviderAccountID != "user_grok_42" ||
-		!strings.HasPrefix(connected.Subscription.CredentialRef, "keyring://") {
+		connected.Subscription.CredentialRef != "local://subscription/"+string(connected.ID) {
 		t.Fatalf("connected service = %#v", connected.Subscription)
 	}
 	models := call("POST", path+"/probe-models", `{"protocol":"openai.models"}`, 200)

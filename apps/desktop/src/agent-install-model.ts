@@ -1,31 +1,89 @@
-export type AgentToolId = "cursor" | "claude" | "codex" | "grok";
+export type AgentToolId = "cursor" | "claude" | "codex" | "grok" | "pi";
+
+/**
+ * A skill AstrLink can install. Only `astrlink-debug` drives the AstrLink CLI,
+ * so only it brings the CLI, its access rules, and the host guards.
+ */
+export type AgentSkillId = "astrlink-debug" | "redaction-placeholders";
+
+/**
+ * How the host is kept away from AstrLink's local files: enforced deny rules
+ * (Claude Code), prompt-only global instructions (Codex), or the skill text
+ * alone (hosts without a verified mechanism).
+ */
+export type AgentGuardKind = "deny_rules" | "instructions" | "skill_only";
+
+/**
+ * How the host lets agents run the AstrLink CLI without asking each time:
+ * allow rules (Claude Code), a rules file that also lifts the sandbox (Codex),
+ * a prompt on first use (hosts without a verified mechanism), or nothing at
+ * all (hosts that run every command without asking, such as Pi).
+ */
+export type AgentCliAccessKind =
+  | "allow_rules"
+  | "exec_policy"
+  | "prompt"
+  | "unrestricted";
+
+export interface AgentSkillStatus {
+  id: AgentSkillId;
+  installed: boolean;
+  /** What installing this skill for the tool writes, apart from `shared_paths`. */
+  preview_paths: string[];
+}
 
 export interface AgentToolStatus {
   id: AgentToolId;
   detected: boolean;
-  skill_installed: boolean;
-  mcp_installed: boolean;
-  preview_paths: string[];
+  skills: AgentSkillStatus[];
+  cli_access: AgentCliAccessKind;
+  cli_access_installed: boolean;
+  guard: AgentGuardKind;
+  guard_installed: boolean;
 }
 
 export interface AgentInstallStatus {
-  canonical_skill: boolean;
-  mcp_binary: boolean;
-  mcp_command: string | null;
+  cli_binary: boolean;
   tools: AgentToolStatus[];
   shared_paths: string[];
 }
 
+export interface AgentInstallReceiptSkill {
+  id: AgentSkillId;
+  version: string;
+}
+
 export interface AgentInstallReceipt {
   version: number;
-  bundle: string;
-  bundle_version: string;
+  skills: AgentInstallReceiptSkill[];
   installed_at_unix: number;
-  mcp_binary: string;
+  /** `null` when no selected skill drives the CLI. */
+  cli_binary: string | null;
   files: string[];
 }
 
-const TOOL_IDS: readonly AgentToolId[] = ["cursor", "claude", "codex", "grok"];
+export const SKILL_IDS: readonly AgentSkillId[] = [
+  "astrlink-debug",
+  "redaction-placeholders",
+];
+const TOOL_IDS: readonly AgentToolId[] = [
+  "cursor",
+  "claude",
+  "codex",
+  "grok",
+  "pi",
+];
+const GUARD_KINDS: readonly AgentGuardKind[] = [
+  "deny_rules",
+  "instructions",
+  "skill_only",
+];
+const CLI_ACCESS_KINDS: readonly AgentCliAccessKind[] = [
+  "allow_rules",
+  "exec_policy",
+  "prompt",
+  "unrestricted",
+];
 
 function invalid(path: string, detail: string): never {
   throw new Error(`Invalid AstrLink agent-install IPC at ${path}: ${detail}`);
@@ -59,32 +117,66 @@ function boundedString(value: unknown, path: string, max = 4096): string {
   return value;
 }
 
-function nullableString(value: unknown, path: string): string | null {
-  if (value === null) return null;
-  return boundedString(value, path);
-}
-
 function booleanAt(value: unknown, path: string): boolean {
   if (typeof value !== "boolean") invalid(path, "expected a boolean");
   return value;
+}
+
+function skillIdAt(value: unknown, path: string): AgentSkillId {
+  if (!SKILL_IDS.includes(value as AgentSkillId))
+    invalid(path, "unknown skill");
+  return value as AgentSkillId;
+}
+
+function parseSkill(value: unknown, path: string): AgentSkillStatus {
+  const root = objectAt(value, path);
+  exactKeys(root, ["id", "installed", "preview_paths"], path);
+  return {
+    id: skillIdAt(root.id, `${path}.id`),
+    installed: booleanAt(root.installed, `${path}.installed`),
+    preview_paths: parsePaths(root.preview_paths, `${path}.preview_paths`),
+  };
 }
 
 function parseTool(value: unknown, path: string): AgentToolStatus {
   const root = objectAt(value, path);
   exactKeys(
     root,
-    ["id", "detected", "skill_installed", "mcp_installed", "preview_paths"],
+    [
+      "id",
+      "detected",
+      "skills",
+      "cli_access",
+      "cli_access_installed",
+      "guard",
+      "guard_installed",
+    ],
     path,
   );
+  if (!Array.isArray(root.skills))
+    invalid(`${path}.skills`, "expected an array");
   if (!TOOL_IDS.includes(root.id as AgentToolId)) {
     invalid(`${path}.id`, "unknown tool");
+  }
+  if (!CLI_ACCESS_KINDS.includes(root.cli_access as AgentCliAccessKind)) {
+    invalid(`${path}.cli_access`, "unknown CLI access kind");
+  }
+  if (!GUARD_KINDS.includes(root.guard as AgentGuardKind)) {
+    invalid(`${path}.guard`, "unknown guard kind");
   }
   return {
     id: root.id as AgentToolId,
     detected: booleanAt(root.detected, `${path}.detected`),
-    skill_installed: booleanAt(root.skill_installed, `${path}.skill_installed`),
-    mcp_installed: booleanAt(root.mcp_installed, `${path}.mcp_installed`),
-    preview_paths: parsePaths(root.preview_paths, `${path}.preview_paths`),
+    skills: root.skills.map((skill, index) =>
+      parseSkill(skill, `${path}.skills[${index}]`),
+    ),
+    cli_access: root.cli_access as AgentCliAccessKind,
+    cli_access_installed: booleanAt(
+      root.cli_access_installed,
+      `${path}.cli_access_installed`,
+    ),
+    guard: root.guard as AgentGuardKind,
+    guard_installed: booleanAt(root.guard_installed, `${path}.guard_installed`),
   };
 }
 
@@ -97,16 +189,10 @@ function parsePaths(value: unknown, path: string): string[] {
 
 export function parseAgentInstallStatus(value: unknown): AgentInstallStatus {
   const root = objectAt(value, "$");
-  exactKeys(
-    root,
-    ["canonical_skill", "mcp_binary", "mcp_command", "tools", "shared_paths"],
-    "$",
-  );
+  exactKeys(root, ["cli_binary", "tools", "shared_paths"], "$");
   if (!Array.isArray(root.tools)) invalid("$.tools", "expected an array");
   return {
-    canonical_skill: booleanAt(root.canonical_skill, "$.canonical_skill"),
-    mcp_binary: booleanAt(root.mcp_binary, "$.mcp_binary"),
-    mcp_command: nullableString(root.mcp_command, "$.mcp_command"),
+    cli_binary: booleanAt(root.cli_binary, "$.cli_binary"),
     tools: root.tools.map((tool, index) =>
       parseTool(tool, `$.tools[${index}]`),
     ),
@@ -118,16 +204,10 @@ export function parseAgentInstallReceipt(value: unknown): AgentInstallReceipt {
   const root = objectAt(value, "$");
   exactKeys(
     root,
-    [
-      "version",
-      "bundle",
-      "bundle_version",
-      "installed_at_unix",
-      "mcp_binary",
-      "files",
-    ],
+    ["version", "skills", "installed_at_unix", "cli_binary", "files"],
     "$",
   );
+  if (!Array.isArray(root.skills)) invalid("$.skills", "expected an array");
   if (!Array.isArray(root.files)) invalid("$.files", "expected an array");
   if (typeof root.version !== "number" || !Number.isInteger(root.version)) {
     invalid("$.version", "expected an integer");
@@ -140,10 +220,20 @@ export function parseAgentInstallReceipt(value: unknown): AgentInstallReceipt {
   }
   return {
     version: root.version,
-    bundle: boundedString(root.bundle, "$.bundle"),
-    bundle_version: boundedString(root.bundle_version, "$.bundle_version"),
+    skills: root.skills.map((value, index) => {
+      const path = `$.skills[${index}]`;
+      const skill = objectAt(value, path);
+      exactKeys(skill, ["id", "version"], path);
+      return {
+        id: skillIdAt(skill.id, `${path}.id`),
+        version: boundedString(skill.version, `${path}.version`),
+      };
+    }),
     installed_at_unix: root.installed_at_unix,
-    mcp_binary: boundedString(root.mcp_binary, "$.mcp_binary", 8192),
+    cli_binary:
+      root.cli_binary === null
+        ? null
+        : boundedString(root.cli_binary, "$.cli_binary", 8192),
     files: root.files.map((path, index) =>
       boundedString(path, `$.files[${index}]`, 8192),
     ),
@@ -152,6 +242,6 @@ export function parseAgentInstallReceipt(value: unknown): AgentInstallReceipt {
 
 export function toolLabelKey(
   id: AgentToolId,
-): "cursor" | "claude" | "codex" | "grok" {
+): "cursor" | "claude" | "codex" | "grok" | "pi" {
   return id;
 }

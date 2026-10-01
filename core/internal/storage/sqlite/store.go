@@ -13,15 +13,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
+	"github.com/QuantumNous/astrlink/core/internal/localkey"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	storagecontract "github.com/QuantumNous/astrlink/core/internal/storage"
 	"github.com/QuantumNous/astrlink/core/internal/storage/migrate"
@@ -42,13 +46,79 @@ const (
 type Store struct {
 	channelBindingsMu chan struct{}
 	db                *sql.DB
-	now               func() time.Time
+	keys              *keyRing
+	rawKey            rawSealingKey
+	// resealDeferred hears of settled raw parts left under the audit key.
+	resealDeferred atomic.Pointer[func()]
+	// settleDeferred holds the in-flight requests whose part a failed settle
+	// left pending; their end asks for another reseal pass.
+	settleDeferred sync.Map
+	now            func() time.Time
+}
+
+// Option configures Open.
+type Option func(*openOptions)
+
+type openOptions struct {
+	localKey []byte
+	logf     func(format string, args ...any)
+	existing bool
+	readOnly bool
+}
+
+// ErrLocalKeyMismatch reports that WithExistingDatabase found data keys the
+// given local key cannot open.
+var ErrLocalKeyMismatch = errors.New("the local key does not open this database's data keys")
+
+// ErrNeedsCoreStart reports that WithReadOnly found a database a Core start
+// still has to upgrade or finish setting up.
+var ErrNeedsCoreStart = errors.New("the database needs a Core start before it can be read")
+
+// WithLocalKey gives Open the local key that wraps the data keys. Without it
+// Open uses local.key next to the database, creating it on first use. The key
+// is copied; the caller may clear its slice once Open returns.
+func WithLocalKey(key []byte) Option {
+	return func(options *openOptions) {
+		clear(options.localKey)
+		options.localKey = append([]byte(nil), key...)
+	}
+}
+
+// WithExistingDatabase is for offline commands. Open fails instead of
+// creating a missing database or local key, and returns ErrLocalKeyMismatch
+// instead of setting aside data keys the local key cannot open, so a wrong
+// key file never costs the user their saved secrets.
+func WithExistingDatabase() Option {
+	return func(options *openOptions) { options.existing = true }
+}
+
+// WithReadOnly is for offline readers such as `audit show`, which may run
+// beside a serving Core. It implies WithExistingDatabase, and Open changes
+// nothing: no migration, credential sealing, key or token bootstrap, or
+// permission change. A database that needs any of them fails with
+// ErrNeedsCoreStart. Writes through the store fail.
+func WithReadOnly() Option {
+	return func(options *openOptions) {
+		options.existing = true
+		options.readOnly = true
+	}
+}
+
+// WithLogger receives warnings that do not stop Open, such as a key file
+// readable by other users.
+func WithLogger(logf func(format string, args ...any)) Option {
+	return func(options *openOptions) { options.logf = logf }
 }
 
 // Open creates or opens a file-backed database, applies restrictive defaults,
-// enables SQLite integrity pragmas, and runs all forward migrations before it
-// returns.
-func Open(ctx context.Context, path string) (*Store, error) {
+// enables SQLite integrity pragmas, runs all forward migrations, and unwraps
+// the data keys before it returns.
+func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
+	settings := openOptions{logf: log.Printf}
+	for _, option := range options {
+		option(&settings)
+	}
+	defer clear(settings.localKey)
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("database path is required")
 	}
@@ -56,6 +126,42 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve database path: %w", err)
 	}
+	if settings.existing {
+		if settings.localKey == nil {
+			return nil, fmt.Errorf("%w: an existing database needs its local key", storagecontract.ErrInvalidArgument)
+		}
+		if _, err := os.Stat(absolutePath); err != nil {
+			return nil, fmt.Errorf("open existing database: %w", err)
+		}
+	}
+	if settings.localKey == nil {
+		key, _, err := localkey.Resolve(localkey.Options{DataDir: filepath.Dir(absolutePath), Logf: settings.logf})
+		if err != nil {
+			return nil, err
+		}
+		settings.localKey = key
+	}
+	if settings.readOnly {
+		return openReadOnly(ctx, absolutePath, settings)
+	}
+	database, err := openDatabase(ctx, absolutePath)
+	if err != nil {
+		return nil, err
+	}
+	store, err := initialize(ctx, database, settings)
+	if err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	if err := restrictDatabaseFiles(absolutePath); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// openDatabase prepares the files and opens a WAL connection pool.
+func openDatabase(ctx context.Context, absolutePath string) (*sql.DB, error) {
 	if err := prepareDatabaseFiles(absolutePath); err != nil {
 		return nil, err
 	}
@@ -63,29 +169,66 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
-	store, err := initialize(ctx, database)
-	if err != nil {
-		_ = database.Close()
-		return nil, err
-	}
-	if err := restrictDatabaseFiles(absolutePath); err != nil {
-		_ = database.Close()
-		return nil, err
-	}
-	return store, nil
-}
-
-func initialize(ctx context.Context, database *sql.DB) (*Store, error) {
-	if database == nil {
-		return nil, fmt.Errorf("database is required")
-	}
 	// WAL in the DSN applies to every pooled connection. A small pool lets
 	// request-record lists share the file with ingress upserts; SQLite still
 	// serializes writers and busy_timeout covers the wait.
 	database.SetMaxOpenConns(maxOpenConns)
 	database.SetMaxIdleConns(maxIdleConns)
 	if err := requireWALMode(ctx, database); err != nil {
+		_ = database.Close()
 		return nil, err
+	}
+	return database, nil
+}
+
+// openReadOnly opens an existing database for reading only; see WithReadOnly.
+func openReadOnly(ctx context.Context, absolutePath string, settings openOptions) (*Store, error) {
+	database, err := sql.Open(driverName, fmt.Sprintf(
+		"file:%s?mode=ro&_pragma=busy_timeout(%d)&_pragma=query_only(1)",
+		filepath.ToSlash(absolutePath), busyTimeoutMS,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite database: %w", err)
+	}
+	database.SetMaxOpenConns(maxOpenConns)
+	database.SetMaxIdleConns(maxIdleConns)
+	store, err := func() (*Store, error) {
+		runner, err := migrate.New(migrate.SQLDatabase{DB: database}, migrate.DefaultMigrations())
+		if err != nil {
+			return nil, fmt.Errorf("create migration runner: %w", err)
+		}
+		if err := runner.RequireCurrent(ctx); errors.Is(err, migrate.ErrDatabaseOlder) {
+			return nil, fmt.Errorf("%w: %v", ErrNeedsCoreStart, err)
+		} else if err != nil {
+			return nil, fmt.Errorf("check sqlite schema: %w", err)
+		}
+		store := &Store{db: database, now: time.Now, channelBindingsMu: make(chan struct{}, 1)}
+		if pending, err := store.hasPlaintextSecrets(ctx); err != nil {
+			return nil, err
+		} else if pending {
+			return nil, fmt.Errorf("%w: stored credentials are waiting to be sealed", ErrNeedsCoreStart)
+		}
+		keys, _, err := ensureKeyRing(ctx, database, settings.localKey, store.now(), keyRingReadOnly)
+		if err != nil {
+			return nil, fmt.Errorf("open data keys: %w", err)
+		}
+		store.keys = keys
+		if err := store.loadRawPublicKey(ctx, settings.logf); err != nil {
+			keys.clear()
+			return nil, fmt.Errorf("open raw sealing key: %w", err)
+		}
+		return store, nil
+	}()
+	if err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func initialize(ctx context.Context, database *sql.DB, settings openOptions) (*Store, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database is required")
 	}
 	runner, err := migrate.New(migrate.SQLDatabase{DB: database}, migrate.DefaultMigrations())
 	if err != nil {
@@ -95,11 +238,44 @@ func initialize(ctx context.Context, database *sql.DB) (*Store, error) {
 		return nil, fmt.Errorf("migrate sqlite database: %w", err)
 	}
 	store := &Store{db: database, now: time.Now, channelBindingsMu: make(chan struct{}, 1)}
+	mode := keyRingRepair
+	if settings.existing {
+		mode = keyRingStrict
+	}
+	keys, result, err := ensureKeyRing(ctx, database, settings.localKey, store.now(), mode)
+	if err != nil {
+		return nil, fmt.Errorf("open data keys: %w", err)
+	}
+	store.keys = keys
+	if len(result.orphaned) > 0 {
+		settings.logf("astrlink storage: saved %s data could not be decrypted on this device and was set aside; stored credentials and captured bodies from before need to be re-entered or restored", strings.Join(result.orphaned, ", "))
+	}
+	sealed, err := store.SealPlaintextSecrets(ctx)
+	if err != nil {
+		keys.clear()
+		return nil, fmt.Errorf("seal stored credentials: %w", err)
+	}
+	if sealed > 0 {
+		settings.logf("astrlink storage: sealed %d stored credential(s) under the local key", sealed)
+	}
+	if result.legacyAuditTable || sealed > 0 {
+		// The data is already protected; only its old copies in free pages
+		// and the WAL remain, so a failed scrub does not stop the start.
+		if err := store.scrubLegacyFile(ctx); err != nil {
+			settings.logf("astrlink storage: file scrub deferred to the next start: %v", err)
+		}
+	}
+	if err := store.loadRawPublicKey(ctx, settings.logf); err != nil {
+		keys.clear()
+		return nil, fmt.Errorf("open raw sealing key: %w", err)
+	}
 	manager, err := accesstoken.NewManager(store)
 	if err != nil {
+		keys.clear()
 		return nil, fmt.Errorf("create access token manager: %w", err)
 	}
 	if _, _, err := manager.EnsureDefault(ctx); err != nil {
+		keys.clear()
 		return nil, fmt.Errorf("bootstrap default access token: %w", err)
 	}
 	return store, nil
@@ -125,7 +301,11 @@ func requireWALMode(ctx context.Context, database *sql.DB) error {
 }
 
 func (store *Store) Close() error {
-	if store == nil || store.db == nil {
+	if store == nil {
+		return nil
+	}
+	store.keys.clear()
+	if store.db == nil {
 		return nil
 	}
 	return store.db.Close()
@@ -156,7 +336,7 @@ func (store *Store) EnsureDefaultAccessToken(ctx context.Context, candidate stor
 	}
 
 	now := store.now().UTC()
-	if record, err = insertAccessTokenTx(ctx, transaction, candidate, now); err != nil {
+	if record, err = store.insertAccessTokenTx(ctx, transaction, candidate, now); err != nil {
 		return storagecontract.AccessTokenMetadata{}, false, err
 	}
 	if _, err = transaction.ExecContext(
@@ -181,7 +361,7 @@ func (store *Store) CreateAccessToken(ctx context.Context, candidate storagecont
 		return record, fmt.Errorf("begin access token create: %w", err)
 	}
 	defer rollbackOnError(transaction, &err)
-	record, err = insertAccessTokenTx(ctx, transaction, candidate, store.now().UTC())
+	record, err = store.insertAccessTokenTx(ctx, transaction, candidate, store.now().UTC())
 	if err != nil {
 		return storagecontract.AccessTokenMetadata{}, err
 	}
@@ -220,8 +400,8 @@ func (store *Store) RevealAccessToken(ctx context.Context, id contract.AccessTok
 	if err := id.Validate(); err != nil {
 		return "", fmt.Errorf("%w: %v", storagecontract.ErrInvalidArgument, err)
 	}
-	row, err := readAccessTokenMaterial(store.db.QueryRowContext(ctx, `SELECT
-    t.id, t.name, t.name_key, t.token_hash, t.token_hint, t.source, t.created_at, s.token_value
+	row, err := store.readAccessTokenMaterial(store.db.QueryRowContext(ctx, `SELECT
+    t.id, t.name, t.name_key, t.token_hash, t.token_hint, t.source, t.created_at, s.token_value, s.sealed
 FROM local_access_tokens AS t
 LEFT JOIN local_access_token_secrets AS s ON s.token_id = t.id
 WHERE t.id = ?`, id))
@@ -252,22 +432,36 @@ func (store *Store) DeleteAccessToken(ctx context.Context, id contract.AccessTok
 	return nil
 }
 
+// FindAccessTokenByHash authenticates by token_hash alone. It never opens
+// the sealed token value, so the hot path needs no decryption and tokens keep
+// working when the stored values no longer decrypt (plan §5.7).
 func (store *Store) FindAccessTokenByHash(ctx context.Context, hash storagecontract.AccessTokenHash) (storagecontract.AccessTokenMetadata, error) {
-	row, err := readAccessTokenMaterial(store.db.QueryRowContext(ctx, `SELECT
-    t.id, t.name, t.name_key, t.token_hash, t.token_hint, t.source, t.created_at, s.token_value
+	var id, name, nameKey, hint, source, createdAt string
+	var hashBytes []byte
+	var hasSecret bool
+	err := store.db.QueryRowContext(ctx, `SELECT
+    t.id, t.name, t.name_key, t.token_hash, t.token_hint, t.source, t.created_at,
+    EXISTS(SELECT 1 FROM local_access_token_secrets AS s WHERE s.token_id = t.id)
 FROM local_access_tokens AS t
-LEFT JOIN local_access_token_secrets AS s ON s.token_id = t.id
-WHERE t.token_hash = ?`, hash[:]))
+WHERE t.token_hash = ?`, hash[:]).Scan(&id, &name, &nameKey, &hashBytes, &hint, &source, &createdAt, &hasSecret)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return storagecontract.AccessTokenMetadata{}, fmt.Errorf("%w: access token hash", storagecontract.ErrNotFound)
 		}
 		return storagecontract.AccessTokenMetadata{}, err
 	}
-	if subtle.ConstantTimeCompare(row.hash[:], hash[:]) != 1 {
+	defer clear(hashBytes)
+	metadata, err := decodeAccessTokenMetadata(id, name, nameKey, hint, source, createdAt)
+	if err != nil {
+		return storagecontract.AccessTokenMetadata{}, err
+	}
+	if len(hashBytes) != sha256.Size || subtle.ConstantTimeCompare(hashBytes, hash[:]) != 1 {
 		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("%w: access token hash lookup mismatch", storagecontract.ErrInvalidRecord)
 	}
-	return row.metadata, nil
+	if !hasSecret {
+		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("%w: access token secret is missing", storagecontract.ErrInvalidRecord)
+	}
+	return metadata, nil
 }
 
 func prepareDatabaseFiles(path string) error {
@@ -384,29 +578,23 @@ func (store *Store) Get(ctx context.Context, ref secretstore.Ref) ([]byte, error
 	if strings.HasPrefix(string(ref), "local://service-proxy/") {
 		return store.getProxyCredential(ctx, ref)
 	}
+	if strings.HasPrefix(string(ref), subscriptionRefPrefix) {
+		return store.subscriptionCredential(ctx, ref, "get", nil)
+	}
 	id, err := localServiceID(ref)
 	if err != nil {
 		return nil, err
 	}
-	var secret []byte
-	if err := store.db.QueryRowContext(ctx, `SELECT credential_value FROM service_credentials WHERE service_id = ?`, id).Scan(&secret); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("%w: %s", secretstore.ErrNotFound, ref)
-		}
-		return nil, fmt.Errorf("read endpoint credential: %w", err)
-	}
-	if err := validateCredential(secret); err != nil {
-		clear(secret)
-		return nil, fmt.Errorf("%w: %v", storagecontract.ErrInvalidRecord, err)
-	}
-	result := append([]byte(nil), secret...)
-	clear(secret)
-	return result, nil
+	return store.getServiceCredential(ctx, ref, id)
 }
 
 func (store *Store) Put(ctx context.Context, ref secretstore.Ref, secret []byte) (err error) {
 	if strings.HasPrefix(string(ref), "local://builtin-tool/") {
 		_, err := store.builtinCredential(ctx, ref, "put", secret)
+		return err
+	}
+	if strings.HasPrefix(string(ref), subscriptionRefPrefix) {
+		_, err := store.subscriptionCredential(ctx, ref, "put", secret)
 		return err
 	}
 	id, err := localServiceID(ref)
@@ -422,7 +610,7 @@ func (store *Store) Put(ctx context.Context, ref secretstore.Ref, secret []byte)
 	}
 	defer rollbackOnError(transaction, &err)
 	now := store.now().UTC().Format(time.RFC3339Nano)
-	if err = putServiceCredentialTx(ctx, transaction, id, secret, now); err != nil {
+	if err = store.putServiceCredentialTx(ctx, transaction, id, secret, now); err != nil {
 		return err
 	}
 	if err = transaction.Commit(); err != nil {
@@ -434,6 +622,10 @@ func (store *Store) Put(ctx context.Context, ref secretstore.Ref, secret []byte)
 func (store *Store) Delete(ctx context.Context, ref secretstore.Ref) error {
 	if strings.HasPrefix(string(ref), "local://builtin-tool/") {
 		_, err := store.builtinCredential(ctx, ref, "delete", nil)
+		return err
+	}
+	if strings.HasPrefix(string(ref), subscriptionRefPrefix) {
+		_, err := store.subscriptionCredential(ctx, ref, "delete", nil)
 		return err
 	}
 	id, err := localServiceID(ref)
@@ -516,11 +708,7 @@ func localServiceID(ref secretstore.Ref) (contract.ServiceID, error) {
 	return id, nil
 }
 
-func putCredentialTx(ctx context.Context, transaction *sql.Tx, id contract.ServiceID, secret []byte, now string) error {
-	return putServiceCredentialTx(ctx, transaction, id, secret, now)
-}
-
-func insertAccessTokenTx(ctx context.Context, transaction *sql.Tx, candidate storagecontract.NewAccessToken, now time.Time) (storagecontract.AccessTokenMetadata, error) {
+func (store *Store) insertAccessTokenTx(ctx context.Context, transaction *sql.Tx, candidate storagecontract.NewAccessToken, now time.Time) (storagecontract.AccessTokenMetadata, error) {
 	var count int
 	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_access_tokens`).Scan(&count); err != nil {
 		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("count access tokens: %w", err)
@@ -551,8 +739,14 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		}
 		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("insert access token metadata: %w", err)
 	}
-	if _, err := transaction.ExecContext(ctx, `INSERT INTO local_access_token_secrets (token_id, token_value)
-VALUES (?, ?)`, candidate.ID, candidate.Value); err != nil {
+	value := []byte(candidate.Value)
+	sealed, err := store.keys.sealColumn(accessTokenSecretsTable, string(candidate.ID), value)
+	clear(value)
+	if err != nil {
+		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("seal access token secret: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO local_access_token_secrets (token_id, token_value, sealed)
+VALUES (?, ?, 1)`, candidate.ID, sealed); err != nil {
 		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("insert access token secret: %w", err)
 	}
 	return storagecontract.AccessTokenMetadata{
@@ -581,37 +775,45 @@ func scanAccessTokenMetadata(scanner accessTokenScanner) (storagecontract.Access
 	return decodeAccessTokenMetadata(id, name, nameKey, hint, source, createdAt)
 }
 
-func readAccessTokenMaterial(scanner accessTokenScanner) (storedAccessTokenMaterial, error) {
+func (store *Store) readAccessTokenMaterial(scanner accessTokenScanner) (storedAccessTokenMaterial, error) {
 	var id, name, nameKey, hint, source, createdAt string
-	var hashBytes []byte
-	var value sql.NullString
-	if err := scanner.Scan(&id, &name, &nameKey, &hashBytes, &hint, &source, &createdAt, &value); err != nil {
+	var hashBytes, stored []byte
+	var sealed sql.NullBool
+	if err := scanner.Scan(&id, &name, &nameKey, &hashBytes, &hint, &source, &createdAt, &stored, &sealed); err != nil {
 		return storedAccessTokenMaterial{}, err
 	}
 	metadata, err := decodeAccessTokenMetadata(id, name, nameKey, hint, source, createdAt)
 	if err != nil {
+		clear(stored)
 		return storedAccessTokenMaterial{}, err
 	}
 	if len(hashBytes) != sha256.Size {
+		clear(stored)
 		return storedAccessTokenMaterial{}, fmt.Errorf("%w: access token hash length", storagecontract.ErrInvalidRecord)
 	}
 	var hash storagecontract.AccessTokenHash
 	copy(hash[:], hashBytes)
 	clear(hashBytes)
-	if !value.Valid {
+	if !sealed.Valid {
 		return storedAccessTokenMaterial{}, fmt.Errorf("%w: access token secret is missing", storagecontract.ErrInvalidRecord)
 	}
-	if !validAccessTokenValue(value.String) {
+	plaintext, err := store.openSecret(accessTokenSecretsTable, id, stored, sealed.Bool)
+	if err != nil {
+		return storedAccessTokenMaterial{}, err
+	}
+	value := string(plaintext)
+	clear(plaintext)
+	if !validAccessTokenValue(value) {
 		return storedAccessTokenMaterial{}, fmt.Errorf("%w: access token secret format", storagecontract.ErrInvalidRecord)
 	}
-	actualHash := sha256.Sum256([]byte(value.String))
+	actualHash := sha256.Sum256([]byte(value))
 	if subtle.ConstantTimeCompare(hash[:], actualHash[:]) != 1 {
 		return storedAccessTokenMaterial{}, fmt.Errorf("%w: access token secret does not match hash", storagecontract.ErrInvalidRecord)
 	}
-	if metadata.Hint != accessTokenHint(value.String) {
+	if metadata.Hint != accessTokenHint(value) {
 		return storedAccessTokenMaterial{}, fmt.Errorf("%w: access token hint does not match secret", storagecontract.ErrInvalidRecord)
 	}
-	return storedAccessTokenMaterial{metadata: metadata, hash: hash, value: value.String}, nil
+	return storedAccessTokenMaterial{metadata: metadata, hash: hash, value: value}, nil
 }
 
 func decodeAccessTokenMetadata(id, name, nameKey, hint, source, createdAt string) (storagecontract.AccessTokenMetadata, error) {

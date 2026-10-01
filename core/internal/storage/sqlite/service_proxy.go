@@ -34,7 +34,7 @@ func applyProxyCredentialMutation(service contract.Service, mutation storage.Cre
 	return service, nil
 }
 
-func putProxyCredentialTx(ctx context.Context, tx *sql.Tx, service contract.Service, mutation storage.CredentialMutation) error {
+func (store *Store) putProxyCredentialTx(ctx context.Context, tx *sql.Tx, service contract.Service, mutation storage.CredentialMutation) error {
 	if service.Proxy == nil || service.Proxy.Mode != "custom" || (mutation.ProxyPresent && mutation.Proxy == nil) {
 		_, err := tx.ExecContext(ctx, `DELETE FROM service_proxy_credentials WHERE service_id = ?`, service.ID)
 		return err
@@ -47,7 +47,11 @@ func putProxyCredentialTx(ctx context.Context, tx *sql.Tx, service contract.Serv
 		return err
 	}
 	defer clear(value)
-	_, err = tx.ExecContext(ctx, `INSERT INTO service_proxy_credentials (service_id, credential_value) VALUES (?, ?) ON CONFLICT(service_id) DO UPDATE SET credential_value=excluded.credential_value`, service.ID, value)
+	sealed, err := store.keys.sealColumn(serviceProxyCredentialsTable, string(service.ID), value)
+	if err != nil {
+		return fmt.Errorf("seal proxy credential: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO service_proxy_credentials (service_id, credential_value, sealed) VALUES (?, ?, 1) ON CONFLICT(service_id) DO UPDATE SET credential_value=excluded.credential_value, sealed=1`, service.ID, sealed)
 	return err
 }
 
@@ -57,11 +61,12 @@ func (store *Store) getProxyCredential(ctx context.Context, ref secretstore.Ref)
 		return nil, secretstore.ErrNotFound
 	}
 	var value []byte
-	if err := store.db.QueryRowContext(ctx, `SELECT credential_value FROM service_proxy_credentials WHERE service_id = ?`, id).Scan(&value); err != nil {
+	var sealed bool
+	if err := store.db.QueryRowContext(ctx, `SELECT credential_value, sealed FROM service_proxy_credentials WHERE service_id = ?`, id).Scan(&value, &sealed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, secretstore.ErrNotFound
 		}
 		return nil, secretstore.ErrUnavailable
 	}
-	return value, nil
+	return store.openSecret(serviceProxyCredentialsTable, string(id), value, sealed)
 }

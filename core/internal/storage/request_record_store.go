@@ -16,6 +16,9 @@ type RequestRecordListOptions struct {
 	ServiceID           *contract.ServiceID
 	LocalAccessTokenIDs []contract.AccessTokenID
 	Status              *contract.RequestStatus
+	// Query matches root records whose input preview contains it as a
+	// literal, ASCII case-insensitive substring. Empty means no text filter.
+	Query string
 }
 
 type RequestRecordPage struct {

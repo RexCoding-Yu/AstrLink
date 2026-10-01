@@ -16,7 +16,7 @@ func BaseURL(kind contract.ServiceKind, protocol contract.ProtocolID, base *url.
 	var roots []string
 	var target string
 	switch kind {
-	case contract.ServiceKindDeepSeek, contract.ServiceKindMoonshot, contract.ServiceKindMiniMax:
+	case contract.ServiceKindDeepSeek, contract.ServiceKindMoonshot, contract.ServiceKindMiniMax, contract.ServiceKindMiniMaxCoding:
 		roots = []string{"/anthropic/v1", "/anthropic", "/v1"}
 		switch protocol {
 		case contract.ProtocolAnthropicMessages:
@@ -41,12 +41,38 @@ func BaseURL(kind contract.ServiceKind, protocol contract.ProtocolID, base *url.
 			return base
 		}
 	case contract.ServiceKindGLM:
-		roots = []string{"/api/paas/v4", "/api/anthropic/v1", "/api/anthropic"}
+		roots = []string{"/api/paas/v4", "/api/anthropic/v1", "/api/anthropic", "/api/v1"}
 		switch protocol {
 		case contract.ProtocolAnthropicMessages:
 			target = "/api/anthropic"
 		case contract.ProtocolOpenAIChat:
 			target = "/api/paas/v4"
+		case contract.ProtocolOpenAIResponses:
+			target = "/api/v1"
+		default:
+			return base
+		}
+	case contract.ServiceKindGLMCoding:
+		// Plan quota applies only to the coding Chat root; /api/paas/v4 bills
+		// the pay-as-you-go balance, so it is replaced rather than kept.
+		// Responses has one /api/v1 root that the plan documents for Codex.
+		roots = []string{"/api/coding/paas/v4", "/api/paas/v4", "/api/anthropic/v1", "/api/anthropic", "/api/v1"}
+		switch protocol {
+		case contract.ProtocolAnthropicMessages:
+			target = "/api/anthropic"
+		case contract.ProtocolOpenAIChat:
+			target = "/api/coding/paas/v4"
+		case contract.ProtocolOpenAIResponses:
+			target = "/api/v1"
+		default:
+			return base
+		}
+	case contract.ServiceKindKimiCoding:
+		// Messages and the OpenAI surface share /coding; accept either documented base.
+		roots = []string{"/coding/v1", "/coding"}
+		switch protocol {
+		case contract.ProtocolAnthropicMessages, contract.ProtocolOpenAIChat, contract.ProtocolOpenAIResponses, contract.ProtocolOpenAIModels:
+			target = "/coding"
 		default:
 			return base
 		}
@@ -84,7 +110,8 @@ func BaseURL(kind contract.ServiceKind, protocol contract.ProtocolID, base *url.
 // different version/root. Anthropic's /v1/messages must retain its version.
 func RequestURL(kind contract.ServiceKind, protocol contract.ProtocolID, incoming *url.URL) *url.URL {
 	stripVersion := (kind == contract.ServiceKindDeepSeek && protocol == contract.ProtocolOpenAIResponses) ||
-		((kind == contract.ServiceKindGLM || kind == contract.ServiceKindDoubao) && protocol != contract.ProtocolAnthropicMessages)
+		((kind == contract.ServiceKindGLM || kind == contract.ServiceKindGLMCoding || kind == contract.ServiceKindDoubao) &&
+			protocol != contract.ProtocolAnthropicMessages)
 	if !stripVersion || !strings.HasPrefix(incoming.Path, "/v1/") {
 		return incoming
 	}
@@ -99,6 +126,15 @@ func RequestURL(kind contract.ServiceKind, protocol contract.ProtocolID, incomin
 // Auth selects the documented Messages authentication for API presets whose
 // default Chat authentication is Bearer. Explicit custom auth is preserved.
 func Auth(kind contract.ServiceKind, protocol contract.ProtocolID, configured contract.ServiceAuth) contract.ServiceAuth {
+	if kind == contract.ServiceKindKimiCoding &&
+		(configured.Scheme == contract.AuthSchemeBearer || configured.Scheme == contract.AuthSchemeAnthropicAPIKey) {
+		// One Kimi Coding key is sent as x-api-key to Messages and as Bearer to
+		// the OpenAI surface, whichever of the two schemes was saved.
+		if protocol == contract.ProtocolAnthropicMessages {
+			return contract.ServiceAuth{Scheme: contract.AuthSchemeAnthropicAPIKey}
+		}
+		return contract.ServiceAuth{Scheme: contract.AuthSchemeBearer}
+	}
 	if protocol == contract.ProtocolAnthropicMessages && configured.Scheme == contract.AuthSchemeBearer {
 		switch kind {
 		case contract.ServiceKindDeepSeek, contract.ServiceKindGLM, contract.ServiceKindDoubao:

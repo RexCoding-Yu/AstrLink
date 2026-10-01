@@ -78,11 +78,7 @@ func TestRegistryPauseAndResumeAcrossRestart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			select {
-			case <-blocked:
-			case <-time.After(3 * time.Second):
-				t.Fatal("download never blocked")
-			}
+			<-blocked
 			if shutdown {
 				cancel()
 			}
@@ -229,11 +225,7 @@ func TestDeletePausedInstallationRemovesCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-repository.blockStarted:
-	case <-time.After(3 * time.Second):
-		t.Fatal("not started")
-	}
+	<-repository.blockStarted
 	if _, err := registry.PauseInstallation(context.Background(), started.ID); err != nil {
 		t.Fatal(err)
 	}

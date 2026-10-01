@@ -19,26 +19,30 @@ type relayKitResponseWriter struct {
 	engine                     relaykitbridge.ConversionEngine
 	plan                       contract.ExecutionPlan
 	publicModel, upstreamModel string
-	streaming                  bool
-	status                     int
-	body                       bytes.Buffer
-	stream                     relaykitbridge.ResponseStream
-	carry                      []byte
-	passthrough                bool
+	// state is what this attempt's request conversion recorded; the response
+	// conversion needs it to restore client-only tool call shapes.
+	state       relaykitbridge.ConversionState
+	diagnostics []relaykitbridge.ConversionDiagnostic
+	streaming   bool
+	status      int
+	body        bytes.Buffer
+	stream      relaykitbridge.ResponseStream
+	carry       []byte
+	passthrough bool
 }
 
 func newRelayKitResponseWriter(
 	writer http.ResponseWriter, engine relaykitbridge.ConversionEngine, plan contract.ExecutionPlan,
-	publicModel, upstreamModel string,
+	publicModel, upstreamModel string, state relaykitbridge.ConversionState,
 ) (*relayKitResponseWriter, error) {
 	result := &relayKitResponseWriter{
 		ResponseWriter: writer, engine: engine, plan: plan, publicModel: publicModel,
-		upstreamModel: upstreamModel, streaming: plan.Streaming,
+		upstreamModel: upstreamModel, state: state, streaming: plan.Streaming,
 	}
 	if plan.Streaming {
 		stream, err := engine.NewResponseStream(context.Background(), relaykitbridge.StreamOptions{
 			From: plan.UpstreamProtocol, To: plan.InputProtocol, PublicModel: publicModel,
-			UpstreamModel: upstreamModel,
+			UpstreamModel: upstreamModel, State: state,
 		})
 		if err != nil {
 			return nil, err
@@ -89,11 +93,12 @@ func (writer *relayKitResponseWriter) Finish() error {
 		output, err := writer.engine.ConvertResponse(context.Background(), relaykitbridge.ConvertResponseInput{
 			From: writer.plan.UpstreamProtocol, To: writer.plan.InputProtocol, StatusCode: writer.status,
 			ContentType: writer.Header().Get("Content-Type"), Body: writer.body.Bytes(), PublicModel: writer.publicModel,
-			UpstreamModel: writer.upstreamModel,
+			UpstreamModel: writer.upstreamModel, State: writer.state,
 		})
 		if err != nil {
 			return err
 		}
+		writer.diagnostics = output.Diagnostics
 		writer.Header().Set("Content-Type", output.ContentType)
 		writer.ResponseWriter.WriteHeader(output.StatusCode)
 		_, err = writer.ResponseWriter.Write(output.Body)
@@ -107,6 +112,18 @@ func (writer *relayKitResponseWriter) Finish() error {
 		return err
 	}
 	return writer.writeEvents(events)
+}
+
+// responseDiagnostics reports what the response conversion dropped or
+// rewrote so far; a passthrough error response is never converted.
+func (writer *relayKitResponseWriter) responseDiagnostics() []relaykitbridge.ConversionDiagnostic {
+	if writer.passthrough {
+		return nil
+	}
+	if writer.stream != nil {
+		return writer.stream.Diagnostics()
+	}
+	return writer.diagnostics
 }
 
 func (writer *relayKitResponseWriter) streamClose() error {

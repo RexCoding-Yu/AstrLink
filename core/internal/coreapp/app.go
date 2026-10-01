@@ -82,27 +82,31 @@ func validateLoopbackAddress(address string) error {
 // Run binds both planes, emits exactly one ready event to readyWriter, and
 // blocks until context cancellation or a server failure.
 func Run(ctx context.Context, config Config, readyWriter io.Writer) error {
-	return run(ctx, config, readyWriter, net.Listen)
+	return runWithDependencies(ctx, config, readyWriter, net.Listen, net.Listen, Dependencies{})
 }
 
 // RunWithDependencies preserves the process/listener contract while allowing
 // later milestones to install a configured inference handler. Run remains the
 // production M1 entry point and fails closed through ingress.New().
 func RunWithDependencies(ctx context.Context, config Config, readyWriter io.Writer, dependencies Dependencies) error {
-	return runWithDependencies(ctx, config, readyWriter, net.Listen, dependencies)
+	return runWithDependencies(ctx, config, readyWriter, net.Listen, net.Listen, dependencies)
 }
 
 type listenFunc func(network, address string) (net.Listener, error)
 
+// run serves IPv4 only; tests that script every bind use it.
 func run(ctx context.Context, config Config, readyWriter io.Writer, listen listenFunc) error {
-	return runWithDependencies(ctx, config, readyWriter, listen, Dependencies{})
+	return runWithDependencies(ctx, config, readyWriter, listen, nil, Dependencies{})
 }
 
+// listenIPv6 binds the inference port on [::1] as well, so clients can use
+// `localhost`, which most resolvers answer with ::1 first. Nil skips it.
 func runWithDependencies(
 	ctx context.Context,
 	config Config,
 	readyWriter io.Writer,
 	listen listenFunc,
+	listenIPv6 listenFunc,
 	dependencies Dependencies,
 ) error {
 	if readyWriter == nil {
@@ -125,6 +129,10 @@ func runWithDependencies(
 		return fmt.Errorf("listen on inference plane: %w", err)
 	}
 	defer inferenceListener.Close()
+	inferenceIPv6, clientInferenceURL := listenIPv6Loopback(listenIPv6, inferenceListener.Addr())
+	if inferenceIPv6 != nil {
+		defer inferenceIPv6.Close()
+	}
 
 	controlListener, err := listen("tcp", config.ControlListen)
 	if err != nil {
@@ -188,7 +196,7 @@ func runWithDependencies(
 		})
 	}
 
-	serverErrors := make(chan error, 3)
+	serverErrors := make(chan error, 4)
 	var serveGroup sync.WaitGroup
 	serve := func(name string, server *http.Server, listener net.Listener) {
 		defer serveGroup.Done()
@@ -203,6 +211,10 @@ func runWithDependencies(
 		serveGroup.Add(1)
 		go serve("control socket", servers[2], controlSocket)
 	}
+	if inferenceIPv6 != nil {
+		serveGroup.Add(1)
+		go serve("inference IPv6", inferenceServer, inferenceIPv6)
+	}
 
 	ready := contract.ReadyEvent{
 		Event:                   "ready",
@@ -210,6 +222,7 @@ func runWithDependencies(
 		ControlAPIVersion:       config.Version.ControlAPIVersion,
 		ProtocolContractVersion: config.Version.ProtocolContractVersion,
 		InferenceURL:            "http://" + inferenceListener.Addr().String(),
+		ClientInferenceURL:      clientInferenceURL,
 		ControlURL:              "http://" + controlListener.Addr().String(),
 	}
 	if err := ready.Validate(); err != nil {
@@ -238,6 +251,23 @@ func runWithDependencies(
 	}
 	cancelRequests()
 	return shutdownAndCollect(servers, &serveGroup, serverErrors, triggerErr)
+}
+
+// listenIPv6Loopback binds the inference port on ::1 and returns the URL
+// clients should use. It is best-effort: when ::1 is unavailable or another
+// process holds the port there, clients keep 127.0.0.1 rather than letting
+// `localhost` reach someone else's listener.
+func listenIPv6Loopback(listen listenFunc, inference net.Addr) (net.Listener, string) {
+	ipv4URL := "http://" + inference.String()
+	_, port, err := net.SplitHostPort(inference.String())
+	if listen == nil || err != nil {
+		return nil, ipv4URL
+	}
+	listener, err := listen("tcp", net.JoinHostPort("::1", port))
+	if err != nil {
+		return nil, ipv4URL
+	}
+	return listener, "http://localhost:" + port
 }
 
 const retentionSweepInterval = time.Hour

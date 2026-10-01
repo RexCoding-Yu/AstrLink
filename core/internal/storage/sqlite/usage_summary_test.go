@@ -317,3 +317,42 @@ func TestUsageSummaryGroupsFailuresAndCurrentAccessTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestUsageSummaryGroupsModelsByUpstreamModel(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "usage-upstream-model.db"))
+	defer store.Close()
+	ctx := t.Context()
+	service := contract.ServiceID("service_usage")
+	start := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	insert := func(id string, requested string, redirect *contract.RequestModelRedirect, recovery *contract.RequestRecovery, tokens int) {
+		t.Helper()
+		if err := store.InsertRequestRecord(ctx, contract.RequestRecord{ID: contract.RequestID(id), StartedAt: start, Status: contract.RequestStatusSucceeded,
+			InputProtocol: contract.ProtocolAnthropicMessages, Audit: contract.NotCapturedAuditSummary(),
+			ServiceID: &service, RequestedModel: &requested, ModelRedirect: redirect, Recovery: recovery,
+			Usage: &contract.Usage{TotalTokens: tokens}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	redirect := &contract.RequestModelRedirect{From: "claude-sonnet-4-5", To: "gpt-6-astra"}
+	insert("usage_served", "claude-sonnet-4-5", redirect, &contract.RequestRecovery{UpstreamModel: "gpt-6-astra"}, 10)
+	// A redirect whose request never reached a provider still reports its target.
+	insert("usage_redirect_only", "claude-sonnet-4-5", redirect, nil, 20)
+	insert("usage_direct", "claude-haiku-4-5", nil, nil, 5)
+
+	summary, err := store.GetUsageSummary(ctx, storage.UsageSummaryOptions{
+		From: start.Add(-time.Second), To: start.Add(time.Hour), TimeZone: "UTC", Bucket: "hour",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	for _, group := range summary.ByModel {
+		if group.ID == nil {
+			t.Fatalf("unexpected unassigned model group=%+v", group)
+		}
+		got[*group.ID] = group.TotalTokens
+	}
+	if want := map[string]int64{"gpt-6-astra": 30, "claude-haiku-4-5": 5}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("by_model=%v want %v", got, want)
+	}
+}

@@ -1,15 +1,13 @@
-import {
-  useLayoutEffect,
-  useRef,
-  useState,
-  type HTMLAttributes,
-  type ReactNode,
-} from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 import { Slot } from "radix-ui";
 
 import { cn } from "@/lib/utils";
 
-/** A fixed header aligned with the content inside a separate native scrollport. */
+/**
+ * A fixed header aligned with the content inside a separate native scrollport.
+ * The scrollport always reserves its gutter, so revealing overflow never
+ * narrows the content, and the header stops where that gutter begins.
+ */
 export function ScrollWorkspace({
   children,
   className,
@@ -26,21 +24,7 @@ export function ScrollWorkspace({
   contentClassName?: string;
   contentSlot?: string;
 }) {
-  const contentRef = useRef<HTMLDivElement>(null);
-  const [gutter, setGutter] = useState(0);
   const Content = contentAsChild ? Slot.Root : "div";
-
-  useLayoutEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    // Measure native/overlay scrollbars instead of assuming a platform width.
-    const syncGutter = () =>
-      setGutter(content.offsetWidth - content.clientWidth);
-    syncGutter();
-    const observer = new ResizeObserver(syncGutter);
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, []);
 
   return (
     <div
@@ -52,9 +36,11 @@ export function ScrollWorkspace({
       {...props}
     >
       <div
-        className={cn("flex shrink-0 flex-col gap-3", headerClassName)}
+        className={cn(
+          "flex shrink-0 flex-col gap-3 pe-(--scrollbar-gutter-width)",
+          headerClassName,
+        )}
         data-slot="scroll-workspace-header"
-        style={{ paddingInlineEnd: gutter }}
       >
         {header}
       </div>
@@ -64,7 +50,6 @@ export function ScrollWorkspace({
           contentClassName,
         )}
         data-slot={contentSlot}
-        ref={contentRef}
       >
         {children}
       </Content>

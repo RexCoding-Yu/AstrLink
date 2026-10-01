@@ -134,8 +134,9 @@ func (capability Capability) Validate() error {
 
 // ValidateCredentialRef applies the same storage-neutral contract used by
 // SecretStore. Local references identify the Service row whose credential is
-// stored in the dedicated local table; keyring references remain available for
-// subscription adapters.
+// stored in a dedicated local table: local://service/<id> for an API key and
+// local://subscription/<id> for an account's OAuth tokens. Keyring references
+// remain readable for subscription accounts not yet moved into the database.
 func ValidateCredentialRef(value string) error {
 	if len(value) > 512 {
 		return fmt.Errorf("credential_ref exceeds 512 characters")
@@ -156,7 +157,7 @@ func ValidateCredentialRef(value string) error {
 			return nil
 		}
 		identifier := strings.TrimPrefix(parsed.Path, "/")
-		if (parsed.Host != "service" && parsed.Host != "endpoint") ||
+		if (parsed.Host != "service" && parsed.Host != "endpoint" && parsed.Host != "subscription") ||
 			strings.Contains(identifier, "/") || ServiceID(identifier).Validate() != nil {
 			return fmt.Errorf("credential_ref must use local://service/<id> or keyring://<namespace>/<id>")
 		}

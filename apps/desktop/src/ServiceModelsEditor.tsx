@@ -5,8 +5,10 @@ import { useT } from "./i18n";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DataRow } from "@/components/DataRow";
+import { FormMessage } from "@/components/FormMessage";
 import { ModelBrandIcon } from "@/components/ModelBrandIcon";
 import { Panel } from "@/components/Panel";
+import { StatusBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,10 +23,18 @@ import {
   type ModelGroup,
 } from "./model-groups";
 
+/** Model IDs returned by the latest successful upstream fetch. */
+export type UpstreamModelSnapshot = {
+  models: ReadonlySet<string>;
+  /** Some discovery protocols failed, so an absent model may still exist. */
+  partial: boolean;
+};
+
 export type ServiceModelsEditorProps = {
   models: string[];
   modelEditor: string;
   probingModels: boolean;
+  upstream?: UpstreamModelSnapshot | null;
   onModelEditorChange: (value: string) => void;
   onAddModels: () => void;
   onDiscoverModels?: () => void;
@@ -35,6 +45,7 @@ export type ServiceModelsEditorProps = {
 type ModelsConfirm =
   | { kind: "clear" }
   | { kind: "remove_filtered"; models: string[] }
+  | { kind: "remove_missing"; models: string[] }
   | { kind: "remove_category"; category: string; models: string[] }
   | { kind: "remove_group"; group: string; models: string[] }
   | null;
@@ -65,6 +76,16 @@ function categoryModels(category: ModelCategory): string[] {
   return category.groups.flatMap((group) => group.models);
 }
 
+function countMissing(
+  models: readonly string[],
+  missing: ReadonlySet<string>,
+): number {
+  return models.reduce(
+    (count, model) => count + (missing.has(model) ? 1 : 0),
+    0,
+  );
+}
+
 const LIST_INSET = "px-3";
 const LIST_GAP = "gap-2";
 
@@ -92,6 +113,7 @@ function ModelListHeader({
   brandModel,
   collapsed,
   countLabel,
+  missingCount,
   onRemove,
   onToggle,
   removeLabel,
@@ -102,6 +124,7 @@ function ModelListHeader({
   brandModel?: string;
   collapsed: boolean;
   countLabel: string;
+  missingCount: number;
   onRemove: () => void;
   onToggle: () => void;
   removeLabel: string;
@@ -109,6 +132,7 @@ function ModelListHeader({
   title: string;
   tone: "card" | "section";
 }) {
+  const t = useT();
   return (
     <div
       className={cn(
@@ -146,6 +170,11 @@ function ModelListHeader({
         >
           {countLabel}
         </Badge>
+        {missingCount > 0 ? (
+          <StatusBadge className="py-0" tone="pending">
+            {t("models.missingCount", { count: missingCount })}
+          </StatusBadge>
+        ) : null}
       </Button>
       <Button
         aria-label={removeLabel}
@@ -162,9 +191,11 @@ function ModelListHeader({
 }
 
 function ModelRow({
+  missing,
   model,
   onRemove,
 }: {
+  missing: boolean;
   model: string;
   onRemove: () => void;
 }) {
@@ -184,6 +215,9 @@ function ModelRow({
       >
         {label}
       </code>
+      {missing ? (
+        <StatusBadge tone="pending">{t("models.missingUpstream")}</StatusBadge>
+      ) : null}
       <Button
         aria-label={t("models.deleteNamed", { label })}
         className="size-6 shrink-0 rounded text-sm text-danger-foreground opacity-0 hover:bg-danger-wash group-hover/row:opacity-100 group-focus-within/row:opacity-100"
@@ -201,6 +235,7 @@ function ModelRow({
 function ModelGroupSection({
   collapsed,
   group,
+  missing,
   nested = false,
   onRemove,
   onRemoveModel,
@@ -208,6 +243,7 @@ function ModelGroupSection({
 }: {
   collapsed: boolean;
   group: ModelGroup;
+  missing: ReadonlySet<string>;
   nested?: boolean;
   onRemove: () => void;
   onRemoveModel: (model: string) => void;
@@ -220,6 +256,7 @@ function ModelGroupSection({
         brandModel={nested ? undefined : group.models[0]}
         collapsed={collapsed}
         countLabel={`${group.models.length}`}
+        missingCount={countMissing(group.models, missing)}
         onRemove={onRemove}
         onToggle={onToggle}
         removeLabel={t("models.deleteGroup", { group: group.key })}
@@ -232,6 +269,7 @@ function ModelGroupSection({
         : group.models.map((model) => (
             <ModelRow
               key={model}
+              missing={missing.has(model)}
               model={model}
               onRemove={() => onRemoveModel(model)}
             />
@@ -254,6 +292,7 @@ export function ServiceModelsEditor({
   models,
   modelEditor,
   probingModels,
+  upstream,
   onModelEditorChange,
   onAddModels,
   onDiscoverModels,
@@ -270,6 +309,12 @@ export function ServiceModelsEditor({
   const seededCollapse = useRef(false);
 
   const catalog = useMemo(() => [...models].sort(), [models]);
+  const missing = useMemo(
+    () =>
+      upstream ? catalog.filter((model) => !upstream.models.has(model)) : [],
+    [catalog, upstream],
+  );
+  const missingSet = useMemo(() => new Set(missing), [missing]);
 
   useEffect(() => {
     if (seededCollapse.current) return;
@@ -462,6 +507,32 @@ export function ServiceModelsEditor({
         </p>
       ) : (
         <>
+          {missing.length > 0 ? (
+            <FormMessage
+              className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1"
+              data-testid="service-models-missing"
+              tone="warning"
+            >
+              <span className="min-w-0 flex-[1_1_240px]">
+                {t(
+                  upstream?.partial
+                    ? "models.missingNoticePartial"
+                    : "models.missingNotice",
+                  { count: missing.length },
+                )}
+              </span>
+              <Button
+                className="h-auto shrink-0 px-0 text-xs text-danger-foreground"
+                onClick={() =>
+                  setConfirm({ kind: "remove_missing", models: missing })
+                }
+                type="button"
+                variant="link"
+              >
+                {t("models.deleteMissing", { count: missing.length })}
+              </Button>
+            </FormMessage>
+          ) : null}
           <div className="my-1.5 mt-2 flex min-h-4 items-center justify-between gap-2.5">
             <span className="text-xs font-semibold text-muted-foreground tabular-nums">
               {hasQuery
@@ -536,6 +607,7 @@ export function ServiceModelsEditor({
                       key={group.key}
                       collapsed={isGroupCollapsed(groupCollapseKey(group.key))}
                       group={group}
+                      missing={missingSet}
                       onRemove={() =>
                         setConfirm({
                           kind: "remove_group",
@@ -560,6 +632,7 @@ export function ServiceModelsEditor({
                         brandModel={models[0]}
                         collapsed={collapsedCategory}
                         countLabel={`${models.length}`}
+                        missingCount={countMissing(models, missingSet)}
                         onRemove={() =>
                           setConfirm({
                             kind: "remove_category",
@@ -586,6 +659,7 @@ export function ServiceModelsEditor({
                                 groupCollapseKey(group.key),
                               )}
                               group={group}
+                              missing={missingSet}
                               nested
                               onRemove={() =>
                                 setConfirm({
@@ -633,7 +707,9 @@ export function ServiceModelsEditor({
               ? t("models.deleteCategoryTitle", { category: confirm.category })
               : confirm?.kind === "remove_group"
                 ? t("models.deleteGroupTitle", { group: confirm.group })
-                : t("models.deleteMatchesTitle")
+                : confirm?.kind === "remove_missing"
+                  ? t("models.deleteMissingTitle")
+                  : t("models.deleteMatchesTitle")
         }
       />
     </fieldset>

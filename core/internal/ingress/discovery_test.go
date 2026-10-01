@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -265,14 +264,14 @@ func (store discoveryStore) ListEndpoints(
 	return storage.EndpointPage{Items: items}, nil
 }
 
-func TestModelDiscoveryServesPartialAggregateAndRecordsCircuitOutcomes(t *testing.T) {
+func TestModelDiscoveryServesPartialAggregate(t *testing.T) {
 	protocol := contract.ProtocolOpenAIModels
-	resolver := &healthTrackingCandidateResolver{candidateResolver: candidateResolver{candidates: []endpoint.Resolved{
+	resolver := candidateResolver{candidates: []endpoint.Resolved{
 		{Endpoint: discoveryEndpoint("endpoint_ok", protocol, contract.CapabilityModeNative)},
 		{Endpoint: discoveryEndpoint("endpoint_dial", protocol, contract.CapabilityModeNative)},
 		{Endpoint: discoveryEndpoint("endpoint_status", protocol, contract.CapabilityModeNative)},
 		{Endpoint: discoveryEndpoint("endpoint_garbled", protocol, contract.CapabilityModeNative)},
-	}}}
+	}}
 	handler := NewWithDependencies(Dependencies{
 		Resolver: resolver,
 		Forwarder: transport.New(roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -306,25 +305,6 @@ func TestModelDiscoveryServesPartialAggregateAndRecordsCircuitOutcomes(t *testin
 	const wantBody = `{"object":"list","data":[{"id":"model-a"}],"first_id":"model-a","has_more":false,"last_id":"model-a"}`
 	if response.Code != http.StatusOK || response.Body.String() != wantBody {
 		t.Fatalf("partial aggregate = %d %q", response.Code, response.Body.String())
-	}
-	resolver.mu.Lock()
-	defer resolver.mu.Unlock()
-	failures := append([]contract.ServiceID(nil), resolver.failures...)
-	sort.Slice(failures, func(left, right int) bool { return failures[left] < failures[right] })
-	wantFailures := []contract.ServiceID{"endpoint_dial", "endpoint_garbled", "endpoint_status"}
-	if len(resolver.successes) != 1 || resolver.successes[0] != "endpoint_ok" {
-		t.Fatalf("successes = %v, want [endpoint_ok]", resolver.successes)
-	}
-	if len(failures) != len(wantFailures) {
-		t.Fatalf("failures = %v, want %v", failures, wantFailures)
-	}
-	for index, want := range wantFailures {
-		if failures[index] != want {
-			t.Fatalf("failures = %v, want %v", failures, wantFailures)
-		}
-	}
-	if len(resolver.abandons) != 0 {
-		t.Fatalf("abandons = %v, want none", resolver.abandons)
 	}
 }
 
@@ -452,10 +432,10 @@ func TestModelDiscoveryKeepsResolveErrorContracts(t *testing.T) {
 			wantCode:   "missing_protocol_capability",
 		},
 		{
-			name:       "every capable endpoint is unhealthy",
+			name:       "every capable endpoint is rate limited",
 			resolver:   candidateResolver{err: endpoint.ErrNoHealthyEndpoint},
-			wantStatus: http.StatusServiceUnavailable,
-			wantCode:   "upstream_unavailable",
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "upstream_rate_limited",
 		},
 	}
 
@@ -515,7 +495,7 @@ func TestModelDiscoveryEnforcesUpstreamResponseByteBound(t *testing.T) {
 					Endpoint: discoveryEndpoint(id, protocol, contract.CapabilityModeNative),
 				})
 			}
-			resolver := &healthTrackingCandidateResolver{candidateResolver: candidateResolver{candidates: candidates}}
+			resolver := candidateResolver{candidates: candidates}
 			handler := NewWithDependencies(Dependencies{
 				Resolver: resolver,
 				Forwarder: transport.New(roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -541,25 +521,25 @@ func TestModelDiscoveryEnforcesUpstreamResponseByteBound(t *testing.T) {
 			} else if response.Code != test.wantStatus || response.Body.String() != test.wantBody {
 				t.Fatalf("response = %d %q", response.Code, response.Body.String())
 			}
-			resolver.mu.Lock()
-			defer resolver.mu.Unlock()
-			if len(resolver.failures) != len(test.wantFailures) || resolver.failures[0] != test.wantFailures[0] {
-				t.Fatalf("failures = %v, want %v", resolver.failures, test.wantFailures)
-			}
 		})
 	}
 }
 
-type admissionRefusingResolver struct {
-	*healthTrackingCandidateResolver
+type rateLimitingResolver struct {
+	candidateResolver
 	refuse map[contract.ServiceID]bool
 }
 
-func (resolver admissionRefusingResolver) BeginAttempt(candidate endpoint.Resolved) bool {
-	return !resolver.refuse[candidate.Endpoint.ID]
+func (resolver rateLimitingResolver) RecordRateLimit(endpoint.Resolved, time.Duration) {}
+
+func (resolver rateLimitingResolver) RateLimitedUntil(candidate endpoint.Resolved) time.Time {
+	if resolver.refuse[candidate.Endpoint.ID] {
+		return time.Now().Add(time.Minute)
+	}
+	return time.Time{}
 }
 
-func TestModelDiscoverySkipsCandidatesRefusedByCircuitAdmission(t *testing.T) {
+func TestModelDiscoverySkipsRateLimitedCandidates(t *testing.T) {
 	protocol := contract.ProtocolOpenAIModels
 	tests := []struct {
 		name       string
@@ -570,28 +550,28 @@ func TestModelDiscoverySkipsCandidatesRefusedByCircuitAdmission(t *testing.T) {
 		wantHosts  []string
 	}{
 		{
-			name:       "refused candidate is skipped without upstream io",
+			name:       "rate-limited candidate is skipped without upstream io",
 			refuse:     map[contract.ServiceID]bool{"endpoint_a": true},
 			wantStatus: http.StatusOK,
 			wantBody:   `{"object":"list","data":[{"id":"endpoint_b-model"}],"first_id":"endpoint_b-model","has_more":false,"last_id":"endpoint_b-model"}`,
 			wantHosts:  []string{"endpoint-b.example"},
 		},
 		{
-			name:       "all candidates refused",
+			name:       "all candidates rate limited",
 			refuse:     map[contract.ServiceID]bool{"endpoint_a": true, "endpoint_b": true},
-			wantStatus: http.StatusServiceUnavailable,
-			wantCode:   "upstream_unavailable",
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "upstream_rate_limited",
 			wantHosts:  nil,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			resolver := admissionRefusingResolver{
-				healthTrackingCandidateResolver: &healthTrackingCandidateResolver{candidateResolver: candidateResolver{candidates: []endpoint.Resolved{
+			resolver := rateLimitingResolver{
+				candidateResolver: candidateResolver{candidates: []endpoint.Resolved{
 					{Endpoint: discoveryEndpoint("endpoint_a", protocol, contract.CapabilityModeNative)},
 					{Endpoint: discoveryEndpoint("endpoint_b", protocol, contract.CapabilityModeNative)},
-				}}},
+				}},
 				refuse: test.refuse,
 			}
 			var mu sync.Mutex
@@ -656,12 +636,8 @@ func TestModelDiscoveryBoundsConcurrentFanOut(t *testing.T) {
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 	}()
 
-	for index := range maxConcurrentDiscoveryFetches {
-		select {
-		case <-entered:
-		case <-time.After(time.Second):
-			t.Fatalf("fetch %d did not start", index+1)
-		}
+	for range maxConcurrentDiscoveryFetches {
+		<-entered
 	}
 	select {
 	case <-entered:
@@ -669,11 +645,7 @@ func TestModelDiscoveryBoundsConcurrentFanOut(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(release)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("aggregation did not finish")
-	}
+	<-done
 	if response.Code != http.StatusOK ||
 		response.Body.String() != `{"object":"list","data":[],"first_id":null,"has_more":false,"last_id":null}` {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
@@ -725,9 +697,9 @@ func TestModelDiscoveryCompressedHTTPResponses(t *testing.T) {
 					CredentialRef: accountauth.CredentialRefFor(service.ID),
 				}
 			}
-			resolver := &healthTrackingCandidateResolver{candidateResolver: candidateResolver{candidates: []endpoint.Resolved{{
+			resolver := candidateResolver{candidates: []endpoint.Resolved{{
 				Service: service, BaseURL: upstream.URL,
-			}}}}
+			}}}
 			handler := NewWithDependencies(Dependencies{
 				Resolver: resolver,
 				Authorizer: authorizerFunc(func(context.Context, contract.Endpoint) (http.Header, error) {
@@ -743,16 +715,16 @@ func TestModelDiscoveryCompressedHTTPResponses(t *testing.T) {
 			}
 			if test.wantError != "" {
 				envelope := assertInferenceError(t, response, http.StatusBadGateway, "upstream_unavailable")
-				if !strings.Contains(envelope.Error.Message, test.wantError) || len(resolver.failures) != 1 {
-					t.Fatalf("failure = %s, health failures = %v", response.Body.String(), resolver.failures)
+				if !strings.Contains(envelope.Error.Message, test.wantError) {
+					t.Fatalf("failure = %s", response.Body.String())
 				}
 				return
 			}
 			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "visible") {
 				t.Fatalf("response = %d %s", response.Code, response.Body.String())
 			}
-			if response.Header().Get("Content-Encoding") != "" || len(resolver.failures) != 0 {
-				t.Fatalf("invalid decoded response headers or health: %#v, %v", response.Header(), resolver.failures)
+			if response.Header().Get("Content-Encoding") != "" {
+				t.Fatalf("invalid decoded response headers: %#v", response.Header())
 			}
 		})
 	}

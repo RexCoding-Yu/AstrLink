@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -18,11 +19,95 @@ type policyPageResponse struct {
 	NextCursor *string           `json:"next_cursor"`
 }
 
+type policySummaryPageResponse struct {
+	Items      []PolicySummary `json:"items"`
+	NextCursor *string         `json:"next_cursor"`
+}
+
+// PolicySummary is the observer view of a privacy policy. Allowlist entries
+// and custom regex patterns can name the very values the policy guards, so
+// they are reported as counts and kinds only; the operator reads them in full.
+type PolicySummary struct {
+	ID                     contract.PolicyID          `json:"id"`
+	Name                   string                     `json:"name"`
+	Enabled                bool                       `json:"enabled"`
+	Priority               int                        `json:"priority"`
+	Detector               contract.PolicyDetector    `json:"detector"`
+	LocalModelID           *contract.PrivacyModelID   `json:"local_model_id"`
+	MinConfidence          float64                    `json:"min_confidence"`
+	RegexSource            contract.PolicyRegexSource `json:"regex_source"`
+	CustomRegexRules       PolicyRegexSummary         `json:"custom_regex_rules"`
+	EnabledKinds           []string                   `json:"enabled_kinds"`
+	Allowlist              PolicyAllowlistSummary     `json:"allowlist"`
+	Match                  contract.PolicyMatch       `json:"match"`
+	RequestAction          contract.PolicyAction      `json:"request_action"`
+	ResponseAction         contract.PolicyAction      `json:"response_action"`
+	ResponseRestore        bool                       `json:"response_restore"`
+	RestoreToolArguments   bool                       `json:"restore_tool_arguments"`
+	PlaceholderNotice      bool                       `json:"placeholder_notice"`
+	SkipToolDeclarations   bool                       `json:"skip_tool_declarations"`
+	InspectAdditionalTools bool                       `json:"inspect_additional_tools"`
+}
+
+// PolicyRegexSummary counts custom regex rules and names their kinds.
+type PolicyRegexSummary struct {
+	Count int      `json:"count"`
+	Kinds []string `json:"kinds"`
+}
+
+// PolicyAllowlistSummary counts allowlist entries by type.
+type PolicyAllowlistSummary struct {
+	Count  int                                  `json:"count"`
+	ByType map[contract.PolicyAllowlistType]int `json:"by_type"`
+}
+
+// SummarizePolicy projects a policy onto its observer view.
+func SummarizePolicy(policy contract.Policy) PolicySummary {
+	summary := PolicySummary{
+		ID:                     policy.ID,
+		Name:                   policy.Name,
+		Enabled:                policy.Enabled,
+		Priority:               policy.Priority,
+		Detector:               policy.Detector,
+		LocalModelID:           policy.LocalModelID,
+		MinConfidence:          policy.MinConfidence,
+		RegexSource:            policy.RegexSource,
+		CustomRegexRules:       PolicyRegexSummary{Count: len(policy.CustomRegexRules), Kinds: []string{}},
+		EnabledKinds:           []string{},
+		Allowlist:              PolicyAllowlistSummary{Count: len(policy.AllowlistRules), ByType: map[contract.PolicyAllowlistType]int{}},
+		Match:                  policy.Match,
+		RequestAction:          policy.RequestAction,
+		ResponseAction:         policy.ResponseAction,
+		ResponseRestore:        policy.ResponseRestore,
+		RestoreToolArguments:   policy.RestoreToolArguments,
+		PlaceholderNotice:      policy.PlaceholderNotice,
+		SkipToolDeclarations:   policy.SkipToolDeclarations,
+		InspectAdditionalTools: policy.InspectAdditionalTools,
+	}
+	seen := map[string]bool{}
+	for _, rule := range policy.CustomRegexRules {
+		if !seen[rule.Kind] {
+			seen[rule.Kind] = true
+			summary.CustomRegexRules.Kinds = append(summary.CustomRegexRules.Kinds, rule.Kind)
+		}
+	}
+	sort.Strings(summary.CustomRegexRules.Kinds)
+	for _, rule := range policy.KindRules {
+		if rule.Enabled {
+			summary.EnabledKinds = append(summary.EnabledKinds, rule.Kind)
+		}
+	}
+	for _, rule := range policy.AllowlistRules {
+		summary.Allowlist.ByType[rule.Type]++
+	}
+	return summary
+}
+
 func (handler *Handler) registerPolicyRoutes() {
-	handler.mux.HandleFunc(PolicyDryRunPath, handler.authenticated(handler.policyDryRun))
-	handler.mux.HandleFunc(PrivacyRegexBuiltinRulesPath, handler.authenticated(handler.privacyRegexBuiltinRules))
-	handler.mux.HandleFunc(PoliciesPath, handler.authenticated(handler.policyCollection))
-	handler.mux.HandleFunc(PoliciesPath+"/", handler.authenticated(handler.policyItem))
+	handler.mux.HandleFunc(PolicyDryRunPath, handler.authenticated(handler.policyDryRun, RoleObserver))
+	handler.mux.HandleFunc(PrivacyRegexBuiltinRulesPath, handler.authenticated(handler.privacyRegexBuiltinRules, RoleObserver))
+	handler.mux.HandleFunc(PoliciesPath, handler.authenticated(handler.policyCollection, RoleObserver))
+	handler.mux.HandleFunc(PoliciesPath+"/", handler.authenticated(handler.policyItem, RoleObserver))
 }
 
 func (handler *Handler) privacyRegexBuiltinRules(writer http.ResponseWriter, request *http.Request) {
@@ -53,6 +138,14 @@ func (handler *Handler) policyCollection(writer http.ResponseWriter, request *ht
 	page, err := handler.policyStore.ListPolicies(request.Context())
 	if err != nil {
 		handler.writePolicyStoreError(writer, err)
+		return
+	}
+	if requestRole(request) < RoleOperator {
+		summaries := policySummaryPageResponse{Items: make([]PolicySummary, 0, len(page.Items))}
+		for _, item := range page.Items {
+			summaries.Items = append(summaries.Items, SummarizePolicy(item.Policy))
+		}
+		writeJSON(writer, http.StatusOK, summaries)
 		return
 	}
 	response := policyPageResponse{Items: make([]contract.Policy, 0, len(page.Items))}
@@ -93,6 +186,12 @@ func (handler *Handler) getPolicy(writer http.ResponseWriter, request *http.Requ
 	record, err := handler.policyStore.GetPolicy(request.Context(), id)
 	if err != nil {
 		handler.writePolicyStoreError(writer, err)
+		return
+	}
+	// The ETag hashes the full document, so observers, who cannot patch,
+	// get neither it nor the values it would let them confirm.
+	if requestRole(request) < RoleOperator {
+		writeJSON(writer, http.StatusOK, SummarizePolicy(record.Policy))
 		return
 	}
 	writer.Header().Set("ETag", record.ETag)

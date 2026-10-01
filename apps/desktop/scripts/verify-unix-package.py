@@ -18,7 +18,7 @@ import urllib.request
 EXECUTABLES = (
     "astrlink-desktop",
     "astrlink-core",
-    "astrlink-mcp",
+    "astrlink-cli",
     "astrlink-privacy-worker",
     "astrlink-classifier-worker",
 )
@@ -72,17 +72,19 @@ def check_binary(path, system, arch, logs):
 def smoke_sidecars(executables, runtime, logs):
     env = dict(os.environ, ASTRLINK_CI_NO_REMOTE_MODELS="1",
                ASTRLINK_CI_SYNTHETIC_MODELS_ONLY="1", ASTRLINK_ONNX_RUNTIME_PATH=str(runtime))
-    for name in ("astrlink-privacy-worker", "astrlink-classifier-worker", "astrlink-mcp"):
+    for name in ("astrlink-privacy-worker", "astrlink-classifier-worker", "astrlink-cli"):
         path = executables[name]
-        args = [str(path)] + (["--help"] if name == "astrlink-mcp" else [])
+        args = [str(path)] + (["--help"] if name == "astrlink-cli" else [])
         with (logs / f"{name}.stdout.log").open("wb") as stdout, (
             logs / f"{name}.stderr.log"
         ).open("wb") as stderr:
             result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=stdout,
                                     stderr=stderr, env=env, timeout=15)
         error = (logs / f"{name}.stderr.log").read_text()
-        if name == "astrlink-mcp":
-            require(result.returncode == 0 and "Usage of" in error, "MCP sidecar failed to start")
+        if name == "astrlink-cli":
+            output = (logs / f"{name}.stdout.log").read_text()
+            require(result.returncode == 0 and "Usage: astrlink" in output,
+                    "agent CLI sidecar failed to start")
         else:
             # This tests process startup and argument validation, not model inference.
             require(result.returncode == 1 and "startup_or_protocol_failure" in error,

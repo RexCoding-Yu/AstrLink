@@ -282,6 +282,7 @@ func newServiceHandler(t *testing.T, ids ...contract.ServiceID) (*sqlite.Store, 
 			ServiceStore:  store,
 			Subscriptions: manager,
 			ControlToken:  testControlToken,
+			ObserverToken: testObserverToken,
 			NewServiceID: func() (contract.ServiceID, error) {
 				id := ids[nextID]
 				nextID++
@@ -444,6 +445,46 @@ func TestPayAsYouGoServicesPersistAsHTTP(t *testing.T) {
 			}
 			clear(secret)
 		})
+	}
+}
+
+func TestServiceReadShowsSavedKeySuffixToOperatorOnly(t *testing.T) {
+	_, handler := newServiceHandler(t, "service_hinted", "service_short")
+	hinted := createServiceForTest(t, handler, `{"name":"API","kind":"openai","models":["model-test"],"http":{"base_url":"https://api.example/v1","auth":{"scheme":"bearer"},"credential":{"secret":"sk-test-0123456789wxyz"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`)
+	short := createServiceForTest(t, handler, `{"name":"Short","kind":"openai","models":["model-test"],"http":{"base_url":"https://api.example/v1","auth":{"scheme":"bearer"},"credential":{"secret":"short-key"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`)
+	readHint := func(id contract.ServiceID, token string) string {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, ServicesPath+"/"+string(id), nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "0123456789") {
+			t.Fatalf("get %s: %d %s", id, response.Code, response.Body.String())
+		}
+		var body struct {
+			HTTP struct {
+				CredentialRef  string `json:"credential_ref"`
+				CredentialHint string `json:"credential_hint"`
+			} `json:"http"`
+		}
+		decode(t, response, &body)
+		if body.HTTP.CredentialRef != "local://service/"+string(id) {
+			t.Fatalf("credential_ref = %q", body.HTTP.CredentialRef)
+		}
+		return body.HTTP.CredentialHint
+	}
+	if hint := readHint(hinted.ID, testControlToken); hint != "…wxyz" {
+		t.Fatalf("operator hint = %q", hint)
+	}
+	if hint := readHint(hinted.ID, testObserverToken); hint != "" {
+		t.Fatalf("observer hint = %q", hint)
+	}
+	if hint := readHint(short.ID, testControlToken); hint != "" {
+		t.Fatalf("short key hint = %q", hint)
+	}
+	list := serviceRequestForTest(t, handler, http.MethodGet, ServicesPath, "", "", "")
+	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), "credential_hint") {
+		t.Fatalf("list: %d %s", list.Code, list.Body.String())
 	}
 }
 

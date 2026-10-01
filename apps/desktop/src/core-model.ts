@@ -20,6 +20,11 @@ export interface ReadyAnnouncement {
   control_api_version: string;
   protocol_contract_version: string;
   inference_url: string;
+  /**
+   * The address clients are configured with: `http://localhost:<port>`
+   * while Core also serves `[::1]`, otherwise `inference_url`.
+   */
+  client_inference_url: string;
   control_url: string;
 }
 
@@ -205,6 +210,7 @@ function parseReady(value: unknown, path: string): ReadyAnnouncement {
       "control_api_version",
       "protocol_contract_version",
       "inference_url",
+      "client_inference_url",
       "control_url",
     ],
     path,
@@ -226,9 +232,24 @@ function parseReady(value: unknown, path: string): ReadyAnnouncement {
     `${path}.inference_url`,
     128,
   );
+  const clientInferenceURL = stringAt(
+    ready.client_inference_url,
+    `${path}.client_inference_url`,
+    128,
+  );
   const controlURL = stringAt(ready.control_url, `${path}.control_url`, 128);
   if (!loopbackURLPattern.test(inferenceURL)) {
     invalid(`${path}.inference_url`, "expected a canonical IPv4 loopback URL");
+  }
+  if (
+    clientInferenceURL !== inferenceURL &&
+    clientInferenceURL !==
+      inferenceURL.replace("http://127.0.0.1:", "http://localhost:")
+  ) {
+    invalid(
+      `${path}.client_inference_url`,
+      "expected inference_url or localhost on the same port",
+    );
   }
   if (!loopbackURLPattern.test(controlURL)) {
     invalid(`${path}.control_url`, "expected a canonical IPv4 loopback URL");
@@ -239,6 +260,7 @@ function parseReady(value: unknown, path: string): ReadyAnnouncement {
     control_api_version: controlVersion,
     protocol_contract_version: protocolVersion,
     inference_url: inferenceURL,
+    client_inference_url: clientInferenceURL,
     control_url: controlURL,
   };
 }

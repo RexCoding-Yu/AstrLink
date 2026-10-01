@@ -10,12 +10,16 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/astrlink/convo"
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
+	"github.com/QuantumNous/astrlink/core/internal/privacy"
+	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
@@ -106,6 +110,47 @@ func (buffer *captureBuffer) reset(enabled bool, maxBytes int) {
 	*buffer = captureBuffer{enabled: enabled, maxBytes: maxBytes}
 }
 
+// captureTee copies a request body into its own buffer. net/http reads
+// outbound bodies on its write goroutine, and the upstream may answer before
+// the final EOF read, even after the request has finished. The tee therefore
+// never touches the session; the request goroutine adopts its buffer through
+// syncCaptureTees.
+type captureTee struct {
+	io.ReadCloser
+	mu     sync.Mutex
+	buffer captureBuffer
+}
+
+func (tee *captureTee) Read(p []byte) (int, error) {
+	n, err := tee.ReadCloser.Read(p)
+	tee.mu.Lock()
+	if n > 0 {
+		tee.buffer.observe(p[:n])
+	}
+	if errors.Is(err, io.EOF) {
+		tee.buffer.markComplete()
+	}
+	tee.mu.Unlock()
+	return n, err
+}
+
+// snapshot returns what the tee has read so far. The tee may keep appending,
+// so the copy is clipped and never shares spare capacity with it.
+func (tee *captureTee) snapshot() captureBuffer {
+	tee.mu.Lock()
+	defer tee.mu.Unlock()
+	snapshot := tee.buffer
+	snapshot.bytes = slices.Clip(snapshot.bytes)
+	return snapshot
+}
+
+// adopt copies the tee into buffer and reports whether it is complete, after
+// which it no longer changes and can be released.
+func (tee *captureTee) adopt(buffer *captureBuffer) bool {
+	*buffer = tee.snapshot()
+	return buffer.complete
+}
+
 type pendingAttemptRecord struct {
 	record     contract.RequestRecord
 	blobs      []storage.AuditBlob
@@ -117,34 +162,53 @@ type recordSession struct {
 	channelBinding *channelBindingAttempt
 	// routingSettings is the request's single settings read; nil when the
 	// store has none or the read failed.
-	routingSettings          *contract.RoutingSettings
-	pendingAttempt           *pendingAttemptRecord
-	recovery                 *contract.RequestRecovery
-	modelRedirect            *contract.RequestModelRedirect
-	id                       contract.RequestID
-	startedAt                time.Time
-	classified               Request
-	accessTokenID            *contract.AccessTokenID
-	scanner                  *usageScanner
-	upstreamScanner          *usageScanner
-	status                   contract.RequestStatus
-	httpStatus               int
-	hasHTTPStatus            bool
-	upstreamHTTPStatus       int
-	hasUpstreamHTTPStatus    bool
-	endpointID               *contract.ServiceID
-	plan                     *contract.ExecutionPlan
-	errorSummary             *contract.ErrorSummary
-	privacyRestore           *contract.PrivacyRestoreSummary
-	privacyBatch             string
-	attemptIndex             int
-	childCount               int
-	networkAttemptOpen       bool
-	responseWriter           *recordStatusWriter
-	requestCapture           captureBuffer
-	responseCapture          captureBuffer
-	upstreamRequestCapture   captureBuffer
-	upstreamResponseCapture  captureBuffer
+	routingSettings       *contract.RoutingSettings
+	pendingAttempt        *pendingAttemptRecord
+	recovery              *contract.RequestRecovery
+	modelRedirect         *contract.RequestModelRedirect
+	id                    contract.RequestID
+	startedAt             time.Time
+	classified            Request
+	accessTokenID         *contract.AccessTokenID
+	scanner               *usageScanner
+	upstreamScanner       *usageScanner
+	status                contract.RequestStatus
+	httpStatus            int
+	hasHTTPStatus         bool
+	upstreamHTTPStatus    int
+	hasUpstreamHTTPStatus bool
+	endpointID            *contract.ServiceID
+	plan                  *contract.ExecutionPlan
+	// conversionDiagnostics is what the current attempt's local protocol
+	// conversion dropped or rewrote, request side first.
+	conversionDiagnostics []contract.ConversionDiagnostic
+	errorSummary          *contract.ErrorSummary
+	privacyRestore        *contract.PrivacyRestoreSummary
+	privacyBatch          string
+	// privacyGated is set when a privacy filter is configured, so the client
+	// body may not be shared before a decision (plan §5.11.3).
+	privacyGated bool
+	// privacyDecision is the most severe decision any attempt reached; empty
+	// until one inspection decides.
+	privacyDecision contract.PrivacyDecision
+	privacyFindings []contract.PrivacyFinding
+	// requestExposure is the label of the stored client body; empty until
+	// it is stored.
+	requestExposure storage.AuditExposure
+	// finishing tells capture-time labels that no decision is still coming.
+	finishing               bool
+	attemptIndex            int
+	childCount              int
+	networkAttemptOpen      bool
+	responseWriter          *recordStatusWriter
+	requestCapture          captureBuffer
+	responseCapture         captureBuffer
+	upstreamRequestCapture  captureBuffer
+	upstreamResponseCapture captureBuffer
+	// upstreamError holds the current attempt's upstream HTTP error body.
+	upstreamError            *upstreamErrorCapture
+	requestTee               *captureTee
+	upstreamRequestTee       *captureTee
 	httpMetaEnabled          bool
 	httpMetaCaptured         bool
 	httpMetaResponseDone     bool
@@ -286,6 +350,21 @@ func (session *recordSession) clearPersistedAudit(direction storage.AuditDirecti
 	delete(session.persistedAudit, direction)
 }
 
+// syncCaptureTees adopts body tees on the request goroutine and reports
+// whether any of them completed.
+func (session *recordSession) syncCaptureTees() bool {
+	completed := false
+	if session.requestTee != nil && session.requestTee.adopt(&session.requestCapture) {
+		session.requestTee = nil
+		completed = true
+	}
+	if session.upstreamRequestTee != nil && session.upstreamRequestTee.adopt(&session.upstreamRequestCapture) {
+		session.upstreamRequestTee = nil
+		completed = true
+	}
+	return completed
+}
+
 // persistAvailableAudit writes request-side blobs that are already complete
 // and refreshes the pending metadata row. The request row is upserted before
 // any blob: audit_blobs.request_id references request_records(id), so a live
@@ -297,6 +376,7 @@ func (session *recordSession) persistAvailableAudit(ctx context.Context) {
 	if session == nil {
 		return
 	}
+	session.syncCaptureTees()
 	persistCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	if session.persistStore != nil {
@@ -307,6 +387,7 @@ func (session *recordSession) persistAvailableAudit(ctx context.Context) {
 	}
 	if session.persistBlobs != nil {
 		session.persistReadyAuditBlobs(persistCtx, session.persistBlobs, session.persistLogf)
+		session.settleRequestExposure(persistCtx, session.persistBlobs, session.persistLogf)
 	}
 	if session.persistStore == nil {
 		return
@@ -372,14 +453,22 @@ func (session *recordSession) persistOneAuditBlob(
 		return
 	}
 	session.markAuditPersisted(direction)
+	session.noteStoredExposure(blob)
 }
 
-func (session *recordSession) noteInboundBodyReady() {
+// noteInboundBodyReady persists the client body once the ingress holds all of
+// it: either the body is replayable or the capture already saw its end.
+func (session *recordSession) noteInboundBodyReady(replayable bool) {
 	if session == nil {
+		return
+	}
+	session.syncCaptureTees()
+	if !replayable && !session.requestCapture.complete {
 		return
 	}
 	if len(session.requestCapture.bytes) > 0 || session.requestCapture.complete {
 		session.requestCapture.markComplete()
+		session.requestTee = nil
 	}
 	session.persistAvailableAudit(context.Background())
 }
@@ -425,7 +514,13 @@ func (session *recordSession) recordSnapshot(
 		Error:              session.errorSummary,
 		Audit:              session.liveAuditSummary(),
 		PrivacyRestore:     session.privacyRestore,
+		PrivacyFindings:    append([]contract.PrivacyFinding(nil), session.privacyFindings...),
 		Events:             append([]contract.RequestEvent(nil), session.events...),
+	}
+	record.ConversionDiagnostics = slices.Clone(session.conversionDiagnostics)
+	if session.privacyDecision != "" {
+		decision := session.privacyDecision
+		record.PrivacyDecision = &decision
 	}
 	if session.upstreamScanner != nil && !session.upstreamScanner.firstOutputAt.IsZero() {
 		firstTokenMs := int(max(0, session.upstreamScanner.firstOutputAt.Sub(session.startedAt).Milliseconds()))
@@ -535,39 +630,28 @@ func (session *recordSession) attachRequestCapture(request *http.Request) {
 		session.requestCapture.markComplete()
 		return
 	}
-	request.Body = &requestCaptureBody{ReadCloser: request.Body, session: session}
+	session.requestTee = &captureTee{ReadCloser: request.Body, buffer: session.requestCapture}
+	request.Body = session.requestTee
 }
 
 // captureUnreadRequestBody feeds the client body to the audit capture when the
-// request fails before any attempt reads it, e.g. every provider's circuit is
-// open. Reading stops one byte past the capture limit so truncation is marked.
+// request fails before any attempt reads it, e.g. every provider is waiting
+// out an upstream rate limit. Reading stops one byte past the capture limit so truncation is marked.
 func (session *recordSession) captureUnreadRequestBody(request *http.Request) {
-	if session == nil || request == nil || session.requestCapture.complete {
+	if session == nil || request == nil {
 		return
 	}
-	body, ok := request.Body.(*requestCaptureBody)
-	if !ok {
+	session.syncCaptureTees()
+	if session.requestCapture.complete {
+		return
+	}
+	body, ok := request.Body.(*captureTee)
+	if !ok || body != session.requestTee {
 		return
 	}
 	limit := int64(session.requestCapture.maxBytes) + 1
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, limit))
-}
-
-type requestCaptureBody struct {
-	io.ReadCloser
-	session *recordSession
-}
-
-func (body *requestCaptureBody) Read(p []byte) (int, error) {
-	n, err := body.ReadCloser.Read(p)
-	if n > 0 && body.session != nil {
-		body.session.requestCapture.observe(p[:n])
-	}
-	if errors.Is(err, io.EOF) && body.session != nil {
-		body.session.requestCapture.markComplete()
-		body.session.persistAvailableAudit(context.Background())
-	}
-	return n, err
+	session.syncCaptureTees()
 }
 
 func (session *recordSession) wrap(writer http.ResponseWriter) http.ResponseWriter {
@@ -628,7 +712,7 @@ func (session *recordSession) noteModelRedirect(ctx context.Context, from, to st
 }
 
 // noteCandidateRejected keeps a provider that was chosen but never called
-// visible on the root, e.g. a missing credential or an open circuit.
+// visible on the root, e.g. a missing credential or a rate-limit cooldown.
 func (session *recordSession) noteCandidateRejected(id contract.ServiceID, reason string) {
 	if session == nil || id == "" {
 		return
@@ -669,6 +753,51 @@ func (session *recordSession) beginNetworkAttempt(
 	session.persistAvailableAudit(ctx)
 }
 
+// noteConversionDiagnostics records what the current attempt's conversion
+// dropped or rewrote. Call it only after beginNetworkAttempt, so a previous
+// attempt's record never receives the next attempt's diagnostics.
+func (session *recordSession) noteConversionDiagnostics(
+	phase contract.ConversionDiagnosticPhase,
+	diagnostics []relaykitbridge.ConversionDiagnostic,
+) {
+	if session == nil {
+		return
+	}
+	for _, diagnostic := range diagnostics {
+		if len(session.conversionDiagnostics) >= contract.MaxConversionDiagnostics {
+			return
+		}
+		severity := contract.ConversionDiagnosticSeverity(diagnostic.Severity)
+		if !severity.Valid() {
+			severity = contract.ConversionDiagnosticWarning
+		}
+		entry := contract.ConversionDiagnostic{
+			Phase:    phase,
+			Severity: severity,
+			Code:     conversionDiagnosticText(diagnostic.Code, contract.MaxConversionDiagnosticCodeRunes),
+			Path:     conversionDiagnosticText(diagnostic.Path, contract.MaxConversionDiagnosticPathRunes),
+			Message:  conversionDiagnosticText(diagnostic.Message, contract.MaxConversionDiagnosticDetailRunes),
+		}
+		if entry.Code == "" {
+			entry.Code = "unspecified"
+		}
+		if slices.Contains(session.conversionDiagnostics, entry) {
+			continue
+		}
+		session.conversionDiagnostics = append(session.conversionDiagnostics, entry)
+	}
+}
+
+func conversionDiagnosticText(value string, maxRunes int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 32 && r != '\t' {
+			return ' '
+		}
+		return r
+	}, value)
+	return contract.ClampRunes(strings.TrimSpace(value), maxRunes)
+}
+
 // observeOutboundCapture records the exact upstream request after transport
 // normalization and attaches a body tee. Credentials are redacted first.
 func (session *recordSession) observeOutboundCapture(outbound *http.Request) {
@@ -692,24 +821,8 @@ func (session *recordSession) observeOutboundCapture(outbound *http.Request) {
 		session.persistAvailableAudit(context.Background())
 		return
 	}
-	outbound.Body = &upstreamRequestCaptureBody{ReadCloser: outbound.Body, session: session}
-}
-
-type upstreamRequestCaptureBody struct {
-	io.ReadCloser
-	session *recordSession
-}
-
-func (body *upstreamRequestCaptureBody) Read(p []byte) (int, error) {
-	n, err := body.ReadCloser.Read(p)
-	if n > 0 && body.session != nil {
-		body.session.upstreamRequestCapture.observe(p[:n])
-	}
-	if errors.Is(err, io.EOF) && body.session != nil {
-		body.session.upstreamRequestCapture.markComplete()
-		body.session.persistAvailableAudit(context.Background())
-	}
-	return n, err
+	session.upstreamRequestTee = &captureTee{ReadCloser: outbound.Body, buffer: session.upstreamRequestCapture}
+	outbound.Body = session.upstreamRequestTee
 }
 
 // wrapUpstreamResponseBody tees raw upstream response bytes before RelayKit /
@@ -724,6 +837,10 @@ func (session *recordSession) wrapUpstreamResponseBody(
 	}
 	session.upstreamHTTPStatus = status
 	session.hasUpstreamHTTPStatus = true
+	session.upstreamError = nil
+	if status >= http.StatusBadRequest {
+		session.upstreamError = newUpstreamErrorCapture(status, headers.Get("Content-Type"), headers.Get("Content-Encoding"))
+	}
 	if session.upstreamHTTPMetaEnabled {
 		if !session.upstreamHTTPMetaCaptured {
 			session.upstreamHTTPMeta = contract.AuditHTTPMeta{
@@ -735,6 +852,11 @@ func (session *recordSession) wrapUpstreamResponseBody(
 		session.upstreamHTTPMeta.ResponseStatus = &statusCopy
 		session.upstreamHTTPMeta.ResponseHeaders = RedactResponseHeaders(headers)
 		session.upstreamHTTPMetaCaptured = true
+	}
+	// Request bodies sent by net/http become visible here, the first point
+	// back on the request goroutine after the round trip started.
+	if session.syncCaptureTees() {
+		session.persistAvailableAudit(context.Background())
 	}
 	if session.upstreamScanner != nil {
 		// A non-streaming request can be answered with SSE when streaming was
@@ -755,18 +877,22 @@ func (session *recordSession) wrapUpstreamResponseBody(
 		}
 		session.upstreamResponseCapture.mediaType = mediaType
 	}
-	return &upstreamResponseCaptureBody{ReadCloser: body, session: session}
+	return &upstreamResponseCaptureBody{ReadCloser: body, session: session, upstreamError: session.upstreamError}
 }
 
 type upstreamResponseCaptureBody struct {
 	io.ReadCloser
 	session *recordSession
+	// upstreamError is this attempt's own error capture, even if a late read
+	// arrives after the next attempt began.
+	upstreamError *upstreamErrorCapture
 }
 
 func (body *upstreamResponseCaptureBody) Read(p []byte) (int, error) {
 	n, err := body.ReadCloser.Read(p)
 	if n > 0 && body.session != nil {
 		body.session.upstreamResponseCapture.observe(p[:n])
+		body.upstreamError.observe(p[:n])
 		if body.session.upstreamScanner != nil {
 			body.session.upstreamScanner.observe(p[:n])
 		}
@@ -881,7 +1007,7 @@ func (session *recordSession) failFromHTTPError() bool {
 	}
 	session.status = contract.RequestStatusFailed
 	if session.errorSummary == nil {
-		summary := errorSummaryFromHTTPStatus(status)
+		summary := session.upstreamHTTPErrorSummary(status)
 		session.errorSummary = &summary
 	}
 	return true
@@ -927,6 +1053,12 @@ func (session *recordSession) noteCancelled() {
 	session.status = contract.RequestStatusCancelled
 }
 
+// clientReceivedTerminal reports whether the client-facing stream already
+// carried its terminal event, so a later disconnect cut nothing off.
+func (session *recordSession) clientReceivedTerminal() bool {
+	return session != nil && session.scanner != nil && session.scanner.streaming && session.scanner.complete
+}
+
 // demoteCurrentAttemptToChild stages a failed attempt. It becomes an independent
 // child only when another actual network attempt begins.
 func (session *recordSession) demoteCurrentAttemptToChild(
@@ -939,6 +1071,7 @@ func (session *recordSession) demoteCurrentAttemptToChild(
 	if session == nil || !session.networkAttemptOpen || session.attemptIndex < 1 {
 		return
 	}
+	session.syncCaptureTees()
 	session.noteFailed(summary)
 	session.closeEventKind(contract.RequestEventUpstream, contract.RequestStatusFailed, summary.Code)
 	session.captureOutputID()
@@ -1048,11 +1181,16 @@ func (session *recordSession) resetAttemptLocal() {
 	session.hasHTTPStatus = false
 	session.upstreamHTTPStatus = 0
 	session.hasUpstreamHTTPStatus = false
+	session.upstreamError = nil
 	session.endpointID = nil
 	session.plan = nil
+	session.conversionDiagnostics = nil
 	session.errorSummary = nil
 	session.privacyRestore = nil
 	session.networkAttemptOpen = false
+	// A previous attempt's tee may still be read by net/http; it keeps its own
+	// buffer and must not leak into the next attempt.
+	session.upstreamRequestTee = nil
 	session.upstreamRequestCapture.reset(session.settings.RequestBodyEnabled, session.settings.RequestBodyMaxBytes)
 	session.upstreamResponseCapture.reset(session.settings.ResponseContentEnabled, session.settings.ResponseContentMaxBytes)
 	session.upstreamHTTPMeta = contract.AuditHTTPMeta{}
@@ -1082,6 +1220,7 @@ func (session *recordSession) finish(
 	if session == nil {
 		return
 	}
+	session.syncCaptureTees()
 	if store == nil {
 		logIngressAccess(logf, session)
 		return
@@ -1121,6 +1260,7 @@ func (session *recordSession) finish(
 		latency = 0
 	}
 	audit := session.liveAuditSummary()
+	session.finishing = true
 	pendingBlobs := make([]storage.AuditBlob, 0, 6)
 	if blobs != nil {
 		key, keyErr := session.prepareAuditKey(ctx, blobs, logf)
@@ -1174,7 +1314,9 @@ func (session *recordSession) finish(
 			continue
 		}
 		session.markAuditPersisted(blob.Direction)
+		session.noteStoredExposure(blob)
 	}
+	session.settleRequestExposure(ctx, blobs, logf)
 }
 
 func (session *recordSession) prepareAuditKey(
@@ -1256,7 +1398,99 @@ func (session *recordSession) sealCapture(
 		Truncated:     buffer.truncated,
 		CapturedBytes: len(buffer.bytes),
 		CreatedAt:     createdAt,
+		Exposure:      session.auditExposure(direction),
 	}, true
+}
+
+// auditExposure labels a part at capture time with who may read it without
+// proof (plan §5.11.3). Upstream parts already left the machine and meta is
+// redacted before storage; the client body follows the privacy decision and
+// the client response is withheld once real values were restored into it.
+func (session *recordSession) auditExposure(direction storage.AuditDirection) storage.AuditExposure {
+	switch direction {
+	case storage.AuditDirectionRequest:
+		switch session.privacyDecision {
+		case contract.PrivacyDecisionNone, contract.PrivacyDecisionAllow, contract.PrivacyDecisionWarn:
+			return storage.AuditExposureShareable
+		case "":
+			if !session.privacyGated {
+				return storage.AuditExposureShareable
+			}
+			if session.finishing {
+				return storage.AuditExposureRaw
+			}
+			return storage.AuditExposurePending
+		default:
+			return storage.AuditExposureRaw
+		}
+	case storage.AuditDirectionResponse:
+		if restore := session.privacyRestore; restore != nil &&
+			(restore.RestoredCount > 0 || restore.ToolArgumentRestoredCount > 0) {
+			return storage.AuditExposureRaw
+		}
+		return storage.AuditExposureShareable
+	default:
+		return storage.AuditExposureShareable
+	}
+}
+
+func (session *recordSession) noteStoredExposure(blob storage.AuditBlob) {
+	if blob.Direction != storage.AuditDirectionRequest {
+		return
+	}
+	exposure := blob.Exposure
+	if exposure == "" {
+		exposure = storage.AuditExposureRaw
+	}
+	// The store keeps raw once set; mirror that so a later label is not
+	// mistaken for the stored one.
+	if session.requestExposure != storage.AuditExposureRaw {
+		session.requestExposure = exposure
+	}
+}
+
+// settleRequestExposure relabels a client body stored before its privacy
+// decision, or narrows one a later attempt withheld. It runs with the
+// metadata upsert that already follows each decision, never as an extra
+// write on the request path. Only the label changes.
+func (session *recordSession) settleRequestExposure(
+	ctx context.Context,
+	blobs AuditBlobPersister,
+	logf func(string, ...any),
+) {
+	current := session.requestExposure
+	if current == "" || current == storage.AuditExposureRaw {
+		return
+	}
+	next := session.auditExposure(storage.AuditDirectionRequest)
+	if next == current || next == storage.AuditExposurePending || !current.CanBecome(next) {
+		return
+	}
+	updater, ok := blobs.(storage.AuditExposureStore)
+	if !ok {
+		return
+	}
+	if err := updater.UpdateAuditExposure(ctx, session.id, storage.AuditDirectionRequest, next); err != nil {
+		logRequestRecordFailure(logf, "audit_exposure_update", err)
+		return
+	}
+	session.requestExposure = next
+}
+
+// notePrivacyOutcome keeps the structured decision beside the event summary.
+// Findings are kept only for decisions that withhold the client body; their
+// paths are reduced to structure so no request value reaches the record.
+func (session *recordSession) notePrivacyOutcome(decision contract.PrivacyDecision, findings []privacy.Finding) {
+	if session == nil || !decision.Valid() {
+		return
+	}
+	if session.privacyDecision == "" || decision.Severity() > session.privacyDecision.Severity() {
+		session.privacyDecision = decision
+	}
+	if decision != contract.PrivacyDecisionRedact && decision != contract.PrivacyDecisionBlock {
+		return
+	}
+	session.privacyFindings = mergePrivacyFindings(session.privacyFindings, findings)
 }
 
 // sealHTTPMeta encrypts the redacted HTTP envelope as a third blob direction.
@@ -1288,6 +1522,7 @@ func (session *recordSession) sealHTTPMeta(
 		Truncated:     false,
 		CapturedBytes: len(payload),
 		CreatedAt:     createdAt,
+		Exposure:      storage.AuditExposureShareable,
 	}, true
 }
 
@@ -1317,6 +1552,7 @@ func (session *recordSession) sealUpstreamHTTPMeta(
 		Truncated:     false,
 		CapturedBytes: len(payload),
 		CreatedAt:     createdAt,
+		Exposure:      storage.AuditExposureShareable,
 	}, true
 }
 

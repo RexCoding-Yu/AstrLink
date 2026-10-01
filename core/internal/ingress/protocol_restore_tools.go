@@ -56,12 +56,16 @@ func appendChatToolArgumentRefs(
 			if !ok {
 				continue
 			}
+			start := len(*refs)
 			prefix := "chat:" + field + ":" + index
 			appendChatToolCallRefs(refs, container, prefix, frame)
 			// function_call predates tool_calls but is still emitted by some
 			// upstreams and reaches the harness the same way.
 			if call, ok := container["function_call"].(map[string]any); ok {
 				appendToolStringRef(refs, call, "arguments", prefix+":function_call", frame)
+			}
+			if field == "delta" {
+				markDeltaRefs(*refs, start)
 			}
 		}
 	}
@@ -86,6 +90,9 @@ func appendChatToolCallRefs(
 		if function, ok := call["function"].(map[string]any); ok {
 			appendToolStringRef(refs, function, "arguments", channel, frame)
 		}
+		if custom, ok := call["custom"].(map[string]any); ok {
+			appendToolTextRef(refs, custom, "input", channel, frame)
+		}
 	}
 }
 
@@ -96,11 +103,15 @@ func appendResponsesToolArgumentRefs(
 ) {
 	eventType, _ := root["type"].(string)
 	itemKey := responseEventItemKey(root)
+	start := len(*refs)
 	switch eventType {
 	case "response.function_call_arguments.delta",
-		"response.mcp_call_arguments.delta",
-		"response.custom_tool_call_input.delta":
+		"response.mcp_call_arguments.delta":
 		appendToolStringRef(refs, root, "delta", "responses:tool_args:"+itemKey, frame)
+		markDeltaRefs(*refs, start)
+	case "response.custom_tool_call_input.delta":
+		appendToolTextRef(refs, root, "delta", "responses:tool_args:"+itemKey, frame)
+		markDeltaRefs(*refs, start)
 	case "response.function_call_arguments.done",
 		"response.mcp_call_arguments.done":
 		appendToolStringRef(
@@ -108,7 +119,7 @@ func appendResponsesToolArgumentRefs(
 			"responses:snapshot:tool_args:"+itemKey, frame,
 		)
 	case "response.custom_tool_call_input.done":
-		appendToolStringRef(
+		appendToolTextRef(
 			refs, root, "input",
 			"responses:snapshot:tool_input:"+itemKey, frame,
 		)
@@ -152,7 +163,9 @@ func appendResponsesToolItemRefs(
 	case "function_call", "mcp_call":
 		appendToolStringRef(refs, item, "arguments", prefix+":arguments", frame)
 	case "custom_tool_call":
-		appendToolStringRef(refs, item, "input", prefix+":input", frame)
+		// A custom tool's input is raw text, such as an apply_patch body, so the
+		// value is written as is rather than escaped for JSON.
+		appendToolTextRef(refs, item, "input", prefix+":input", frame)
 	}
 }
 
@@ -167,10 +180,12 @@ func appendAnthropicToolArgumentRefs(
 	case "content_block_delta":
 		delta, _ := root["delta"].(map[string]any)
 		if deltaType, _ := delta["type"].(string); deltaType == "input_json_delta" {
+			start := len(*refs)
 			appendToolStringRef(
 				refs, delta, "partial_json",
 				"anthropic:tool_input:"+index, frame,
 			)
+			markDeltaRefs(*refs, start)
 		}
 	case "content_block_start":
 		block, _ := root["content_block"].(map[string]any)

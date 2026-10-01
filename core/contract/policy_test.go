@@ -166,7 +166,7 @@ func TestDefaultKindRulesCoverEveryKindAndDisableTheNoisyOnes(t *testing.T) {
 			t.Fatalf("default rule %q rejected: %v", rule.Kind, err)
 		}
 		wantStyle := PlaceholderStyleNatural
-		if PlaceholderStyleLocked(rule.Kind) {
+		if PlaceholderStyleLocked(rule.Kind) || rule.Kind == "phone" {
 			wantStyle = PlaceholderStyleToken
 		}
 		if rule.Style != wantStyle {

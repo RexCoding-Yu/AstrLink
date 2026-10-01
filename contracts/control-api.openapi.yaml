@@ -18,6 +18,15 @@ info:
     equivalent protected IPC; it must not be placed in process arguments or the
     environment.
 
+    Authenticated callers hold one of two roles, recorded on each operation as
+    `x-astrlink-role`. The desktop's per-start control token is `operator` and may
+    call everything. Agent tools reach Core through the same-user control socket or,
+    on Windows, a separate per-start observer token; both are `observer`, which may
+    call only GET operations marked `observer`. Every non-GET operation, token
+    reveal, and OAuth authorization session is `operator`, and an observer calling
+    one receives 403 `forbidden`. `public` marks the unauthenticated bootstrap
+    operations.
+
     Request and response bodies are excluded from ordinary request records. The two
     audit-body switches are independent, default to false, and can only be enabled
     through this authenticated control API after explicit risk acknowledgement.
@@ -87,6 +96,7 @@ x-astrlink-implementation:
     - POST /control/v1/policies/{policy_id}/dry-run
     - GET /control/v1/privacy/regex-builtin-rules
     - GET /control/v1/privacy-model-catalog
+    - GET /control/v1/privacy-model-catalog/releases
     - POST /control/v1/privacy-models/probe
     - POST /control/v1/privacy-models/local/probe
     - GET /control/v1/privacy-models
@@ -99,6 +109,20 @@ x-astrlink-implementation:
     - GET /control/v1/requests/{request_id}/children
     - POST /control/v1/requests/purge
     - GET /control/v1/requests/{request_id}/audit
+    - POST /control/v1/requests/{request_id}/audit/raw-access
+    - GET /control/v1/audit/raw-access
+    - DELETE /control/v1/audit/raw-access/{grant_id}
+    - POST /control/v1/audit/raw-access/{grant_id}/decision
+    - GET /control/v1/audit/raw-grant
+    - DELETE /control/v1/audit/raw-grant
+    - GET /control/v1/audit/raw-sealing
+    - POST /control/v1/audit/raw-password
+    - POST /control/v1/audit/raw-unlock
+    - POST /control/v1/audit/raw-lock
+    - POST /control/v1/audit/raw-verify
+    - GET /control/v1/local-data
+    - GET /control/v1/client-identities
+    - GET /control/v1/observers
     - GET /control/v1/audit-settings
     - PATCH /control/v1/audit-settings
     - POST /control/v1/auto-classifier/local/probe
@@ -134,6 +158,7 @@ tags:
 paths:
   /control/v1/pricing/status:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Services]
       operationId: getPricingStatus
@@ -153,6 +178,7 @@ paths:
           }
   /control/v1/pricing/catalog:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Services]
       operationId: getPriceCatalog
@@ -172,6 +198,7 @@ paths:
           }
   /control/v1/pricing/sync:
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Services]
       operationId: syncOfficialPrices
@@ -191,6 +218,7 @@ paths:
           }
   /control/v1/pricing/summary:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Services]
       operationId: getBillingSummary
@@ -223,6 +251,7 @@ paths:
           }
   /control/v1/pricing/services/{service_id}:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Services]
       operationId: getServiceBilling
@@ -246,6 +275,7 @@ paths:
             description: Price synchronization failed; last valid catalog retained.,
           }
     put:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Services]
       operationId: configureServicePricing
@@ -275,6 +305,7 @@ paths:
           }
   /control/v1/pricing/services/{service_id}/backfill:
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Services]
       operationId: backfillServicePricing
@@ -299,6 +330,7 @@ paths:
           }
   /control/v1/health:
     get:
+      x-astrlink-role: public
       x-astrlink-implementation-status: implemented
       tags: [Bootstrap]
       operationId: getHealth
@@ -329,6 +361,7 @@ paths:
                 status: starting
   /control/v1/version:
     get:
+      x-astrlink-role: public
       x-astrlink-implementation-status: implemented
       tags: [Bootstrap]
       operationId: getVersion
@@ -351,6 +384,7 @@ paths:
                 build_commit: unknown
   /control/v1/capabilities:
     get:
+      x-astrlink-role: public
       x-astrlink-implementation-status: implemented
       tags: [Bootstrap]
       operationId: getCapabilities
@@ -424,6 +458,7 @@ paths:
                   edges: []
   /control/v1/service-order:
     get:
+      x-astrlink-role: observer
       operationId: getServiceOrder
       summary: Read the complete global service priority order
       security:
@@ -440,6 +475,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ServiceOrder"
     put:
+      x-astrlink-role: operator
       operationId: updateServiceOrder
       summary: Atomically replace the complete service order
       security:
@@ -476,6 +512,7 @@ paths:
   /control/v1/services:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Services]
       operationId: listServices
       summary: List every configured API service, including subscription and HTTP variants.
@@ -503,6 +540,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: createService
       summary: Create one independently addressable API service.
@@ -546,6 +584,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     get:
+      x-astrlink-role: observer
       tags: [Services]
       operationId: getService
       summary: Read one service without exposing credential material.
@@ -566,6 +605,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
     patch:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: updateService
       summary: Update service metadata or an HTTP service connection.
@@ -600,6 +640,7 @@ paths:
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
     delete:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: deleteService
       summary: Delete one service after route-reference checks.
@@ -623,6 +664,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: beginServiceAuthorization
       summary: Start provider-specific OAuth for this subscription service only.
@@ -654,6 +696,7 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
     put:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: completeServiceAuthorization
       summary: Exchange a Claude authorization code for the active service session.
@@ -690,6 +733,7 @@ paths:
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
     get:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: getServiceAuthorization
       summary: Read the current OAuth session for this service.
@@ -708,6 +752,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: cancelServiceAuthorization
       summary: Cancel the pending OAuth session for this service.
@@ -732,6 +777,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: logoutService
       summary: Delete OAuth credentials while retaining the subscription service.
@@ -758,6 +804,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: probeServiceModels
       summary: Discover models through a persisted HTTP or subscription service.
@@ -798,6 +845,7 @@ paths:
   /control/v1/service-proxy-probes:
     x-astrlink-implementation-status: implemented
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: probeServiceProxy
       summary: Test an unsaved custom proxy against an HTTP target.
@@ -855,6 +903,7 @@ paths:
   /control/v1/service-model-probes:
     x-astrlink-implementation-status: implemented
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: probeDraftServiceModels
       summary: Discover models using an unsaved HTTP service draft.
@@ -891,6 +940,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: testService
       summary: Send one real text generation request to a saved provider.
@@ -937,6 +987,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: probeServiceResponses
       summary: Execute one non-streaming Responses probe through a connected subscription service.
@@ -975,6 +1026,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     get:
+      x-astrlink-role: observer
       tags: [Services]
       operationId: getServiceUsage
       summary: Read the live subscription rolling-quota snapshot.
@@ -1015,6 +1067,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: resetServiceUsage
       summary: Redeem one official Codex rate-limit reset credit.
@@ -1052,6 +1105,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     post:
+      x-astrlink-role: operator
       tags: [Services]
       operationId: clearServiceRisk
       summary: Restore scheduling for a subscription paused by an upstream risk signal.
@@ -1085,6 +1139,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/ServiceId"
     get:
+      x-astrlink-role: observer
       tags: [Services]
       operationId: listServiceRiskEvents
       summary: List the recent upstream risk history of a subscription service.
@@ -1132,6 +1187,7 @@ paths:
   /control/v1/usage-summary:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       operationId: getUsageSummary
       summary: Summarize all retained root requests in a calendar window.
@@ -1180,6 +1236,7 @@ paths:
   /control/v1/access-token-usage:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Access Tokens]
       operationId: listAccessTokenUsage
       summary: Aggregate today and retained-history token counts for all local tokens.
@@ -1213,6 +1270,7 @@ paths:
   /control/v1/access-tokens:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Access Tokens]
       operationId: listAccessTokens
       summary: List persistent local inference access-token metadata.
@@ -1229,6 +1287,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
+      x-astrlink-role: operator
       tags: [Access Tokens]
       operationId: createAccessToken
       summary: Create a persistent local inference access token.
@@ -1263,6 +1322,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/AccessTokenId"
     delete:
+      x-astrlink-role: operator
       tags: [Access Tokens]
       operationId: deleteAccessToken
       summary: Permanently delete a local inference access token.
@@ -1281,6 +1341,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/AccessTokenId"
     get:
+      x-astrlink-role: operator
       tags: [Access Tokens]
       operationId: revealAccessToken
       summary: Explicitly reveal one persistent local inference access-token secret.
@@ -1298,9 +1359,19 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: The saved token does not decrypt on this device (`access_token_unreadable`). It still authenticates; create a new token to see a value.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /control/v1/routes:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Routes]
       operationId: listRoutes
       summary: List routes in deterministic evaluation order.
@@ -1311,6 +1382,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: createRoute
       summary: Create a route.
@@ -1325,6 +1397,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/RouteId"
     get:
+      x-astrlink-role: observer
       tags: [Routes]
       operationId: getRoute
       summary: Read one route.
@@ -1335,6 +1408,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     patch:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: updateRoute
       summary: Update a route.
@@ -1345,6 +1419,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     delete:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: deleteRoute
       summary: Delete a route.
@@ -1356,10 +1431,15 @@ paths:
           $ref: "#/components/responses/Unauthorized"
   /control/v1/policies:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Policies]
       operationId: listPolicies
       summary: List the fixed MVP privacy policy.
+      description: |
+        Operators receive `PolicyPage` with full policies. Observers receive
+        `PolicySummaryPage`, which reports allowlist entries and custom regex
+        rules as counts and kinds only.
       responses:
         "200":
           description: Policy page.
@@ -1369,10 +1449,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/PolicyPage"
+                oneOf:
+                  - $ref: "#/components/schemas/PolicyPage"
+                  - $ref: "#/components/schemas/PolicySummaryPage"
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: planned
       tags: [Policies]
       operationId: createPolicy
@@ -1409,27 +1492,37 @@ paths:
     parameters:
       - $ref: "#/components/parameters/PolicyId"
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Policies]
       operationId: getPolicy
       summary: Read one policy.
+      description: |
+        Operators receive the full `Policy` and its ETag. Observers receive
+        `PolicySummary`, which reports allowlist entries and custom regex rules
+        as counts and kinds only, and no ETag: it hashes the full document.
       responses:
         "200":
           description: Policy details.
           headers:
             ETag:
-              $ref: "#/components/headers/ETag"
+              description: Sent to operators only.
+              schema:
+                type: string
             Cache-Control:
               $ref: "#/components/headers/NoStore"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Policy"
+                oneOf:
+                  - $ref: "#/components/schemas/Policy"
+                  - $ref: "#/components/schemas/PolicySummary"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
     patch:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Policies]
       operationId: updatePolicy
@@ -1465,6 +1558,7 @@ paths:
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
     delete:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: planned
       tags: [Policies]
       operationId: deletePolicy
@@ -1484,6 +1578,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/PolicyId"
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Policies]
       operationId: dryRunPolicy
@@ -1522,6 +1617,7 @@ paths:
           $ref: "#/components/responses/ServiceUnavailable"
   /control/v1/privacy/regex-builtin-rules:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Policies]
       operationId: listPrivacyRegexBuiltinRules
@@ -1545,6 +1641,7 @@ paths:
           $ref: "#/components/responses/Unauthorized"
   /control/v1/privacy-model-catalog:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: listPrivacyModelCatalog
@@ -1561,8 +1658,31 @@ paths:
                 $ref: "#/components/schemas/PrivacyModelCatalog"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /control/v1/privacy-model-catalog/releases:
+    get:
+      x-astrlink-role: observer
+      x-astrlink-implementation-status: implemented
+      tags: [Privacy Model]
+      operationId: listPrivacyModelReleases
+      summary: Check Hugging Face for newer compatible releases of catalog models.
+      description: Returns the newest release this build can run for each catalog model published through versioned tags. Releases whose labels or decoding contracts are unknown to this build are skipped. Results are cached for an hour.
+      responses:
+        "200":
+          description: Latest compatible releases, shaped like catalog entries pinned to the release commit.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivacyModelCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/BadGateway"
   /control/v1/privacy-models/probe:
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: probePrivacyModel
@@ -1598,6 +1718,7 @@ paths:
           $ref: "#/components/responses/BadGateway"
   /control/v1/privacy-models/local/probe:
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: probeLocalPrivacyModel
@@ -1629,6 +1750,7 @@ paths:
           $ref: "#/components/responses/InternalServerError"
   /control/v1/privacy-models:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: listPrivacyModelInstallations
@@ -1646,6 +1768,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: installPrivacyModel
@@ -1686,6 +1809,7 @@ paths:
         schema:
           $ref: "#/components/schemas/PrivacyModelInstallationId"
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: getPrivacyModelInstallation
@@ -1705,6 +1829,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: deletePrivacyModelInstallation
@@ -1732,6 +1857,7 @@ paths:
         schema:
           $ref: "#/components/schemas/PrivacyModelInstallationId"
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: pausePrivacyModelInstallation
@@ -1766,6 +1892,7 @@ paths:
         schema:
           $ref: "#/components/schemas/PrivacyModelInstallationId"
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Privacy Model]
       operationId: resumePrivacyModelInstallation
@@ -1794,6 +1921,7 @@ paths:
           $ref: "#/components/responses/BadGateway"
   /control/v1/auto-classifier/local/probe:
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Auto Classifier]
       operationId: probeLocalAutoClassifier
@@ -1833,6 +1961,7 @@ paths:
           $ref: "#/components/responses/InternalServerError"
   /control/v1/auto-classifier:
     get:
+      x-astrlink-role: observer
       x-astrlink-implementation-status: implemented
       tags: [Auto Classifier]
       operationId: listAutoClassifierInstallations
@@ -1853,6 +1982,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Auto Classifier]
       operationId: installAutoClassifier
@@ -1888,6 +2018,7 @@ paths:
           $ref: "#/components/responses/InternalServerError"
   /control/v1/auto-classifier/classify-preview:
     post:
+      x-astrlink-role: operator
       x-astrlink-implementation-status: implemented
       tags: [Auto Classifier]
       operationId: classifyPreviewAutoClassifier
@@ -1928,6 +2059,7 @@ paths:
   /control/v1/recovery-paths:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Routes]
       operationId: listRecoveryPaths
       deprecated: true
@@ -1937,6 +2069,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: createRecoveryPath
       deprecated: true
@@ -1954,6 +2087,7 @@ paths:
         schema:
           $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
     get:
+      x-astrlink-role: observer
       tags: [Routes]
       operationId: getRecoveryPath
       deprecated: true
@@ -1963,6 +2097,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     patch:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: updateRecoveryPath
       deprecated: true
@@ -1972,6 +2107,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     delete:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: deleteRecoveryPath
       deprecated: true
@@ -1983,6 +2119,7 @@ paths:
   /control/v1/recovery-paths/preview:
     x-astrlink-implementation-status: implemented
     post:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: previewRecoveryPath
       summary: Simulate the actual scheduler without saving, waiting, or sending inference requests.
@@ -2000,6 +2137,7 @@ paths:
         required: true
         schema: { type: string, enum: [web_search, image_generation] }
     get:
+      x-astrlink-role: operator
       operationId: getBuiltinToolCredentialStatus
       summary: Read whether the tool API key is configured, never its value.
       responses:
@@ -2011,6 +2149,7 @@ paths:
                 { $ref: "#/components/schemas/BuiltinToolCredentialStatus" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     put:
+      x-astrlink-role: operator
       operationId: putBuiltinToolCredential
       summary: Save a tool API key independently of routing settings.
       requestBody:
@@ -2039,6 +2178,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
     delete:
+      x-astrlink-role: operator
       operationId: deleteBuiltinToolCredential
       summary: Clear the stored tool API key.
       responses:
@@ -2057,6 +2197,7 @@ paths:
         required: true
         schema: { type: string, enum: [web_search, image_generation] }
     post:
+      x-astrlink-role: operator
       operationId: testBuiltinTool
       summary: Execute one real search or image call using the supplied configuration.
       description: Explicit invocation only; can incur backend charges. Never called by configuration saving.
@@ -2081,6 +2222,7 @@ paths:
   /control/v1/routing-settings:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Routes]
       operationId: getRoutingSettings
       summary: Read failure handling for requests without a matching route.
@@ -2097,6 +2239,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     patch:
+      x-astrlink-role: operator
       tags: [Routes]
       operationId: updateRoutingSettings
       summary: Configure unmatched request retries and service switching.
@@ -2120,9 +2263,35 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /control/v1/client-identities:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: observer
+      tags: [Routes]
+      operationId: getClientIdentities
+      summary: Read the learned and built-in subscription client versions.
+      description: |
+        Reports the Codex and Claude Code versions learned from official client
+        requests next to the built-in versions used until one is learned. A
+        learned version is reported even while learning is switched off.
+      responses:
+        "200":
+          description: Learned and built-in client identity versions.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientIdentities"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /control/v1/audit-settings:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Policies]
       operationId: getAuditSettings
       summary: Read the privileged global body-audit settings.
@@ -2140,6 +2309,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
     patch:
+      x-astrlink-role: operator
       tags: [Policies]
       operationId: updateAuditSettings
       summary: Update the privileged global body-audit settings.
@@ -2173,6 +2343,7 @@ paths:
   /control/v1/events:
     x-astrlink-implementation-status: planned
     get:
+      x-astrlink-role: observer
       tags: [Events]
       operationId: listEvents
       summary: List sanitized operational events.
@@ -2208,6 +2379,7 @@ paths:
   /control/v1/requests:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       operationId: listRequestRecords
       summary: List root request metadata records.
@@ -2245,6 +2417,16 @@ paths:
           in: query
           schema:
             $ref: "#/components/schemas/RequestStatus"
+        - name: q
+          in: query
+          description: |
+            Substring match (ASCII case-insensitive) against the root record's short
+            `input_preview`. Leading and trailing whitespace is trimmed; `%` and `_`
+            match literally. Not supported on request sessions.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
       responses:
         "200":
           description: Request-record page.
@@ -2264,6 +2446,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/RequestId"
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       operationId: getRequestRecord
       summary: Read one request metadata record.
@@ -2282,6 +2465,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
+      x-astrlink-role: operator
       tags: [Requests]
       operationId: deleteRequestRecord
       summary: Delete one metadata record and its encrypted audit content, if any.
@@ -2297,6 +2481,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/RequestId"
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       operationId: getRequestAuditContent
       summary: Decrypt and read explicitly captured audit content.
@@ -2306,6 +2491,32 @@ paths:
         must not be logged, cached, included in diagnostics, or exported as ordinary
         configuration. Root records may expose client and upstream sides; retry
         children expose only their own upstream capture fields.
+
+        `view=shareable` is open to the observer role and returns only parts that
+        passed a privacy decision; raw parts come back withheld. The default
+        `view=full` needs the operator role, or an approved raw access grant in
+        `X-AstrLink-Raw-Grant`; an observer without a grant receives 403. Until
+        a raw password protects the raw key, raw parts are not kept: they come
+        back withheld as `raw_not_kept`. Once one does and raw reading is not
+        unlocked, the operator's raw parts are withheld with reason
+        `raw_locked`. The grant header is control-plane
+        local and is never forwarded upstream. While `agent_raw_access_enabled`
+        is off, a read with a grant receives 409 `raw_access_disabled`.
+      parameters:
+        - name: view
+          in: query
+          description: Which parts to return. Unknown values are rejected.
+          schema:
+            $ref: "#/components/schemas/AuditContentView"
+        - name: X-AstrLink-Raw-Grant
+          in: header
+          description: |
+            Token of an approved raw access grant. A `once` grant reads its own
+            request one time; a timed grant reads any request until it ends.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
       responses:
         "200":
           description: Decrypted audit content.
@@ -2316,17 +2527,503 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuditContent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/requests/{request_id}/audit/raw-access:
+    x-astrlink-implementation-status: implemented
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      x-astrlink-role: observer
+      tags: [Requests]
+      operationId: requestRawAuditAccess
+      summary: Ask the desktop operator to approve reading a request's raw parts.
+      description: |
+        Files an in-memory grant awaiting a desktop decision. The returned token is
+        useless until the operator approves; it is shown only in this response
+        and is stored as a hash. A
+        Core restart invalidates every grant. A new request from the same client
+        for the same request replaces the one still awaiting a decision; at most
+        16 requests may await a decision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawAccessRequest"
+      responses:
+        "201":
+          description: Grant created and awaiting a decision.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawAccessGrantCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/audit/raw-access:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: operator
+      tags: [Requests]
+      operationId: listRawAuditAccess
+      summary: List agent raw access grants awaiting a decision and timed grants still running.
+      description: Grant tokens are never returned.
+      responses:
+        "200":
+          description: Pending and running grants, oldest first.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, active, unlocked]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 32
+                    items:
+                      $ref: "#/components/schemas/RawAccessGrant"
+                    description: Grants awaiting a decision.
+                  active:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RawAccessGrant"
+                    description: Approved timed grants that have not ended.
+                  unlocked:
+                    type: boolean
+                    description: |
+                      True while the operator's unlock session lasts, so an
+                      approval needs no password.
+                additionalProperties: false
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /control/v1/audit/raw-access/{grant_id}:
+    x-astrlink-implementation-status: implemented
+    parameters:
+      - name: grant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^rawgrant_[0-9a-f]{16}$"
+    delete:
+      x-astrlink-role: operator
+      tags: [Requests]
+      operationId: revokeRawAuditAccess
+      summary: Revoke a running timed grant.
+      description: |
+        Ends the grant and zeroes the raw key it holds. A grant that is not a
+        running timed grant returns 409 `raw_access_not_active`.
+      responses:
+        "200":
+          description: The revoked grant.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawAccessGrant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /control/v1/audit/raw-access/{grant_id}/decision:
+    x-astrlink-implementation-status: implemented
+    parameters:
+      - name: grant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^rawgrant_[0-9a-f]{16}$"
+    post:
+      x-astrlink-role: operator
+      tags: [Requests]
+      operationId: decideRawAuditAccess
+      summary: Approve or deny a pending agent raw access grant.
+      description: |
+        `deny` needs no proof. `once` allows one read of the requested record.
+        `window_5m` and `window_1h` allow unlimited reads of every request,
+        including ones recorded while the grant runs, until the window ends;
+        the grant keeps its own copy of the raw key, which is zeroed when it
+        ends, is revoked, or Core exits. While the operator's unlock session
+        lasts an approval needs no proof; otherwise it needs the raw password
+        and returns 422 `raw_proof_required` without one. Repeated wrong
+        passwords back off exponentially and return 429 with `Retry-After`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawAccessDecision"
+      responses:
+        "200":
+          description: The decided grant.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawAccessGrant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/audit/raw-grant:
+    x-astrlink-implementation-status: implemented
+    parameters:
+      - name: X-AstrLink-Raw-Grant
+        in: header
+        required: true
+        description: The grant token returned when the request was filed.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    get:
+      x-astrlink-role: observer
+      tags: [Requests]
+      operationId: getRawAuditGrant
+      summary: Read the state of the caller's own raw access grant.
+      description: |
+        While `agent_raw_access_enabled` is off it returns 409
+        `raw_access_disabled`. An unknown token returns 403 `raw_grant_invalid`.
+      responses:
+        "200":
+          description: The grant.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawAccessGrant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      x-astrlink-role: observer
+      tags: [Requests]
+      operationId: revokeRawAuditGrant
+      summary: Revoke the caller's own raw access grant.
+      description: |
+        Whoever holds the token may revoke it; no password is needed. Revoking
+        a grant that already ended returns its final state. An unknown token
+        returns 403 `raw_grant_invalid`.
+      responses:
+        "200":
+          description: The grant after revoking.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawAccessGrant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /control/v1/audit/raw-sealing:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: observer
+      tags: [Requests]
+      operationId: getRawSealing
+      summary: Report whether captured raw parts are sealed and unlocked.
+      description: |
+        Operators receive `RawSealingStatus`. Observers receive only
+        `RawSealingSummary`, which says whether asking for raw access can
+        succeed. Neither view carries key material.
+      responses:
+        "200":
+          description: Raw sealing state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RawSealingStatus"
+                  - $ref: "#/components/schemas/RawSealingSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/audit/raw-password:
+    x-astrlink-implementation-status: implemented
+    post:
+      x-astrlink-role: operator
+      tags: [Requests]
+      operationId: changeRawPassword
+      summary: Set, change, or reset the password that seals raw parts.
+      description: |
+        `set` adds the first password and takes no proof. `change` needs the
+        current password as `proof`. `reset` replaces the key pair and discards
+        every captured raw part sealed to the old key; it always needs a new
+        password and takes no proof, since it is how a forgotten password is
+        recovered from.
+        Passwords contain 8 to 128 characters.
+        Raw parts are kept only once a password protects the raw key. Wrong
+        proofs back off like raw access decisions. A successful call revokes
+        every agent grant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawPasswordRequest"
+      responses:
+        "200":
+          description: The new raw sealing state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawPasswordResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/audit/raw-unlock:
+    x-astrlink-implementation-status: implemented
+    post:
+      x-astrlink-role: operator
+      tags: [Requests]
+      operationId: unlockRawSealing
+      summary: Unlock raw parts for the desktop operator.
+      description: |
+        Opens the raw key with a proof and keeps it in Core memory until 15
+        minutes pass without a raw read, `raw-lock` is called, or Core exits.
+        While it lasts, approving an agent request needs no password; the
+        approved grant keeps its own key and outlives it. Without a raw password
+        it returns 409 `raw_access_unavailable`. Repeated wrong proofs return
+        429 with `Retry-After`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawUnlockRequest"
+      responses:
+        "200":
+          description: The unlocked raw sealing state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawSealingStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/audit/raw-verify:
+    x-astrlink-implementation-status: implemented
+    post:
+      x-astrlink-role: operator
+      tags: [Requests]
+      operationId: verifyRawSealing
+      summary: Check a raw proof without unlocking.
+      description: |
+        Checks a proof like `raw-unlock` and zeroes the raw key at once. It
+        neither starts nor extends the unlock session, and it leaves an open
+        session as it was. Wrong passwords count toward the same backoff as
+        every other proof, and a backoff returns 429 with `Retry-After`.
+        Without a raw password it returns 409 `raw_access_unavailable`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawUnlockRequest"
+      responses:
+        "200":
+          description: The raw sealing state, including the key fingerprint the proof opened.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawSealingStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/audit/raw-lock:
+    x-astrlink-implementation-status: implemented
+    post:
+      x-astrlink-role: operator
+      tags: [Requests]
+      operationId: lockRawSealing
+      summary: End the operator's raw unlock session now.
+      description: |
+        Clears the raw private key from Core memory and revokes every agent
+        grant. The desktop's automatic lock, when its window is hidden or
+        minimized, sends `keep_agent_grants: true` to leave the grants running.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawLockRequest"
+      responses:
+        "200":
+          description: The locked raw sealing state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RawSealingStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/local-data:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: observer
+      tags: [Bootstrap]
+      operationId: getLocalDataStatus
+      summary: Count saved data this device cannot decrypt.
+      description: |
+        Non-zero counts mean the data directory came from another device or
+        the local key that sealed it is gone. The response carries counts
+        only, never names, references, or values.
+      responses:
+        "200":
+          description: Local data status.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalDataStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/observers:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: observer
+      tags: [Requests]
+      operationId: getObservers
+      summary: Report recent agent-side reads of the control plane.
+      description: |
+        Requests from the local control socket or the agent CLI count as agent
+        reads. The desktop uses this to show that an agent is watching and how far
+        its latest read reached. The state lives in Core memory only.
+      responses:
+        "200":
+          description: Observer state.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObserversResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /control/v1/requests/{request_id}/children:
     x-astrlink-implementation-status: implemented
     parameters:
       - $ref: "#/components/parameters/RequestId"
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       operationId: listRequestRecordChildren
       summary: List failed retry attempts folded under a root request record.
@@ -2352,6 +3049,7 @@ paths:
   /control/v1/requests/purge:
     x-astrlink-implementation-status: implemented
     post:
+      x-astrlink-role: operator
       tags: [Requests]
       operationId: purgeRequestRecords
       summary: Explicitly delete request records and associated encrypted audit content.
@@ -2375,6 +3073,7 @@ paths:
   /control/v1/request-sessions:
     x-astrlink-implementation-status: implemented
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       operationId: listRequestSessions
       summary: List conversation sessions aggregated from root request records.
@@ -2442,6 +3141,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/SessionId"
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       operationId: getRequestSession
       summary: Read one session summary and its root turns in time order.
@@ -2464,6 +3164,7 @@ paths:
     parameters:
       - $ref: "#/components/parameters/SessionId"
     get:
+      x-astrlink-role: observer
       tags: [Requests]
       parameters:
         - name: before
@@ -2487,6 +3188,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
+      x-astrlink-role: operator
       tags: [Requests]
       operationId: releaseSessionChannelBindings
       summary: Release all ordinary channel preferences for this session and fence in-flight writes.
@@ -2620,6 +3322,29 @@ components:
       headers:
         Cache-Control:
           $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: The caller's role or grant does not allow this operation.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    TooManyRequests:
+      description: Too many attempts or live requests; retry later.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        Retry-After:
+          description: Seconds to wait before retrying, when known.
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:
@@ -2868,6 +3593,7 @@ components:
         - control_api_version
         - protocol_contract_version
         - inference_url
+        - client_inference_url
         - control_url
       properties:
         event:
@@ -2885,6 +3611,14 @@ components:
           type: string
           format: uri
           pattern: "^http://127\\.0\\.0\\.1:(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?![\\s\\S])"
+        client_inference_url:
+          description: >-
+            Address written into client configs. It is http://localhost on the
+            inference port only while the core also listens on [::1]; otherwise
+            it equals inference_url.
+          type: string
+          format: uri
+          pattern: "^http://(?:127\\.0\\.0\\.1|localhost):(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?![\\s\\S])"
         control_url:
           type: string
           format: uri
@@ -3321,6 +4055,30 @@ components:
         duration_ms: { type: integer, minimum: 0 }
         result_count: { type: integer, minimum: 0 }
         usage: { type: [object, "null"], additionalProperties: true }
+    ClientIdentities:
+      type: object
+      required: [codex, claude, grok]
+      properties:
+        codex:
+          $ref: "#/components/schemas/ClientIdentityStatus"
+        claude:
+          $ref: "#/components/schemas/ClientIdentityStatus"
+        grok:
+          $ref: "#/components/schemas/ClientIdentityStatus"
+      additionalProperties: false
+    ClientIdentityStatus:
+      type: object
+      required: [builtin_version]
+      properties:
+        learned_version:
+          type: string
+          maxLength: 64
+          description: Version learned from official client requests; absent until one is learned.
+        builtin_version:
+          type: string
+          maxLength: 64
+          description: Version of the built-in identity used until one is learned.
+      additionalProperties: false
     RoutingSettings:
       type: object
       required:
@@ -3345,7 +4103,7 @@ components:
         grok_identity_enforcement:
           type: boolean
           default: true
-          description: Use the default Grok client identity. When disabled, preserve recognized Grok client identities with a matching version header.
+          description: Use the resolved Grok shell identity, raising its version from the version header or Grok User-Agent when newer. When disabled, preserve recognized Grok client identities with a matching version header.
         subscription_risk_protection:
           type: boolean
           default: true
@@ -3370,11 +4128,17 @@ components:
           type: boolean
           default: true
           description: Let recognized Claude Code requests replace the built-in Claude identity used for converted requests, model discovery, connection tests, OAuth and usage requests. When disabled, the built-in identity is used and nothing new is learned.
+        grok_identity_auto_learn:
+          type: boolean
+          default: true
+          description: Learn newer versions from recognized Grok CLI requests and persist them for forwarding, model discovery, connection tests, OAuth and usage requests. Never learn below the built-in baseline. When disabled, ignore learned versions and stop learning.
         codex_identity_auto_learn:
           type: boolean
           default: true
           description: Let recognized Codex CLI requests replace the built-in Codex identity used for converted requests, model discovery, connection tests, OAuth and usage requests. When disabled, the built-in identity is used and nothing new is learned.
         claude_identity_version:
+          $ref: "#/components/schemas/ClientIdentityVersion"
+        grok_identity_version:
           $ref: "#/components/schemas/ClientIdentityVersion"
         codex_identity_version:
           $ref: "#/components/schemas/CodexIdentityVersion"
@@ -3441,7 +4205,14 @@ components:
           type: boolean
         codex_identity_auto_learn:
           type: boolean
+        grok_identity_auto_learn:
+          type: boolean
         claude_identity_version:
+          description: An empty string removes the override; null is rejected.
+          oneOf:
+            - $ref: "#/components/schemas/ClientIdentityVersion"
+            - { type: string, const: "" }
+        grok_identity_version:
           description: An empty string removes the override; null is rejected.
           oneOf:
             - $ref: "#/components/schemas/ClientIdentityVersion"
@@ -3507,6 +4278,7 @@ components:
         - codex_subscription
         - claude_subscription
         - grok_subscription
+        - antigravity_subscription
         - opencode_go
         - opencode_zen
         - kimi_coding
@@ -3547,6 +4319,15 @@ components:
           pattern: "^local://service/[a-z][a-z0-9_-]{2,95}$"
           readOnly: true
           description: Opaque local credential reference; never contains credential bytes.
+        credential_hint:
+          type: string
+          maxLength: 16
+          pattern: "^…"
+          readOnly: true
+          description: >
+            Last four characters of the saved API key, prefixed with an ellipsis.
+            Returned only on the operator's single-service read and never persisted;
+            keys shorter than twelve characters have no hint.
       additionalProperties: false
     SubscriptionServiceConnection:
       type: object
@@ -3554,7 +4335,7 @@ components:
       properties:
         provider:
           type: string
-          enum: [openai_codex, claude_code, xai_grok]
+          enum: [openai_codex, claude_code, xai_grok, antigravity]
         status:
           type: string
           enum: [disconnected, authorizing, connected, needs_reauth, error]
@@ -3567,9 +4348,9 @@ components:
         credential_ref:
           type: string
           maxLength: 512
-          pattern: "^keyring://"
+          pattern: "^(?:local://subscription/[a-z][a-z0-9_-]{2,95}|keyring://.+)$"
           readOnly: true
-          description: Opaque keyring reference; OAuth token bytes never cross the control API.
+          description: Opaque credential reference. local://subscription/<service id> names the OAuth tokens sealed in local storage; keyring:// remains only on accounts whose tokens have not yet moved out of the OS keystore. OAuth token bytes never cross the control API.
         authorization_boundary:
           type: string
           maxLength: 240
@@ -3693,7 +4474,13 @@ components:
       oneOf:
         - properties:
             kind:
-              enum: [codex_subscription, claude_subscription, grok_subscription]
+              enum:
+                [
+                  codex_subscription,
+                  claude_subscription,
+                  grok_subscription,
+                  antigravity_subscription,
+                ]
           required: [subscription]
           not:
             required: [http]
@@ -3755,7 +4542,13 @@ components:
       oneOf:
         - properties:
             kind:
-              enum: [codex_subscription, claude_subscription, grok_subscription]
+              enum:
+                [
+                  codex_subscription,
+                  claude_subscription,
+                  grok_subscription,
+                  antigravity_subscription,
+                ]
           not:
             required: [http]
         - properties:
@@ -3970,6 +4763,108 @@ components:
             carries the mapping. Requests that emit only natural stand-ins skip
             it, since those need no explanation.
       additionalProperties: false
+    PolicySummary:
+      type: object
+      description: >
+        The observer view of a policy. Allowlist entries and custom regex
+        patterns can name the values the policy guards, so they are reported as
+        counts and kinds only.
+      required:
+        - id
+        - name
+        - enabled
+        - priority
+        - detector
+        - local_model_id
+        - min_confidence
+        - regex_source
+        - custom_regex_rules
+        - enabled_kinds
+        - allowlist
+        - match
+        - request_action
+        - response_action
+        - response_restore
+        - restore_tool_arguments
+        - placeholder_notice
+        - skip_tool_declarations
+        - inspect_additional_tools
+      properties:
+        id:
+          $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        enabled:
+          type: boolean
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        detector:
+          $ref: "#/components/schemas/PolicyDetector"
+        local_model_id:
+          oneOf:
+            - $ref: "#/components/schemas/PrivacyModelInstallationId"
+            - type: "null"
+        min_confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        regex_source:
+          $ref: "#/components/schemas/PolicyRegexSource"
+        custom_regex_rules:
+          type: object
+          required: [count, kinds]
+          properties:
+            count:
+              type: integer
+              minimum: 0
+            kinds:
+              type: array
+              uniqueItems: true
+              items:
+                $ref: "#/components/schemas/PrivacyRegexDetectorKind"
+          additionalProperties: false
+        enabled_kinds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/PrivacyKind"
+        allowlist:
+          type: object
+          required: [count, by_type]
+          properties:
+            count:
+              type: integer
+              minimum: 0
+            by_type:
+              type: object
+              propertyNames:
+                enum: [literal, domain_suffix, cidr]
+              additionalProperties:
+                type: integer
+                minimum: 1
+          additionalProperties: false
+        match:
+          $ref: "#/components/schemas/PolicyMatch"
+        request_action:
+          $ref: "#/components/schemas/PolicyAction"
+        response_action:
+          type: string
+          const: allow
+        response_restore:
+          type: boolean
+        restore_tool_arguments:
+          type: boolean
+        placeholder_notice:
+          type: boolean
+        skip_tool_declarations:
+          type: boolean
+        inspect_additional_tools:
+          type: boolean
+      additionalProperties: false
     PolicyKindRule:
       type: object
       required: [kind, enabled, style]
@@ -3984,8 +4879,10 @@ components:
       description: >
         Per-kind detection switch and placeholder shape. url and ip_address ship
         disabled because they are the dominant false-positive source for coding
-        agents. common_secret, private_person, private_address, and private_date
-        are rejected with any style other than token.
+        agents. phone ships with the token style because models regroup its
+        stand-in and its fictional number block is small. common_secret,
+        private_person, private_address, and private_date are rejected with any
+        style other than token.
     PlaceholderStyle:
       type: string
       enum: [natural, token]
@@ -4373,6 +5270,8 @@ components:
         - languages
         - adapter
         - variants
+        - version
+        - recommended
       properties:
         id:
           $ref: "#/components/schemas/PrivacyModelCatalogId"
@@ -4415,6 +5314,13 @@ components:
           maxItems: 32
           items:
             $ref: "#/components/schemas/PrivacyModelVariant"
+        version:
+          type: [string, "null"]
+          pattern: "^(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})$"
+          description: Published release tag without its leading `v`; null for models that are not released through versioned tags.
+        recommended:
+          type: boolean
+          description: Whether AstrLink recommends this model for new installations.
       additionalProperties: false
     PrivacyModelCatalog:
       type: object
@@ -4848,6 +5754,9 @@ components:
           type: integer
           minimum: 1
           maximum: 365
+        agent_raw_access_enabled:
+          type: boolean
+          description: Lets agents ask for raw audit content. Turning it off revokes every pending and approved grant.
         audit_risk_acknowledged:
           type: boolean
           writeOnly: true
@@ -5053,6 +5962,15 @@ components:
           oneOf:
             - $ref: ./protocol-capabilities.schema.json#/$defs/ExecutionPlan
             - type: "null"
+        conversion_diagnostics:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/ConversionDiagnostic"
+          description: |
+            Tools and fields this attempt's local protocol conversion dropped or
+            rewrote. Informational: the conversion still succeeded. Omitted when
+            nothing was lost, for unconverted plans, and on legacy rows.
         http_status:
           type: [integer, "null"]
           minimum: 100
@@ -5140,8 +6058,65 @@ components:
           items:
             $ref: "#/components/schemas/RequestEvent"
           description: Gateway phase events for this attempt. Empty on legacy rows.
+        privacy_decision:
+          $ref: "#/components/schemas/PrivacyDecision"
+        privacy_findings:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/PrivacyFinding"
+          description: Present for redact and block decisions. Omitted on legacy rows.
         extensions:
           $ref: ./protocol-capabilities.schema.json#/$defs/Extensions
+      additionalProperties: false
+    PrivacyDecision:
+      type: string
+      enum: [none, allow, warn, redact, block, fail_open]
+      description: |
+        Request-time privacy outcome. Retries combine to the most severe decision
+        any attempt reached. Omitted on records captured before decisions were
+        recorded.
+    ConversionDiagnostic:
+      type: object
+      required: [phase, severity, code, message]
+      description: |
+        One tool or field a local protocol conversion dropped or rewrote. error
+        marks a loss that can change what the model or its tools do; warning
+        marks presentation-only detail. Path points into the converted body and
+        never carries the content itself.
+      properties:
+        phase:
+          type: string
+          enum: [request, response]
+        severity:
+          type: string
+          enum: [warning, error]
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+        path:
+          type: string
+          minLength: 1
+          maxLength: 256
+        message:
+          type: string
+          maxLength: 1024
+      additionalProperties: false
+    PrivacyFinding:
+      type: object
+      required: [kind, json_path, count]
+      description: Where accepted matches of one kind were found. Never carries the matched value or a placeholder.
+      properties:
+        kind:
+          $ref: "#/components/schemas/PrivacyCanonicalKind"
+        json_path:
+          type: string
+          minLength: 1
+          maxLength: 256
+        count:
+          type: integer
+          minimum: 1
       additionalProperties: false
     SessionCursorKind:
       type: string
@@ -5255,8 +6230,8 @@ components:
         protocol_unsupported: the provider has no capability for the input protocol.
         streaming_unsupported: the provider cannot stream this protocol.
         conversion_unavailable: the model only speaks another protocol and the local converter cannot bridge the request.
-        circuit_open: recent failures opened the provider's circuit breaker.
-        rate_limited: the provider is cooling down after an upstream rate limit.
+        circuit_open: historical records only; AstrLink no longer withholds a provider after failures.
+        rate_limited: the upstream answered HTTP 429 for this model and its retry delay has not passed.
         websocket_disabled: Responses WebSocket is turned off for the provider.
         websocket_unsupported: the provider cannot serve this model over a native Responses WebSocket.
     RequestEvent:
@@ -5439,8 +6414,29 @@ components:
           type: string
           minLength: 1
           maxLength: 1024
-          description: Operator-visible failure text. Transport errors may include the upstream host, URL, and IP; credentials (Authorization, API keys, sensitive query values) are redacted. Never contains request or response bodies or header maps.
+          description: Operator-visible failure text. For an upstream HTTP error it is the provider's own message, prefixed with its error type or code. Transport errors may include the upstream host, URL, and IP; credentials (Authorization, API keys, sensitive query values) are redacted from transport errors.
         retryable:
+          type: boolean
+        upstream:
+          $ref: "#/components/schemas/UpstreamErrorResponse"
+      additionalProperties: false
+    UpstreamErrorResponse:
+      type: object
+      description: An upstream HTTP error as the provider sent it, kept whatever the audit capture settings and never redacted.
+      required: [status, body, truncated]
+      properties:
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        content_type:
+          type: string
+          maxLength: 256
+        body:
+          type: string
+          maxLength: 16384
+          description: The decoded response body, cut at 16 KiB.
+        truncated:
           type: boolean
       additionalProperties: false
     AuditRecordSummary:
@@ -5521,6 +6517,8 @@ components:
       type: object
       required:
         - request_id
+        - view
+        - privacy_findings
         - http_meta
         - request_body
         - response_content
@@ -5530,6 +6528,14 @@ components:
       properties:
         request_id:
           $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
+        view:
+          $ref: "#/components/schemas/AuditContentView"
+        privacy_findings:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/PrivacyFinding"
+          description: Kinds and structural paths the privacy decision found, so a withheld part can still be explained.
         http_meta:
           oneOf:
             - $ref: "#/components/schemas/AuditHTTPMeta"
@@ -5618,9 +6624,18 @@ components:
           items:
             $ref: "#/components/schemas/AuditHeader"
       additionalProperties: false
+    AuditContentView:
+      type: string
+      enum: [shareable, full]
+      default: full
+      description: "`shareable` returns only parts that passed a privacy decision; `full` also returns raw parts the caller may read."
     AuditContentPart:
+      oneOf:
+        - $ref: "#/components/schemas/AuditReadablePart"
+        - $ref: "#/components/schemas/AuditWithheldPart"
+    AuditReadablePart:
       type: object
-      required: [media_type, content, truncated, captured_bytes]
+      required: [media_type, content, truncated, captured_bytes, exposure]
       properties:
         media_type:
           type: string
@@ -5634,6 +6649,393 @@ components:
         captured_bytes:
           type: integer
           minimum: 0
+        exposure:
+          type: string
+          enum: [shareable, raw]
+          description: "`shareable` parts passed a privacy decision; `raw` parts did not."
+      additionalProperties: false
+    AuditWithheldPart:
+      type: object
+      required:
+        [withheld, reason, raw_available, media_type, truncated, captured_bytes]
+      description: A captured part the caller may not read. It never carries content.
+      properties:
+        withheld:
+          type: boolean
+          const: true
+        reason:
+          $ref: "#/components/schemas/AuditWithheldReason"
+        raw_available:
+          type: boolean
+          description: Whether requesting raw access can succeed; raw sealing is set up and agent raw access is enabled.
+        media_type:
+          type: string
+          minLength: 1
+          maxLength: 128
+        truncated:
+          type: boolean
+        captured_bytes:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    AuditWithheldReason:
+      type: string
+      enum:
+        - privacy_redacted
+        - privacy_blocked
+        - privacy_restored
+        - privacy_fail_open
+        - privacy_pending
+        - privacy_unknown
+        - raw_locked
+        - raw_not_kept
+      description: |
+        Why a part was withheld. `privacy_unknown` covers parts captured before
+        decisions were recorded; `raw_locked` is returned to the operator until
+        raw reading is unlocked. `raw_not_kept` marks raw parts captured before
+        a raw password protected the raw key, whose content was never stored.
+    RawAccessRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Why the agent needs the raw parts; shown to the operator.
+        client_name:
+          type: string
+          maxLength: 64
+          description: Agent client name shown to the operator. Defaults to `agent`.
+      additionalProperties: false
+    RawLockRequest:
+      type: object
+      properties:
+        keep_agent_grants:
+          type: boolean
+          default: false
+      additionalProperties: false
+    RawAccessGrantStatus:
+      type: string
+      enum: [pending, approved, denied, expired, consumed, revoked]
+    RawAccessDecisionMode:
+      type: string
+      enum: [once, window_5m, window_1h, deny]
+    RawAccessGrant:
+      allOf:
+        - $ref: "#/components/schemas/RawAccessGrantFields"
+      unevaluatedProperties: false
+    RawAccessGrantFields:
+      type: object
+      required:
+        [
+          grant_id,
+          request_id,
+          status,
+          reason,
+          client_name,
+          created_at,
+          expires_at,
+        ]
+      properties:
+        grant_id:
+          type: string
+          pattern: "^rawgrant_[0-9a-f]{16}$"
+        request_id:
+          $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
+        status:
+          $ref: "#/components/schemas/RawAccessGrantStatus"
+        decision:
+          $ref: "#/components/schemas/RawAccessDecisionMode"
+        scope:
+          type: string
+          enum: [request, all_requests]
+          description: |
+            Present once decided: `request` for a `once` grant, `all_requests`
+            for a timed grant.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        client_name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+    RawAccessGrantCreated:
+      allOf:
+        - $ref: "#/components/schemas/RawAccessGrantFields"
+      type: object
+      required: [grant_token]
+      properties:
+        grant_token:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Bearer for `X-AstrLink-Raw-Grant`. Returned once; keep it in memory only.
+      unevaluatedProperties: false
+    RawProof:
+      type: object
+      required: [password]
+      properties:
+        kind:
+          type: string
+          const: password
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+          writeOnly: true
+      additionalProperties: false
+    RawAccessDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          $ref: "#/components/schemas/RawAccessDecisionMode"
+        proof:
+          oneOf:
+            - $ref: "#/components/schemas/RawProof"
+            - type: "null"
+          description: |
+            The raw password. Needed to approve while the operator's unlock
+            session is closed; ignored for `deny`.
+      additionalProperties: false
+    RawAccessEvent:
+      type: object
+      required: [at, kind, client_name]
+      description: |
+        One step of an agent raw access request, or a change to the raw password
+        or key. Identifiers only; never content or proof. A `password_invalid`
+        event from the desktop's own unlock or password change, and the
+        `raw_password_set`, `raw_password_changed` and `raw_key_reset` events,
+        carry no `grant_id` or `request_id`.
+      properties:
+        at:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          enum:
+            [
+              requested,
+              approved,
+              denied,
+              password_invalid,
+              raw_read,
+              revoked,
+              raw_password_set,
+              raw_password_changed,
+              raw_key_reset,
+            ]
+        grant_id:
+          type: string
+          pattern: "^rawgrant_[0-9a-f]{16}$"
+        request_id:
+          $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
+        client_name:
+          type: string
+          maxLength: 64
+        decision:
+          $ref: "#/components/schemas/RawAccessDecisionMode"
+      additionalProperties: false
+    LocalDataStatus:
+      type: object
+      required:
+        [unreadable_credentials, unreadable_access_tokens, audit_key_missing]
+      properties:
+        unreadable_credentials:
+          type: integer
+          minimum: 0
+          description: Service API keys, proxy and built-in tool credentials, and subscription sign-ins that must be entered again.
+        unreadable_access_tokens:
+          type: integer
+          minimum: 0
+          description: Local access tokens whose value can no longer be shown. They still authenticate.
+        audit_key_missing:
+          type: boolean
+          description: Bodies captured earlier cannot be opened on this device.
+      additionalProperties: false
+    RawSealingSummary:
+      type: object
+      required: [raw_available]
+      description: The observer view of raw sealing.
+      properties:
+        raw_available:
+          type: boolean
+          description: Raw sealing is set up and agent raw access is enabled.
+      additionalProperties: false
+    RawSealingStatus:
+      allOf:
+        - $ref: "#/components/schemas/RawSealingStatusFields"
+      unevaluatedProperties: false
+    RawSealingStatusFields:
+      type: object
+      required:
+        - raw_available
+        - configured
+        - password_set
+        - password_required
+        - envelopes
+        - key_verified
+        - unlocked
+        - unlock_expires_at
+        - unlock_idle_seconds
+        - retry_after_seconds
+        - password_min_length
+        - password_max_length
+        - key_fingerprint
+      description: The operator view of raw sealing. It never carries key material.
+      properties:
+        raw_available:
+          type: boolean
+        configured:
+          type: boolean
+          description: A raw key pair exists.
+        password_set:
+          type: boolean
+        password_required:
+          type: boolean
+          description: |
+            True while no raw password protects the raw key. Until one does raw
+            parts are not kept and nothing raw is readable; shareable parts and
+            forwarding are unaffected.
+        envelopes:
+          type: array
+          maxItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [password]
+        key_verified:
+          type: boolean
+          description: |
+            False while a proof has yet to confirm the stored public key; raw
+            parts captured meanwhile are not kept.
+        unlocked:
+          type: boolean
+        unlock_expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the idle unlock session ends unless a raw read extends it.
+        unlock_idle_seconds:
+          type: integer
+          minimum: 1
+        retry_after_seconds:
+          type: integer
+          minimum: 0
+          description: Seconds before another password attempt is accepted.
+        password_min_length:
+          type: integer
+          minimum: 1
+        password_max_length:
+          type: integer
+          minimum: 1
+        key_fingerprint:
+          type: string
+          pattern: "^([0-9a-f]{64})?$"
+          description: |
+            Lowercase hex SHA-256 of the raw public key, or empty before a key
+            exists. A change keeps it and a reset replaces it, so the desktop
+            can notice a key replaced outside it. It is not key material.
+    RawPasswordAction:
+      type: string
+      enum: [set, change, reset]
+    RawPasswordRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: "#/components/schemas/RawPasswordAction"
+        password:
+          type: [string, "null"]
+          minLength: 8
+          maxLength: 128
+          writeOnly: true
+          description: The new password. Lengths count Unicode characters.
+        proof:
+          oneOf:
+            - $ref: "#/components/schemas/RawProof"
+            - type: "null"
+          description: The current password; required for `change`, ignored for `set` and `reset`.
+      additionalProperties: false
+    RawPasswordResponse:
+      allOf:
+        - $ref: "#/components/schemas/RawSealingStatusFields"
+      type: object
+      properties:
+        reset:
+          type: object
+          required: [deleted_parts, affected_records]
+          description: What a reset discarded; absent for `set` and `change`.
+          properties:
+            deleted_parts:
+              type: integer
+              minimum: 0
+            affected_records:
+              type: integer
+              minimum: 0
+          additionalProperties: false
+      unevaluatedProperties: false
+    RawUnlockRequest:
+      type: object
+      required: [proof]
+      properties:
+        proof:
+          $ref: "#/components/schemas/RawProof"
+      additionalProperties: false
+    ObserversResponse:
+      type: object
+      required:
+        - last_seen_at
+        - client
+        - requests
+        - read_level
+        - last_raw_read_at
+        - pending_raw_access
+        - active_raw_grants
+        - raw_access_events
+        - raw_password_required
+      properties:
+        last_seen_at:
+          type: [string, "null"]
+          format: date-time
+        client:
+          type: string
+          maxLength: 64
+        requests:
+          type: integer
+          minimum: 0
+        read_level:
+          type: string
+          enum: ["", metadata, shareable, raw]
+          description: Level of the latest agent-side request; empty before any.
+        last_raw_read_at:
+          type: [string, "null"]
+          format: date-time
+        pending_raw_access:
+          type: integer
+          minimum: 0
+        active_raw_grants:
+          type: integer
+          minimum: 0
+          description: Approved timed grants that have not ended.
+        raw_access_events:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/RawAccessEvent"
+          description: Recent raw access steps, oldest first.
+        raw_password_required:
+          type: boolean
+          description: |
+            True while no raw password protects the raw key, so the desktop can
+            point at the setup from the tray as well as the main window.
       additionalProperties: false
     PurgeRequest:
       type: object
@@ -5699,6 +7101,19 @@ components:
           maxItems: 1
           items:
             $ref: "#/components/schemas/Policy"
+        next_cursor:
+          type: "null"
+      additionalProperties: false
+    PolicySummaryPage:
+      type: object
+      required: [items, next_cursor]
+      description: The observer view of the policy list.
+      properties:
+        items:
+          type: array
+          maxItems: 1
+          items:
+            $ref: "#/components/schemas/PolicySummary"
         next_cursor:
           type: "null"
       additionalProperties: false
@@ -5778,6 +7193,9 @@ components:
           uniqueItems: true
           items:
             $ref: ./protocol-capabilities.schema.json#/$defs/PlanType
+        retry_after_seconds:
+          type: integer
+          minimum: 1
       additionalProperties: false
     SubscriptionError:
       type: object
@@ -5858,7 +7276,7 @@ components:
     AuthorizationFlow:
       type: string
       enum: [browser, device_code, authorization_code]
-      description: Codex supports browser and device_code. Claude Code supports authorization_code with PKCE and a manual code#state callback. Grok (xai_grok) supports device_code only (RFC 8628 against auth.x.ai).
+      description: Codex supports browser and device_code. Claude Code supports authorization_code with PKCE and a manual code#state callback. Grok (xai_grok) supports device_code only (RFC 8628 against auth.x.ai). Antigravity supports browser authorization with Google OAuth and a loopback callback.
     AuthorizationStartRequest:
       type: object
       required: [flow]
@@ -5896,7 +7314,7 @@ components:
           $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
         provider:
           type: string
-          enum: [openai_codex, claude_code, xai_grok]
+          enum: [openai_codex, claude_code, xai_grok, antigravity]
         status:
           type: string
           enum: [pending, completed, cancelled, expired, failed]
@@ -6183,7 +7601,7 @@ components:
           $ref: "#/components/schemas/RateLimitWindow"
         additional_rate_limits:
           type: array
-          maxItems: 16
+          maxItems: 256
           items:
             $ref: "#/components/schemas/AdditionalRateLimit"
         credits:

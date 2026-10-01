@@ -3,7 +3,6 @@ package controlapi
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,41 +32,6 @@ type serviceCapabilityInput struct {
 	Mode      *contract.CapabilityMode `json:"mode"`
 	Streaming *bool                    `json:"streaming"`
 	ConvertTo *contract.ProtocolID     `json:"convert_to,omitempty"`
-}
-
-func (handler *Handler) authenticated(next http.HandlerFunc) http.HandlerFunc {
-	return func(writer http.ResponseWriter, request *http.Request) {
-		// Authenticated agent-side readers are recorded before dispatch so the
-		// desktop can show that records are being read while the call runs.
-		dispatch := func() {
-			if request.URL.Path != ObserversPath {
-				handler.observers.note(request)
-			}
-			next(writer, request)
-		}
-		if LocalSocketAuthenticated(request) {
-			dispatch()
-			return
-		}
-		const prefix = "Bearer "
-		authorization := request.Header.Get("Authorization")
-		provided := []byte("")
-		if strings.HasPrefix(authorization, prefix) {
-			provided = []byte(strings.TrimPrefix(authorization, prefix))
-		}
-		if len(provided) != len(handler.controlToken) ||
-			subtle.ConstantTimeCompare(provided, handler.controlToken) != 1 {
-			writer.Header().Set("WWW-Authenticate", `Bearer realm="astrlink-control"`)
-			writeError(
-				writer,
-				http.StatusUnauthorized,
-				"unauthorized",
-				"missing or invalid local control token",
-			)
-			return
-		}
-		dispatch()
-	}
 }
 
 func decodeServiceCapabilities(raw json.RawMessage) ([]contract.Capability, error) {

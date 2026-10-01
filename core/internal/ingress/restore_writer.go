@@ -208,19 +208,18 @@ func (writer *restoringResponseWriter) Finish() error {
 	var restored []byte
 	switch contentType {
 	case "text/plain":
-		value, count, pending := restoreVisibleText(string(original), writer.engine.replacements)
+		value, count, _ := writer.engine.plain.Restore(string(original), true)
 		restored = []byte(value)
 		writer.textRestored += count
-		if pending {
-			writer.textFallbacks++
-		}
 	case "text/event-stream":
 		// A non-streaming request receiving SSE is an upstream shape mismatch.
 		// Preserve it rather than applying raw substitutions to unknown fields.
 		restored = original
 		writer.engine.fallbacks++
 	default:
-		restored = writer.engine.push(newJSONRestoreFrame(nil, original))
+		frame := newJSONRestoreFrame(nil, original)
+		frame.complete = true
+		restored = writer.engine.push(frame)
 		if pending := writer.engine.finish(); len(pending) > 0 {
 			restored = append(restored, pending...)
 		}
@@ -280,14 +279,8 @@ func (writer *restoringResponseWriter) finishSSE() []byte {
 
 func (writer *restoringResponseWriter) pushText(chunk []byte) []byte {
 	combined := writer.textPending + string(chunk)
-	writer.textPending = ""
-	hold := trailingRestorePrefix(combined, writer.engine.replacements)
-	stable := combined
-	if hold > 0 {
-		stable = combined[:len(combined)-hold]
-		writer.textPending = combined[len(combined)-hold:]
-	}
-	restored, count, _ := restoreVisibleText(stable, writer.engine.replacements)
+	restored, count, hold := writer.engine.plain.Restore(combined, false)
+	writer.textPending = combined[len(combined)-hold:]
 	writer.textRestored += count
 	return []byte(restored)
 }
@@ -296,10 +289,14 @@ func (writer *restoringResponseWriter) finishText() []byte {
 	if writer.textPending == "" {
 		return nil
 	}
-	pending := []byte(writer.textPending)
+	restored, count, _ := writer.engine.plain.Restore(writer.textPending, true)
 	writer.textPending = ""
-	writer.textFallbacks++
-	return pending
+	writer.textRestored += count
+	if count == 0 {
+		// The held tail never completed a placeholder.
+		writer.textFallbacks++
+	}
+	return []byte(restored)
 }
 
 func (writer *restoringResponseWriter) pushJSONStream(chunk []byte, final bool) []byte {
@@ -416,7 +413,7 @@ func (writer *restoringResponseWriter) mappingCount() int {
 	if writer == nil || writer.engine == nil {
 		return 0
 	}
-	return len(writer.engine.replacements)
+	return writer.engine.plain.Len()
 }
 
 func (writer *restoringResponseWriter) visibleRestoredCount() int {

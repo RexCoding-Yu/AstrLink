@@ -6,6 +6,13 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { MarkdownContent } from "./MarkdownContent";
 
+const mocks = vi.hoisted(() => ({
+  native: false,
+  openExternalURL: vi.fn(async (_url: string) => {}),
+}));
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => mocks.native }));
+vi.mock("@/bridge", () => ({ openExternalURL: mocks.openExternalURL }));
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -21,6 +28,8 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  mocks.native = false;
+  mocks.openExternalURL.mockClear();
 });
 
 async function render(content: string) {
@@ -69,5 +78,39 @@ it("accepts plain text and truncated Markdown without losing the response", asyn
   await render('```json\n{"unfinished":');
   expect(container.querySelector("pre code")?.textContent).toContain(
     '{"unfinished":',
+  );
+});
+
+it("renders GitHub alerts without the marker and keeps plain quotes", async () => {
+  await render(
+    "> [!IMPORTANT]\r\n> First release with [Guard](https://example.com/guard).\r\n\r\n> [!warning]\n>\n> Back up first.\n\n> [!NOTE] inline text stays a quote",
+  );
+  const paragraphs = (kind: string) =>
+    Array.from(
+      container.querySelectorAll(`[data-alert="${kind}"] > p`),
+      (p) => p.textContent,
+    );
+  expect(paragraphs("important")).toEqual([
+    "重要",
+    "First release with Guard.",
+  ]);
+  expect(
+    container.querySelector('[data-alert="important"] a')?.getAttribute("href"),
+  ).toBe("https://example.com/guard");
+  expect(paragraphs("warning")).toEqual(["警告", "Back up first."]);
+  expect(container.querySelector("blockquote")?.textContent?.trim()).toBe(
+    "[!NOTE] inline text stays a quote",
+  );
+});
+
+it("opens links in the system browser inside the desktop shell", async () => {
+  mocks.native = true;
+  await render("[docs](https://example.com/docs)");
+  const link = container.querySelector("a")!;
+  const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+  await act(async () => link.dispatchEvent(click));
+  expect(click.defaultPrevented).toBe(true);
+  expect(mocks.openExternalURL).toHaveBeenCalledWith(
+    "https://example.com/docs",
   );
 });

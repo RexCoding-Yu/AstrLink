@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 
 import {
@@ -12,15 +19,20 @@ import {
   X,
 } from "@/components/icons";
 import { IconButton } from "@/components/IconButton";
+import { Metric, MetricGroup } from "@/components/Metric";
 import { SectionKicker } from "@/components/SectionKicker";
+import { ServiceKindIcon } from "@/components/ServiceKindIcon";
 import { StatusDot, type StatusTone } from "@/components/StatusDot";
 import { SubscriptionQuotaMeter } from "@/components/SubscriptionQuotaMeter";
+import { UsageMeterGrid } from "@/components/UsageMeter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import { ActiveRawGrants } from "./ActiveRawGrants";
 import {
   getTrayState,
+  listRawAccess,
   trayAction,
   trayPopoverHide,
   trayPopoverResize,
@@ -28,6 +40,8 @@ import {
 import type { CorePhase } from "./core-model";
 import { i18n, useT } from "./i18n";
 import type { TrayPreferences } from "./preferences-model";
+import { useQuotaDisplayMode } from "./quota-display";
+import type { RawAccessGrant } from "./raw-access-model";
 import { formatResetCountdown, windowLabel } from "./subscription-usage-model";
 import {
   cacheHitPercent,
@@ -36,7 +50,9 @@ import {
   parseTrayState,
   percentChange,
   type TrayAction,
+  type TrayRawKeyEventKind,
   type TrayState,
+  type TraySubscription,
 } from "./tray-model";
 import { TRAY_POPOVER_WIDTH, TRAY_STATE_EVENT } from "./tray-popover-window";
 
@@ -87,8 +103,71 @@ export function formatAgo(from: Date, now: Date): string {
   return i18n.t("tray.daysAgo", { count: Math.floor(hours / 24) });
 }
 
+function rawKeyEventKey(kind: TrayRawKeyEventKind): string {
+  switch (kind) {
+    case "raw_password_set":
+      return "tray.rawKeyEvent.passwordSet";
+    case "raw_password_changed":
+      return "tray.rawKeyEvent.passwordChanged";
+    case "raw_key_reset":
+      return "tray.rawKeyEvent.keyReset";
+  }
+}
+
 function formatLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`;
+}
+
+interface SubscriptionGroup {
+  key: string;
+  name: string;
+  kind: TraySubscription["kind"];
+  rows: Array<{
+    key: string;
+    label: string;
+    usedPercent: number;
+    reset: string | null;
+    resetDetail: string | null;
+  }>;
+}
+
+/** Plans with their windows, cut off after `limit` windows in total. */
+function subscriptionGroups(
+  subscriptions: TraySubscription[],
+  limit: number,
+  now: Date,
+): SubscriptionGroup[] {
+  let budget = limit;
+  const groups: SubscriptionGroup[] = [];
+  subscriptions.forEach((subscription, index) => {
+    if (budget <= 0) return;
+    const windows = subscription.windows.slice(0, budget);
+    budget -= windows.length;
+    groups.push({
+      key: `${index}`,
+      name: subscription.name,
+      kind: subscription.kind,
+      rows: windows.map((window, windowIndex) => {
+        const countdown = {
+          used_percent: window.used_percent,
+          reset_at: window.reset_at ?? undefined,
+        };
+        return {
+          key: `${windowIndex}`,
+          label:
+            window.label ??
+            windowLabel(
+              window.limit_window_seconds ?? undefined,
+              window.secondary,
+            ),
+          usedPercent: window.used_percent,
+          reset: formatResetCountdown(countdown, now, { short: true }),
+          resetDetail: formatResetCountdown(countdown, now),
+        };
+      }),
+    });
+  });
+  return groups;
 }
 
 /** 24 bars, one per local hour; the current hour is emphasised. */
@@ -133,38 +212,6 @@ function HourlySparkline({ tokens, now }: { tokens: number[]; now: Date }) {
   );
 }
 
-function Stat({
-  label,
-  value,
-  badge,
-}: {
-  label: string;
-  value: string;
-  badge?: string;
-}) {
-  return (
-    <div className="min-w-0 space-y-1 border-l pl-3 first:border-l-0 first:pl-0">
-      <div
-        className="truncate text-2xl leading-8 font-semibold tracking-tight tabular-nums"
-        title={value}
-      >
-        {value}
-      </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-micro text-muted-foreground">
-        <span className="truncate">{label}</span>
-        {badge ? (
-          <Badge
-            className="border-destructive/30 text-destructive"
-            variant="outline"
-          >
-            {badge}
-          </Badge>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 function Chip({
   label,
   value,
@@ -202,7 +249,9 @@ export function TrayPopoverPanel({
   copyFeedback,
   onAction,
   onClose,
+  onRawGrantRevoked,
   preview = false,
+  rawGrants = [],
   className,
 }: {
   state: TrayState | null;
@@ -211,10 +260,15 @@ export function TrayPopoverPanel({
   copyFeedback?: string | null;
   onAction: (action: TrayAction) => void;
   onClose?: () => void;
+  /** A timed grant was revoked here; reread `rawGrants`. */
+  onRawGrantRevoked?: () => void;
   preview?: boolean;
+  /** Timed agent grants to raw content still running. */
+  rawGrants?: RawAccessGrant[];
   className?: string;
 }) {
   const t = useT();
+  const quotaMode = useQuotaDisplayMode();
   const [subscriptionsExpanded, setSubscriptionsExpanded] = useState(false);
   const view = state?.view ?? null;
   const phase: CorePhase = view?.phase ?? "unavailable";
@@ -314,22 +368,24 @@ export function TrayPopoverPanel({
   }
 
   const showToday = usage.today || usage.cost;
-  const subscriptionRows =
-    usage.subscription_windows && digest
-      ? digest.subscriptions.flatMap((subscription) =>
-          subscription.windows.map((window, index) => ({
-            key: `${subscription.name}-${index}`,
-            name: subscription.name,
-            window,
-          })),
-        )
-      : [];
+  const subscriptions =
+    usage.subscription_windows && digest ? digest.subscriptions : [];
+  const subscriptionWindowCount = subscriptions.reduce(
+    (count, subscription) => count + subscription.windows.length,
+    0,
+  );
   const subscriptionsFoldable =
-    subscriptionRows.length > SUBSCRIPTION_FOLD_LIMIT;
-  const visibleSubscriptionRows =
+    subscriptionWindowCount > SUBSCRIPTION_FOLD_LIMIT;
+  const visibleSubscriptions = subscriptionGroups(
+    subscriptions,
     subscriptionsFoldable && !subscriptionsExpanded
-      ? subscriptionRows.slice(0, SUBSCRIPTION_FOLD_LIMIT)
-      : subscriptionRows;
+      ? SUBSCRIPTION_FOLD_LIMIT
+      : subscriptionWindowCount,
+    now,
+  );
+  const showResetColumn = visibleSubscriptions.some((group) =>
+    group.rows.some((row) => row.reset),
+  );
   const digestAt =
     state?.digest_age_ms != null
       ? new Date(now.getTime() - state.digest_age_ms)
@@ -360,12 +416,16 @@ export function TrayPopoverPanel({
             ) : null}
             {view?.observer_active ? (
               <Badge
-                className="shrink-0 gap-1 border-accent-foreground/30 bg-accent text-accent-foreground"
+                className="shrink-0 gap-1"
                 data-slot="tray-observed"
-                variant="outline"
+                variant="accent"
               >
                 <Eye aria-hidden="true" className="size-3" />
-                {t("tray.observed")}
+                {t(
+                  view.observer_read_level === "raw"
+                    ? "tray.observedRaw"
+                    : "tray.observed",
+                )}
               </Badge>
             ) : null}
           </div>
@@ -380,6 +440,53 @@ export function TrayPopoverPanel({
                 </span>
               ) : null}
             </div>
+          ) : null}
+          {view?.pending_raw_access ? (
+            // Requests are decided only in the approval window.
+            <Button
+              className="mt-0.5 h-auto p-0 text-micro text-warning-foreground"
+              data-slot="tray-raw-pending"
+              onClick={() => onAction({ kind: "raw_access" })}
+              type="button"
+              variant="link"
+            >
+              {t("tray.rawAccessPending", { count: view.pending_raw_access })}
+            </Button>
+          ) : null}
+          {view?.raw_password_required ? (
+            // Only the main window sets up the raw password; take the user
+            // there instead of leaving the tray silent about it.
+            <Button
+              className="mt-0.5 h-auto p-0 text-micro text-warning-foreground"
+              data-slot="tray-raw-password-required"
+              onClick={() => onAction({ kind: "open" })}
+              type="button"
+              variant="link"
+            >
+              {t("tray.rawPasswordRequired")}
+            </Button>
+          ) : null}
+          {view?.raw_key_replaced ? (
+            // The warning and its resolution live in the main window, too.
+            <Button
+              className="mt-0.5 h-auto p-0 text-micro text-warning-foreground"
+              data-slot="tray-raw-key-replaced"
+              onClick={() => onAction({ kind: "open" })}
+              type="button"
+              variant="link"
+            >
+              {t("tray.rawKeyReplaced")}
+            </Button>
+          ) : null}
+          {view?.raw_key_event ? (
+            <p
+              className="mt-0.5 text-micro text-text-secondary"
+              data-slot="tray-raw-key-event"
+            >
+              {t(rawKeyEventKey(view.raw_key_event.kind), {
+                ago: formatAgo(new Date(view.raw_key_event.at), now),
+              })}
+            </p>
           ) : null}
           {view?.inference_port_fallback ? (
             <p className="mt-0.5 text-micro text-warning-foreground">
@@ -417,6 +524,13 @@ export function TrayPopoverPanel({
         </div>
       </header>
 
+      <ActiveRawGrants
+        className="border-t px-4 py-3"
+        grants={rawGrants}
+        onRevoked={() => onRawGrantRevoked?.()}
+        title={t("tray.rawGrantsTitle")}
+      />
+
       {/* Usage: the reason to open the panel. */}
       {ready && wantsUsage ? (
         <div
@@ -426,7 +540,17 @@ export function TrayPopoverPanel({
           {showToday ? (
             <div className="grid gap-3">
               <div className="flex items-center justify-between gap-2">
-                <SectionKicker>{t("tray.today")}</SectionKicker>
+                <div className="flex items-center gap-2">
+                  <SectionKicker>{t("tray.today")}</SectionKicker>
+                  {usage.today && digest?.today && digest.today.failed > 0 ? (
+                    <Badge
+                      className="border-destructive/30 text-destructive"
+                      variant="outline"
+                    >
+                      {t("tray.failedCount", { count: digest.today.failed })}
+                    </Badge>
+                  ) : null}
+                </div>
                 <div className="flex items-center gap-1 text-micro text-muted-foreground">
                   {digestAt ? (
                     <span>
@@ -451,33 +575,32 @@ export function TrayPopoverPanel({
                   {t("tray.noCallsToday")}
                 </p>
               ) : (
-                <div className="grid auto-cols-fr grid-flow-col gap-3">
+                <MetricGroup className="auto-cols-fr grid-flow-col grid-cols-none rounded-md [overflow-wrap:anywhere] @min-[640px]/workspace-surface:grid-cols-none">
                   {usage.today && digest.today ? (
                     <>
-                      <Stat
-                        badge={
-                          digest.today.failed > 0
-                            ? t("tray.failedCount", {
-                                count: digest.today.failed,
-                              })
-                            : undefined
-                        }
+                      <Metric
                         label={t("tray.requests")}
+                        size="sm"
+                        title={digest.today.requests.toLocaleString()}
                         value={digest.today.requests.toLocaleString()}
                       />
-                      <Stat
+                      <Metric
                         label={t("tray.tokens")}
+                        size="sm"
+                        title={digest.today.total_tokens.toLocaleString()}
                         value={formatCompactTokens(digest.today.total_tokens)}
                       />
                     </>
                   ) : null}
                   {usage.cost && digest.cost_today ? (
-                    <Stat
+                    <Metric
                       label={t("tray.cost")}
+                      size="sm"
+                      title={`$${formatUsd(digest.cost_today.amount_usd)}`}
                       value={`$${formatUsd(digest.cost_today.amount_usd)}`}
                     />
                   ) : null}
-                </div>
+                </MetricGroup>
               )}
               {usage.today && digest ? (
                 <HourlySparkline now={now} tokens={digest.hourly_tokens} />
@@ -498,37 +621,65 @@ export function TrayPopoverPanel({
             </div>
           ) : null}
 
-          {subscriptionRows.length > 0 ? (
+          {subscriptions.length > 0 ? (
             <div
               className={cn(
-                "grid gap-3",
+                "grid gap-1.5",
                 (showToday || chips.length > 0) && "border-t pt-4",
               )}
             >
-              <div className="flex items-center justify-between gap-2">
-                <SectionKicker>{t("tray.subscriptions")}</SectionKicker>
-                {subscriptionsFoldable ? (
-                  <span className="text-micro text-muted-foreground tabular-nums">
-                    {visibleSubscriptionRows.length}/{subscriptionRows.length}
-                  </span>
-                ) : null}
-              </div>
-              <div className="grid gap-4" data-slot="tray-subscriptions">
-                {visibleSubscriptionRows.map(({ key, name, window }) => (
-                  <SubscriptionQuotaMeter
-                    key={key}
-                    caption={formatResetCountdown(
-                      {
-                        used_percent: window.used_percent,
-                        reset_at: window.reset_at ?? undefined,
-                      },
-                      now,
+              {/* One grid, so the bars, percents and resets line up across plans. */}
+              <UsageMeterGrid
+                captions={showResetColumn}
+                className="gap-y-0.5"
+                data-slot="tray-subscriptions"
+              >
+                <div className="col-span-full mb-1.5 grid grid-cols-subgrid items-center">
+                  <SectionKicker className="col-span-2">
+                    {t("tray.subscriptions")}
+                  </SectionKicker>
+                  <SectionKicker className="text-right">
+                    {t(
+                      quotaMode === "remaining"
+                        ? "tray.quotaRemainingColumn"
+                        : "tray.quotaUsedColumn",
                     )}
-                    label={`${name} · ${window.label ?? windowLabel(window.limit_window_seconds ?? undefined, window.secondary)}`}
-                    usedPercent={window.used_percent}
-                  />
+                  </SectionKicker>
+                  {showResetColumn ? (
+                    <SectionKicker className="text-right">
+                      {t("tray.quotaResetColumn")}
+                    </SectionKicker>
+                  ) : null}
+                </div>
+                {visibleSubscriptions.map((group, index) => (
+                  <Fragment key={group.key}>
+                    <div
+                      className={cn(
+                        "col-span-full flex min-w-0 items-center gap-1.5 text-xs font-medium",
+                        index > 0 && "mt-2",
+                      )}
+                    >
+                      <ServiceKindIcon kind={group.kind} size={14} />
+                      <span className="min-w-0 truncate" title={group.name}>
+                        {group.name}
+                      </span>
+                    </div>
+                    {group.rows.map((row) => (
+                      <SubscriptionQuotaMeter
+                        key={row.key}
+                        accessibleLabel={`${group.name} · ${row.label}`}
+                        // A dash keeps the column filled where no reset is known.
+                        caption={showResetColumn ? (row.reset ?? "—") : null}
+                        captionDetail={row.resetDetail}
+                        className="pl-5"
+                        label={row.label}
+                        layout="row"
+                        usedPercent={row.usedPercent}
+                      />
+                    ))}
+                  </Fragment>
                 ))}
-              </div>
+              </UsageMeterGrid>
               {subscriptionsFoldable ? (
                 <Button
                   aria-expanded={subscriptionsExpanded}
@@ -544,7 +695,7 @@ export function TrayPopoverPanel({
                     ? t("tray.showLessSubscriptions")
                     : t("tray.showMoreSubscriptions", {
                         count:
-                          subscriptionRows.length - SUBSCRIPTION_FOLD_LIMIT,
+                          subscriptionWindowCount - SUBSCRIPTION_FOLD_LIMIT,
                       })}
                 </Button>
               ) : null}
@@ -643,6 +794,7 @@ export function TrayPopoverWindow() {
   const [state, setState] = useState<TrayState | null>(null);
   const [now, setNow] = useState(() => new Date());
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [rawGrants, setRawGrants] = useState<RawAccessGrant[]>([]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const close = useCallback(() => {
@@ -681,6 +833,27 @@ export function TrayPopoverWindow() {
     const timer = window.setInterval(() => setNow(new Date()), CLOCK_TICK_MS);
     return () => window.clearInterval(timer);
   }, []);
+
+  // The host counts the running grants; who holds them is read on demand.
+  const activeRawGrants = state?.view?.active_raw_grants ?? 0;
+  const [rawGrantsGeneration, setRawGrantsGeneration] = useState(0);
+  useEffect(() => {
+    if (activeRawGrants === 0) {
+      setRawGrants([]);
+      return;
+    }
+    let cancelled = false;
+    void listRawAccess().then(
+      (list) => {
+        if (!cancelled) setRawGrants(list.active);
+      },
+      (error) =>
+        console.error("Unable to read AstrLink raw access grants", error),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRawGrants, rawGrantsGeneration]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -756,6 +929,10 @@ export function TrayPopoverWindow() {
           now={now}
           onAction={handleAction}
           onClose={close}
+          onRawGrantRevoked={() =>
+            setRawGrantsGeneration((generation) => generation + 1)
+          }
+          rawGrants={rawGrants}
           state={state}
           tray={tray}
         />

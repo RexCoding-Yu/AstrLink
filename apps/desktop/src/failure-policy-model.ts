@@ -53,12 +53,14 @@ export type SubscriptionProtectionKey =
 export const identityLearningKeys = [
   "codex_identity_auto_learn",
   "claude_identity_auto_learn",
+  "grok_identity_auto_learn",
 ] as const;
 export type IdentityLearningKey = (typeof identityLearningKeys)[number];
 
 export const identityVersionKeys = [
   "codex_identity_version",
   "claude_identity_version",
+  "grok_identity_version",
 ] as const;
 export type IdentityVersionKey = (typeof identityVersionKeys)[number];
 
@@ -188,9 +190,11 @@ export interface RoutingSettings {
   subscription_session_isolation?: boolean;
   codex_identity_auto_learn?: boolean;
   claude_identity_auto_learn?: boolean;
+  grok_identity_auto_learn?: boolean;
   /** Minimum declared client version; absent when no override is set. */
   codex_identity_version?: string;
   claude_identity_version?: string;
+  grok_identity_version?: string;
   model_redirects?: ModelRedirect[];
   channel_stickiness?: ChannelStickiness;
   default_recovery_paths?: Record<string, string>;
@@ -404,6 +408,48 @@ function parseModelRedirects(value: unknown): ModelRedirect[] {
   if (modelRedirectIssues(redirects).some(Boolean))
     throw Error("model_redirects: invalid model redirect");
   return redirects;
+}
+
+export type LearnedClient = "codex" | "claude" | "grok";
+
+/** A client's version learned from official requests and its built-in one. */
+export interface ClientIdentityStatus {
+  /** Absent until an official request is learned, even while learning is off. */
+  learned_version?: string;
+  builtin_version: string;
+}
+
+export type ClientIdentities = Record<LearnedClient, ClientIdentityStatus>;
+
+export function parseClientIdentities(value: unknown): ClientIdentities {
+  const identities = object(value, "client_identities");
+  keys(identities, ["codex", "claude", "grok"], [], "client_identities");
+  const parse = (client: LearnedClient): ClientIdentityStatus => {
+    const path = `client_identities.${client}`;
+    const status = object(identities[client], path);
+    keys(status, ["builtin_version"], ["learned_version"], path);
+    for (const key of ["builtin_version", "learned_version"]) {
+      if (!Object.hasOwn(status, key)) continue;
+      const version = status[key];
+      if (
+        typeof version !== "string" ||
+        version === "" ||
+        !validIdentityVersion(`${client}_identity_version`, version)
+      )
+        throw Error(`${path}.${key}: invalid client version`);
+    }
+    return {
+      ...(status.learned_version === undefined
+        ? {}
+        : { learned_version: status.learned_version as string }),
+      builtin_version: status.builtin_version as string,
+    };
+  };
+  return {
+    codex: parse("codex"),
+    claude: parse("claude"),
+    grok: parse("grok"),
+  };
 }
 
 export function parseRoutingSettings(value: unknown): RoutingSettings {

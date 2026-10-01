@@ -6,6 +6,8 @@ export interface AuditSettings {
   response_content_max_bytes: number;
   metadata_retention_days: number;
   content_retention_days: number;
+  /** Agent tools may ask the user for a request's raw parts. */
+  agent_raw_access_enabled: boolean;
 }
 
 export interface AuditSettingsPatch {
@@ -17,6 +19,7 @@ export interface AuditSettingsPatch {
   metadata_retention_days?: number;
   content_retention_days?: number;
   audit_risk_acknowledged?: boolean;
+  agent_raw_access_enabled?: boolean;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -76,6 +79,10 @@ export function parseAuditSettings(value: unknown): AuditSettings {
     content_retention_days: intAt(
       settings.content_retention_days,
       "$.content_retention_days",
+    ),
+    agent_raw_access_enabled: boolAt(
+      settings.agent_raw_access_enabled,
+      "$.agent_raw_access_enabled",
     ),
   };
 }

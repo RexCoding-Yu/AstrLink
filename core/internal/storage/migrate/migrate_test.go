@@ -142,6 +142,26 @@ func TestRunnerAppliesMigrationsInOrderAndRecordsThem(t *testing.T) {
 	}
 }
 
+func TestRunnerRecordsAMigrationWithoutStatements(t *testing.T) {
+	transaction := &fakeTransaction{}
+	runner, err := New(&fakeDatabase{transaction: transaction}, []Migration{
+		{Version: 1, Name: "one", Statements: []string{"CREATE TABLE one (id INTEGER)"}},
+		{Version: 2, Name: "removed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Up(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if len(transaction.execCalls) != 4 {
+		t.Fatalf("exec call count = %d, want 4", len(transaction.execCalls))
+	}
+	if got := transaction.execCalls[3].args; len(got) != 3 || got[0] != int64(2) || got[1] != "removed" {
+		t.Fatalf("empty migration record args = %#v", got)
+	}
+}
+
 func TestRunnerSkipsAlreadyAppliedMigrations(t *testing.T) {
 	transaction := &fakeTransaction{currentVersion: 1, recorded: map[int64]string{1: "one"}}
 	runner, err := New(&fakeDatabase{transaction: transaction}, []Migration{
@@ -193,6 +213,38 @@ func TestRunnerRejectsNewerDatabase(t *testing.T) {
 	}
 	if !transaction.rolledBack {
 		t.Fatal("newer database transaction was not rolled back")
+	}
+}
+
+func TestRequireCurrentChecksWithoutMigrating(t *testing.T) {
+	migrations := []Migration{
+		{Version: 1, Name: "one", Statements: []string{"CREATE TABLE one (id INTEGER)"}},
+		{Version: 2, Name: "two", Statements: []string{"CREATE TABLE two (id INTEGER)"}},
+	}
+	for _, test := range []struct {
+		name     string
+		version  int64
+		recorded map[int64]string
+		want     error
+	}{
+		{"current", 2, map[int64]string{1: "one", 2: "two"}, nil},
+		{"older", 1, map[int64]string{1: "one"}, ErrDatabaseOlder},
+		{"newer", 3, map[int64]string{1: "one", 2: "two", 3: "three"}, ErrDatabaseNewer},
+		{"renamed", 2, map[int64]string{1: "one", 2: "other"}, ErrMigrationHistory},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transaction := &fakeTransaction{currentVersion: test.version, recorded: test.recorded}
+			runner, err := New(&fakeDatabase{transaction: transaction}, migrations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runner.RequireCurrent(context.Background()); !errors.Is(err, test.want) {
+				t.Fatalf("RequireCurrent error = %v, want %v", err, test.want)
+			}
+			if len(transaction.execCalls) != 0 || transaction.committed || !transaction.rolledBack {
+				t.Fatalf("RequireCurrent wrote: %d statements, committed=%t", len(transaction.execCalls), transaction.committed)
+			}
+		})
 	}
 }
 
@@ -280,8 +332,9 @@ func TestDefaultMigrationsIsolateCredentialsFromGenericDocuments(t *testing.T) {
 			}
 			if strings.Contains(lower, "create table local_access_token_secrets") {
 				foundAccessTokenSecretTable = true
+				// Migration 45 rebuilds it with a BLOB column for sealed values.
 				if !strings.Contains(lower, "references local_access_tokens(id) on delete cascade") ||
-					!strings.Contains(lower, "token_value text not null") {
+					(!strings.Contains(lower, "token_value text not null") && !strings.Contains(lower, "token_value blob not null")) {
 					t.Fatalf("access token secret table lacks required isolation/cascade: %s", statement)
 				}
 				continue
@@ -415,7 +468,7 @@ WHERE name IN ('session_id', 'previous_response_id', 'output_response_id', 'inpu
 	}
 	var auditTables int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_master
-WHERE type='table' AND name IN ('audit_settings', 'audit_keys', 'audit_blobs')`).Scan(&auditTables); err != nil || auditTables != 3 {
+WHERE type='table' AND name IN ('audit_settings', 'audit_blobs')`).Scan(&auditTables); err != nil || auditTables != 2 {
 		t.Fatalf("audit tables missing after upgrade: count=%d err=%v", auditTables, err)
 	}
 	var credential []byte

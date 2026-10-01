@@ -15,14 +15,27 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ChevronRight } from "@/components/icons";
 import { EmptyState } from "@/components/EmptyState";
 import { FormMessage } from "@/components/FormMessage";
+import { JsonTreeView } from "@/components/JsonTreeView";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { ResponseViewer } from "@/components/ResponseViewer";
+import { StatusBadge } from "@/components/StatusBadge";
 import { cn } from "@/lib/utils";
 
 import { buildHeadersText } from "./audit-bundle";
 import { i18n } from "./i18n";
 import { copyButtonLabel, type CopyFeedback } from "./copy-feedback";
-import type { AuditContentPart, AuditHTTPMeta } from "./request-record-model";
+import {
+  JsonTreeCancelledError,
+  parseJsonTree,
+  parseJsonTreeIncremental,
+  type JsonNode,
+  type JsonTreeParse,
+} from "./json-tree-model";
+import type {
+  AuditContentPart,
+  AuditHTTPMeta,
+  AuditWithheldPart,
+} from "./request-record-model";
 import { splitPrivacyHighlights } from "./request-trajectory-model";
 import {
   parseResponsePreview,
@@ -36,6 +49,10 @@ import {
 } from "./sse-review-model";
 
 const RAW_SEGMENT_SIZE = 256 * 1024;
+// JSON bodies up to this size parse at once; larger ones parse in slices.
+const JSON_TREE_SYNC_CHARS = 256 * 1024;
+// The request capture ceiling; beyond it only the original text is offered.
+const JSON_TREE_MAX_CHARS = 16 * 1024 * 1024;
 const EVENT_RENDER_BATCH = 300;
 // Short streams read better unfiltered; the search box earns its row later.
 const EVENT_FILTER_THRESHOLD = 12;
@@ -381,20 +398,47 @@ function HeaderList({
   );
 }
 
+/**
+ * The hint for a captured body this read leaves out: a raw part waits for
+ * an unlock or a raw password, or was never kept without one, so the
+ * capture switch is not the reason it is missing.
+ */
+export function withheldHint(
+  withheld: AuditWithheldPart | null | undefined,
+): string | null {
+  if (!withheld) return null;
+  switch (withheld.reason) {
+    case "raw_locked":
+      return i18n.t("rawSealing.lockedDetail");
+    case "raw_not_kept":
+      return i18n.t("rawSealing.notKeptDetail");
+    default:
+      return i18n.t("rawSealing.withheldDetail");
+  }
+}
+
 export function AuditPartSection({
   title,
   part,
   protocol,
   sectionKey,
   copyFeedback,
+  withheld = null,
+  onUnlock,
 }: {
   title: string;
   part: AuditContentPart | null;
   protocol: string;
   sectionKey: string;
   copyFeedback: CopyFeedback;
+  /** Why a captured part is missing from this read, if it is. */
+  withheld?: AuditWithheldPart | null;
+  /** Opens the raw unlock for a part sealed with the raw key. */
+  onUnlock?: () => void;
 }) {
   const t = i18n.t.bind(i18n);
+  const reason = part === null ? withheld?.reason : undefined;
+  const locked = reason === "raw_locked";
   return (
     <DetailBlock
       actions={
@@ -407,16 +451,38 @@ export function AuditPartSection({
           >
             {copyButtonLabel(copyFeedback, sectionKey)}
           </Button>
+        ) : locked && onUnlock ? (
+          <Button
+            className="h-auto px-0 text-xs"
+            onClick={onUnlock}
+            type="button"
+            variant="link"
+          >
+            {t("rawSealing.unlock")}
+          </Button>
         ) : null
       }
       title={title}
     >
-      {part === null ? (
+      {part !== null ? (
+        <AuditPartView part={part} protocol={protocol} />
+      ) : withheld ? (
+        <div
+          className="flex flex-wrap items-center gap-2 text-xs leading-6 text-muted-foreground"
+          data-slot="audit-part-withheld"
+        >
+          {locked ? (
+            <StatusBadge tone="neutral">{t("rawSealing.locked")}</StatusBadge>
+          ) : reason === "raw_not_kept" ? (
+            <StatusBadge tone="neutral">{t("rawSealing.notKept")}</StatusBadge>
+          ) : null}
+          <span>{withheldHint(withheld)}</span>
+          <span>{formatBytes(withheld.captured_bytes)}</span>
+        </div>
+      ) : (
         <p className="text-xs leading-6 text-muted-foreground">
           {t("audit.uncapturedDetail")}
         </p>
-      ) : (
-        <AuditPartView part={part} protocol={protocol} />
       )}
     </DetailBlock>
   );
@@ -767,40 +833,50 @@ export type WireViewMode = "structured" | "raw";
 /** Label for the structured view of a body, or null when only raw applies. */
 export function wireStructuredLabel(part: AuditContentPart): string | null {
   if (isEventStream(part)) return i18n.t("audit.events");
-  return formattedDocument(part) === null ? null : i18n.t("audit.formatted");
+  // Decided without parsing: the host asks on every render.
+  return jsonCandidate(part) ? i18n.t("audit.formatted") : null;
 }
 
 /**
  * One captured body inside a host that owns the only scroller: stream events
- * as compact rows, JSON formatted, or the original text.
+ * as compact rows, JSON as a foldable tree, or the original text.
  */
 export function AuditWireView({
   part,
   mode,
+  revealPrivacy = false,
 }: {
   part: AuditContentPart;
   mode: WireViewMode;
+  /** Unfolds the strings that carry privacy placeholders. */
+  revealPrivacy?: boolean;
 }) {
   const t = i18n.t.bind(i18n);
   const structured = mode === "structured";
-  const formatted = useMemo(
-    () => (structured && !isEventStream(part) ? formattedDocument(part) : null),
-    [part, structured],
-  );
+  const stream = isEventStream(part);
+  const tree = useJsonTree(part.content, structured && jsonCandidate(part));
+  const root = usableTreeRoot(tree);
   return (
     <div className="grid gap-2">
       {part.truncated ? (
         <FormMessage tone="warning">{t("audit.truncatedNote")}</FormMessage>
       ) : null}
-      {structured && isEventStream(part) ? (
+      {structured && stream ? (
         <StreamEventList part={part} />
-      ) : formatted !== null ? (
-        <HighlightedAuditText
-          className="rounded-lg bg-muted/40 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]"
-          content={formatted}
+      ) : tree?.status === "parsing" ? (
+        <JsonParseProgress progress={tree.progress} />
+      ) : root ? (
+        <JsonTreeView
+          className="rounded-lg bg-muted/40 p-3"
+          renderText={privacyText}
+          revealText={revealPrivacy ? hasPrivacyHighlight : undefined}
+          root={root}
         />
       ) : (
-        <RawSegmentView bounded={false} content={part.content} />
+        <>
+          {tree ? <InvalidJsonBadge /> : null}
+          <RawSegmentView bounded={false} content={part.content} />
+        </>
       )}
     </div>
   );
@@ -1034,64 +1110,121 @@ function isEventStream(part: AuditContentPart): boolean {
   return part.media_type.toLowerCase().includes("text/event-stream");
 }
 
-function formattedDocument(part: AuditContentPart): string | null {
-  if (
-    part.content.length > 1024 * 1024 ||
-    !(
-      part.media_type.toLowerCase().includes("json") ||
-      looksLikeJson(part.content)
-    )
-  )
-    return null;
-  try {
-    return JSON.stringify(JSON.parse(part.content), null, 2);
-  } catch {
-    return null;
-  }
+/** A body worth offering as a JSON tree, judged without parsing it. */
+function jsonCandidate(part: AuditContentPart): boolean {
+  return (
+    !isEventStream(part) &&
+    part.content.length <= JSON_TREE_MAX_CHARS &&
+    (part.media_type.toLowerCase().includes("json") ||
+      looksLikeJson(part.content))
+  );
+}
+
+type JsonTreeState =
+  | { status: "parsing"; progress: number }
+  | { status: "ready"; parse: JsonTreeParse }
+  | { status: "failed" };
+
+/**
+ * Parses a JSON body into a tree: at once when small, in slices when large
+ * so the window keeps responding. Null when `enabled` is off.
+ */
+function useJsonTree(content: string, enabled: boolean): JsonTreeState | null {
+  const small = enabled && content.length <= JSON_TREE_SYNC_CHARS;
+  const parsed = useMemo(
+    () => (small ? parseJsonTree(content) : null),
+    [content, small],
+  );
+  const [sliced, setSliced] = useState<{
+    content: string;
+    state: JsonTreeState;
+  } | null>(null);
+  useEffect(() => {
+    if (!enabled || small) return;
+    const controller = new AbortController();
+    void parseJsonTreeIncremental(content, {
+      signal: controller.signal,
+      onProgress: (progress) =>
+        setSliced({ content, state: { status: "parsing", progress } }),
+    })
+      .then((parse) => {
+        if (controller.signal.aborted) return;
+        setSliced({ content, state: { status: "ready", parse } });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof JsonTreeCancelledError) return;
+        setSliced({ content, state: { status: "failed" } });
+      });
+    return () => controller.abort();
+  }, [content, enabled, small]);
+  if (!enabled) return null;
+  if (parsed) return { status: "ready", parse: parsed };
+  return sliced?.content === content
+    ? sliced.state
+    : { status: "parsing", progress: 0 };
+}
+
+/** The tree to show, or null when the text stopped being JSON before its end. */
+function usableTreeRoot(state: JsonTreeState | null): JsonNode | null {
+  if (state?.status !== "ready" || state.parse.errorAt !== null) return null;
+  return state.parse.root;
+}
+
+function JsonParseProgress({ progress }: { progress: number }) {
+  return (
+    <Badge className="justify-self-start" role="status" variant="secondary">
+      {i18n.t("audit.parsingPercent", { percent: Math.round(progress * 100) })}
+    </Badge>
+  );
+}
+
+function InvalidJsonBadge() {
+  return (
+    <Badge
+      className="justify-self-start bg-warning-wash text-warning-foreground"
+      variant="secondary"
+    >
+      {i18n.t("audit.invalidJsonBadge")}
+    </Badge>
+  );
 }
 
 function DocumentInspector({ part }: { part: AuditContentPart }) {
-  const canFormat =
-    part.content.length <= 1024 * 1024 &&
-    (part.media_type.toLowerCase().includes("json") ||
-      looksLikeJson(part.content));
-  const formatted = useMemo(() => {
-    if (!canFormat) return null;
-    try {
-      return JSON.stringify(JSON.parse(part.content), null, 2);
-    } catch {
-      return null;
-    }
-  }, [canFormat, part.content]);
-  const [mode, setMode] = useState<DocumentViewMode>(
-    formatted === null ? "raw" : "formatted",
+  const candidate = jsonCandidate(part);
+  const tree = useJsonTree(part.content, candidate);
+  const root = usableTreeRoot(tree);
+  const invalid = tree !== null && tree.status !== "parsing" && root === null;
+  const [chosen, setChosen] = useState<DocumentViewMode>(
+    candidate ? "formatted" : "raw",
   );
+  const mode = invalid ? "raw" : chosen;
 
   const t = i18n.t.bind(i18n);
   return (
     <Tabs
       value={mode}
-      onValueChange={(value) => setMode(value as DocumentViewMode)}
+      onValueChange={(value) => setChosen(value as DocumentViewMode)}
     >
       <div className="mb-2.5 flex items-center justify-between gap-3">
         <TabsList aria-label={t("audit.contentView")}>
-          <TabsTrigger disabled={formatted === null} value="formatted">
+          <TabsTrigger disabled={!candidate || invalid} value="formatted">
             {t("audit.formatted")}
           </TabsTrigger>
           <TabsTrigger value="raw">{t("audit.original")}</TabsTrigger>
         </TabsList>
-        {formatted === null && canFormat ? (
-          <Badge
-            className="bg-warning-wash text-warning-foreground"
-            variant="secondary"
-          >
-            {t("audit.invalidJsonBadge")}
-          </Badge>
+        {invalid ? (
+          <InvalidJsonBadge />
+        ) : tree?.status === "parsing" ? (
+          <JsonParseProgress progress={tree.progress} />
         ) : null}
       </div>
       <TabsContent value="formatted">
-        {formatted !== null ? (
-          <HighlightedAuditText content={formatted} />
+        {root ? (
+          <JsonTreeView
+            className="max-h-[520px] overflow-auto rounded-lg bg-muted/40 p-3"
+            renderText={privacyText}
+            root={root}
+          />
         ) : null}
       </TabsContent>
       <TabsContent value="raw">
@@ -1190,31 +1323,34 @@ function HighlightedAuditText({
   content: string;
   className?: string;
 }) {
-  const spans = splitPrivacyHighlights(content);
-  return (
-    <pre className={className}>
-      {spans.map((span, index) =>
-        span.kind ? (
-          <mark
-            className="rounded-sm bg-warning-wash px-0.5 text-warning-foreground"
-            data-kind={span.kind}
-            data-placeholder={span.text}
-            data-testid="privacy-mark"
-            key={`${span.text}:${index}`}
-          >
-            {span.text}
-          </mark>
-        ) : (
-          <span key={index}>{span.text}</span>
-        ),
-      )}
-    </pre>
+  return <pre className={className}>{privacyText(content)}</pre>;
+}
+
+/** Text with each privacy placeholder marked so the reviewer can find it. */
+function privacyText(text: string): ReactNode {
+  return splitPrivacyHighlights(text).map((span, index) =>
+    span.kind ? (
+      <mark
+        className="rounded-sm bg-warning-wash px-0.5 text-warning-foreground"
+        data-kind={span.kind}
+        data-placeholder={span.text}
+        data-testid="privacy-mark"
+        key={`${span.text}:${index}`}
+      >
+        {span.text}
+      </mark>
+    ) : (
+      <span key={index}>{span.text}</span>
+    ),
   );
 }
 
+function hasPrivacyHighlight(text: string): boolean {
+  return splitPrivacyHighlights(text).some((span) => span.kind !== undefined);
+}
+
 function looksLikeJson(content: string): boolean {
-  const trimmed = content.trimStart();
-  return trimmed.startsWith("{") || trimmed.startsWith("[");
+  return /^\s*[{[]/.test(content);
 }
 
 function formatBytes(bytes: number): string {

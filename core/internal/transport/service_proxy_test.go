@@ -96,7 +96,7 @@ func TestResponsesSocketBindsProxyAndRequiresReconnectAfterChange(t *testing.T) 
 	socket := &ResponsesSocket{}
 	defer socket.Close()
 	forward := func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		request := httptest.NewRequest("POST", "http://localhost/v1/responses", strings.NewReader(`{"model":"test","input":"hello"}`)).WithContext(ctx)
 		return socket.Forward(httptest.NewRecorder(), request, target, "account-binding", nil)

@@ -72,9 +72,7 @@ func TestListenControlSocketAcceptsSameUIDWithoutBearer(t *testing.T) {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 	if err := <-done; err != nil && err != http.ErrServerClosed {

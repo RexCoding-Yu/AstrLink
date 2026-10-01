@@ -15,7 +15,6 @@ import {
   ArrowUpRight,
   Boxes,
   Check,
-  CircleDollarSign,
   Copy,
   Plus,
   RefreshCw,
@@ -208,7 +207,7 @@ export function Overview({
     revision: summary,
   });
 
-  const inferenceURL = snapshot?.ready?.inference_url ?? "";
+  const inferenceURL = snapshot?.ready?.client_inference_url ?? "";
   const apiAddressLabel = t("overview.apiAddress");
   const apiCopied =
     copyFeedback === t("copy.copiedNamed", { label: apiAddressLabel });
@@ -912,8 +911,6 @@ interface TokenUsageRow {
   billing: BillingSummary["by_token"][number];
 }
 
-type TokenSortKey = "tokens" | "fee" | "requests";
-
 function emptyTokenBilling(tokenId: string): TokenUsageRow["billing"] {
   return {
     token_id: tokenId,
@@ -961,20 +958,11 @@ function tokenFee(row: TokenUsageRow): number {
 function compareTokenUsageRows(
   left: TokenUsageRow,
   right: TokenUsageRow,
-  sort: TokenSortKey,
 ): number {
-  const primary =
-    sort === "tokens"
-      ? right.usage.total_tokens - left.usage.total_tokens
-      : sort === "fee"
-        ? tokenFee(right) - tokenFee(left)
-        : tokenRequestCount(right) - tokenRequestCount(left);
-  if (primary !== 0) return primary;
-
-  // Keep ties deterministic without exposing a second active sort condition.
   if (right.usage.total_tokens !== left.usage.total_tokens) {
     return right.usage.total_tokens - left.usage.total_tokens;
   }
+  // Keep ties deterministic.
   if (tokenRequestCount(right) !== tokenRequestCount(left)) {
     return tokenRequestCount(right) - tokenRequestCount(left);
   }
@@ -1011,29 +999,14 @@ function TokenUsagePanel({
   usagePreset: UsageRangePreset;
 }) {
   const t = i18n.t.bind(i18n);
-  const [sort, setSort] = useState<TokenSortKey>("tokens");
   const rows = useMemo(
     () => mergeTokenUsageRows(tokenCatalog, usage, billingSummary),
     [billingSummary, tokenCatalog, usage],
   );
   const sortedRows = useMemo(
-    () =>
-      [...rows].sort((left, right) => compareTokenUsageRows(left, right, sort)),
-    [rows, sort],
+    () => [...rows].sort(compareTokenUsageRows),
+    [rows],
   );
-  const sortOptions = [
-    { key: "tokens" as const, label: t("overview.sortTokens"), Icon: Boxes },
-    {
-      key: "fee" as const,
-      label: t("overview.sortFee"),
-      Icon: CircleDollarSign,
-    },
-    {
-      key: "requests" as const,
-      label: t("overview.sortRequests"),
-      Icon: Activity,
-    },
-  ];
 
   return (
     <Panel
@@ -1044,40 +1017,13 @@ function TokenUsagePanel({
         className={USAGE_BREAKDOWN_HEADER}
         actions={
           <div className="flex min-w-0 items-center gap-2">
+            <span className="text-micro text-muted-foreground">
+              {t("overview.rankedByTokens")}
+            </span>
             <HelpPopover label={t("overview.tokenCostCoverageLabel")}>
               <p>{t("overview.tokenFailureExplanation")}</p>
               <p>{t("overview.tokenCostCoverage")}</p>
             </HelpPopover>
-            <div
-              aria-label={t("overview.tokenSortLabel")}
-              className="flex items-center gap-0.5"
-              data-testid="token-sort-controls"
-            >
-              {sortOptions.map(({ key, label, Icon }) => {
-                const active = sort === key;
-                const buttonLabel = active
-                  ? t("overview.tokenSortActive", { label })
-                  : t("overview.tokenSortBy", { label });
-                return (
-                  <IconButton
-                    aria-pressed={active}
-                    className={cn(
-                      "relative",
-                      active &&
-                        "bg-accent text-accent-foreground ring-1 ring-inset ring-ring/35",
-                    )}
-                    data-active={active ? "true" : "false"}
-                    data-testid={`token-sort-${key}`}
-                    key={key}
-                    label={buttonLabel}
-                    onClick={() => setSort(key)}
-                    type="button"
-                  >
-                    <Icon aria-hidden="true" />
-                  </IconButton>
-                );
-              })}
-            </div>
           </div>
         }
       >
@@ -1346,7 +1292,6 @@ const heatmapCells = new WeakMap<HeatmapPoint[], Map<string, ActivityCell[]>>();
 
 function prepareHeatmapCells(
   points: HeatmapPoint[],
-  metric: "tokens" | "requests",
   locale: string,
 ): ActivityCell[] {
   let variants = heatmapCells.get(points);
@@ -1354,8 +1299,7 @@ function prepareHeatmapCells(
     variants = new Map();
     heatmapCells.set(points, variants);
   }
-  const key = `${locale}:${metric}`;
-  const cached = variants.get(key);
+  const cached = variants.get(locale);
   if (cached) return cached;
   const t = i18n.getFixedT(locale);
   const cells = points.map((point) => {
@@ -1364,10 +1308,7 @@ function prepareHeatmapCells(
       key: point.date,
       date: point.date,
       label: `${dateLabel}, ${formatExactNumber(point.total_tokens)} Token, ${t("overview.dayRequests", { count: formatExactNumber(point.requests) })}, ${t("overview.dayFailed", { count: formatExactNumber(point.failed_requests) })}`,
-      value:
-        metric === "tokens"
-          ? point.total_tokens
-          : point.requests + point.failed_requests,
+      value: point.total_tokens,
       detail: () => (
         <span className="flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums">
           <strong className="font-medium">{dateLabel}</strong>
@@ -1388,7 +1329,7 @@ function prepareHeatmapCells(
       ),
     };
   });
-  variants.set(key, cells);
+  variants.set(locale, cells);
   return cells;
 }
 
@@ -1401,7 +1342,6 @@ const UsageHeatmap = memo(function UsageHeatmap({
 }) {
   const t = useT();
   const locale = i18n.language;
-  const [metric, setMetric] = useState<"tokens" | "requests">("tokens");
   const unavailable = status === "blocked" || status === "error";
   const active = points.filter(
     (point) =>
@@ -1410,41 +1350,12 @@ const UsageHeatmap = memo(function UsageHeatmap({
   // The summary is retained while navigating. Its immutable day buckets can
   // reuse their labels on return; replacing the summary releases this cache.
   const cells = useMemo(
-    () => prepareHeatmapCells(points, metric, locale),
-    [points, metric, locale],
+    () => prepareHeatmapCells(points, locale),
+    [points, locale],
   );
   return (
     <div className="px-4 py-3.5">
-      <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-3 gap-y-2 text-micro text-muted-foreground">
-        <span>
-          {unavailable
-            ? t("overview.heatmap")
-            : t("overview.activeDays", { count: active, total: points.length })}
-        </span>
-        <div
-          className="flex items-center gap-1"
-          role="group"
-          aria-label={t("overview.heatmapMetric")}
-        >
-          <Button
-            size="xs"
-            variant={metric === "tokens" ? "secondary" : "ghost"}
-            aria-pressed={metric === "tokens"}
-            onClick={() => setMetric("tokens")}
-          >
-            Token
-          </Button>
-          <Button
-            size="xs"
-            variant={metric === "requests" ? "secondary" : "ghost"}
-            aria-pressed={metric === "requests"}
-            onClick={() => setMetric("requests")}
-          >
-            {t("overview.requests")}
-          </Button>
-        </div>
-      </div>
-      <div className="mt-3 min-h-40">
+      <div className="min-h-40">
         {unavailable ? (
           <EmptyState
             className="h-full border-0 py-4"
@@ -1465,7 +1376,7 @@ const UsageHeatmap = memo(function UsageHeatmap({
             label={t("overview.heatmapLabel")}
             caption={
               points.length
-                ? `${points[0].date} ~ ${points[points.length - 1].date}`
+                ? `${points[0].date} ~ ${points[points.length - 1].date} · ${t("overview.activeDays", { count: active, total: points.length })}`
                 : ""
             }
             lessLabel={t("overview.less")}

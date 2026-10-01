@@ -692,3 +692,53 @@ func ptrInt(value int) *int { return &value }
 func ptrTime(value time.Time) *time.Time { return &value }
 
 func ptrString(value string) *string { return &value }
+
+func TestListRequestRecordsSearchesInputPreviewLiterally(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "astrlink.db"))
+	defer store.Close()
+	ctx := context.Background()
+	start := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	previews := map[contract.RequestID]string{
+		"request_plain":   "Refactor the Payment module",
+		"request_percent": "raise quota to 100% today",
+		"request_under":   "rename user_id column",
+		"request_slash":   `path C:\temp\x`,
+		"request_other":   "unrelated prompt",
+	}
+	index := 0
+	for id, preview := range previews {
+		value := preview
+		record := contract.RequestRecord{
+			ID: id, StartedAt: start.Add(time.Duration(index) * time.Second), CompletedAt: ptrTime(start),
+			Status: contract.RequestStatusSucceeded, InputProtocol: contract.ProtocolOpenAIChat,
+			Audit: contract.NotCapturedAuditSummary(), InputPreview: &value,
+		}
+		index++
+		if err := store.InsertRequestRecord(ctx, record); err != nil {
+			t.Fatalf("InsertRequestRecord(%s): %v", id, err)
+		}
+	}
+	for query, want := range map[string][]contract.RequestID{
+		"payment":     {"request_plain"},
+		"100%":        {"request_percent"},
+		"%":           {"request_percent"},
+		"user_id":     {"request_under"},
+		"r_i":         {"request_under"},
+		"_":           {"request_under"},
+		`C:\temp`:     {"request_slash"},
+		`\`:           {"request_slash"},
+		"' OR 1=1 --": nil,
+	} {
+		page, err := store.ListRequestRecords(ctx, storagecontract.RequestRecordListOptions{Query: query})
+		if err != nil {
+			t.Fatalf("ListRequestRecords(%q): %v", query, err)
+		}
+		got := make([]contract.RequestID, 0, len(page.Items))
+		for _, item := range page.Items {
+			got = append(got, item.ID)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(append([]contract.RequestID{}, want...)) {
+			t.Fatalf("query %q = %v, want %v", query, got, want)
+		}
+	}
+}

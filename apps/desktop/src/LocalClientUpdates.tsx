@@ -22,6 +22,7 @@ import {
   emptyLocalClients,
   localClientGuide,
   localClientLabel,
+  type LocalClientId,
   type LocalClientSnapshot,
 } from "./local-client-model";
 
@@ -98,7 +99,7 @@ export function LocalClientUpdates({ compact = false }: { compact?: boolean }) {
       setPending(false);
     }
   }
-  async function guide(client: "codex" | "claude") {
+  async function guide(client: LocalClientId) {
     try {
       await openExternalURL(localClientGuide(client));
     } catch (error) {

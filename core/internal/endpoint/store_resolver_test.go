@@ -29,7 +29,8 @@ func (function endpointReaderFunc) ListEndpoints(ctx context.Context, options st
 
 func TestStoreResolverSelectsServiceBeforeCapabilityMode(t *testing.T) {
 	reader := endpointReaderFunc(func(_ context.Context, options storage.EndpointListOptions) (storage.EndpointPage, error) {
-		if options.Enabled == nil || !*options.Enabled || options.Limit != 200 {
+		// Disabled services are listed too, to explain why routing passed them over.
+		if options.Enabled != nil || options.Limit != 200 {
 			t.Fatalf("list options = %#v", options)
 		}
 		return storage.EndpointPage{Items: []storage.EndpointRecord{

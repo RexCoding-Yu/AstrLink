@@ -15,8 +15,8 @@
 | `completed`      | Terminal status written (`succeeded`, `failed`, `cancelled`, `blocked`). Failures use `error.code ·` the unwrapped transport cause (host/URL allowed; credentials redacted). |
 
 Retries appear as **child** records (`parent_request_id` set).
-`get_request_children` lists them. The root keeps `child_count` and the
-successful or last-failed outcome.
+`{{ASTRLINK_CLI}} children <id>` lists them. The root keeps `child_count` and
+the successful or last-failed outcome.
 
 Useful session fields:
 
@@ -65,6 +65,6 @@ not a gateway fault.
 If `status` is `blocked`, start with the `privacy` event and `privacy_restore`
 counts. If the model name looks wrong, check for a `model_redirect` event (and
 the record's `model_redirect`) first, then `routed`, `requested_model`, and
-`recovery.upstream_model`; `get_routing_settings` shows the current redirect
+`recovery.upstream_model`; `{{ASTRLINK_CLI}} routing` shows the current redirect
 rules. If the client saw a 5xx after a delay, compare root `events` with child
 retries.

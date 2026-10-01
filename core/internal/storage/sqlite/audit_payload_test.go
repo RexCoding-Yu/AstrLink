@@ -3,7 +3,6 @@ package sqlite
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	storage "github.com/QuantumNous/astrlink/core/internal/storage"
-	"github.com/QuantumNous/astrlink/core/internal/storage/migrate"
 )
 
 func auditPayloadFixture(t *testing.T, store *Store, id contract.RequestID) []byte {
@@ -35,8 +33,11 @@ func sealedPayload(t *testing.T, key []byte, id contract.RequestID, direction st
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Only parts a privacy decision cleared share payloads; raw parts are
+	// sealed one by one to the raw key.
 	return storage.AuditBlob{RequestID: id, Direction: direction, MediaType: "text/event-stream", Nonce: nonce,
-		Ciphertext: ciphertext, CapturedBytes: len(body), CreatedAt: time.Now().UTC()}
+		Ciphertext: ciphertext, CapturedBytes: len(body), CreatedAt: time.Now().UTC(),
+		Exposure: storage.AuditExposureShareable}
 }
 
 func assertPayloadCount(t *testing.T, store *Store, want int) {
@@ -154,39 +155,15 @@ func TestSharedAuditPayloadPreservesMetadataAndRetention(t *testing.T) {
 func TestAuditPayloadMigrationCompactsLegacyWithoutChangingContent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy.db")
-	db, err := sql.Open(driverName, sqliteFileDSN(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	migrations := migrate.DefaultMigrations()
-	var old []migrate.Migration
-	for _, migration := range migrations {
-		if migration.Version < 41 {
-			old = append(old, migration)
-		}
-	}
-	runner, err := migrate.New(migrate.SQLDatabase{DB: db}, old)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	legacyStore := &Store{db: db, now: time.Now}
+	store := openTestStore(t, path)
 	const id = contract.RequestID("request_legacy")
-	key := auditPayloadFixture(t, legacyStore, id)
+	key := auditPayloadFixture(t, store, id)
+	// Inline rows, as captured before shared payloads existed.
 	for _, direction := range []storage.AuditDirection{storage.AuditDirectionResponse, storage.AuditDirectionUpstreamResponse} {
-		blob := sealedPayload(t, key, id, direction, "legacy response")
-		if _, err := db.Exec(`INSERT INTO audit_blobs (request_id, direction, media_type, nonce, ciphertext, truncated, captured_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			blob.RequestID, blob.Direction, blob.MediaType, blob.Nonce, blob.Ciphertext, 0, blob.CapturedBytes, blob.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		if err := upsertAuditBlob(ctx, store.db, sealedPayload(t, key, id, direction, "legacy response"), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store := openTestStore(t, path)
 	want := map[storage.AuditDirection]string{storage.AuditDirectionResponse: "legacy response", storage.AuditDirectionUpstreamResponse: "legacy response"}
 	assertAuditPlaintexts(t, store, key, id, want)
 	if _, err := store.SweepExpiredAuditData(ctx); err != nil {

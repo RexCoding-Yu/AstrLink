@@ -11,10 +11,11 @@ use ort::{
 use tokenizers::{Encoding, Tokenizer};
 
 use crate::{
-    decoder::Decoder,
+    decoder::{Decoder, offset_contract},
     manifest::{Adapter, ModelManifest},
     protocol::{DetectedSpan, TextInput},
     sensitive::SensitiveGuard,
+    span_contract,
 };
 
 const INTRA_OP_THREADS: usize = 2;
@@ -30,6 +31,7 @@ pub struct PrivacyEngine {
     apply_post_processor: bool,
     decoder: Decoder,
     sensitive: Option<SensitiveGuard>,
+    span_contract: bool,
     session: Session,
     model_window_tokens: usize,
     content_window_tokens: usize,
@@ -53,6 +55,19 @@ impl PrivacyEngine {
         tokenizer.with_truncation(None)?;
         tokenizer.with_padding(None);
         let config = fs::read(manifest.resolve(model_directory, &manifest.config_path))?;
+        // Opt-in AstrLink Guard contracts. Absent or null fields keep the
+        // legacy decoder and spans; they are defined only for generic HF
+        // token-classification models.
+        let offset_consistency = offset_contract::configured(&config).map_err(io::Error::other)?;
+        let span_contract = span_contract::configured(&config).map_err(io::Error::other)?;
+        if manifest.adapter != Adapter::HfTokenClassification {
+            if offset_consistency {
+                return Err(io::Error::other("invalid_decoder_contract_adapter").into());
+            }
+            if span_contract {
+                return Err(io::Error::other("invalid_span_contract_adapter").into());
+            }
+        }
         let (decoder, sensitive) = match manifest.adapter {
             Adapter::PplxBioesViterbi => (
                 Decoder::from_pplx_json(&config, &manifest.label_mapping),
@@ -70,7 +85,14 @@ impl PrivacyEngine {
                 )
             }
             Adapter::HfTokenClassification => (
-                Decoder::from_hf_json(&config, manifest.tag_scheme, &manifest.label_mapping),
+                Decoder::from_hf_json(&config, manifest.tag_scheme, &manifest.label_mapping)
+                    .and_then(|decoder| {
+                        if offset_consistency {
+                            decoder.with_offset_consistency()
+                        } else {
+                            Ok(decoder)
+                        }
+                    }),
                 None,
             ),
             Adapter::AstrlinkSensitiveGuard => {
@@ -130,6 +152,7 @@ impl PrivacyEngine {
             apply_post_processor,
             decoder,
             sensitive,
+            span_contract,
             session,
             model_window_tokens: manifest.window,
             content_window_tokens,
@@ -242,6 +265,9 @@ impl PrivacyEngine {
             crate::pplx::normalize_boundaries(text, &mut model_spans);
         }
         let Some(guard) = self.sensitive.as_ref() else {
+            if self.span_contract {
+                return Ok(span_contract::refine(text, model_spans).map_err(io::Error::other)?);
+            }
             return Ok(model_spans);
         };
         let rule_confidence = self
@@ -643,6 +669,50 @@ mod tests {
         101, 10, 2, 8, 33, 66, 4, 10, 0, 16, 13,
     ];
 
+    // The micro fixture above with the 21 Guard BIO labels: every token
+    // prefers I-ip_address, then B-ip_address.
+    const GUARD_CONTRACT_ONNX_MODEL: &[u8] = &[
+        8, 9, 18, 21, 97, 115, 116, 114, 108, 105, 110, 107, 45, 116, 101, 115, 116, 45, 102, 105,
+        120, 116, 117, 114, 101, 58, 135, 4, 10, 31, 10, 9, 105, 110, 112, 117, 116, 95, 105, 100,
+        115, 18, 11, 105, 110, 112, 117, 116, 95, 115, 104, 97, 112, 101, 34, 5, 83, 104, 97, 112,
+        101, 10, 63, 18, 17, 108, 97, 98, 101, 108, 95, 119, 105, 100, 116, 104, 95, 118, 97, 108,
+        117, 101, 34, 8, 67, 111, 110, 115, 116, 97, 110, 116, 42, 32, 10, 5, 118, 97, 108, 117,
+        101, 42, 20, 8, 1, 16, 7, 58, 1, 21, 66, 11, 108, 97, 98, 101, 108, 95, 119, 105, 100, 116,
+        104, 160, 1, 4, 10, 67, 10, 11, 105, 110, 112, 117, 116, 95, 115, 104, 97, 112, 101, 10,
+        17, 108, 97, 98, 101, 108, 95, 119, 105, 100, 116, 104, 95, 118, 97, 108, 117, 101, 18, 12,
+        111, 117, 116, 112, 117, 116, 95, 115, 104, 97, 112, 101, 34, 6, 67, 111, 110, 99, 97, 116,
+        42, 11, 10, 4, 97, 120, 105, 115, 24, 0, 160, 1, 2, 10, 150, 1, 18, 17, 98, 97, 115, 101,
+        95, 108, 111, 103, 105, 116, 115, 95, 118, 97, 108, 117, 101, 34, 8, 67, 111, 110, 115,
+        116, 97, 110, 116, 42, 119, 10, 5, 118, 97, 108, 117, 101, 42, 107, 8, 1, 8, 1, 8, 21, 16,
+        1, 34, 84, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0,
+        32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 160, 64, 0, 0, 32, 65, 0, 0,
+        32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0,
+        32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 0, 0, 32, 193, 66, 11, 98, 97, 115, 101, 95, 108,
+        111, 103, 105, 116, 115, 160, 1, 4, 10, 49, 10, 17, 98, 97, 115, 101, 95, 108, 111, 103,
+        105, 116, 115, 95, 118, 97, 108, 117, 101, 10, 12, 111, 117, 116, 112, 117, 116, 95, 115,
+        104, 97, 112, 101, 18, 6, 108, 111, 103, 105, 116, 115, 34, 6, 69, 120, 112, 97, 110, 100,
+        18, 29, 97, 115, 116, 114, 108, 105, 110, 107, 95, 109, 105, 99, 114, 111, 95, 112, 114,
+        105, 118, 97, 99, 121, 95, 102, 105, 108, 116, 101, 114, 90, 35, 10, 9, 105, 110, 112, 117,
+        116, 95, 105, 100, 115, 18, 22, 10, 20, 8, 7, 18, 16, 10, 2, 8, 1, 10, 10, 18, 8, 115, 101,
+        113, 117, 101, 110, 99, 101, 90, 40, 10, 14, 97, 116, 116, 101, 110, 116, 105, 111, 110,
+        95, 109, 97, 115, 107, 18, 22, 10, 20, 8, 7, 18, 16, 10, 2, 8, 1, 10, 10, 18, 8, 115, 101,
+        113, 117, 101, 110, 99, 101, 98, 36, 10, 6, 108, 111, 103, 105, 116, 115, 18, 26, 10, 24,
+        8, 1, 18, 20, 10, 2, 8, 1, 10, 10, 18, 8, 115, 101, 113, 117, 101, 110, 99, 101, 10, 2, 8,
+        21, 66, 4, 10, 0, 16, 13,
+    ];
+    const GUARD_KINDS: [&str; 10] = [
+        "email",
+        "phone",
+        "account",
+        "payment_card",
+        "ip_address",
+        "url",
+        "common_secret",
+        "private_address",
+        "private_date",
+        "private_person",
+    ];
+
     #[test]
     fn preserves_raw_logits_for_pplx_confidence_across_windows() {
         let mut accumulator = LogProbabilityAccumulator::new(3, 2);
@@ -981,6 +1051,198 @@ mod tests {
             (spans[3].start, spans[3].end),
             ("你好 secret 你好 ".len(), "你好 secret 你好 secret".len())
         );
+    }
+
+    #[test]
+    fn guard_contracts_are_opt_in_and_refine_model_spans() {
+        let text = "203.0.113.9:8080";
+        let detect = |fields: serde_json::Value| {
+            let directory = guard_contract_model_directory();
+            edit_fixture(&directory, |config, _| {
+                for (key, value) in fields.as_object().expect("contract fields") {
+                    config[key] = value.clone();
+                }
+            });
+            let result = (|| {
+                PrivacyEngine::load(&directory)?.detect(&[TextInput {
+                    id: 29,
+                    text: text.into(),
+                }])
+            })();
+            let _ = fs::remove_dir_all(&directory);
+            result.expect("run Guard contract fixture")
+        };
+        let decoder_field = offset_contract::CONFIG_FIELD;
+        let span_field = span_contract::CONFIG_FIELD;
+
+        let legacy = detect(serde_json::json!({}));
+        assert_eq!(
+            legacy
+                .iter()
+                .map(|span| (span.text_id, span.label.as_str(), span.start, span.end))
+                .collect::<Vec<_>>(),
+            vec![(29, "ip_address", 0, text.len())]
+        );
+        assert_eq!(
+            detect(serde_json::json!({ decoder_field: null, span_field: null })),
+            legacy
+        );
+        // No token shares a character here, so the decoder contract agrees.
+        assert_eq!(
+            detect(serde_json::json!({ decoder_field: offset_contract::CONTRACT })),
+            legacy
+        );
+
+        let refined = detect(serde_json::json!({ span_field: span_contract::CONTRACT }));
+        assert_eq!(
+            refined
+                .iter()
+                .map(|span| (span.text_id, span.label.as_str(), span.start, span.end))
+                .collect::<Vec<_>>(),
+            vec![(29, "ip_address", 0, "203.0.113.9".len())]
+        );
+        assert_eq!(refined[0].score, legacy[0].score);
+        assert_eq!(
+            detect(serde_json::json!({
+                decoder_field: offset_contract::CONTRACT,
+                span_field: span_contract::CONTRACT,
+            })),
+            refined
+        );
+    }
+
+    #[test]
+    fn guard_contract_values_are_strict_at_load() {
+        for (field, value, error) in [
+            (
+                offset_contract::CONFIG_FIELD,
+                serde_json::json!("bio-offset-consistency-v2"),
+                "invalid_decoder_contract",
+            ),
+            (
+                offset_contract::CONFIG_FIELD,
+                serde_json::json!(true),
+                "invalid_decoder_contract",
+            ),
+            (
+                span_contract::CONFIG_FIELD,
+                serde_json::json!("existing-ip-and-dynamic-url-v0"),
+                "invalid_span_contract",
+            ),
+            (
+                span_contract::CONFIG_FIELD,
+                serde_json::json!(["existing-ip-and-dynamic-url-v1"]),
+                "invalid_span_contract",
+            ),
+        ] {
+            let directory = guard_contract_model_directory();
+            edit_fixture(&directory, |config, _| config[field] = value.clone());
+            assert_eq!(load_error(&directory), error, "{field}={value}");
+        }
+    }
+
+    #[test]
+    fn guard_contracts_require_the_hf_adapter_and_guard_labels() {
+        for (field, value, error) in [
+            (
+                offset_contract::CONFIG_FIELD,
+                offset_contract::CONTRACT,
+                "invalid_decoder_contract_adapter",
+            ),
+            (
+                span_contract::CONFIG_FIELD,
+                span_contract::CONTRACT,
+                "invalid_span_contract_adapter",
+            ),
+        ] {
+            // The micro fixture uses the OpenAI BIOES adapter.
+            let directory = micro_model_directory();
+            edit_fixture(&directory, |config, _| config[field] = value.into());
+            assert_eq!(load_error(&directory), error, "{field}");
+        }
+
+        // A generic HF model without the 21 Guard BIO labels cannot use the
+        // decoder contract.
+        let directory = micro_model_directory();
+        edit_fixture(&directory, |config, manifest| {
+            config[offset_contract::CONFIG_FIELD] = offset_contract::CONTRACT.into();
+            manifest["adapter"] = "hf_token_classification".into();
+            manifest["calibration_path"] = serde_json::Value::Null;
+        });
+        assert_eq!(load_error(&directory), "invalid_decoder_contract");
+    }
+
+    /// Rewrites the fixture `config.json` and manifest, keeping the manifest
+    /// file sizes of the config and model valid.
+    fn edit_fixture(
+        directory: &Path,
+        edit: impl FnOnce(&mut serde_json::Value, &mut serde_json::Value),
+    ) {
+        let manifest_path = directory.join(crate::manifest::MANIFEST_NAME);
+        let config_path = directory.join("config.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read fixture manifest"))
+                .expect("parse fixture manifest");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).expect("read fixture config"))
+                .expect("parse fixture config");
+        edit(&mut config, &mut manifest);
+        let config = serde_json::to_vec(&config).expect("serialize fixture config");
+        fs::write(&config_path, &config).expect("write fixture config");
+        let model_size = fs::metadata(directory.join("onnx/model_q4.onnx"))
+            .expect("fixture model metadata")
+            .len();
+        for file in manifest["files"]
+            .as_array_mut()
+            .expect("fixture file descriptors")
+        {
+            if file["path"] == "config.json" {
+                file["size"] = config.len().into();
+            } else if file["path"] == "onnx/model_q4.onnx" {
+                file["size"] = model_size.into();
+            }
+        }
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize fixture manifest"),
+        )
+        .expect("write fixture manifest");
+    }
+
+    fn guard_contract_model_directory() -> PathBuf {
+        let directory = micro_model_directory();
+        fs::write(
+            directory.join("onnx/model_q4.onnx"),
+            GUARD_CONTRACT_ONNX_MODEL,
+        )
+        .expect("write Guard contract model");
+        edit_fixture(&directory, |config, manifest| {
+            let mut labels = serde_json::Map::new();
+            labels.insert("0".into(), "O".into());
+            for (index, kind) in GUARD_KINDS.iter().enumerate() {
+                labels.insert((1 + index * 2).to_string(), format!("B-{kind}").into());
+                labels.insert((2 + index * 2).to_string(), format!("I-{kind}").into());
+            }
+            *config = serde_json::json!({ "id2label": labels });
+            manifest["adapter"] = "hf_token_classification".into();
+            manifest["tag_scheme"] = "bio".into();
+            manifest["calibration_path"] = serde_json::Value::Null;
+            manifest["label_mapping"] = GUARD_KINDS
+                .iter()
+                .map(|kind| ((*kind).to_owned(), serde_json::Value::from(*kind)))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        });
+        directory
+    }
+
+    /// Loads a fixture that must fail and removes it.
+    fn load_error(directory: &Path) -> String {
+        let error = PrivacyEngine::load(directory)
+            .err()
+            .map(|error| error.to_string());
+        let _ = fs::remove_dir_all(directory);
+        error.expect("fixture must fail to load")
     }
 
     fn configure_template_windows(directory: &Path, manifest: &mut serde_json::Value) {

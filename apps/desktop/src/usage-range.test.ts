@@ -341,7 +341,11 @@ describe("usage aggregation", () => {
     const aggregate = aggregateUsageRecords([
       record(
         { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
-        { service_id: "service_a", requested_model: "model_a", local_access_token_id: "token_a" },
+        {
+          service_id: "service_a",
+          requested_model: "model_a",
+          local_access_token_id: "token_a",
+        },
       ),
       record(null, {
         status: "failed",
@@ -358,15 +362,39 @@ describe("usage aggregation", () => {
     ]);
 
     expect(aggregate.by_service).toEqual([
-      { id: "service_a", ...emptyUsageTotals(), requests: 1, failed_requests: 1, input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      {
+        id: "service_a",
+        ...emptyUsageTotals(),
+        requests: 1,
+        failed_requests: 1,
+        input_tokens: 4,
+        output_tokens: 2,
+        total_tokens: 6,
+      },
       { id: "service_b", ...emptyUsageTotals(), failed_requests: 1 },
     ]);
     expect(aggregate.by_model).toEqual([
-      { id: "model_a", ...emptyUsageTotals(), requests: 1, failed_requests: 1, input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      {
+        id: "model_a",
+        ...emptyUsageTotals(),
+        requests: 1,
+        failed_requests: 1,
+        input_tokens: 4,
+        output_tokens: 2,
+        total_tokens: 6,
+      },
       { id: "model_b", ...emptyUsageTotals(), failed_requests: 1 },
     ]);
     expect(aggregate.by_token).toEqual([
-      { id: "token_a", ...emptyUsageTotals(), requests: 1, failed_requests: 1, input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      {
+        id: "token_a",
+        ...emptyUsageTotals(),
+        requests: 1,
+        failed_requests: 1,
+        input_tokens: 4,
+        output_tokens: 2,
+        total_tokens: 6,
+      },
     ]);
   });
 
@@ -427,6 +455,40 @@ describe("usage aggregation", () => {
       [null, 4],
     ]);
     expect(aggregate.by_service[0]?.requests).toBe(2);
+  });
+
+  it("groups models by the upstream model after redirects", () => {
+    const redirect = { from: "claude-sonnet-4-5", to: "gpt-6-astra" };
+    const aggregate = aggregateUsageRecords([
+      record(
+        { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
+        {
+          id: "req_served",
+          requested_model: "claude-sonnet-4-5",
+          model_redirect: redirect,
+          recovery: { upstream_model: "gpt-6-astra", delay_ms: 0 },
+        },
+      ),
+      record(
+        { input_tokens: 15, output_tokens: 5, total_tokens: 20 },
+        {
+          id: "req_redirect_only",
+          requested_model: "claude-sonnet-4-5",
+          model_redirect: redirect,
+        },
+      ),
+      record(
+        { input_tokens: 4, output_tokens: 1, total_tokens: 5 },
+        { id: "req_direct", requested_model: "claude-haiku-4-5" },
+      ),
+    ]);
+
+    expect(
+      aggregate.by_model.map((group) => [group.id, group.total_tokens]),
+    ).toEqual([
+      ["gpt-6-astra", 30],
+      ["claude-haiku-4-5", 5],
+    ]);
   });
 
   it("buckets records into local days and pads the gaps", () => {

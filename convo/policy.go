@@ -95,8 +95,11 @@ func (policy Policy) minFingerprintRunes() int {
 // Resolve decides which earlier session the request continues. Layers are
 // tried most trusted first and the first hit wins:
 //
-//  1. KindExplicit with an unrestricted Scope;
-//  2. KindEchoID restricted to the same principal and Window;
+//  1. SessionCursor, or the first ExplicitCursors entry, with an unrestricted
+//     Scope. An unmatched explicit identity starts a new session; inherited
+//     history and lower-priority hints must not attach it to another one.
+//  2. Without an explicit identity, KindEchoID restricted to the same principal
+//     and Window;
 //  3. KindFingerprint with the same restriction, skipped when fp is nil or
 //     the request carries no assistant digest.
 //
@@ -110,6 +113,11 @@ func (policy Policy) Resolve(
 	now time.Time,
 ) (Decision, error) {
 	decision := Decision{}
+	explicit := summary.ExplicitCursors
+	sessionCursor := clampCursorValue(summary.SessionCursor)
+	if sessionCursor != "" {
+		explicit = append([]string{sessionCursor}, explicit...)
+	}
 	scoped := Scope{SamePrincipal: true}
 	if policy.Window > 0 {
 		scoped.NotBefore = now.Add(-policy.Window)
@@ -119,7 +127,7 @@ func (policy Policy) Resolve(
 		values []string
 		scope  Scope
 	}{
-		{KindExplicit, summary.ExplicitCursors, Scope{}},
+		{KindExplicit, explicit, Scope{}},
 		{KindEchoID, summary.EchoIDs, scoped},
 	}
 	if fp != nil {
@@ -139,10 +147,14 @@ func (policy Policy) Resolve(
 		for _, value := range layer.values {
 			decision.Inbound = append(decision.Inbound, Cursor{Kind: layer.kind, Direction: DirectionIn, Value: value})
 		}
-		if matched != nil || lookup == nil {
+		if matched != nil || lookup == nil || (layer.kind != KindExplicit && len(explicit) > 0) {
 			continue
 		}
-		match, ok, err := lookup(ctx, layer.kind, layer.values, layer.scope)
+		values := layer.values
+		if layer.kind == KindExplicit {
+			values = values[:1]
+		}
+		match, ok, err := lookup(ctx, layer.kind, values, layer.scope)
 		if err != nil {
 			return decision, err
 		}
@@ -156,6 +168,19 @@ func (policy Policy) Resolve(
 		matched = &copied
 		decision.Matched = true
 		decision.Match = match
+	}
+	// Session headers decide membership. For a stateful continuation within
+	// that session, the response producer still anchors the turn, including
+	// repeated requests against an older response. A parent thread's response
+	// cannot override the fork's identity or turn state.
+	if sessionCursor != "" && matched != nil && summary.Stateful && len(summary.ExplicitCursors) > 0 {
+		anchor, ok, err := lookup(ctx, KindExplicit, summary.ExplicitCursors[:1], Scope{})
+		if err != nil {
+			return decision, err
+		}
+		if ok && anchor.SessionID == matched.SessionID {
+			matched = &anchor
+		}
 	}
 	var userFingerprint string
 	if fp != nil {

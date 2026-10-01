@@ -14,8 +14,12 @@ var ErrInvalidJSON = errors.New("convo: request body is not a JSON object")
 // user text a host may want for previews. It never contains assistant text.
 type RequestSummary struct {
 	Protocol Protocol
+	// SessionCursor is an authoritative client session identifier supplied by
+	// the host, such as Codex's Session_id header. A new value starts a new
+	// session even when the request replays another conversation's history.
+	SessionCursor string
 	// ExplicitCursors are conversation identifiers the request names, most
-	// trusted first.
+	// trusted first. Only the first is used when SessionCursor is absent.
 	ExplicitCursors []string
 	// Stateful is true when the request continues server-side history, so
 	// the body holds only the newest turn (Responses with previous_response_id).

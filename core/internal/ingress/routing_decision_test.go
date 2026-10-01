@@ -111,11 +111,12 @@ func TestRequestRecordsExplainWhyALowerPriorityProviderServed(t *testing.T) {
 	check("priority", serve(`{"model":"public","messages":[{"role":"user","content":"a new conversation"}]}`), "service_backup", contract.RoutingSelectionPriority, ahead)
 	check("binding to the first eligible", serve(follow("a new conversation")), "service_backup", contract.RoutingSelectionPriority, ahead)
 
-	// Without an eligible provider the decision explains every exclusion.
+	// Without an eligible provider the decision explains every exclusion. A
+	// disabled provider without the model is excluded for lacking it.
 	root = serve(`{"model":"missing","messages":[{"role":"user","content":"hi"}]}`)
 	want := &contract.RequestRoutingDecision{Skipped: []contract.RoutingSkip{
 		{ServiceID: "service_mly", Reason: contract.RoutingSkipModelNotListed},
-		{ServiceID: "service_codex", Reason: contract.RoutingSkipDisabled},
+		{ServiceID: "service_codex", Reason: contract.RoutingSkipModelNotListed},
 		{ServiceID: "service_backup", Reason: contract.RoutingSkipModelNotListed},
 		{ServiceID: "service_newapi", Reason: contract.RoutingSkipModelNotListed},
 	}}

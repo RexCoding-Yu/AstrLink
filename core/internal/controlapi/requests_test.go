@@ -246,3 +246,25 @@ func requestRecordHTTP(
 	handler.ServeHTTP(response, request)
 	return response
 }
+
+func TestParseRequestRecordQueryValidatesSearchText(t *testing.T) {
+	options, err := parseRequestRecordQuery(url.Values{"q": {"  refactor payment  "}})
+	if err != nil || options.Query != "refactor payment" {
+		t.Fatalf("options = %#v err=%v", options, err)
+	}
+	for _, values := range [][]string{
+		{""},
+		{"   "},
+		{"a", "b"},
+		{strings.Repeat("x", maxRequestSearchRunes+1)},
+		{"line\nbreak"},
+	} {
+		if _, err := parseRequestRecordQuery(url.Values{"q": values}); err == nil {
+			t.Fatalf("q=%q was accepted", values)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, RequestSessionsPath+"?q=x", nil)
+	if _, err := parseRequestSessionListOptions(request); err == nil {
+		t.Fatal("q on request sessions was accepted")
+	}
+}

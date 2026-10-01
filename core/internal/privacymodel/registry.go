@@ -86,6 +86,8 @@ type Registry struct {
 	operations    map[contract.PrivacyModelID]*registryOperation
 	deleting      map[contract.PrivacyModelID]struct{}
 	localProbes   map[string]localProbeCacheEntry
+
+	releases catalogReleaseCache
 }
 
 type registryOperation struct {
@@ -167,6 +169,9 @@ func (registry *Registry) Probe(
 ) (contract.PrivacyModelProbeResponse, error) {
 	if isLocalPrivacyModelRepoID(request.RepoID) {
 		return contract.PrivacyModelProbeResponse{}, ErrLocalProbeRequired
+	}
+	if request.RepoID == astrLinkGuardRepoID {
+		return registry.probeAstrLinkGuard(ctx, request)
 	}
 	result, err := registry.probe.inspect(ctx, request)
 	if err != nil {
@@ -417,16 +422,21 @@ func (registry *Registry) prepareInstallation(
 		return registry.prepareLocalInstallation(request)
 	}
 	id := InstallationID(request.RepoID, request.Revision, request.VariantID)
-	if catalogPlan, exists := builtinVariantPlan(
+	catalogPlan, exists := builtinVariantPlan(
 		request.RepoID, request.Revision, request.VariantID,
-	); exists {
+	)
+	if !exists && request.RepoID == astrLinkGuardRepoID {
+		release, err := registry.astrLinkGuardRelease(ctx, request.Revision)
+		if err != nil {
+			return installationPlan{}, err
+		}
+		if catalogPlan, exists = release.plans[request.VariantID]; !exists {
+			return installationPlan{}, ErrUnsupportedModel
+		}
+	}
+	if exists {
 		mapping := cloneLabelMapping(request.LabelMapping)
-		if catalogPlan.item.Adapter == contract.PrivacyModelAdapterOpenAIBIOES ||
-			catalogPlan.item.Adapter == contract.PrivacyModelAdapterPPLXBIOES {
-			fixedMapping := defaultOpenAILabelMapping()
-			if catalogPlan.item.Adapter == contract.PrivacyModelAdapterPPLXBIOES {
-				fixedMapping = defaultPPLXLabelMapping()
-			}
+		if fixedMapping, fixed := fixedCatalogLabelMapping(catalogPlan.item); fixed {
 			if len(mapping) == 0 {
 				mapping = fixedMapping
 			} else if !sameLabelKeys(mapping, fixedMapping) {
@@ -514,6 +524,22 @@ func (registry *Registry) prepareInstallation(
 		},
 		assets: copyAssets(customPlan.assets), runtime: customPlan.runtime,
 	}, nil
+}
+
+// Catalog models with a known label set install without a mapping step.
+func fixedCatalogLabelMapping(
+	item contract.PrivacyModelCatalogItem,
+) (map[string]*contract.CanonicalKind, bool) {
+	switch {
+	case item.ID == CatalogAstrLinkGuard:
+		return defaultAstrLinkGuardLabelMapping(), true
+	case item.Adapter == contract.PrivacyModelAdapterPPLXBIOES:
+		return defaultPPLXLabelMapping(), true
+	case item.Adapter == contract.PrivacyModelAdapterOpenAIBIOES:
+		return defaultOpenAILabelMapping(), true
+	default:
+		return nil, false
+	}
 }
 
 func sameLabelKeys(
@@ -827,29 +853,7 @@ func manifestMatchesBuiltinPlan(
 	manifest normalizedManifest,
 	plan variantPlan,
 ) bool {
-	if manifest.Adapter != plan.item.Adapter ||
-		manifest.ModelPath != plan.runtime.modelPath ||
-		!stringSlicesEqual(manifest.ExternalData, plan.runtime.externalData) ||
-		manifest.TokenizerPath != plan.runtime.tokenizerPath ||
-		manifest.ConfigPath != plan.runtime.configPath ||
-		!optionalStringsEqual(
-			manifest.CalibrationPath,
-			plan.runtime.calibrationPath,
-		) ||
-		!optionalStringsEqual(
-			manifest.SecretRulesPath,
-			plan.runtime.secretRulesPath,
-		) ||
-		!optionalStringsEqual(
-			manifest.SecretCalibrationPath,
-			plan.runtime.secretCalibrationPath,
-		) ||
-		manifest.TagScheme != plan.runtime.tagScheme ||
-		manifest.Window != plan.runtime.window ||
-		manifest.Stride != plan.runtime.stride ||
-		manifest.MaxRequestTokens != plan.runtime.maxRequestTokens ||
-		manifest.InputNames != plan.runtime.inputNames ||
-		manifest.OutputName != plan.runtime.outputName ||
+	if !manifestMatchesRuntime(manifest, plan) ||
 		len(manifest.Files) != len(plan.assets) {
 		return false
 	}
@@ -865,6 +869,40 @@ func manifestMatchesBuiltinPlan(
 		}
 	}
 	return true
+}
+
+func manifestMatchesRuntime(
+	manifest normalizedManifest,
+	plan variantPlan,
+) bool {
+	return manifest.Adapter == plan.item.Adapter &&
+		manifest.ModelPath == plan.runtime.modelPath &&
+		stringSlicesEqual(manifest.ExternalData, plan.runtime.externalData) &&
+		manifest.TokenizerPath == plan.runtime.tokenizerPath &&
+		manifest.ConfigPath == plan.runtime.configPath &&
+		optionalStringsEqual(
+			manifest.CalibrationPath,
+			plan.runtime.calibrationPath,
+		) &&
+		optionalStringsEqual(
+			manifest.SecretRulesPath,
+			plan.runtime.secretRulesPath,
+		) &&
+		optionalStringsEqual(
+			manifest.SecretCalibrationPath,
+			plan.runtime.secretCalibrationPath,
+		) &&
+		manifest.TagScheme == plan.runtime.tagScheme &&
+		manifest.Window == plan.runtime.window &&
+		manifest.Stride == plan.runtime.stride &&
+		manifest.MaxRequestTokens == plan.runtime.maxRequestTokens &&
+		manifest.InputNames.InputIDs == plan.runtime.inputNames.InputIDs &&
+		manifest.InputNames.AttentionMask == plan.runtime.inputNames.AttentionMask &&
+		optionalStringsEqual(
+			manifest.InputNames.TokenTypeIDs,
+			plan.runtime.inputNames.TokenTypeIDs,
+		) &&
+		manifest.OutputName == plan.runtime.outputName
 }
 
 func stringSlicesEqual(left, right []string) bool {
@@ -1093,6 +1131,9 @@ func (registry *Registry) download(
 				id,
 				current.BytesDownloaded,
 			)
+		}
+		if plan.installation.RepoID == astrLinkGuardRepoID {
+			registry.countAstrLinkGuardDownload(ctx)
 		}
 	} else if registry.logf != nil {
 		registry.logf(
@@ -1432,7 +1473,38 @@ func manifestMatchesInstallationProvenance(
 		installation.Revision,
 		installation.VariantID,
 	)
-	return exists && manifestMatchesBuiltinPlan(manifest, plan)
+	if exists {
+		return manifestMatchesBuiltinPlan(manifest, plan)
+	}
+	// Release files were pinned from the tag's checksums when installed;
+	// offline startup can only confirm the runtime and file layout.
+	template, exists := astrLinkGuardReleaseTemplate(
+		installation.RepoID,
+		installation.Revision,
+		installation.VariantID,
+	)
+	return exists && manifestMatchesReleaseLayout(manifest, template)
+}
+
+func manifestMatchesReleaseLayout(
+	manifest normalizedManifest,
+	template variantPlan,
+) bool {
+	if !manifestMatchesRuntime(manifest, template) ||
+		len(manifest.Files) != len(template.assets) {
+		return false
+	}
+	expected := make(map[string]struct{}, len(template.assets))
+	for _, asset := range template.assets {
+		expected[asset.Path] = struct{}{}
+	}
+	for _, file := range manifest.Files {
+		if _, exists := expected[file.Path]; !exists {
+			return false
+		}
+		delete(expected, file.Path)
+	}
+	return true
 }
 
 func (registry *Registry) migrateLegacyOpenAI() error {
@@ -1586,10 +1658,15 @@ func validInstallationProvenance(
 		installation.Revision,
 		installation.VariantID,
 	)
+	template, release := astrLinkGuardReleaseTemplate(
+		installation.RepoID,
+		installation.Revision,
+		installation.VariantID,
+	)
 	if installation.Source == contract.PrivacyModelSourceCustom {
 		return installation.CatalogID == nil &&
 			installation.CatalogSource == nil &&
-			!builtin &&
+			!builtin && !release &&
 			!isLocalPrivacyModelRepoID(installation.RepoID)
 	}
 	if installation.Source == contract.PrivacyModelSourceLocal {
@@ -1601,8 +1678,13 @@ func validInstallationProvenance(
 	if installation.Source != contract.PrivacyModelSourceCatalog ||
 		installation.CatalogID == nil ||
 		installation.CatalogSource == nil ||
-		!builtin {
+		(!builtin && !release) {
 		return false
+	}
+	bytesTotalMatches := installation.BytesTotal == plan.variant.BytesTotal
+	if !builtin {
+		plan = template
+		bytesTotalMatches = installation.BytesTotal > 0
 	}
 	return *installation.CatalogID == plan.item.ID &&
 		*installation.CatalogSource == plan.item.Source &&
@@ -1612,7 +1694,7 @@ func validInstallationProvenance(
 		installation.VariantName == plan.variant.Name &&
 		installation.Quantization == plan.variant.Quantization &&
 		installation.Adapter == plan.item.Adapter &&
-		installation.BytesTotal == plan.variant.BytesTotal &&
+		bytesTotalMatches &&
 		installation.EstimatedRAMBytes == plan.variant.EstimatedRAMBytes
 }
 

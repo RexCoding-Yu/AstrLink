@@ -86,6 +86,7 @@ func validReadyEvent() ReadyEvent {
 		ControlAPIVersion:       ControlAPIVersion,
 		ProtocolContractVersion: ProtocolContractVersion,
 		InferenceURL:            "http://127.0.0.1:8317",
+		ClientInferenceURL:      "http://localhost:8317",
 		ControlURL:              "http://127.0.0.1:49152",
 	}
 }
@@ -94,10 +95,19 @@ func TestReadyEventValidateAcceptsPortBoundaries(t *testing.T) {
 	for _, port := range []string{"1", "65535"} {
 		event := validReadyEvent()
 		event.InferenceURL = "http://127.0.0.1:" + port
+		event.ClientInferenceURL = "http://localhost:" + port
 		event.ControlURL = "http://127.0.0.1:" + port
 		if err := event.Validate(); err != nil {
 			t.Errorf("port %s rejected: %v", port, err)
 		}
+	}
+}
+
+func TestReadyEventValidateAcceptsIPv4OnlyClientURL(t *testing.T) {
+	event := validReadyEvent()
+	event.ClientInferenceURL = event.InferenceURL
+	if err := event.Validate(); err != nil {
+		t.Fatalf("IPv4-only client URL rejected: %v", err)
 	}
 }
 
@@ -120,6 +130,11 @@ func TestReadyEventValidateRejectsInvalidAnnouncements(t *testing.T) {
 		{name: "path", mutate: func(value *ReadyEvent) { value.ControlURL = "http://127.0.0.1:8317/" }},
 		{name: "query", mutate: func(value *ReadyEvent) { value.ControlURL = "http://127.0.0.1:8317?x=1" }},
 		{name: "fragment", mutate: func(value *ReadyEvent) { value.ControlURL = "http://127.0.0.1:8317#x" }},
+		{name: "client missing", mutate: func(value *ReadyEvent) { value.ClientInferenceURL = "" }},
+		{name: "client other port", mutate: func(value *ReadyEvent) { value.ClientInferenceURL = "http://localhost:8318" }},
+		{name: "client ipv6", mutate: func(value *ReadyEvent) { value.ClientInferenceURL = "http://[::1]:8317" }},
+		{name: "client path", mutate: func(value *ReadyEvent) { value.ClientInferenceURL = "http://localhost:8317/" }},
+		{name: "client control", mutate: func(value *ReadyEvent) { value.ClientInferenceURL = value.ControlURL }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

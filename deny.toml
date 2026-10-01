@@ -1,0 +1,25 @@
+# cargo-deny policy shared by the Rust crates under apps/. CI runs it from the
+# repository root for each crate:
+#   cargo deny --locked --manifest-path <crate>/Cargo.toml check advisories bans sources
+# License checks are intentionally not enabled.
+
+[advisories]
+# Fail rather than silently scan against an outdated RustSec database.
+maximum-db-staleness = "P30D"
+# Unmaintained notices fail only for direct dependencies; transitive ones come
+# from upstream stacks such as Tauri and are tracked there.
+unmaintained = "workspace"
+# Every ignore must name the affected crate and a reason.
+ignore = [
+    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23.42 in apps/desktop/src-tauri/Cargo.lock only (reqwest/tauri-plugin-updater); the handshake transcript stays authenticated. Remove after `cargo update -p rustls` there; the workers already use 0.23.45." },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,12 +1,28 @@
 package subscription
 
 import (
+	"encoding/json"
 	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
 )
+
+func TestDecodeCodexCatalogPreservesMetadataWithoutChangingPublicModelList(t *testing.T) {
+	const entry = `{"slug":"custom-model","visibility":"list","base_instructions":"Original instructions","future_capability":{"enabled":true}}`
+	list, err := DecodeCodexCatalog([]byte(`{"models":[` + entry + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 || string(list.Data[0].CodexCatalog) != entry {
+		t.Fatalf("metadata lost or internal model invented: %+v", list)
+	}
+	body, err := json.Marshal(list)
+	if err != nil || strings.Contains(string(body), "base_instructions") || strings.Contains(string(body), "CodexCatalog") {
+		t.Fatalf("public model list changed: %s, error = %v", body, err)
+	}
+}
 
 func TestCodexUsageURLUsesOfficialChatGPTAndCodexPaths(t *testing.T) {
 	got := CodexUsageURL(accountauth.DefaultCodexAPIBaseURL + "/")

@@ -39,17 +39,15 @@ type discoveryOutcome uint8
 
 const (
 	// discoveryOutcomeExcluded covers candidates rejected before upstream I/O:
-	// plan/capability, credential, configuration, privacy, or a refused
-	// circuit admission. No health outcome is recorded for them.
+	// plan/capability, credential, configuration, privacy, or an upstream
+	// rate-limit cooldown.
 	discoveryOutcomeExcluded discoveryOutcome = iota
-	// discoveryOutcomeAborted marks client cancellation. An admitted attempt
-	// is abandoned rather than counted for or against the circuit.
+	// discoveryOutcomeAborted marks client cancellation.
 	discoveryOutcomeAborted
-	// discoveryOutcomeFailed marks an admitted fetch that did not produce a
-	// usable model list. It records exactly one circuit failure.
+	// discoveryOutcomeFailed marks a fetch that did not produce a usable
+	// model list.
 	discoveryOutcomeFailed
-	// discoveryOutcomeFetched marks an admitted fetch that produced a usable
-	// model list. It records exactly one circuit success.
+	// discoveryOutcomeFetched marks a fetch that produced a usable model list.
 	discoveryOutcomeFetched
 )
 
@@ -59,13 +57,15 @@ type discoveryResult struct {
 	warning    string
 	failure    executionFailure
 	privacyErr error
+	rateLimit  *endpoint.RateLimitedCandidate
 }
 
 // discoveryEntry keeps the upstream's original entry bytes together with the
 // public model ID used for conflict handling.
 type discoveryEntry struct {
-	id  string
-	raw json.RawMessage
+	id           string
+	raw          json.RawMessage
+	codexCatalog json.RawMessage
 }
 
 // aggregateModelDiscovery serves a model listing from every capable enabled
@@ -118,12 +118,15 @@ func (handler *Handler) aggregateModelDiscovery(
 	}
 	if session := recordSessionFromContext(request.Context()); session != nil {
 		decision := "allow"
+		outcome := contract.PrivacyDecisionAllow
 		for _, result := range results {
 			if result.warning != "" {
 				decision = "warn"
+				outcome = contract.PrivacyDecisionWarn
 			}
 		}
 		session.notePrivacyDecision(decision, contract.RequestStatusSucceeded)
+		session.notePrivacyOutcome(outcome, nil)
 	}
 	merged, succeeded := mergeDiscoveryEntries(results)
 	if succeeded == 0 {
@@ -139,7 +142,11 @@ func (handler *Handler) aggregateModelDiscovery(
 	merged, err := appendRedirectDiscoveryEntries(classified.Protocol, visible, redirects)
 	var body []byte
 	if err == nil {
-		body, err = encodeDiscoveryList(classified.Protocol, merged)
+		if wantsCodexModelCatalog(request, classified.Protocol) {
+			body, err = encodeCodexModelCatalog(merged)
+		} else {
+			body, err = encodeDiscoveryList(classified.Protocol, merged)
+		}
 	}
 	if err != nil {
 		writeInferenceError(
@@ -251,6 +258,7 @@ func (handler *Handler) fetchModelDiscovery(
 	}
 	var headers http.Header
 	if authorizeErr == nil {
+		authorizationEndpoint.Auth = providerapi.Auth(candidate.Service.Kind, classified.Protocol, authorizationEndpoint.Auth)
 		headers, authorizeErr = handler.authorizer.Headers(proxyContext, authorizationEndpoint, fetchRequest.Header)
 	}
 	if authorizeErr != nil {
@@ -288,11 +296,13 @@ func (handler *Handler) fetchModelDiscovery(
 		fetchRequest.URL.RawQuery = query.Encode()
 	}
 
-	controller, healthAware := handler.resolver.(endpoint.AttemptController)
-	if healthAware && !controller.BeginAttempt(candidate) {
-		return discoveryResult{outcome: discoveryOutcomeExcluded}
+	if limiter, ok := handler.resolver.(endpoint.RateLimitController); ok {
+		if until := limiter.RateLimitedUntil(candidate); !until.IsZero() {
+			return discoveryResult{outcome: discoveryOutcomeExcluded, rateLimit: &endpoint.RateLimitedCandidate{
+				Service: candidate.Service.ID, ServiceName: candidate.Service.Name, Model: candidate.UpstreamModel, Until: until,
+			}}
+		}
 	}
-	health := newAttemptHealthOutcome(controller, candidate, healthAware)
 
 	forwardErr := handler.forwarder.Forward(recorder, fetchRequest, transport.Target{
 		Service: candidate.Service, ProxyCredentials: handler.proxyCredentials,
@@ -300,13 +310,11 @@ func (handler *Handler) fetchModelDiscovery(
 		RequestHeaders: headers,
 	})
 	if request.Context().Err() != nil {
-		health.Abandon()
 		return discoveryResult{outcome: discoveryOutcomeAborted}
 	}
 	var targetErr *transport.TargetError
 	if errors.As(forwardErr, &targetErr) {
-		// The target was rejected before upstream I/O: configuration, not health.
-		health.Abandon()
+		// The target was rejected before upstream I/O: configuration.
 		return discoveryResult{outcome: discoveryOutcomeExcluded, failure: executionFailure{
 			kind:       executionFailureConfiguration,
 			err:        forwardErr,
@@ -314,7 +322,6 @@ func (handler *Handler) fetchModelDiscovery(
 		}}
 	}
 	if forwardErr != nil {
-		health.Failure()
 		failureErr := forwardErr
 		if errors.Is(fetchContext.Err(), context.DeadlineExceeded) &&
 			!errors.Is(forwardErr, context.DeadlineExceeded) {
@@ -327,10 +334,9 @@ func (handler *Handler) fetchModelDiscovery(
 		}}
 	}
 	if recorder.status < http.StatusOK || recorder.status >= http.StatusMultipleChoices {
-		health.Failure()
 		return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
 			kind:       executionFailureUpstream,
-			err:        fmt.Errorf("upstream model discovery returned status %d", recorder.status),
+			err:        discoveryStatusError(recorder),
 			endpointID: candidate.Service.ID,
 		}}
 	}
@@ -338,36 +344,24 @@ func (handler *Handler) fetchModelDiscovery(
 		recorder.body.Bytes(), strings.Join(recorder.Header().Values("Content-Encoding"), ","), maxResponseInspectionBytes,
 	)
 	if bodyErr != nil {
-		health.Failure()
 		return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
 			kind:       executionFailureUpstream,
 			err:        bodyErr,
 			endpointID: candidate.Service.ID,
 		}}
 	}
+	var entries []discoveryEntry
+	var entriesErr error
 	if candidate.Service.Kind == contract.ServiceKindCodexSubscription {
 		list, decodeErr := subscription.DecodeCodexModels(discoveryBody)
-		if decodeErr != nil {
-			health.Failure()
-			return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
-				kind:       executionFailureUpstream,
-				err:        decodeErr,
-				endpointID: candidate.Service.ID,
-			}}
+		entriesErr = decodeErr
+		if entriesErr == nil {
+			entries, entriesErr = codexCatalogDiscoveryEntries(list)
 		}
-		discoveryBody, decodeErr = subscription.EncodeOpenAIModelDiscovery(list)
-		if decodeErr != nil {
-			health.Failure()
-			return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
-				kind:       executionFailureUpstream,
-				err:        decodeErr,
-				endpointID: candidate.Service.ID,
-			}}
-		}
+	} else {
+		entries, entriesErr = parseDiscoveryEntries(classified.Protocol, discoveryBody)
 	}
-	entries, entriesErr := parseDiscoveryEntries(classified.Protocol, discoveryBody)
 	if entriesErr != nil {
-		health.Failure()
 		return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
 			kind:       executionFailureUpstream,
 			err:        entriesErr,
@@ -380,14 +374,12 @@ func (handler *Handler) fetchModelDiscovery(
 		candidate.Service.Models,
 	)
 	if entriesErr != nil {
-		health.Failure()
 		return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
 			kind:       executionFailureUpstream,
 			err:        entriesErr,
 			endpointID: candidate.Service.ID,
 		}}
 	}
-	health.Success()
 	return discoveryResult{
 		outcome: discoveryOutcomeFetched,
 		entries: entries,
@@ -480,6 +472,15 @@ func parseDiscoveryEntries(protocol contract.ProtocolID, body []byte) ([]discove
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope == nil {
 		return nil, errDiscoveryResponseInvalid
 	}
+	if protocol == contract.ProtocolOpenAIModels {
+		if _, ok := envelope["models"]; ok {
+			list, err := subscription.DecodeCodexCatalog(body)
+			if err != nil {
+				return nil, err
+			}
+			return codexCatalogDiscoveryEntries(list)
+		}
+	}
 	var elements []json.RawMessage
 	if rawList, exists := envelope[listKey]; exists {
 		if err := json.Unmarshal(rawList, &elements); err != nil {
@@ -548,10 +549,13 @@ func appendRedirectDiscoveryEntries(
 		return entries, nil
 	}
 	listed := make(map[string]struct{}, len(entries))
+	catalogs := make(map[string]json.RawMessage, len(entries))
 	for _, entry := range entries {
 		listed[discoveryModelID(protocol, entry.id)] = struct{}{}
+		catalogs[discoveryModelID(protocol, entry.id)] = entry.codexCatalog
 	}
 	sources := make([]string, 0)
+	sourceCatalogs := make(map[string]json.RawMessage)
 	for _, redirect := range redirects {
 		if !redirect.Enabled || redirect.From == "" || redirect.From == contract.AstrLinkAutoModelID {
 			continue
@@ -567,6 +571,7 @@ func appendRedirectDiscoveryEntries(
 		}
 		listed[redirect.From] = struct{}{}
 		sources = append(sources, redirect.From)
+		sourceCatalogs[redirect.From] = catalogs[redirect.To]
 	}
 	if len(sources) == 0 {
 		return entries, nil
@@ -574,6 +579,9 @@ func appendRedirectDiscoveryEntries(
 	synthesized, err := synthesizeDiscoveryEntries(protocol, sources)
 	if err != nil {
 		return nil, err
+	}
+	for index := range synthesized {
+		synthesized[index].codexCatalog = sourceCatalogs[discoveryModelID(protocol, synthesized[index].id)]
 	}
 	entries = append(entries, synthesized...)
 	sort.Slice(entries, func(left, right int) bool {
@@ -682,7 +690,32 @@ func (handler *Handler) writeDiscoveryFailure(
 			}
 		}
 	}
-	handler.writeResolveError(writer, request, classified, endpoint.ErrNoHealthyEndpoint)
+	limited := &endpoint.RateLimitedCandidatesError{}
+	for _, result := range results {
+		if result.rateLimit != nil {
+			limited.Limits = append(limited.Limits, *result.rateLimit)
+		}
+	}
+	handler.writeResolveError(writer, request, classified, limited)
+}
+
+// discoveryStatusError carries the provider's own message for a failed
+// listing, so the aggregate error says why and not only the status.
+func discoveryStatusError(recorder *discoveryResponseRecorder) error {
+	err := fmt.Errorf("upstream model discovery returned status %d", recorder.status)
+	if recorder.status < http.StatusBadRequest {
+		return err
+	}
+	capture := newUpstreamErrorCapture(
+		recorder.status,
+		recorder.Header().Get("Content-Type"),
+		strings.Join(recorder.Header().Values("Content-Encoding"), ","),
+	)
+	capture.observe(recorder.body.Bytes())
+	if message := nativeErrorMessage(capture.response()); message != "" {
+		return fmt.Errorf("%w: %s", err, message)
+	}
+	return err
 }
 
 // discoveryResponseRecorder buffers one upstream discovery response in

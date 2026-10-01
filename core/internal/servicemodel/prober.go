@@ -114,7 +114,7 @@ func (prober *Prober) ProbeHTTP(
 			return nil, fmt.Errorf("%w: %v", ErrCredentialUnavailable, err)
 		}
 	}
-	headers, err := authorizationHeaders(connection.Auth, secret)
+	headers, err := authorizationHeaders(providerapi.Auth(kind, protocol, connection.Auth), secret)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +134,7 @@ func (prober *Prober) probeSubscription(
 	serviceID contract.ServiceID,
 	protocol contract.ProtocolID,
 ) ([]string, error) {
-	if protocol != contract.ProtocolOpenAIModels || prober == nil || prober.subscriptions == nil {
+	if !protocol.IsModelDiscovery() || prober == nil || prober.subscriptions == nil {
 		return nil, ErrUnsupported
 	}
 	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
@@ -154,6 +154,12 @@ func (prober *Prober) probeSubscription(
 	if err != nil {
 		return nil, ErrNotConnected
 	}
+	if account.Provider == contract.SubscriptionProviderAntigravity {
+		return prober.subscriptions.AntigravityModels(probeContext, tokens)
+	}
+	if protocol != contract.ProtocolOpenAIModels {
+		return nil, ErrUnsupported
+	}
 	if account.Provider == contract.SubscriptionProviderClaudeCode {
 		headers := make(http.Header)
 		accountauth.ApplyClaudeAPIHeaders(headers, tokens, prober.subscriptions.ClaudeIdentity(probeContext))
@@ -161,7 +167,7 @@ func (prober *Prober) probeSubscription(
 	}
 	if account.Provider == contract.SubscriptionProviderXAIGrok {
 		headers := make(http.Header)
-		accountauth.ApplyGrokAPIHeaders(headers, tokens, prober.subscriptions.GrokClientVersion())
+		accountauth.ApplyGrokAPIHeaders(headers, tokens, prober.subscriptions.GrokClientVersion(probeContext))
 		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, false, "")
 	}
 	models, err := prober.subscriptions.Provider().ListModels(probeContext, tokens)

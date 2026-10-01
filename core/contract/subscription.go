@@ -37,12 +37,13 @@ const (
 	SubscriptionProviderClaudeCode  SubscriptionProvider = "claude_code"
 	// SubscriptionProviderXAIGrok is a SuperGrok / Grok Build subscription
 	// authorized through the public Grok CLI OAuth client (device code).
-	SubscriptionProviderXAIGrok SubscriptionProvider = "xai_grok"
+	SubscriptionProviderXAIGrok     SubscriptionProvider = "xai_grok"
+	SubscriptionProviderAntigravity SubscriptionProvider = "antigravity"
 )
 
 func (provider SubscriptionProvider) Valid() bool {
 	switch provider {
-	case SubscriptionProviderOpenAICodex, SubscriptionProviderClaudeCode, SubscriptionProviderXAIGrok:
+	case SubscriptionProviderOpenAICodex, SubscriptionProviderClaudeCode, SubscriptionProviderXAIGrok, SubscriptionProviderAntigravity:
 		return true
 	default:
 		return false
@@ -55,6 +56,8 @@ func (provider SubscriptionProvider) ServiceKind() ServiceKind {
 		return ServiceKindClaudeSubscription
 	case SubscriptionProviderXAIGrok:
 		return ServiceKindGrokSubscription
+	case SubscriptionProviderAntigravity:
+		return ServiceKindAntigravitySubscription
 	default:
 		return ServiceKindCodexSubscription
 	}
@@ -69,6 +72,12 @@ func (provider SubscriptionProvider) Capabilities() []Capability {
 		}
 	case SubscriptionProviderXAIGrok:
 		return DefaultXAIGrokCapabilities()
+	case SubscriptionProviderAntigravity:
+		return []Capability{
+			{Protocol: ProtocolGoogleGenerateContent, Mode: CapabilityModeNative, Streaming: true},
+			{Protocol: ProtocolGoogleModels, Mode: CapabilityModeNative},
+			{Protocol: ProtocolOpenAIModels, Mode: CapabilityModeNative},
+		}
 	default:
 		return DefaultOpenAICodexCapabilities()
 	}
@@ -83,6 +92,8 @@ func (provider SubscriptionProvider) ConversionTargets() []ProtocolID {
 		return []ProtocolID{ProtocolAnthropicMessages}
 	case SubscriptionProviderXAIGrok:
 		return []ProtocolID{ProtocolOpenAIResponses, ProtocolOpenAIChat}
+	case SubscriptionProviderAntigravity:
+		return []ProtocolID{ProtocolGoogleGenerateContent}
 	default:
 		return []ProtocolID{ProtocolOpenAIResponses}
 	}
@@ -241,8 +252,8 @@ func (account SubscriptionAccount) Validate() error {
 		if err := ValidateCredentialRef(account.CredentialRef); err != nil {
 			return fmt.Errorf("connected subscription requires credential_ref: %w", err)
 		}
-		if !strings.HasPrefix(account.CredentialRef, "keyring://") {
-			return fmt.Errorf("subscription credential_ref must use keyring://")
+		if account.CredentialRef != "local://subscription/"+string(account.ID) && !strings.HasPrefix(account.CredentialRef, "keyring://") {
+			return fmt.Errorf("subscription credential_ref must equal %q or use keyring://", "local://subscription/"+string(account.ID))
 		}
 	default:
 		if account.CredentialRef != "" {
@@ -354,6 +365,8 @@ func (flow AuthorizationFlow) SupportedBy(provider SubscriptionProvider) bool {
 		return flow == AuthorizationFlowCode
 	case SubscriptionProviderXAIGrok:
 		return flow == AuthorizationFlowDeviceCode
+	case SubscriptionProviderAntigravity:
+		return flow == AuthorizationFlowBrowser
 	case SubscriptionProviderOpenAICodex:
 		return flow == AuthorizationFlowBrowser || flow == AuthorizationFlowDeviceCode
 	default:
@@ -483,7 +496,7 @@ const (
 	maxUsageLimitNameLength        = 128
 	maxUsageFeatureLength          = 128
 	maxUsageBalanceLength          = 32
-	maxUsageAdditionalLimits       = 16
+	maxUsageAdditionalLimits       = 256
 	maxUsageUsedPercent            = 1000
 	maxUsageResetCredits           = 1000
 	maxUsageWindowSeconds    int64 = 366 * 24 * 3600
@@ -669,6 +682,16 @@ func (quota UsageQuota) Validate() error {
 // `/wham/usage`. Redeeming one uses the official consume path.
 type RateLimitResetCredits struct {
 	AvailableCount int `json:"available_count"`
+}
+
+// ResetCreditDetails exposes expiry information without upstream credit or user IDs.
+type ResetCreditDetails struct {
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+type ResetCreditsDetails struct {
+	AvailableCount int                  `json:"available_count"`
+	Credits        []ResetCreditDetails `json:"credits"`
 }
 
 const (

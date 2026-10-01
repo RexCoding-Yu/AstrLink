@@ -150,19 +150,26 @@ func TestAuthenticateHashesCanonicalValueAndCollapsesInvalidRecords(t *testing.T
 		name      string
 		raw       string
 		findErr   error
+		hint      string
 		wantError bool
 		wantCalls int
 	}{
 		{name: "valid", raw: raw, wantCalls: 1},
+		{name: "hint mismatch", raw: raw, hint: "astr_…AAAAAA", wantError: true, wantCalls: 1},
 		{name: "malformed", raw: "astr_not-base64!", wantError: true},
 		{name: "missing", raw: raw, findErr: storage.ErrNotFound, wantError: true, wantCalls: 1},
 		{name: "corrupt", raw: raw, findErr: storage.ErrInvalidRecord, wantError: true, wantCalls: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			hint := test.hint
+			if hint == "" {
+				hint = tokenHint(raw)
+			}
 			store := &fakeAccessTokenStore{
 				findErr: test.findErr,
 				findRecord: storage.AccessTokenMetadata{
-					ID: "access_token_stable",
+					ID:   "access_token_stable",
+					Hint: hint,
 				},
 			}
 			manager, err := NewManager(store)

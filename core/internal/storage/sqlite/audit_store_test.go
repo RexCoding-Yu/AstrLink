@@ -76,6 +76,7 @@ func TestAuditBlobUpsertReplacesSameDirection(t *testing.T) {
 	if err := store.InsertAuditBlob(ctx, storagecontract.AuditBlob{
 		RequestID: "request_upsert", Direction: storagecontract.AuditDirectionHTTPMeta,
 		MediaType: "application/json", Nonce: firstNonce, Ciphertext: firstCipher, CapturedBytes: 14,
+		Exposure: storagecontract.AuditExposureShareable,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +87,7 @@ func TestAuditBlobUpsertReplacesSameDirection(t *testing.T) {
 	if err := store.InsertAuditBlob(ctx, storagecontract.AuditBlob{
 		RequestID: "request_upsert", Direction: storagecontract.AuditDirectionHTTPMeta,
 		MediaType: "application/json", Nonce: secondNonce, Ciphertext: secondCipher, CapturedBytes: 29,
+		Exposure: storagecontract.AuditExposureShareable,
 	}); err != nil {
 		t.Fatal(err)
 	}

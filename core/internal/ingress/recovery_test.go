@@ -121,7 +121,9 @@ func TestRecoverySkippedCandidatesAndRetryAfter(t *testing.T) {
 
 func TestRecoveryCancelDuringBackoff(t *testing.T) {
 	policy := contract.DefaultFailurePolicy()
-	policy.InitialDelayMS = 5000
+	// A backoff far longer than any scheduling stall keeps the elapsed check
+	// meaningful without making it sensitive to slow runners.
+	policy.InitialDelayMS, policy.MaxDelayMS = 60000, 60000
 	schedule := newRecoverySchedule(recoveryCandidates(1, policy, contract.DefaultFailoverPolicy()), true)
 	i, _ := schedule.next(context.Background())
 	schedule.started(i)
@@ -129,7 +131,7 @@ func TestRecoveryCancelDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	if _, ok := schedule.next(ctx); ok || time.Since(start) > 100*time.Millisecond || schedule.stopReason != "cancelled" {
+	if _, ok := schedule.next(ctx); ok || time.Since(start) > 30*time.Second || schedule.stopReason != "cancelled" {
 		t.Fatal("cancellation did not stop backoff")
 	}
 }

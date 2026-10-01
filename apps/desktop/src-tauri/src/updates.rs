@@ -14,13 +14,13 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
-use crate::{preferences::PreferencesStore, sidecar::CoreManager};
+use crate::{i18n, preferences::PreferencesStore, sidecar::CoreManager};
 
 const REPOSITORY: &str = "https://github.com/Calcium-Ion/AstrLink";
 const RELEASE_API: &str = "https://api.github.com/repos/Calcium-Ion/AstrLink/releases";
 const EVENT: &str = "app-update-status";
 const PUBLIC_KEY: &str = env!("TAURI_UPDATER_PUBLIC_KEY");
-const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
 const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -81,6 +81,8 @@ struct Inner {
     generation: u64,
     pending: Option<Update>,
     retry_after: Option<Instant>,
+    /// The last `(notice, version)` announced, so periodic checks do not repeat it.
+    notified: Option<(&'static str, String)>,
 }
 
 pub struct UpdateManager {
@@ -123,6 +125,44 @@ fn select_release(releases: &[GithubRelease], channel: UpdateChannel) -> Option<
         })
         .max_by(|a, b| a.0.cmp_precedence(&b.0))
         .map(|(_, r)| r)
+}
+
+/// The update state worth the operator's attention. `available` only counts
+/// while it waits on them; with automatic download, `ready` follows shortly.
+fn notice(phase: &str, auto_download: bool) -> Option<&'static str> {
+    match phase {
+        "available" if !auto_download => Some("available"),
+        "manual" => Some("manual"),
+        "ready" => Some("ready"),
+        _ => None,
+    }
+}
+
+/// The main window shows its own toast; a native notification covers the
+/// times it cannot be seen: hidden to the tray, minimized, or behind other apps.
+fn notify_unattended(app: &AppHandle, kind: &str, version: &str) {
+    let attended = app.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false)
+            && window.is_focused().unwrap_or(false)
+            && !window.is_minimized().unwrap_or(false)
+    });
+    if attended {
+        return;
+    }
+    let locale = app
+        .state::<Arc<PreferencesStore>>()
+        .snapshot()
+        .values
+        .locale;
+    crate::notify_native(
+        app,
+        i18n::t(locale, &format!("about.phase.{kind}"), &[]),
+        i18n::t(
+            locale,
+            &format!("about.{kind}Notification"),
+            &[("version", version)],
+        ),
+    );
 }
 
 fn github_asset(url: &str, tag: &str) -> bool {
@@ -246,6 +286,7 @@ impl UpdateManager {
                 generation: 0,
                 pending: None,
                 retry_after: None,
+                notified: None,
             }),
             operation: AsyncMutex::new(()),
             lifecycle: Arc::new(AsyncMutex::new(())),
@@ -265,14 +306,26 @@ impl UpdateManager {
         self.lock().snapshot.clone()
     }
     fn publish(&self, app: &AppHandle, change: impl FnOnce(&mut Inner)) {
-        let snapshot = {
+        let (snapshot, announce) = {
             let mut inner = self.lock();
             change(&mut inner);
             inner.snapshot.revision += 1;
-            inner.snapshot.clone()
+            let current = notice(
+                &inner.snapshot.phase,
+                inner.snapshot.preferences.auto_download,
+            )
+            .zip(inner.snapshot.release.as_ref().map(|r| r.version.clone()));
+            let announce = current.filter(|n| inner.notified.as_ref() != Some(n));
+            if announce.is_some() {
+                inner.notified.clone_from(&announce);
+            }
+            (inner.snapshot.clone(), announce)
         };
         if let Err(error) = app.emit_to("main", EVENT, snapshot) {
             eprintln!("unable to publish update state: {error}");
+        }
+        if let Some((kind, version)) = announce {
+            notify_unattended(app, kind, &version);
         }
     }
     fn fail(&self, app: &AppHandle, generation: u64, code: &str, detail: String) {
@@ -741,6 +794,32 @@ mod tests {
             body: None,
             published_at: None,
             assets: vec![],
+        }
+    }
+    #[test]
+    fn notices_skip_states_that_resolve_on_their_own() {
+        assert_eq!(notice("available", false), Some("available"));
+        assert_eq!(notice("available", true), None);
+        assert_eq!(notice("manual", true), Some("manual"));
+        assert_eq!(notice("ready", true), Some("ready"));
+        for phase in ["idle", "checking", "up_to_date", "downloading", "error"] {
+            assert_eq!(notice(phase, false), None, "{phase}");
+        }
+        // Native notifications read the same catalogs; a missing key would
+        // surface raw, and zh-CN would silently fall back to English.
+        for kind in ["available", "manual", "ready"] {
+            let title = format!("about.phase.{kind}");
+            let body = format!("about.{kind}Notification");
+            let vars = [("version", "1.1.0")];
+            let en = i18n::t(i18n::Locale::En, &body, &vars);
+            let zh = i18n::t(i18n::Locale::ZhCN, &body, &vars);
+            assert!(en.contains("1.1.0") && zh.contains("1.1.0"), "{body}");
+            assert_ne!(en, zh, "{body}");
+            assert_ne!(
+                i18n::t(i18n::Locale::En, &title, &[]),
+                i18n::t(i18n::Locale::ZhCN, &title, &[]),
+                "{title}"
+            );
         }
     }
     #[test]

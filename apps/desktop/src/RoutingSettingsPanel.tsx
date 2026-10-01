@@ -206,7 +206,7 @@ export function RoutingSettingsPanel({
 
   return (
     <div
-      className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden"
+      className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-clip"
       data-testid="routing-defaults-panel"
     >
       {loadError ? (
@@ -241,7 +241,7 @@ export function RoutingSettingsPanel({
       <Tabs
         value={tab}
         onValueChange={setTab}
-        className="min-h-0 min-w-0 flex-1 gap-3 overflow-hidden"
+        className="min-h-0 min-w-0 flex-1 gap-3 overflow-y-clip"
       >
         <div className="flex min-w-0 shrink-0 items-center justify-between gap-3">
           <TabsList
@@ -281,7 +281,7 @@ export function RoutingSettingsPanel({
           <>
             <TabsContent
               value="modelsAndTools"
-              className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pb-1"
+              className="gutter-scroller flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pb-1"
               data-tab-scroller
             >
               <fieldset
@@ -310,7 +310,7 @@ export function RoutingSettingsPanel({
             </TabsContent>
             <TabsContent
               value="recovery"
-              className="min-h-0 flex-1 overflow-y-auto pb-1"
+              className="gutter-scroller min-h-0 flex-1 overflow-y-auto pb-1"
               data-tab-scroller
             >
               <fieldset disabled={!ready} className="grid min-w-0 gap-3">
@@ -365,7 +365,7 @@ export function RoutingSettingsPanel({
             </TabsContent>
             <TabsContent
               value="rules"
-              className="flex min-h-0 flex-1 flex-col overflow-hidden pb-1"
+              className="gutter-scroller flex min-h-0 flex-1 flex-col overflow-hidden pb-1"
               data-tab-scroller
             >
               <fieldset
@@ -386,7 +386,7 @@ export function RoutingSettingsPanel({
             </TabsContent>
             <TabsContent
               value="session"
-              className="min-h-0 flex-1 overflow-y-auto pb-1"
+              className="gutter-scroller min-h-0 flex-1 overflow-y-auto pb-1"
               data-tab-scroller
             >
               <fieldset disabled={!ready} className="min-w-0">
@@ -405,7 +405,7 @@ export function RoutingSettingsPanel({
             </TabsContent>
             <TabsContent
               value="identity"
-              className="min-h-0 flex-1 overflow-y-auto pb-1"
+              className="gutter-scroller min-h-0 flex-1 overflow-y-auto pb-1"
               data-tab-scroller
             >
               <fieldset disabled={!ready} className="grid min-w-0 gap-3">
@@ -419,7 +419,7 @@ export function RoutingSettingsPanel({
         ) : (
           <TabsContent
             value={tab}
-            className="min-h-0 flex-1 overflow-y-auto"
+            className="gutter-scroller min-h-0 flex-1 overflow-y-auto"
             data-tab-scroller
           >
             <p className="text-xs text-muted-foreground">

@@ -10,6 +10,7 @@ import {
   eventTone,
   extendPendingTimeline,
   extractPrivacyHits,
+  foldTimelineColumns,
   inspectorChainRows,
   inspectorPart,
   inspectorTitle,
@@ -26,6 +27,7 @@ import {
   timelineKneeMs,
   timelineScrollForList,
   timelineWeight,
+  trajectoryListLayout,
   trajectoryRows,
   trajectoryTimeline,
   TIMELINE_KNEE_MS,
@@ -503,6 +505,107 @@ describe("request trajectory model", () => {
     expect(trajectoryRows([step2], {}).map((row) => row.chip)).toEqual([
       "CLIENT",
     ]);
+  });
+
+  it("folds past turns under their headers and keeps the latest one open", () => {
+    const turn = (
+      id: string,
+      index: number,
+      minute: number,
+    ): RequestRecord => ({
+      ...record,
+      id,
+      turn_index: index,
+      input_preview: `turn ${index}`,
+      started_at: `2026-08-16T10:0${minute}:00Z`,
+      completed_at: `2026-08-16T10:0${minute}:01Z`,
+    });
+    const rows = trajectoryRows(
+      [turn("req_t1", 1, 0), turn("req_t2", 2, 1), turn("req_t3", 3, 2)],
+      {},
+    );
+    const visible = (layout: ReturnType<typeof trajectoryListLayout>) =>
+      layout.rows.map((row) =>
+        row.chip === "TURN" ? `TURN ${row.requestId}` : row.requestId,
+      );
+    const header = (requestId: string) =>
+      rows.find((row) => row.chip === "TURN" && row.requestId === requestId)!;
+    const phases = rows.filter(
+      (row) => row.chip !== "TURN" && row.requestId === "req_t3",
+    ).length;
+
+    const initial = trajectoryListLayout(rows, new Map(), null);
+    expect(visible(initial)).toEqual([
+      "TURN req_t1",
+      "TURN req_t2",
+      "TURN req_t3",
+      ...Array<string>(phases).fill("req_t3"),
+    ]);
+    expect([...initial.openTurns]).toEqual([header("req_t3").id]);
+    expect(initial.anchorByRequestId).toEqual(
+      new Map([
+        ["req_t1", "req_t1"],
+        ["req_t2", "req_t2"],
+      ]),
+    );
+    const upstream = rows.find(
+      (row) => row.chip === "UPSTREAM" && row.requestId === "req_t2",
+    )!;
+    expect(initial.turnByRowId.get(upstream.id)).toBe(header("req_t2").id);
+    expect(initial.turnByRowId.get(header("req_t2").id)).toBe(
+      header("req_t2").id,
+    );
+
+    // The turn holding the selection stays open beside the latest one.
+    expect(
+      trajectoryListLayout(rows, new Map(), upstream.id).openTurns,
+    ).toEqual(new Set([header("req_t2").id, header("req_t3").id]));
+
+    // A turn opened or closed by hand wins over both defaults.
+    const toggled = trajectoryListLayout(
+      rows,
+      new Map([
+        [header("req_t1").id, true],
+        [header("req_t2").id, false],
+        [header("req_t3").id, false],
+      ]),
+      upstream.id,
+    );
+    expect(toggled.openTurns).toEqual(new Set([header("req_t1").id]));
+    expect(visible(toggled)).toEqual([
+      "TURN req_t1",
+      ...Array<string>(phases).fill("req_t1"),
+      "TURN req_t2",
+      "TURN req_t3",
+    ]);
+
+    // A single turn has no header to fold under.
+    const single = trajectoryRows([turn("req_t1", 1, 0)], {});
+    expect(trajectoryListLayout(single, new Map(), null).rows).toEqual(single);
+  });
+
+  it("merges the timeline calls a folded turn hides into its header's call", () => {
+    const columns = [
+      { requestId: "a1", offset: 0, width: 40 },
+      { requestId: "a2", offset: 48, width: 20 },
+      { requestId: "b1", offset: 76, width: 30 },
+      { requestId: "b2", offset: 114, width: 10 },
+    ];
+
+    expect(
+      foldTimelineColumns(
+        columns,
+        new Map([
+          ["a1", "a1"],
+          ["a2", "a1"],
+        ]),
+      ),
+    ).toEqual([
+      { requestId: "a1", offset: 0, width: 68 },
+      { requestId: "b1", offset: 76, width: 30 },
+      { requestId: "b2", offset: 114, width: 10 },
+    ]);
+    expect(foldTimelineColumns(columns, new Map())).toEqual(columns);
   });
 
   it("emits one call per root record with sequential phases and skips child retries", () => {
@@ -1069,6 +1172,72 @@ describe("request trajectory model", () => {
       ["service_b · circuit_open", "failed"],
     ]);
     expect(new Set(routes.map((row) => row.id)).size).toBe(2);
+  });
+
+  it("gives a call no provider could take a route row of its own", () => {
+    const at = record.started_at;
+    const unroutable: RequestRecord = {
+      ...record,
+      status: "failed",
+      service_id: null,
+      http_status: null,
+      privacy_restore: null,
+      events: [
+        {
+          kind: "accepted",
+          started_at: at,
+          ended_at: at,
+          status: "succeeded",
+          summary: "gpt-5 · openai.responses",
+          attempt_index: 0,
+        },
+        {
+          kind: "completed",
+          started_at: at,
+          ended_at: at,
+          status: "failed",
+          summary: "no endpoint provides the requested protocol capability",
+          attempt_index: 0,
+        },
+      ],
+      routing_decision: {
+        skipped: [{ service_id: "service_a", reason: "model_not_listed" }],
+      },
+    };
+    expect(
+      inspectorChainRows(unroutable).map((row) => [
+        row.chip,
+        row.summary,
+        row.tone,
+      ]),
+    ).toEqual([
+      ["CLIENT", "gpt-5 · openai.responses", "ok"],
+      ["ROUTE", "", "failed"],
+      [
+        "RESULT",
+        "no endpoint provides the requested protocol capability",
+        "failed",
+      ],
+    ]);
+    // A route event already explains the call.
+    const routed: RequestRecord = {
+      ...unroutable,
+      events: [
+        unroutable.events[0]!,
+        {
+          kind: "routed",
+          started_at: at,
+          ended_at: at,
+          status: "failed",
+          summary: "service_a · circuit_open",
+          attempt_index: 0,
+        },
+        unroutable.events[1]!,
+      ],
+    };
+    expect(
+      inspectorChainRows(routed).filter((row) => row.chip === "ROUTE"),
+    ).toHaveLength(1);
   });
 
   it("maps trajectory chips to inspector audit parts", () => {

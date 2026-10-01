@@ -42,6 +42,21 @@ func TestSubscriptionAccountValidateRejectsEndpointCredentialRef(t *testing.T) {
 	}
 }
 
+func TestSubscriptionAccountValidateAcceptsItsLocalCredentialRef(t *testing.T) {
+	t.Parallel()
+	account := validSubscriptionAccount()
+	account.CredentialRef = "local://subscription/subscription_01"
+	if err := account.Validate(); err != nil {
+		t.Fatalf("Validate() rejected the account's local credential_ref: %v", err)
+	}
+	for _, ref := range []string{"local://subscription/subscription_02", "local://subscription/subscription_01/extra", "local://service/subscription_01"} {
+		account.CredentialRef = ref
+		if err := account.Validate(); err == nil {
+			t.Fatalf("Validate() accepted credential_ref %q", ref)
+		}
+	}
+}
+
 func TestSubscriptionAccountValidateRejectsTokenLeakInError(t *testing.T) {
 	t.Parallel()
 	messages := []string{

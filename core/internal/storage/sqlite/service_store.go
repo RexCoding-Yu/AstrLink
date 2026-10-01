@@ -56,11 +56,11 @@ func (store *Store) CreateService(
 		return record, fmt.Errorf("insert service: %w", err)
 	}
 	if service.Kind.IsHTTP() && credential.Present && len(credential.Secret) > 0 {
-		if err = putServiceCredentialTx(ctx, transaction, service.ID, credential.Secret, timestamp); err != nil {
+		if err = store.putServiceCredentialTx(ctx, transaction, service.ID, credential.Secret, timestamp); err != nil {
 			return record, err
 		}
 	}
-	if err = putProxyCredentialTx(ctx, transaction, service, credential); err != nil {
+	if err = store.putProxyCredentialTx(ctx, transaction, service, credential); err != nil {
 		return record, err
 	}
 	if err = transaction.Commit(); err != nil {
@@ -190,11 +190,11 @@ func (store *Store) UpdateService(
 			if _, err = transaction.ExecContext(ctx, `DELETE FROM service_credentials WHERE service_id = ?`, service.ID); err != nil {
 				return record, fmt.Errorf("delete service credential: %w", err)
 			}
-		} else if err = putServiceCredentialTx(ctx, transaction, service.ID, credential.Secret, now); err != nil {
+		} else if err = store.putServiceCredentialTx(ctx, transaction, service.ID, credential.Secret, now); err != nil {
 			return record, err
 		}
 	}
-	if err = putProxyCredentialTx(ctx, transaction, service, credential); err != nil {
+	if err = store.putProxyCredentialTx(ctx, transaction, service, credential); err != nil {
 		return record, err
 	}
 	if err = transaction.Commit(); err != nil {
@@ -309,22 +309,6 @@ func decodeServiceRecord(id string, document []byte) (storagecontract.ServiceRec
 
 func localServiceRef(id contract.ServiceID) string {
 	return "local://service/" + string(id)
-}
-
-func putServiceCredentialTx(ctx context.Context, transaction *sql.Tx, id contract.ServiceID, secret []byte, now string) error {
-	if err := validateCredential(secret); err != nil {
-		return err
-	}
-	credentialValue := append([]byte(nil), secret...)
-	defer clear(credentialValue)
-	_, err := transaction.ExecContext(ctx, `INSERT INTO service_credentials (service_id, credential_value, created_at, updated_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(service_id) DO UPDATE SET credential_value = excluded.credential_value, updated_at = excluded.updated_at`,
-		id, credentialValue, now, now)
-	if err != nil {
-		return fmt.Errorf("write service credential: %w", err)
-	}
-	return nil
 }
 
 func encodeServiceCursor(id contract.ServiceID) string {

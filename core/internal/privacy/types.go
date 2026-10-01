@@ -155,7 +155,9 @@ const (
 // successful DecisionRedact and must never be logged, persisted, or sent upstream.
 //
 // Suppression is empty on accepted findings and set on suppressed ones.
-// Detectors never populate it; only the engine does.
+// Path is the JSON path of the indexed segment, never its value, so a request
+// record can say where a match was without keeping it. Detectors never
+// populate either field; only the engine does.
 type Finding struct {
 	Segment     int
 	Start       int
@@ -163,6 +165,7 @@ type Finding struct {
 	Kind        Kind
 	Confidence  float64
 	Suppression SuppressionReason
+	Path        string
 }
 
 // Redaction maps a request-scoped placeholder to the original plaintext for
@@ -214,6 +217,9 @@ type Result struct {
 	// NoticeInjected reports that a placeholder convention note was prepended
 	// to the upstream system prompt.
 	NoticeInjected bool
+	// SkillListed reports that the client's own system prompt already offered
+	// the placeholder skill, so no convention note was needed.
+	SkillListed bool
 }
 
 type Filter interface {

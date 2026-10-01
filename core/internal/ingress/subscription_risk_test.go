@@ -325,14 +325,7 @@ func serveRiskRequest(t *testing.T, reporter SubscriptionRiskReporter, stream bo
 
 func waitForRiskSignal[T any](t *testing.T, channel <-chan T) T {
 	t.Helper()
-	select {
-	case value := <-channel:
-		return value
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for subscription risk signal")
-		var zero T
-		return zero
-	}
+	return <-channel
 }
 
 func TestSubscriptionUsageLimitPausesAccountAndFailsOver(t *testing.T) {
@@ -461,50 +454,5 @@ func TestSubscriptionStreamErrorIsReportedWithoutChangingStream(t *testing.T) {
 	reports, _ := reporter.snapshot()
 	if len(reports) != 1 || reports[0].observation.Code != contract.RiskCodeUsageLimitReached || reports[0].observation.HTTPStatus != 0 {
 		t.Fatalf("reports = %+v", reports)
-	}
-}
-
-func TestAttemptHealthOutcomeCountsSubscriptionRejections(t *testing.T) {
-	t.Parallel()
-	subscription := codexVersionCandidate("https://chatgpt.example/backend-api/codex")
-	apiKey := endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, true)}
-	for _, test := range []struct {
-		name      string
-		candidate endpoint.Resolved
-		status    int
-		protected bool
-		want      string
-	}{
-		{"subscription 401", subscription, http.StatusUnauthorized, true, "failure"},
-		{"subscription 402", subscription, http.StatusPaymentRequired, true, "failure"},
-		{"subscription 403", subscription, http.StatusForbidden, true, "failure"},
-		{"subscription 403 without risk protection", subscription, http.StatusForbidden, false, "success"},
-		{"subscription 400", subscription, http.StatusBadRequest, true, "success"},
-		{"subscription 429", subscription, http.StatusTooManyRequests, true, "abandon"},
-		{"api key 403", apiKey, http.StatusForbidden, true, "success"},
-		{"api key 503", apiKey, http.StatusServiceUnavailable, true, "failure"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			resolver := &healthRecordingResolver{
-				successes: make(chan struct{}, 1), failures: make(chan struct{}, 1), abandons: make(chan struct{}, 1),
-			}
-			outcome := newAttemptHealthOutcome(resolver, test.candidate, true)
-			outcome.accountRejections = test.protected
-			outcome.RecordStatus(test.status)
-			got := ""
-			select {
-			case <-resolver.successes:
-				got = "success"
-			case <-resolver.failures:
-				got = "failure"
-			case <-resolver.abandons:
-				got = "abandon"
-			default:
-			}
-			if got != test.want {
-				t.Fatalf("RecordStatus(%d) = %q, want %q", test.status, got, test.want)
-			}
-		})
 	}
 }

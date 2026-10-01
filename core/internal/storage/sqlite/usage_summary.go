@@ -31,8 +31,13 @@ func (store *Store) GetUsageSummary(ctx context.Context, options storage.UsageSu
 	}
 	// A second prefix includes fractional timestamps at the inclusive boundary
 	// and excludes them at the exclusive boundary, including legacy exact seconds.
+	// Models group by what was sent upstream, matching billing: the served
+	// model, then a routing redirect target, then the client's model.
 	rows, err := store.db.QueryContext(ctx, `SELECT started_at, status, http_status,
-    service_id, requested_model, local_access_token_id, usage_json,
+    service_id, COALESCE(
+        NULLIF(json_extract(NULLIF(recovery_json, ''), '$.upstream_model'), ''),
+        NULLIF(json_extract(NULLIF(model_redirect_json, ''), '$.to'), ''),
+        requested_model), local_access_token_id, usage_json,
     streaming, latency_ms, first_token_ms
 FROM request_records
 WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?

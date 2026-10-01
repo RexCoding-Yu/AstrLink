@@ -26,20 +26,6 @@ export function requestServiceIdentity(
 }
 
 /**
- * Route summaries name services by ID, one " · " segment each: the chosen one
- * ("native · id") and any rejected on the way ("id · reason").
- */
-export function namedRouteSummary(
-  summary: string,
-  services: RequestServiceMap = {},
-): string {
-  return summary
-    .split(" · ")
-    .map((part) => services[part]?.name ?? part)
-    .join(" · ");
-}
-
-/**
  * The services a record's route events and routing decision name, for a
  * window without the list.
  */

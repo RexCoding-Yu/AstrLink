@@ -51,7 +51,7 @@ func TestStoreResolverSkipsRiskPausedSubscriptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver.breaker = newCircuitBreaker(circuitBreakerConfig{Now: func() time.Time { return now }})
+	resolver.clock = func() time.Time { return now }
 	candidates, err := resolver.ResolveCandidates(context.Background(), ResolveRequest{
 		Protocol: contract.ProtocolOpenAIResponses, Model: "gpt-5", Streaming: true, AllCandidates: true,
 	})

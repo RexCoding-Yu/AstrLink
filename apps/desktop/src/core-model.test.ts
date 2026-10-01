@@ -68,6 +68,7 @@ describe("core status presentation", () => {
         control_api_version: "v1",
         protocol_contract_version: "v1",
         inference_url: "http://127.0.0.1:8317",
+        client_inference_url: "http://localhost:8317",
         control_url: "http://127.0.0.1:49152",
       },
       health: { status: "ok" },

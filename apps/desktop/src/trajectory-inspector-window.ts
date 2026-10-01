@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -125,6 +125,10 @@ export function useDetachedInspector(
   selection: TrajectoryInspectorSelection | null,
 ): DetachedInspector {
   const enabled = useMemo(detachedInspectorEnabled, []);
+  // The last payload handed to the host, serialized. A new turn replaces every
+  // record in the conversation, so the selection is a new object even when the
+  // call it points at did not change, and re-sending it made the window redraw.
+  const sentRef = useRef<string | null>(null);
 
   // Follows the selection into whichever window is already open, including a
   // poll that replaces the record while the same phase stays selected. This
@@ -132,6 +136,9 @@ export function useDetachedInspector(
   // operator closed, and it cannot disturb a pinned one.
   useEffect(() => {
     if (!enabled || !selection) return;
+    const payload = JSON.stringify(selection);
+    if (payload === sentRef.current) return;
+    sentRef.current = payload;
     void updateTrajectoryInspector(selection).catch(reportFailure);
   }, [enabled, selection]);
 
@@ -148,6 +155,9 @@ export function useDetachedInspector(
   const show = useCallback(
     (next: TrajectoryInspectorSelection) => {
       if (!enabled) return;
+      // The click already delivered this phase, so the update that follows
+      // from the new selection state has nothing to add.
+      sentRef.current = JSON.stringify(next);
       void showTrajectoryInspector(next).catch((error: unknown) => {
         notify.error(i18n.t("trajectory.inspectorWindowFailed"));
         reportFailure(error);

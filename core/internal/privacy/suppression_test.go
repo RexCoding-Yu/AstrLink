@@ -227,7 +227,7 @@ func TestNoticeDeduplicatesAcrossSystemMessages(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			policy := tokenPolicy()
 			policy.PlaceholderNotice = true
-			body := strings.ReplaceAll(test.body, "__NOTICE__", placeholderNotice)
+			body := strings.ReplaceAll(test.body, "__NOTICE__", placeholderNoticeUnrestored)
 			result, err := mustTestEngine(t).Inspect(t.Context(), policy, test.protocol, []byte(body))
 			if err != nil || result.Decision != DecisionRedact || result.NoticeInjected {
 				t.Fatalf("inspect: decision=%s notice=%t err=%v", result.Decision, result.NoticeInjected, err)
@@ -244,7 +244,7 @@ func TestUserAndAssistantNoticeQuotesDoNotSuppressSystemNotice(t *testing.T) {
 	for _, protocol := range []contract.ProtocolID{contract.ProtocolOpenAIChat, contract.ProtocolOpenAIResponses} {
 		for _, role := range []string{"user", "assistant"} {
 			t.Run(string(protocol)+"/"+role, func(t *testing.T) {
-				body := `{"messages":[{"role":"system","content":"be brief"},{"role":"` + role + `","content":"` + placeholderNotice + `"},{"role":"user","content":"alice@example.com"}]}`
+				body := `{"messages":[{"role":"system","content":"be brief"},{"role":"` + role + `","content":"` + placeholderNoticeUnrestored + `"},{"role":"user","content":"alice@example.com"}]}`
 				if protocol == contract.ProtocolOpenAIResponses {
 					body = strings.Replace(body, `"messages":`, `"input":`, 1)
 				}

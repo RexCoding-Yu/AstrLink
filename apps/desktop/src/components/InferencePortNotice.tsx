@@ -15,7 +15,7 @@ export function InferencePortNotice({
     <FormMessage tone="warning">
       {t("core.portFallback", {
         port: fallback.requested_port,
-        address: snapshot?.ready?.inference_url,
+        address: snapshot?.ready?.client_inference_url,
       })}
     </FormMessage>
   );

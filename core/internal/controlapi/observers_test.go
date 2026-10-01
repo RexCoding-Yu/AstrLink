@@ -47,9 +47,9 @@ func TestObserversAPI(t *testing.T) {
 		t.Fatalf("shell request was counted as an observer: %+v", got)
 	}
 
-	// An unauthenticated request claiming to be the MCP bridge is not counted.
+	// An unauthenticated request claiming to be the agent CLI is not counted.
 	unauthorized := httptest.NewRequest(http.MethodGet, UsageSummaryPath+query, nil)
-	unauthorized.Header.Set("User-Agent", "astrlink-mcp/1")
+	unauthorized.Header.Set("User-Agent", "astrlink-cli/1")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, unauthorized)
 	if recorder.Code != http.StatusUnauthorized {
@@ -59,18 +59,18 @@ func TestObserversAPI(t *testing.T) {
 		t.Fatalf("unauthenticated observer was counted: %+v", got)
 	}
 
-	// The MCP bridge over the loopback fallback announces itself.
+	// The agent CLI over the loopback fallback announces itself.
 	viaToken := httptest.NewRequest(http.MethodGet, UsageSummaryPath+query, nil)
 	viaToken.Header.Set("Authorization", "Bearer "+testControlToken)
-	viaToken.Header.Set("User-Agent", "astrlink-mcp/1")
+	viaToken.Header.Set("User-Agent", "astrlink-cli/1")
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, viaToken)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("mcp token status=%d", recorder.Code)
+		t.Fatalf("cli token status=%d", recorder.Code)
 	}
 	got := read()
-	if got.LastSeenAt == nil || !got.LastSeenAt.Equal(now) || got.Requests != 1 || got.Client != "astrlink-mcp" {
-		t.Fatalf("mcp request not recorded: %+v", got)
+	if got.LastSeenAt == nil || !got.LastSeenAt.Equal(now) || got.Requests != 1 || got.Client != "astrlink-cli" {
+		t.Fatalf("cli request not recorded: %+v", got)
 	}
 
 	// The production path is the local control socket, without a token.

@@ -34,10 +34,11 @@ func (store *memoryAuditSettings) GetAuditSettings(context.Context) (contract.Au
 }
 
 type memoryAuditBlobs struct {
-	key     []byte
-	blobs   []storage.AuditBlob
-	fail    bool
-	records *memoryRequestRecordStore
+	key             []byte
+	blobs           []storage.AuditBlob
+	fail            bool
+	records         *memoryRequestRecordStore
+	exposureUpdates int
 }
 
 func (store *memoryAuditBlobs) GetOrCreateAuditKey(context.Context) ([]byte, error) {
@@ -63,15 +64,45 @@ func (store *memoryAuditBlobs) InsertAuditBlob(_ context.Context, blob storage.A
 			return fmt.Errorf("upsert audit blob: constraint failed: FOREIGN KEY constraint failed (787)")
 		}
 	}
+	if blob.Exposure == "" {
+		blob.Exposure = storage.AuditExposureRaw
+	}
 	for index := range store.blobs {
 		if store.blobs[index].RequestID == blob.RequestID &&
 			store.blobs[index].Direction == blob.Direction {
+			// Mirror the store: a recapture never widens a raw part.
+			if store.blobs[index].Exposure == storage.AuditExposureRaw {
+				blob.Exposure = storage.AuditExposureRaw
+			}
 			store.blobs[index] = blob
 			return nil
 		}
 	}
 	store.blobs = append(store.blobs, blob)
 	return nil
+}
+
+func (store *memoryAuditBlobs) UpdateAuditExposure(
+	_ context.Context,
+	id contract.RequestID,
+	direction storage.AuditDirection,
+	exposure storage.AuditExposure,
+) error {
+	if !exposure.Valid() {
+		return storage.ErrInvalidArgument
+	}
+	for index := range store.blobs {
+		if store.blobs[index].RequestID != id || store.blobs[index].Direction != direction {
+			continue
+		}
+		if !store.blobs[index].Exposure.CanBecome(exposure) {
+			return storage.ErrPrecondition
+		}
+		store.blobs[index].Exposure = exposure
+		store.exposureUpdates++
+		return nil
+	}
+	return storage.ErrNotFound
 }
 
 func TestIngressAuditPersistsClientRequestWhilePending(t *testing.T) {
@@ -107,11 +138,7 @@ func TestIngressAuditPersistsClientRequestWhilePending(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		handler.ServeHTTP(httptest.NewRecorder(), req)
 	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("forwarder did not start")
-	}
+	<-started
 	if len(records.records) != 1 || records.records[0].Status != contract.RequestStatusPending {
 		t.Fatalf("pending records=%#v", records.records)
 	}
@@ -139,11 +166,7 @@ func TestIngressAuditPersistsClientRequestWhilePending(t *testing.T) {
 		t.Fatalf("pending request plain=%q", plain)
 	}
 	close(release)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not finish")
-	}
+	<-done
 	record := records.records[len(records.records)-1]
 	if record.Status != contract.RequestStatusSucceeded || !record.Audit.RequestBodyCaptured ||
 		!record.Audit.ResponseContentCaptured {
@@ -160,6 +183,79 @@ func TestIngressAuditPersistsClientRequestWhilePending(t *testing.T) {
 	}
 	if !sawRequest || !sawResponse {
 		t.Fatalf("terminal blobs=%#v", blobs.blobs)
+	}
+}
+
+// net/http writes request bodies on its own goroutine and may deliver the
+// response before the final EOF read, even after the handler has finished.
+func TestIngressAuditToleratesRequestBodyReadAfterResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		protocol         contract.ProtocolID
+	}{
+		{name: "buffered", path: "/v1/responses", body: `{"model":"m","input":"hello"}`, protocol: contract.ProtocolOpenAIResponses},
+		{name: "streamed", path: "/v1beta/models/m:generateContent", body: `{"contents":[{"parts":[{"text":"hello"}]}]}`, protocol: contract.ProtocolGoogleGenerateContent},
+	} {
+		for _, afterFinish := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/after_finish=%t", tc.name, afterFinish), func(t *testing.T) {
+				records := &memoryRequestRecordStore{}
+				blobs := &memoryAuditBlobs{records: records}
+				settings := &memoryAuditSettings{settings: contract.AuditSettings{
+					RequestBodyEnabled: true, ResponseContentEnabled: true, HTTPMetaEnabled: true,
+					RequestBodyMaxBytes: 1024, ResponseContentMaxBytes: 1024,
+					MetadataRetentionDays: 30, ContentRetentionDays: 7,
+				}}
+				finished := make(chan struct{})
+				sent := make(chan []byte, 1)
+				handler := NewWithDependencies(Dependencies{
+					Resolver:       candidateResolver{candidates: []endpoint.Resolved{{Endpoint: validEndpoint(tc.protocol, false)}}},
+					RequestRecords: records,
+					AuditSettings:  settings,
+					AuditBlobs:     blobs,
+					Forwarder: transport.New(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+						received := make(chan struct{})
+						go func() {
+							if afterFinish {
+								<-finished
+							}
+							body, _ := io.ReadAll(request.Body)
+							sent <- body
+							close(received)
+						}()
+						reply := io.NopCloser(strings.NewReader(`{}`))
+						if !afterFinish {
+							// Headers arrive at once, but a real upstream finishes its
+							// reply only after receiving the request body.
+							pipe, writer := io.Pipe()
+							go func() {
+								<-received
+								_, _ = writer.Write([]byte(`{}`))
+								_ = writer.Close()
+							}()
+							reply = pipe
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     http.Header{"Content-Type": {"application/json"}},
+							Body:       reply,
+						}, nil
+					})),
+				})
+				request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+				request.Header.Set("Content-Type", "application/json")
+				handler.ServeHTTP(httptest.NewRecorder(), request)
+				close(finished)
+				// A streamed client body is closed once the handler returns.
+				if body := <-sent; !afterFinish && !json.Valid(body) {
+					t.Fatalf("upstream body=%q", body)
+				}
+				if len(records.records) != 1 ||
+					records.records[0].Status != contract.RequestStatusSucceeded ||
+					records.records[0].CompletedAt == nil {
+					t.Fatalf("records=%#v", records.records)
+				}
+			})
+		}
 	}
 }
 
@@ -674,16 +770,19 @@ func TestIngressAuditCapturesClientBodyWhenNoAttemptReadsIt(t *testing.T) {
 		wantRejected  []string
 	}{
 		{
-			name:         "all circuits open",
-			body:         requestBody,
-			resolverErr:  &endpoint.UnhealthyCandidatesError{Services: []contract.ServiceID{"endpoint_open_a", "endpoint_open_b"}},
+			name: "all rate limited",
+			body: requestBody,
+			resolverErr: &endpoint.RateLimitedCandidatesError{Limits: []endpoint.RateLimitedCandidate{
+				{Service: "endpoint_limited_a", Model: "public-alias", Until: time.Now().Add(time.Minute)},
+				{Service: "endpoint_limited_b", Model: "public-alias", Until: time.Now().Add(time.Minute)},
+			}},
 			maxBytes:     1024,
-			code:         "upstream_unavailable",
-			wantRejected: []string{"endpoint_open_a · circuit_open", "endpoint_open_b · circuit_open"},
+			code:         "upstream_rate_limited",
+			wantRejected: []string{"endpoint_limited_a · rate_limited", "endpoint_limited_b · rate_limited"},
 		},
 		{name: "no capable provider", body: requestBody, resolverErr: endpoint.ErrNoEndpoint, maxBytes: 1024, code: "missing_protocol_capability"},
 		{name: "retired auto model", body: `{"model":"` + contract.AstrLinkAutoModelID + `","messages":[]}`, maxBytes: 1024, code: "routing_feature_retired"},
-		{name: "capture limit", body: requestBody, resolverErr: endpoint.ErrNoHealthyEndpoint, maxBytes: 16, code: "upstream_unavailable", wantTruncated: true},
+		{name: "capture limit", body: requestBody, resolverErr: endpoint.ErrNoHealthyEndpoint, maxBytes: 16, code: "upstream_rate_limited", wantTruncated: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -17,6 +17,9 @@ var (
 	// ErrMigrationHistory reports applied migrations that differ from this
 	// core's, such as another build's migration recorded under a taken version.
 	ErrMigrationHistory = errors.New("database migration history differs from this core")
+	// ErrDatabaseOlder reports a database that still needs migrations, found
+	// by a reader that must not apply them.
+	ErrDatabaseOlder = errors.New("database schema is older than this core")
 )
 
 const createMigrationsTable = `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -26,8 +29,9 @@ const createMigrationsTable = `CREATE TABLE IF NOT EXISTS schema_migrations (
 )`
 
 type Migration struct {
-	Version    int64
-	Name       string
+	Version int64
+	Name    string
+	// Statements may be empty for a removed step that only keeps its version.
 	Statements []string
 }
 
@@ -104,9 +108,6 @@ func validate(migrations []Migration) error {
 		if strings.TrimSpace(migration.Name) == "" {
 			return fmt.Errorf("migrations[%d]: name is required", index)
 		}
-		if len(migration.Statements) == 0 {
-			return fmt.Errorf("migrations[%d]: at least one statement is required", index)
-		}
 		for statementIndex, statement := range migration.Statements {
 			if strings.TrimSpace(statement) == "" {
 				return fmt.Errorf("migrations[%d].statements[%d]: statement is empty", index, statementIndex)
@@ -172,6 +173,31 @@ func (runner *Runner) Up(ctx context.Context) (err error) {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
 	return nil
+}
+
+// RequireCurrent checks, without writing, that the database records exactly
+// this core's migrations. Read-only callers use it instead of Up.
+func (runner *Runner) RequireCurrent(ctx context.Context) error {
+	transaction, err := runner.database.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin schema check: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	var currentVersion int64
+	if err := transaction.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&currentVersion); err != nil {
+		return fmt.Errorf("read current schema version: %w", err)
+	}
+	var latestVersion int64
+	if len(runner.migrations) > 0 {
+		latestVersion = runner.migrations[len(runner.migrations)-1].Version
+	}
+	switch {
+	case currentVersion > latestVersion:
+		return fmt.Errorf("%w: database=%d core=%d", ErrDatabaseNewer, currentVersion, latestVersion)
+	case currentVersion < latestVersion:
+		return fmt.Errorf("%w: database=%d core=%d", ErrDatabaseOlder, currentVersion, latestVersion)
+	}
+	return runner.verifyHistory(ctx, transaction, currentVersion)
 }
 
 // verifyHistory requires the database to record exactly this core's migrations

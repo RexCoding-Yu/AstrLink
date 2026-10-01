@@ -66,6 +66,7 @@ func extractDocument(
 
 	document := jsonDocument{body: body, duplicateKeys: duplicateKeys}
 	protected := continuationPaths(protocol, root)
+	addToolResultReferencePaths(protocol, root, protected)
 	if options.InspectToolDeclarations {
 		roots = append(roots, toolDeclarationRoots(protocol)...)
 	}
@@ -87,6 +88,77 @@ func extractDocument(
 		return jsonDocument{}, nil, ErrUnsafeInput
 	}
 	return document, extracted, nil
+}
+
+// addToolResultReferencePaths protects file references that tool results
+// carry inside their payloads and later turns must replay unchanged. Tool
+// payloads are otherwise inspected whatever their key names, so it walks only
+// the typed records each protocol defines: a tool argument or free-form output
+// that merely uses a "file_id" key stays inspectable.
+func addToolResultReferencePaths(protocol contract.ProtocolID, root map[string]any, paths map[string]struct{}) {
+	protect := func(path string, record map[string]any) {
+		if _, ok := record["file_id"].(string); ok {
+			paths[path+"/file_id"] = struct{}{}
+		}
+	}
+	records := func(value any, visit func(int, map[string]any)) {
+		items, _ := value.([]any)
+		for index, item := range items {
+			if record, ok := item.(map[string]any); ok {
+				visit(index, record)
+			}
+		}
+	}
+
+	switch protocol {
+	case contract.ProtocolOpenAIResponses, contract.ProtocolOpenAIResponsesCompact:
+		records(root["input"], func(index int, item map[string]any) {
+			if role, exists := item["role"]; exists && role != "assistant" {
+				return
+			}
+			path := "/input/" + jsonIndex(index)
+			switch item["type"] {
+			case "function_call_output", "custom_tool_call_output":
+				records(item["output"], func(index int, part map[string]any) {
+					if part["type"] == "input_file" || part["type"] == "input_image" {
+						protect(path+"/output/"+jsonIndex(index), part)
+					}
+				})
+			case "computer_call_output":
+				if output, _ := item["output"].(map[string]any); output["type"] == "computer_screenshot" {
+					protect(path+"/output", output)
+				}
+			}
+		})
+	case contract.ProtocolAnthropicMessages:
+		records(root["messages"], func(index int, message map[string]any) {
+			if message["role"] != "assistant" {
+				return
+			}
+			path := "/messages/" + jsonIndex(index)
+			records(message["content"], func(index int, block map[string]any) {
+				var resultType, outputType string
+				switch block["type"] {
+				case "code_execution_tool_result":
+					resultType, outputType = "code_execution_result", "code_execution_output"
+				case "bash_code_execution_tool_result":
+					resultType, outputType = "bash_code_execution_result", "bash_code_execution_output"
+				default:
+					return
+				}
+				result, _ := block["content"].(map[string]any)
+				if result["type"] != resultType {
+					return
+				}
+				resultPath := path + "/content/" + jsonIndex(index) + "/content"
+				records(result["content"], func(index int, output map[string]any) {
+					if output["type"] == outputType {
+						protect(resultPath+"/content/"+jsonIndex(index), output)
+					}
+				})
+			})
+		})
+	}
 }
 
 // protocolRoots lists the request fields whose strings are inspected.
@@ -171,9 +243,13 @@ func walkJSONStrings(
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
+		// Responses prompt variable names are chosen by the caller, so a
+		// variable that happens to be called file_id is still inspected.
+		callerNamed := path == "/prompt/variables"
 		for _, key := range keys {
 			child := typed[key]
-			if skipJSONChild(typed, key, child, context) {
+			if skipJSONChild(typed, key, child, context) &&
+				!(callerNamed && isRoundTripIDKey(strings.ToLower(strings.ReplaceAll(key, "_", "")))) {
 				continue
 			}
 			childContext := nextJSONTraversalContext(typed, key, context)
@@ -280,6 +356,11 @@ func skipJSONChild(
 		case "type", "id", "format", "required", "enum", "const", "pattern",
 			"$ref", "propertyordering":
 			return true
+		case "$schema":
+			// The dialect URI keyword. A property that happens to be named
+			// "$schema" has a schema object as its value and stays inspected.
+			_, keyword := child.(string)
+			return keyword
 		}
 	}
 
@@ -295,7 +376,26 @@ func skipJSONChild(
 			return true
 		}
 	}
-	return false
+
+	// Round-trip identifiers that a later turn must echo byte for byte.
+	// Masking tool_result.tool_use_id while tool_use.id survives orphans the
+	// pair and the upstream model reads the call as interrupted. Keys are
+	// listed explicitly: an "*id" suffix rule would also hide user fields such
+	// as metadata.user_id. Tool payloads returned above and schema property
+	// names are left alone, so a tool argument or schema property that happens
+	// to use one of these names is still inspected; the typed references tool
+	// results do carry are protected by addToolResultReferencePaths.
+	return context == jsonContentContext && isRoundTripIDKey(normalized)
+}
+
+func isRoundTripIDKey(normalized string) bool {
+	switch normalized {
+	case "tooluseid", "previousresponseid", "itemid", "responseid", "fileid",
+		"containerid", "approvalrequestid", "encryptedindex":
+		return true
+	default:
+		return false
+	}
 }
 
 func isNonTextMediaChild(
@@ -499,7 +599,7 @@ func rewriteDocument(
 	findings []Finding,
 	allocator *placeholderAllocator,
 	protocol contract.ProtocolID,
-	notice bool,
+	notice string,
 ) (rewriteOutcome, error) {
 	placed, redactions, err := assignPlaceholders(extracted, findings, allocator)
 	if err != nil {
@@ -527,9 +627,10 @@ func rewriteDocument(
 	}
 	// The note is only worth its tokens when an opaque marker actually reached
 	// the wire, so it is decided after allocation rather than from policy alone.
+	// An empty notice means the policy or the listed skill already covers it.
 	injected := false
-	if notice && anyTokenPlaceholder(redactions) {
-		injected, err = injectPlaceholderNotice(&document, protocol)
+	if notice != "" && anyTokenPlaceholder(redactions) {
+		injected, err = injectPlaceholderNotice(&document, protocol, notice)
 		if err != nil {
 			return rewriteOutcome{}, ErrUnsafeRewrite
 		}

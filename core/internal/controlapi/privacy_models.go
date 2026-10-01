@@ -13,23 +13,27 @@ import (
 func (handler *Handler) registerPrivacyModelsRoutes() {
 	handler.mux.HandleFunc(
 		PrivacyModelCatalogPath,
-		handler.authenticated(handler.privacyModelCatalog),
+		handler.authenticated(handler.privacyModelCatalog, RoleObserver),
+	)
+	handler.mux.HandleFunc(
+		PrivacyModelReleasesPath,
+		handler.authenticated(handler.privacyModelReleases, RoleObserver),
 	)
 	handler.mux.HandleFunc(
 		PrivacyModelProbePath,
-		handler.authenticated(handler.privacyModelProbe),
+		handler.authenticated(handler.privacyModelProbe, RoleObserver),
 	)
 	handler.mux.HandleFunc(
 		PrivacyModelLocalProbePath,
-		handler.authenticated(handler.privacyModelLocalProbe),
+		handler.authenticated(handler.privacyModelLocalProbe, RoleObserver),
 	)
 	handler.mux.HandleFunc(
 		PrivacyModelsPath,
-		handler.authenticated(handler.privacyModelCollection),
+		handler.authenticated(handler.privacyModelCollection, RoleObserver),
 	)
 	handler.mux.HandleFunc(
 		PrivacyModelsPath+"/",
-		handler.authenticated(handler.privacyModelItem),
+		handler.authenticated(handler.privacyModelItem, RoleObserver),
 	)
 }
 
@@ -79,6 +83,27 @@ func (handler *Handler) privacyModelCatalog(
 		return
 	}
 	writeJSON(writer, http.StatusOK, handler.privacyModels.Catalog())
+}
+
+func (handler *Handler) privacyModelReleases(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if request.URL.RawQuery != "" {
+		writeError(writer, http.StatusBadRequest, "invalid_query", "privacy model releases do not accept query parameters")
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is allowed")
+		return
+	}
+	response, err := handler.privacyModels.CatalogReleases(request.Context())
+	if err != nil {
+		handler.writePrivacyModelRegistryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (handler *Handler) privacyModelProbe(

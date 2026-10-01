@@ -69,7 +69,17 @@ func continuationPaths(protocol contract.ProtocolID, root map[string]any) map[st
 			}
 			path := "/messages/" + jsonIndex(index)
 			arrayRecords(message["content"], func(index int, part map[string]any) {
-				protectThinking(path+"/content/"+jsonIndex(index), part)
+				partPath := path + "/content/" + jsonIndex(index)
+				protectThinking(partPath, part)
+				// Anthropic web search results carry encrypted page content that
+				// later turns must replay unchanged.
+				if protocol == contract.ProtocolAnthropicMessages && part["type"] == "web_search_tool_result" {
+					arrayRecords(part["content"], func(index int, result map[string]any) {
+						if result["type"] == "web_search_result" {
+							addStrings(partPath+"/content/"+jsonIndex(index), result, "encrypted_content")
+						}
+					})
+				}
 			})
 			if protocol != contract.ProtocolOpenAIChat {
 				return

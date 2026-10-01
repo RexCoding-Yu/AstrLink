@@ -18,11 +18,6 @@ const (
 	maxQueuedRestoreFrames = 128
 )
 
-type textReplacement struct {
-	placeholder string
-	value       string
-}
-
 type restoreLogicalFrameKind uint8
 
 const (
@@ -36,6 +31,9 @@ type restoreLogicalFrame struct {
 	original []byte
 	jsonData []byte
 	prefix   []byte
+	// complete marks a whole buffered response rather than one frame of a
+	// stream, so none of its text can continue in a later frame.
+	complete bool
 }
 
 func newJSONRestoreFrame(prefix, data []byte) restoreLogicalFrame {
@@ -80,16 +78,17 @@ func (frame restoreLogicalFrame) render(data []byte) []byte {
 }
 
 // visibleRestoreEngine queues complete protocol frames only while a restorable
-// text channel ends in a strict prefix of a current-request placeholder.
-// Evaluation is repeated from the original frames so a failed parse or limit
-// breach can always emit the exact queued wire bytes.
+// text channel that may still continue ends inside a spelling of a
+// current-request placeholder. Evaluation is repeated from the original frames
+// so a failed parse or limit breach can always emit the exact queued wire
+// bytes.
 type visibleRestoreEngine struct {
 	protocol contract.ProtocolID
-	// replacements substitute into decoded strings that this engine re-encodes.
-	replacements []textReplacement
-	// jsonReplacements substitute into a string that itself holds JSON, where
-	// the surrounding quoting is not ours to re-encode.
-	jsonReplacements []textReplacement
+	// plain substitutes into decoded strings that this engine re-encodes.
+	plain *privacy.TextRestorer
+	// json substitutes into a string that itself holds JSON, where the
+	// surrounding quoting is not ours to re-encode.
+	json             *privacy.TextRestorer
 	toolArguments    bool
 	queue            []restoreLogicalFrame
 	queueBytes       int
@@ -103,57 +102,12 @@ func newVisibleRestoreEngine(
 	redactions []privacy.Redaction,
 	toolArguments bool,
 ) *visibleRestoreEngine {
-	seen := make(map[string]struct{}, len(redactions))
-	replacements := make([]textReplacement, 0, len(redactions))
-	jsonReplacements := make([]textReplacement, 0, len(redactions))
-	for _, redaction := range redactions {
-		if redaction.Placeholder == "" {
-			continue
-		}
-		if _, ok := seen[redaction.Placeholder]; ok {
-			continue
-		}
-		seen[redaction.Placeholder] = struct{}{}
-		replacements = append(replacements, textReplacement{
-			placeholder: redaction.Placeholder,
-			value:       redaction.Value,
-		})
-		if escaped, ok := jsonEscapedContent(redaction.Value); ok {
-			jsonReplacements = append(jsonReplacements, textReplacement{
-				placeholder: redaction.Placeholder,
-				value:       escaped,
-			})
-		}
-	}
-	byLongestPlaceholder := func(list []textReplacement) {
-		sort.Slice(list, func(left, right int) bool {
-			return len(list[left].placeholder) > len(list[right].placeholder)
-		})
-	}
-	byLongestPlaceholder(replacements)
-	byLongestPlaceholder(jsonReplacements)
 	return &visibleRestoreEngine{
-		protocol:         protocol,
-		replacements:     replacements,
-		jsonReplacements: jsonReplacements,
-		toolArguments:    toolArguments,
+		protocol:      protocol,
+		plain:         privacy.NewTextRestorer(redactions, privacy.ValuePlain),
+		json:          privacy.NewTextRestorer(redactions, privacy.ValueJSONString),
+		toolArguments: toolArguments,
 	}
-}
-
-// jsonEscapedContent returns the value as it must appear inside a JSON string
-// literal. A value that does not survive the round trip (invalid UTF-8) is
-// refused rather than silently substituted with replacement characters.
-func jsonEscapedContent(value string) (string, bool) {
-	encoded, err := json.Marshal(value)
-	if err != nil || len(encoded) < 2 {
-		return "", false
-	}
-	content := string(encoded[1 : len(encoded)-1])
-	var round string
-	if err := json.Unmarshal(encoded, &round); err != nil || round != value {
-		return "", false
-	}
-	return content, true
 }
 
 func (engine *visibleRestoreEngine) push(frame restoreLogicalFrame) []byte {
@@ -249,6 +203,29 @@ type visibleTextRef struct {
 	// tool marks a reference the local agent is about to act on rather than one
 	// the reader merely sees.
 	tool bool
+	// delta marks a stream fragment whose text may continue in a later frame.
+	// Any other reference carries its field whole.
+	delta bool
+}
+
+// markDeltaRefs marks the references appended since start as stream fragments.
+func markDeltaRefs(refs []visibleTextRef, start int) {
+	for index := start; index < len(refs); index++ {
+		refs[index].delta = true
+	}
+}
+
+type restoreChannel struct {
+	refs []*visibleTextRef
+	// last is the queued frame holding the channel's latest reference.
+	last int
+	// open means a fragment could still be followed by more text.
+	open bool
+}
+
+type restoreChannelClosure struct {
+	frame  int
+	prefix string
 }
 
 type restoreCounts struct {
@@ -258,8 +235,9 @@ type restoreCounts struct {
 
 func (engine *visibleRestoreEngine) evaluate() ([]byte, bool, restoreCounts, error) {
 	decoded := make([]decodedRestoreFrame, len(engine.queue))
-	byChannel := make(map[string][]*visibleTextRef)
+	byChannel := make(map[string]*restoreChannel)
 	order := make([]string, 0, len(engine.queue))
+	var closures []restoreChannelClosure
 	for index, frame := range engine.queue {
 		if frame.kind == restoreFrameRaw {
 			decoded[index] = decodedRestoreFrame{frame: frame}
@@ -276,10 +254,20 @@ func (engine *visibleRestoreEngine) evaluate() ([]byte, bool, restoreCounts, err
 		}
 		for refIndex := range refs {
 			ref := &refs[refIndex]
-			if _, seen := byChannel[ref.channel]; !seen {
+			channel := byChannel[ref.channel]
+			if channel == nil {
+				channel = &restoreChannel{}
+				byChannel[ref.channel] = channel
 				order = append(order, ref.channel)
 			}
-			byChannel[ref.channel] = append(byChannel[ref.channel], ref)
+			channel.refs = append(channel.refs, ref)
+			channel.last = index
+			if ref.delta && !frame.complete {
+				channel.open = true
+			}
+		}
+		for _, prefix := range closedRestoreChannels(engine.protocol, root) {
+			closures = append(closures, restoreChannelClosure{frame: index, prefix: prefix})
 		}
 	}
 
@@ -289,18 +277,22 @@ func (engine *visibleRestoreEngine) evaluate() ([]byte, bool, restoreCounts, err
 		value string
 	}
 	rewrites := make([]channelRewrite, 0, len(byChannel))
-	for _, channel := range order {
-		refs := byChannel[channel]
+	for _, name := range order {
+		channel := byChannel[name]
+		refs := channel.refs
 		var text strings.Builder
 		for _, ref := range refs {
 			text.WriteString(ref.value)
 		}
-		replacements := engine.replacements
+		restorer := engine.plain
 		if refs[0].encoding == refEncodingJSONString {
-			replacements = engine.jsonReplacements
+			restorer = engine.json
 		}
-		restored, count, pending := restoreVisibleText(text.String(), replacements)
-		if pending {
+		// A channel that cannot continue resolves a spelling cut short at its
+		// end now, instead of holding the stream for text that never arrives.
+		final := !channel.open || restoreChannelClosed(name, channel.last, closures)
+		restored, count, hold := restorer.Restore(text.String(), final)
+		if hold > 0 {
 			return nil, true, restoreCounts{}, nil
 		}
 		if count > 0 {
@@ -366,73 +358,132 @@ func decodeJSONValue(data []byte) (any, error) {
 	return root, nil
 }
 
-func restoreVisibleText(
-	input string,
-	replacements []textReplacement,
-) (string, int, bool) {
-	if input == "" || len(replacements) == 0 {
-		return input, 0, false
-	}
-	hold := trailingRestorePrefix(input, replacements)
-	stable := input
-	pending := ""
-	if hold > 0 {
-		stable = input[:len(input)-hold]
-		pending = input[len(input)-hold:]
-	}
-
-	var out strings.Builder
-	cursor := 0
-	count := 0
-	for cursor < len(stable) {
-		next := -1
-		var selected *textReplacement
-		for index := range replacements {
-			replacement := &replacements[index]
-			position := strings.Index(stable[cursor:], replacement.placeholder)
-			if position < 0 {
-				continue
-			}
-			position += cursor
-			if next < 0 || position < next ||
-				(position == next && len(replacement.placeholder) > len(selected.placeholder)) {
-				next = position
-				selected = replacement
-			}
+// restoreChannelClosed reports whether a frame at or after the channel's
+// latest reference ended it.
+func restoreChannelClosed(channel string, last int, closures []restoreChannelClosure) bool {
+	for _, closure := range closures {
+		if closure.frame < last {
+			continue
 		}
-		if next < 0 {
-			out.WriteString(stable[cursor:])
-			break
+		if closure.prefix == "" || channel == closure.prefix ||
+			strings.HasPrefix(channel, closure.prefix+":") {
+			return true
 		}
-		out.WriteString(stable[cursor:next])
-		out.WriteString(selected.value)
-		cursor = next + len(selected.placeholder)
-		count++
 	}
-	out.WriteString(pending)
-	return out.String(), count, hold > 0
+	return false
 }
 
-func trailingRestorePrefix(input string, replacements []textReplacement) int {
-	limit := 0
-	for _, replacement := range replacements {
-		if candidate := len(replacement.placeholder) - 1; candidate > limit {
-			limit = candidate
+// closedRestoreChannels lists the channel prefixes a frame ends; an empty
+// prefix ends every channel. Text in an ended channel cannot continue, so a
+// spelling cut short at its end is final rather than a prefix to wait on.
+func closedRestoreChannels(protocol contract.ProtocolID, root any) []string {
+	object, ok := root.(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch protocol {
+	case contract.ProtocolOpenAIChat:
+		return closedChoiceChannels(object, "chat:delta:")
+	case contract.ProtocolOpenAICompletions:
+		return closedChoiceChannels(object, "completion:")
+	case contract.ProtocolOpenAIResponses, contract.ProtocolOpenAIResponsesCompact:
+		return closedResponseChannels(object)
+	case contract.ProtocolAnthropicMessages:
+		return closedAnthropicChannels(object)
+	case contract.ProtocolGoogleGenerateContent:
+		return closedGeminiChannels(object)
+	default:
+		return nil
+	}
+}
+
+func closedChoiceChannels(root map[string]any, prefix string) []string {
+	choices, _ := root["choices"].([]any)
+	var closed []string
+	for position, value := range choices {
+		choice, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if reason, _ := choice["finish_reason"].(string); reason != "" {
+			closed = append(closed, prefix+memberID(choice, "index", position))
 		}
 	}
-	if len(input) < limit {
-		limit = len(input)
-	}
-	for length := limit; length > 0; length-- {
-		suffix := input[len(input)-length:]
-		for _, replacement := range replacements {
-			if len(replacement.placeholder) > length &&
-				strings.HasPrefix(replacement.placeholder, suffix) {
-				return length
+	return closed
+}
+
+func closedResponseChannels(root map[string]any) []string {
+	eventType, _ := root["type"].(string)
+	itemKey := responseEventItemKey(root)
+	part := itemKey + ":" + memberID(root, "content_index", 0)
+	switch eventType {
+	case "response.output_text.done":
+		return []string{"responses:output_text:" + part}
+	case "response.refusal.done":
+		return []string{"responses:refusal:" + part}
+	case "response.content_part.done":
+		return []string{"responses:output_text:" + part, "responses:refusal:" + part}
+	case "response.function_call_arguments.done",
+		"response.mcp_call_arguments.done",
+		"response.custom_tool_call_input.done":
+		return []string{"responses:tool_args:" + itemKey}
+	case "response.output_item.done":
+		// Deltas are keyed by item_id when they carry one and by output_index
+		// otherwise, so the finished item ends both.
+		var keys []string
+		if _, ok := root["output_index"]; ok {
+			keys = append(keys, memberID(root, "output_index", 0))
+		}
+		if item, ok := root["item"].(map[string]any); ok {
+			if id := memberString(item, "id", ""); id != "" {
+				keys = append(keys, id)
 			}
 		}
+		closed := make([]string, 0, 3*len(keys))
+		for _, key := range keys {
+			closed = append(closed,
+				"responses:output_text:"+key,
+				"responses:refusal:"+key,
+				"responses:tool_args:"+key,
+			)
+		}
+		return closed
+	case "response.completed", "response.incomplete", "response.failed":
+		return []string{""}
+	default:
+		return nil
 	}
-	return 0
+}
+
+func closedAnthropicChannels(root map[string]any) []string {
+	eventType, _ := root["type"].(string)
+	switch eventType {
+	case "content_block_stop":
+		index := memberID(root, "index", 0)
+		return []string{"anthropic:text:" + index, "anthropic:tool_input:" + index}
+	case "message_delta", "message_stop":
+		return []string{""}
+	}
+	// A legacy text completion stream ends with a stop reason.
+	if reason, _ := root["stop_reason"].(string); reason != "" {
+		return []string{"anthropic:completion"}
+	}
+	return nil
+}
+
+func closedGeminiChannels(root map[string]any) []string {
+	candidates, _ := root["candidates"].([]any)
+	var closed []string
+	for position, value := range candidates {
+		candidate, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if reason, _ := candidate["finishReason"].(string); reason != "" {
+			closed = append(closed, "gemini:"+memberID(candidate, "index", position))
+		}
+	}
+	return closed
 }
 
 func visibleResponseTextRefs(
@@ -489,9 +540,11 @@ func appendOpenAIChatRefs(
 		}
 		index := memberID(choice, "index", position)
 		if delta, ok := choice["delta"].(map[string]any); ok {
+			start := len(*refs)
 			channel := "chat:delta:" + index
 			appendContentValueRefs(refs, delta, "content", channel, frame)
 			appendStringRef(refs, delta, "refusal", channel+":refusal", frame)
+			markDeltaRefs(*refs, start)
 		}
 		if message, ok := choice["message"].(map[string]any); ok {
 			channel := "chat:message:" + index
@@ -513,7 +566,9 @@ func appendOpenAICompletionRefs(
 			continue
 		}
 		index := memberID(choice, "index", position)
+		start := len(*refs)
 		appendStringRef(refs, choice, "text", "completion:"+index, frame)
+		markDeltaRefs(*refs, start)
 	}
 }
 
@@ -525,6 +580,7 @@ func appendOpenAIResponseRefs(
 	eventType, _ := root["type"].(string)
 	itemKey := responseEventItemKey(root)
 	contentIndex := memberID(root, "content_index", 0)
+	start := len(*refs)
 	switch eventType {
 	case "response.output_text.delta":
 		appendStringRef(
@@ -534,6 +590,7 @@ func appendOpenAIResponseRefs(
 			"responses:output_text:"+itemKey+":"+contentIndex,
 			frame,
 		)
+		markDeltaRefs(*refs, start)
 	case "response.refusal.delta":
 		appendStringRef(
 			refs,
@@ -542,6 +599,7 @@ func appendOpenAIResponseRefs(
 			"responses:refusal:"+itemKey+":"+contentIndex,
 			frame,
 		)
+		markDeltaRefs(*refs, start)
 	case "response.output_text.done":
 		appendStringRef(
 			refs,
@@ -643,12 +701,14 @@ func appendAnthropicRefs(
 ) {
 	eventType, _ := root["type"].(string)
 	index := memberID(root, "index", 0)
+	start := len(*refs)
 	switch eventType {
 	case "content_block_delta":
 		delta, _ := root["delta"].(map[string]any)
 		deltaType, _ := delta["type"].(string)
 		if deltaType == "text_delta" {
 			appendStringRef(refs, delta, "text", "anthropic:text:"+index, frame)
+			markDeltaRefs(*refs, start)
 		}
 	case "content_block_start":
 		block, _ := root["content_block"].(map[string]any)
@@ -668,7 +728,10 @@ func appendAnthropicRefs(
 		}
 	default:
 		appendAnthropicContentRefs(refs, root, "anthropic:message", frame)
+		// A legacy text completion streams its text in this field.
+		start = len(*refs)
 		appendStringRef(refs, root, "completion", "anthropic:completion", frame)
+		markDeltaRefs(*refs, start)
 	}
 }
 
@@ -719,6 +782,7 @@ func appendGeminiRefs(
 			if thought, _ := part["thought"].(bool); thought {
 				continue
 			}
+			start := len(*refs)
 			appendStringRef(
 				refs,
 				part,
@@ -726,6 +790,7 @@ func appendGeminiRefs(
 				"gemini:"+candidateID+":"+strconv.Itoa(partPosition),
 				frame,
 			)
+			markDeltaRefs(*refs, start)
 		}
 	}
 }
@@ -799,6 +864,27 @@ func appendToolStringRef(
 		value:    value,
 		encoding: refEncodingJSONString,
 		tool:     true,
+	})
+}
+
+// appendToolTextRef targets free-form tool input, such as a custom tool's raw
+// text, which the harness hands over without parsing it as JSON.
+func appendToolTextRef(
+	refs *[]visibleTextRef,
+	object map[string]any,
+	key, channel string,
+	frame int,
+) {
+	value, ok := object[key].(string)
+	if !ok {
+		return
+	}
+	*refs = append(*refs, visibleTextRef{
+		frame:   frame,
+		set:     func(replacement string) { object[key] = replacement },
+		channel: channel,
+		value:   value,
+		tool:    true,
 	})
 }
 

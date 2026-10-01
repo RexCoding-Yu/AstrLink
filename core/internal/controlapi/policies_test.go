@@ -199,6 +199,7 @@ func TestPolicyAndPrivacyModelRoutesRequireAuthenticationAndNoStore(t *testing.T
 		{method: http.MethodGet, path: PoliciesPath},
 		{method: http.MethodPost, path: PolicyDryRunPath},
 		{method: http.MethodGet, path: PrivacyModelCatalogPath},
+		{method: http.MethodGet, path: PrivacyModelReleasesPath},
 		{method: http.MethodGet, path: PrivacyModelsPath},
 		{method: http.MethodPost, path: PrivacyModelProbePath},
 		{method: http.MethodPost, path: PrivacyModelLocalProbePath},

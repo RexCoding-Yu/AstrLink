@@ -16,6 +16,8 @@ pub struct ControlSessionFile {
     pub control_socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_url: Option<String>,
+    /// Observer-role bearer token for agent tools on Windows. The field keeps its
+    /// historical name; it never carries the desktop's operator token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_token: Option<String>,
     /// Core process id, for readers that want to check liveness.
@@ -51,19 +53,38 @@ pub fn control_socket_path(data_directory: &Path) -> PathBuf {
     data_directory.join(CONTROL_SOCKET_FILE_NAME)
 }
 
+/// Publishes the locator agent tools use to reach Core. Only the observer
+/// token is accepted here, so the operator token cannot reach the file.
 pub fn publish_control_session(
     home: &Path,
     data_directory: &Path,
     control_url: &str,
-    control_token: Option<&str>,
+    observer_token: Option<&str>,
     pid: Option<u32>,
 ) -> Result<(), String> {
-    let session = if cfg!(windows) {
+    let session = control_session_file(
+        cfg!(windows),
+        data_directory,
+        control_url,
+        observer_token,
+        pid,
+    )?;
+    write_private_json(&session_path(home), &session)
+}
+
+fn control_session_file(
+    windows: bool,
+    data_directory: &Path,
+    control_url: &str,
+    observer_token: Option<&str>,
+    pid: Option<u32>,
+) -> Result<ControlSessionFile, String> {
+    Ok(if windows {
         ControlSessionFile {
             schema_version: SESSION_SCHEMA_VERSION,
             control_socket: None,
             control_url: Some(control_url.to_string()),
-            control_token: control_token.map(str::to_string),
+            control_token: observer_token.map(str::to_string),
             pid,
             desktop_pid: Some(std::process::id()),
         }
@@ -81,13 +102,12 @@ pub fn publish_control_session(
             pid,
             desktop_pid: Some(std::process::id()),
         }
-    };
-    write_private_json(&session_path(home), &session)
+    })
 }
 
 /// Removes the session file unless another desktop process published it.
 /// During a development restart the old instance shuts down after the new
-/// one has already announced itself; deleting here would leave MCP clients
+/// one has already announced itself; deleting here would leave the agent CLI
 /// without a locator until the next full launch.
 pub fn clear_control_session(home: &Path) -> Result<(), String> {
     clear_control_session_for(home, std::process::id())
@@ -168,6 +188,32 @@ mod tests {
         assert!(!raw.contains("control_token"));
         assert!(raw.contains("control.sock"));
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn windows_session_carries_only_the_observer_token() {
+        let session = control_session_file(
+            true,
+            Path::new("C:/data"),
+            "http://127.0.0.1:9",
+            Some("observer-token"),
+            Some(7),
+        )
+        .unwrap();
+        assert_eq!(session.control_token.as_deref(), Some("observer-token"));
+        assert_eq!(session.control_url.as_deref(), Some("http://127.0.0.1:9"));
+        assert!(session.control_socket.is_none());
+
+        let unix = control_session_file(
+            false,
+            Path::new("/data"),
+            "http://127.0.0.1:9",
+            Some("observer-token"),
+            Some(7),
+        )
+        .unwrap();
+        assert!(unix.control_token.is_none());
+        assert!(unix.control_url.is_none());
     }
 
     #[test]

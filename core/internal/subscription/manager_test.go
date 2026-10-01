@@ -534,11 +534,7 @@ func TestFailedAuthorizationRollbackPreservesConcurrentInvalidGrant(t *testing.T
 		_, err := manager.AccessToken(ctx, account.ID)
 		refreshDone <- err
 	}()
-	select {
-	case <-refreshStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refresh request did not start")
-	}
+	<-refreshStarted
 
 	authorizationDone := make(chan error, 1)
 	go func() {
@@ -620,11 +616,7 @@ func TestConcurrentRefreshAndLogoutCannotResurrectCredentials(t *testing.T) {
 		_, err := manager.AccessToken(ctx, account.ID)
 		refreshDone <- err
 	}()
-	select {
-	case <-refreshStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("refresh request did not start")
-	}
+	<-refreshStarted
 
 	logoutDone := make(chan error, 1)
 	go func() {
@@ -804,7 +796,6 @@ func waitForManagerInvalidation(
 	id contract.SubscriptionAccountID,
 ) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 		_, err := manager.AccessToken(ctx, id)
@@ -815,9 +806,6 @@ func waitForManagerInvalidation(
 		if !errors.Is(err, context.DeadlineExceeded) &&
 			!errors.Is(err, context.Canceled) {
 			t.Fatalf("AccessToken() while waiting for invalidation = %v", err)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("manager did not enter logout transition: %v", err)
 		}
 	}
 }

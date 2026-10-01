@@ -6,9 +6,12 @@ import {
 } from "./local-client-model";
 
 describe("local client IPC", () => {
-  it("accepts both clients and prevents stale responses overwriting progress", () => {
+  it("accepts every client and prevents stale responses overwriting progress", () => {
     const initial = emptyLocalClients();
     expect(parseLocalClients(initial)).toEqual(initial);
+    const bun = emptyLocalClients();
+    bun.clients[3].install_method = "bun";
+    expect(parseLocalClients(bun)).toEqual(bun);
     const next = { ...initial, revision: 3, busy: true };
     expect(acceptLocalClients(next, initial)).toBe(next);
     expect(acceptLocalClients(initial, next)).toBe(next);

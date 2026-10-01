@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -22,6 +23,7 @@ const (
 	RequestSessionsPath = "/control/v1/request-sessions"
 
 	maxLocalAccessTokenFilters = 100
+	maxRequestSearchRunes      = 200
 )
 
 type requestRecordPageResponse struct {
@@ -30,13 +32,25 @@ type requestRecordPageResponse struct {
 }
 
 func (handler *Handler) registerRequestRecordRoutes() {
-	handler.mux.HandleFunc(UsageSummaryPath, handler.authenticated(handler.getUsageSummary))
-	handler.mux.HandleFunc(AccessTokenUsagePath, handler.authenticated(handler.listAccessTokenUsage))
-	handler.mux.HandleFunc(RequestsPurgePath, handler.authenticated(handler.purgeRequestRecords))
-	handler.mux.HandleFunc(RequestSessionsPath, handler.authenticated(handler.requestSessionCollection))
-	handler.mux.HandleFunc(RequestSessionsPath+"/", handler.authenticated(handler.requestSessionItem))
-	handler.mux.HandleFunc(RequestsPath, handler.authenticated(handler.requestRecordCollection))
-	handler.mux.HandleFunc(RequestsPath+"/", handler.authenticated(handler.requestRecordItem))
+	handler.mux.HandleFunc(UsageSummaryPath, handler.authenticated(handler.getUsageSummary, RoleObserver))
+	handler.mux.HandleFunc(AccessTokenUsagePath, handler.authenticated(handler.listAccessTokenUsage, RoleObserver))
+	handler.mux.HandleFunc(RequestsPurgePath, handler.authenticated(handler.purgeRequestRecords, RoleOperator))
+	handler.mux.HandleFunc(RequestSessionsPath, handler.authenticated(handler.requestSessionCollection, RoleObserver))
+	handler.mux.HandleFunc(RequestSessionsPath+"/", handler.authenticated(handler.requestSessionItem, RoleObserver))
+	handler.mux.HandleFunc(RequestsPath, handler.authenticated(handler.requestRecordCollection, RoleObserver))
+	handler.mux.HandleFunc(RequestsPath+"/", handler.authenticatedBy(handler.requestRecordItem, requestRecordItemRole))
+}
+
+// requestRecordItemRole admits observers to reads and to filing a raw
+// access request; every other write stays operator-only.
+func requestRecordItemRole(request *http.Request) Role {
+	if isSafeMethod(request.Method) {
+		return RoleObserver
+	}
+	if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/audit/raw-access") {
+		return RoleObserver
+	}
+	return RoleOperator
 }
 
 type requestSessionPageResponse struct {
@@ -108,6 +122,9 @@ func parseRequestSessionListOptions(request *http.Request) (storage.RequestSessi
 		return storage.RequestSessionListOptions{}, fmt.Errorf("kind must be inference or discovery")
 	}
 	query.Del("kind")
+	if query.Has("q") {
+		return storage.RequestSessionListOptions{}, fmt.Errorf("q is only supported on request records")
+	}
 	recordOptions, err := parseRequestRecordQuery(query)
 	if err != nil {
 		return storage.RequestSessionListOptions{}, err
@@ -155,6 +172,15 @@ func (handler *Handler) requestRecordItem(writer http.ResponseWriter, request *h
 	rawID := strings.TrimPrefix(request.URL.Path, RequestsPath+"/")
 	if rawID == "" {
 		writeError(writer, http.StatusNotFound, "not_found", "control API path not found")
+		return
+	}
+	if strings.HasSuffix(rawID, "/audit/raw-access") {
+		idPart := strings.TrimSuffix(rawID, "/audit/raw-access")
+		if idPart == "" || strings.Contains(idPart, "/") || handler.auditBlobs == nil {
+			writeError(writer, http.StatusNotFound, "not_found", "control API path not found")
+			return
+		}
+		handler.requestRawAccess(writer, request, idPart)
 		return
 	}
 	if strings.HasSuffix(rawID, "/audit") {
@@ -219,53 +245,111 @@ func (handler *Handler) getRequestAuditContent(writer http.ResponseWriter, reque
 		writeError(writer, http.StatusNotFound, "not_found", "control API path not found")
 		return
 	}
-	decodedID, err := url.PathUnescape(rawID)
-	if err != nil || decodedID != rawID {
-		writeError(writer, http.StatusBadRequest, "invalid_request_id", "request_id must use its canonical form")
+	id, ok := parseRequestIDSegment(writer, rawID)
+	if !ok {
 		return
 	}
-	id := contract.RequestID(decodedID)
-	if err := id.Validate(); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_request_id", "request_id is invalid")
-		return
-	}
-	if _, err := handler.requestRecords.GetRequestRecord(request.Context(), id); err != nil {
-		handler.writeRequestRecordStoreError(writer, err)
-		return
-	}
-	blobs, err := handler.auditBlobs.GetAuditBlobsByRequest(request.Context(), id)
-	if err != nil {
-		handler.writeRequestRecordStoreError(writer, err)
-		return
-	}
-	content := contract.AuditContent{RequestID: id}
-	if len(blobs) == 0 {
-		writeJSON(writer, http.StatusOK, content)
-		return
-	}
-	if handler.auditKeys == nil {
-		writeError(writer, http.StatusConflict, "audit_key_missing", "audit content cannot be decrypted")
-		return
-	}
-	key, err := handler.auditKeys.GetAuditKey(request.Context())
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			writeError(writer, http.StatusConflict, "audit_key_missing", "audit content cannot be decrypted")
+	view := contract.AuditContentViewFull
+	if values, present := request.URL.Query()["view"]; present {
+		if len(values) != 1 || !contract.AuditContentView(values[0]).Valid() {
+			writeValidationFailed(writer, "view is invalid", []errorDetail{{
+				Field: "view", Reason: "must be shareable or full",
+			}})
 			return
 		}
-		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "audit key storage is unavailable")
+		view = contract.AuditContentView(values[0])
+	}
+	reader := &auditReader{handler: handler, request: request, view: view}
+	grantToken := strings.TrimSpace(request.Header.Get(RawGrantHeader))
+	if view == contract.AuditContentViewFull {
+		switch {
+		case grantToken != "":
+			// Turning agent raw access off revokes every grant; checking
+			// the switch here also covers a grant filed while it changed.
+			enabled, err := handler.agentRawAccessEnabled(request.Context())
+			if err != nil {
+				handler.writeAuditSettingsStoreError(writer, err)
+				return
+			}
+			if !enabled {
+				writeError(writer, http.StatusConflict, "raw_access_disabled", "agent raw access requests are turned off")
+				return
+			}
+			if !writeRawGrantError(writer, handler.rawGrants.check(grantToken, id)) {
+				return
+			}
+		case requestRole(request) < RoleOperator:
+			writeError(writer, http.StatusForbidden, "forbidden",
+				"the full audit view needs the operator role or an approved raw grant")
+			return
+		}
+	}
+	record, err := handler.requestRecords.GetRequestRecord(request.Context(), id)
+	if err != nil {
+		handler.writeRequestRecordStoreError(writer, err)
 		return
+	}
+	reader.record = record
+	var blobs []storage.AuditBlob
+	if view == contract.AuditContentViewShareable {
+		blobs, err = handler.auditBlobs.GetShareableAuditBlobsByRequest(request.Context(), id)
+	} else {
+		blobs, err = handler.auditBlobs.GetAuditBlobsByRequest(request.Context(), id)
+	}
+	if err != nil {
+		handler.writeRequestRecordStoreError(writer, err)
+		return
+	}
+	if view == contract.AuditContentViewFull {
+		if grantToken != "" {
+			// Spend the read before opening anything, so a once grant
+			// cannot serve two concurrent reads.
+			lease, err := handler.rawGrants.claim(grantToken, id)
+			if !writeRawGrantError(writer, err) {
+				return
+			}
+			defer lease.release()
+			reader.lease = lease
+		} else if !reader.prepareOperator(writer) {
+			return
+		}
+	}
+	defer reader.close()
+	content, err := reader.content(id, blobs)
+	if err != nil {
+		reader.writeOpenError(writer, err)
+		return
+	}
+	switch {
+	case reader.lease != nil:
+		handler.observers.noteRead(request, ReadLevelRaw)
+		handler.observers.noteRawEvent(RawAccessEventRawRead, reader.lease.grant)
+	case view == contract.AuditContentViewShareable:
+		handler.observers.noteRead(request, ReadLevelShareable)
+	}
+	writeJSON(writer, http.StatusOK, content)
+}
+
+// content opens every part one read may see into the audit view.
+func (reader *auditReader) content(id contract.RequestID, blobs []storage.AuditBlob) (contract.AuditContent, error) {
+	content := contract.AuditContent{
+		RequestID: id, View: reader.view,
+		PrivacyFindings: append([]contract.PrivacyFinding{}, reader.record.PrivacyFindings...),
 	}
 	for _, blob := range blobs {
 		switch blob.Direction {
 		case storage.AuditDirectionHTTPMeta, storage.AuditDirectionUpstreamHTTPMeta:
-			plaintext, err := storage.OpenAuditBlob(key, blob.Nonce, blob.Ciphertext)
+			plaintext, withheld, err := reader.open(blob)
 			if err != nil {
-				writeError(writer, http.StatusConflict, "audit_decrypt_failed", "audit content cannot be decrypted")
-				return
+				return contract.AuditContent{}, err
+			}
+			if withheld != "" {
+				continue
 			}
 			var meta contract.AuditHTTPMeta
-			if err := json.Unmarshal(plaintext, &meta); err != nil {
+			err = json.Unmarshal(plaintext, &meta)
+			clear(plaintext)
+			if err != nil {
 				// A corrupt meta payload leaves that meta field null instead of
 				// failing the whole detail view.
 				continue
@@ -279,10 +363,9 @@ func (handler *Handler) getRequestAuditContent(writer http.ResponseWriter, reque
 			storage.AuditDirectionResponse,
 			storage.AuditDirectionUpstreamRequest,
 			storage.AuditDirectionUpstreamResponse:
-			part, err := decryptAuditContentPart(key, blob)
+			part, err := reader.part(blob)
 			if err != nil {
-				writeError(writer, http.StatusConflict, "audit_decrypt_failed", "audit content cannot be decrypted")
-				return
+				return contract.AuditContent{}, err
 			}
 			switch blob.Direction {
 			case storage.AuditDirectionRequest:
@@ -296,8 +379,250 @@ func (handler *Handler) getRequestAuditContent(writer http.ResponseWriter, reque
 			}
 		}
 	}
-	writeJSON(writer, http.StatusOK, content)
+	return content, nil
 }
+
+// writeRawGrantError maps a grant lookup failure onto its wire code.
+func writeRawGrantError(writer http.ResponseWriter, err error) bool {
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, errRawGrantPending):
+		writeError(writer, http.StatusConflict, "raw_access_pending", "raw access is awaiting approval on the desktop")
+	case errors.Is(err, errRawGrantDenied):
+		writeError(writer, http.StatusForbidden, "raw_access_denied", "raw access was denied on the desktop")
+	default:
+		writeError(writer, http.StatusForbidden, "raw_grant_invalid",
+			"raw grant is unknown, expired, revoked, or for another request; request raw access again")
+	}
+	return false
+}
+
+// auditReader opens the parts one audit read may see. Shareable parts open
+// with the audit key; the rest open only in the full view, through an
+// approved grant or the operator's unlock session. Until a raw password is
+// set, nobody reads them: parts captured before then were never kept.
+type auditReader struct {
+	handler *Handler
+	request *http.Request
+	view    contract.AuditContentView
+	record  contract.RequestRecord
+	lease   *rawGrantLease
+	sealing RawVaultStatus
+	// opener is the operator's unlock session once looked up; locked
+	// withholds raw parts from an operator without one.
+	sessionChecked bool
+	opener         RawKeyOpener
+	locked         bool
+	auditKey       []byte
+	keyErr         error
+	keyRead        bool
+	// rawAvailable caches whether an agent may ask for raw parts.
+	rawAvailable *bool
+}
+
+var errAuditKeyMissing = errors.New("audit key missing")
+
+// prepareOperator settles how an operator's full read treats raw parts.
+func (reader *auditReader) prepareOperator(writer http.ResponseWriter) bool {
+	status, err := reader.handler.rawVaultStatus(reader.request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "raw_vault_unavailable", "raw sealing state is unavailable")
+		return false
+	}
+	reader.sealing = status
+	return true
+}
+
+func (reader *auditReader) close() { clear(reader.auditKey) }
+
+func (reader *auditReader) key() ([]byte, error) {
+	if !reader.keyRead {
+		reader.keyRead = true
+		if reader.handler.auditKeys == nil {
+			reader.keyErr = errAuditKeyMissing
+		} else {
+			reader.auditKey, reader.keyErr = reader.handler.auditKeys.GetAuditKey(reader.request.Context())
+			if errors.Is(reader.keyErr, storage.ErrNotFound) {
+				reader.keyErr = errAuditKeyMissing
+			}
+		}
+	}
+	return reader.auditKey, reader.keyErr
+}
+
+// open returns a part's plaintext, or the reason it is withheld.
+func (reader *auditReader) open(blob storage.AuditBlob) ([]byte, contract.AuditWithheldReason, error) {
+	if blob.Exposure != storage.AuditExposureShareable {
+		if blob.Sealing == storage.AuditSealingNone {
+			return nil, contract.AuditWithheldRawNotKept, nil
+		}
+		if reader.view == contract.AuditContentViewShareable {
+			return nil, privacyWithheldReason(reader.record, blob), nil
+		}
+		if reader.lease == nil && !reader.sealing.PasswordSet {
+			// No audit-key fallback: the local key alone must not read raw
+			// content.
+			if blob.Exposure == storage.AuditExposurePending {
+				return nil, contract.AuditWithheldPrivacyPending, nil
+			}
+			return nil, contract.AuditWithheldRawNotKept, nil
+		}
+		if reader.lease == nil && !reader.sessionChecked {
+			// Looked up once per read: a raw read is what keeps the
+			// unlock session from idling out.
+			reader.sessionChecked = true
+			opener, unlocked := reader.handler.rawVault.UnlockedOpener()
+			reader.opener, reader.locked = opener, !unlocked || opener == nil
+		}
+		if reader.lease == nil && reader.locked {
+			return nil, contract.AuditWithheldRawLocked, nil
+		}
+		if rawSealed(blob) {
+			return reader.openRawSealed(blob)
+		}
+	}
+	key, err := reader.key()
+	if err != nil {
+		return nil, "", err
+	}
+	plaintext, err := storage.OpenAuditBlob(key, blob.Nonce, blob.Ciphertext)
+	if errors.Is(err, storage.ErrAuditDecrypt) && reader.auditKeyOrphaned() {
+		// Sealed under an audit key this device lost with its local key.
+		err = errAuditKeyMissing
+	}
+	return plaintext, "", err
+}
+
+// auditKeyOrphaned reports whether the store set aside an audit key it can
+// no longer open, so a failed decryption means the key is missing.
+func (reader *auditReader) auditKeyOrphaned() bool {
+	orphans, ok := reader.handler.auditKeys.(interface{ HasOrphanedAuditKey() bool })
+	return ok && orphans.HasOrphanedAuditKey()
+}
+
+// openRawSealed opens a part sealed to the raw key with its own part key.
+func (reader *auditReader) openRawSealed(blob storage.AuditBlob) ([]byte, contract.AuditWithheldReason, error) {
+	var partKey []byte
+	switch {
+	case reader.lease != nil && reader.lease.opener != nil:
+		key, err := reader.lease.opener.OpenBlobKey(blob)
+		if err != nil {
+			// Sealed to a key the grant does not hold, or the grant
+			// ended during this read.
+			return nil, privacyWithheldReason(reader.record, blob), nil
+		}
+		defer clear(key)
+		partKey = key
+	case reader.lease != nil:
+		partKey = reader.lease.keys[blob.Direction]
+		if len(partKey) == 0 {
+			// Captured after the approval; the grant does not cover it.
+			return nil, privacyWithheldReason(reader.record, blob), nil
+		}
+	case reader.opener != nil:
+		key, err := reader.opener.OpenBlobKey(blob)
+		if err != nil {
+			return nil, "", err
+		}
+		defer clear(key)
+		partKey = key
+	default:
+		// Raw sealing was reset since this part was stored.
+		return nil, contract.AuditWithheldRawLocked, nil
+	}
+	plaintext, err := storage.OpenAuditBlob(partKey, blob.Nonce, blob.Ciphertext)
+	if err != nil && reader.lease != nil {
+		// Recaptured after the approval with a new part key.
+		return nil, privacyWithheldReason(reader.record, blob), nil
+	}
+	return plaintext, "", err
+}
+
+func (reader *auditReader) part(blob storage.AuditBlob) (*contract.AuditContentPart, error) {
+	plaintext, withheld, err := reader.open(blob)
+	if err != nil {
+		return nil, err
+	}
+	part := &contract.AuditContentPart{
+		MediaType:     blob.MediaType,
+		Truncated:     blob.Truncated,
+		CapturedBytes: blob.CapturedBytes,
+	}
+	if withheld != "" {
+		// A part that was never kept cannot be asked for.
+		available := withheld != contract.AuditWithheldRawNotKept && reader.agentRawAvailable()
+		part.Withheld, part.Reason, part.RawAvailable = true, withheld, &available
+		return part, nil
+	}
+	// Decrypted content is returned as UTF-8 when valid; otherwise base64 so
+	// the JSON string stays well-formed. media_type is left unchanged either way.
+	part.Content = string(plaintext)
+	if !utf8.Valid(plaintext) {
+		part.Content = base64.StdEncoding.EncodeToString(plaintext)
+	}
+	clear(plaintext)
+	part.Exposure = contract.AuditPartExposureRaw
+	if blob.Exposure == storage.AuditExposureShareable {
+		part.Exposure = contract.AuditPartExposureShareable
+	}
+	return part, nil
+}
+
+// agentRawAvailable reports whether asking for the raw part can succeed:
+// a raw password is set and the settings switch allows agent requests. It
+// is advisory, so a state it cannot read reports false.
+func (reader *auditReader) agentRawAvailable() bool {
+	if reader.rawAvailable == nil {
+		ctx := reader.request.Context()
+		status, err := reader.handler.rawVaultStatus(ctx)
+		available := err == nil && status.PasswordSet
+		if available {
+			enabled, err := reader.handler.agentRawAccessEnabled(ctx)
+			available = err == nil && enabled
+		}
+		reader.rawAvailable = &available
+	}
+	return *reader.rawAvailable
+}
+
+func (reader *auditReader) writeOpenError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errAuditKeyMissing):
+		writeError(writer, http.StatusConflict, "audit_key_missing", "audit content cannot be decrypted")
+	case reader.keyErr != nil && err == reader.keyErr:
+		writeError(writer, http.StatusInternalServerError, "storage_unavailable", "audit key storage is unavailable")
+	default:
+		writeError(writer, http.StatusConflict, "audit_decrypt_failed", "audit content cannot be decrypted")
+	}
+}
+
+// privacyWithheldReason explains a part withheld from the shareable view.
+func privacyWithheldReason(record contract.RequestRecord, blob storage.AuditBlob) contract.AuditWithheldReason {
+	if blob.Exposure == storage.AuditExposurePending {
+		return contract.AuditWithheldPrivacyPending
+	}
+	switch blob.Direction {
+	case storage.AuditDirectionResponse:
+		return contract.AuditWithheldPrivacyRestored
+	case storage.AuditDirectionRequest:
+		if record.PrivacyDecision != nil {
+			switch *record.PrivacyDecision {
+			case contract.PrivacyDecisionRedact:
+				return contract.AuditWithheldPrivacyRedacted
+			case contract.PrivacyDecisionBlock:
+				return contract.AuditWithheldPrivacyBlocked
+			case contract.PrivacyDecisionFailOpen:
+				return contract.AuditWithheldPrivacyFailOpen
+			}
+		}
+	}
+	return contract.AuditWithheldPrivacyUnknown
+}
+
+// rawSealed reports whether a part is sealed to the raw key rather than
+// the audit key.
+func rawSealed(blob storage.AuditBlob) bool { return blob.Sealing == storage.AuditSealingRawV1 }
 
 func (handler *Handler) listRequestRecordChildren(
 	writer http.ResponseWriter,
@@ -328,25 +653,6 @@ func (handler *Handler) listRequestRecordChildren(
 		children = []contract.RequestRecord{}
 	}
 	writeJSON(writer, http.StatusOK, requestRecordPageResponse{Items: children})
-}
-
-func decryptAuditContentPart(key []byte, blob storage.AuditBlob) (*contract.AuditContentPart, error) {
-	plaintext, err := storage.OpenAuditBlob(key, blob.Nonce, blob.Ciphertext)
-	if err != nil {
-		return nil, err
-	}
-	// Decrypted content is returned as UTF-8 when valid; otherwise base64 so
-	// the JSON string stays well-formed. media_type is left unchanged either way.
-	content := string(plaintext)
-	if !utf8.Valid(plaintext) {
-		content = base64.StdEncoding.EncodeToString(plaintext)
-	}
-	return &contract.AuditContentPart{
-		MediaType:     blob.MediaType,
-		Content:       content,
-		Truncated:     blob.Truncated,
-		CapturedBytes: blob.CapturedBytes,
-	}, nil
 }
 
 func (handler *Handler) purgeRequestRecords(writer http.ResponseWriter, request *http.Request) {
@@ -381,7 +687,7 @@ func parseRequestRecordListOptions(request *http.Request) (storage.RequestRecord
 func parseRequestRecordQuery(query url.Values) (storage.RequestRecordListOptions, error) {
 	for name, values := range query {
 		switch name {
-		case "limit", "cursor", "from", "to", "protocol", "service_id", "status":
+		case "limit", "cursor", "from", "to", "protocol", "service_id", "status", "q":
 			if len(values) != 1 {
 				return storage.RequestRecordListOptions{}, fmt.Errorf("query parameter must occur once")
 			}
@@ -461,6 +767,13 @@ func parseRequestRecordQuery(query url.Values) (storage.RequestRecordListOptions
 			return options, fmt.Errorf("invalid status filter")
 		}
 		options.Status = &status
+	}
+	if values, ok := query["q"]; ok {
+		text := strings.TrimSpace(values[0])
+		if text == "" || utf8.RuneCountInString(text) > maxRequestSearchRunes || strings.ContainsFunc(text, unicode.IsControl) {
+			return options, fmt.Errorf("invalid q filter")
+		}
+		options.Query = text
 	}
 	return options, nil
 }

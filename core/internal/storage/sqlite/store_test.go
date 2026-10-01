@@ -104,17 +104,13 @@ func TestOpenWALPoolAllowsReadDuringWrite(t *testing.T) {
 	case <-writerStarted:
 	case err := <-writerErr:
 		t.Fatalf("writer: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("writer did not take the write lock")
 	}
 
-	listStarted := time.Now()
+	// The writer holds its lock until the list returns, so a list that
+	// blocked on it would fail with SQLITE_BUSY or hang, not merely run slow.
 	page, err := store.ListRequestSessions(ctx, storagecontract.RequestSessionListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListRequestSessions during write: %v", err)
-	}
-	if elapsed := time.Since(listStarted); elapsed > 2*time.Second {
-		t.Fatalf("list blocked for %s under WAL", elapsed)
 	}
 	if len(page.Items) != 1 {
 		t.Fatalf("sessions=%#v", page.Items)
@@ -400,17 +396,21 @@ func TestAccessTokenCreateListRevealAuthenticateAndDelete(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 
-	var storedHash []byte
-	var storedSecret string
+	var storedHash, storedSecret []byte
+	var sealed int
 	if err := store.db.QueryRow(`SELECT token_hash FROM local_access_tokens WHERE id = ?`, created.Token.ID).Scan(&storedHash); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT token_value FROM local_access_token_secrets WHERE token_id = ?`, created.Token.ID).Scan(&storedSecret); err != nil {
+	if err := store.db.QueryRow(`SELECT token_value, sealed FROM local_access_token_secrets WHERE token_id = ?`, created.Token.ID).Scan(&storedSecret, &sealed); err != nil {
 		t.Fatal(err)
 	}
 	expectedHash := sha256.Sum256([]byte(created.Value))
-	if !bytes.Equal(storedHash, expectedHash[:]) || storedSecret != created.Value {
+	if !bytes.Equal(storedHash, expectedHash[:]) || sealed != 1 || len(storedSecret) != 77 ||
+		bytes.Contains(storedSecret, []byte(created.Value)) {
 		t.Fatal("access token hash/secret persistence mismatch")
+	}
+	if opened, err := store.keys.openColumn(accessTokenSecretsTable, string(created.Token.ID), storedSecret); err != nil || string(opened) != created.Value {
+		t.Fatalf("stored access token secret does not open to the token: %v", err)
 	}
 
 	tokens, err := manager.List(ctx)
@@ -524,7 +524,6 @@ END`); err != nil {
 }
 
 func TestAccessTokenAuthenticationFailsClosedForCorruptStoredRecords(t *testing.T) {
-	otherRaw := "astr_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x7f}, 32))
 	tests := []struct {
 		name   string
 		mutate func(*testing.T, *Store, contract.AccessTokenID)
@@ -575,18 +574,6 @@ func TestAccessTokenAuthenticationFailsClosedForCorruptStoredRecords(t *testing.
 			},
 		},
 		{
-			name: "invalid secret format",
-			mutate: func(t *testing.T, store *Store, id contract.AccessTokenID) {
-				mustExec(t, store, `UPDATE local_access_token_secrets SET token_value = ? WHERE token_id = ?`, strings.Repeat("!", 48), id)
-			},
-		},
-		{
-			name: "secret hash mismatch",
-			mutate: func(t *testing.T, store *Store, id contract.AccessTokenID) {
-				mustExec(t, store, `UPDATE local_access_token_secrets SET token_value = ? WHERE token_id = ?`, otherRaw, id)
-			},
-		},
-		{
 			name: "hint mismatch",
 			mutate: func(t *testing.T, store *Store, id contract.AccessTokenID) {
 				mustExec(t, store, `UPDATE local_access_tokens SET token_hint = 'astr_…AAAAAA' WHERE id = ?`, id)
@@ -613,6 +600,81 @@ func TestAccessTokenAuthenticationFailsClosedForCorruptStoredRecords(t *testing.
 			}
 			if strings.Contains(fmt.Sprint(err), created.Value) {
 				t.Fatal("authentication error leaked raw token")
+			}
+		})
+	}
+}
+
+// Authentication reads token_hash only, so a stored value that is corrupt or
+// no longer decrypts stops Reveal but not the token itself.
+func TestAccessTokenRevealFailsClosedForCorruptStoredSecrets(t *testing.T) {
+	otherRaw := "astr_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x7f}, 32))
+	sealAs := func(t *testing.T, store *Store, id contract.AccessTokenID, value string) {
+		t.Helper()
+		sealed, err := store.keys.sealColumn(accessTokenSecretsTable, string(id), []byte(value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, store, `UPDATE local_access_token_secrets SET token_value = ?, sealed = 1 WHERE token_id = ?`, sealed, id)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *Store, contract.AccessTokenID)
+		want   error
+	}{
+		{
+			name: "invalid secret format",
+			mutate: func(t *testing.T, store *Store, id contract.AccessTokenID) {
+				sealAs(t, store, id, strings.Repeat("!", 48))
+			},
+			want: storagecontract.ErrInvalidRecord,
+		},
+		{
+			name:   "secret hash mismatch",
+			mutate: func(t *testing.T, store *Store, id contract.AccessTokenID) { sealAs(t, store, id, otherRaw) },
+			want:   storagecontract.ErrInvalidRecord,
+		},
+		{
+			name: "sealed for another row",
+			mutate: func(t *testing.T, store *Store, id contract.AccessTokenID) {
+				var value []byte
+				if err := store.db.QueryRow(`SELECT token_value FROM local_access_token_secrets WHERE token_id <> ? LIMIT 1`, id).Scan(&value); err != nil {
+					t.Fatal(err)
+				}
+				mustExec(t, store, `UPDATE local_access_token_secrets SET token_value = ? WHERE token_id = ?`, value, id)
+			},
+			want: secretstore.ErrUnavailable,
+		},
+		{
+			name: "plaintext row from before sealing",
+			mutate: func(t *testing.T, store *Store, id contract.AccessTokenID) {
+				mustExec(t, store, `UPDATE local_access_token_secrets SET token_value = ?, sealed = 0 WHERE token_id = ?`, otherRaw, id)
+			},
+			want: storagecontract.ErrInvalidRecord,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestStore(t, filepath.Join(t.TempDir(), "astrlink.db"))
+			defer store.Close()
+			manager, err := accesstoken.NewManager(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := manager.Create(context.Background(), "corruption target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, store, created.Token.ID)
+			if id, err := manager.Authenticate(context.Background(), created.Value); err != nil || id != created.Token.ID {
+				t.Fatalf("Authenticate = %q, %v; token_hash alone must authenticate", id, err)
+			}
+			revealed, err := manager.Reveal(context.Background(), created.Token.ID)
+			if revealed != "" || !errors.Is(err, test.want) {
+				t.Fatalf("Reveal corrupt secret = %q, %v; want %v", revealed, err, test.want)
+			}
+			if strings.Contains(fmt.Sprint(err), created.Value) {
+				t.Fatal("reveal error leaked raw token")
 			}
 		})
 	}

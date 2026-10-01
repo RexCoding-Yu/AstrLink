@@ -63,7 +63,7 @@ type Config struct {
 
 func DefaultConfig(kind contract.ServiceKind) Config {
 	provider := map[contract.ServiceKind]string{"openai": "openai", "anthropic": "anthropic", "gemini": "google",
-		"codex_subscription": "openai", "claude_subscription": "anthropic", "grok_subscription": "xai", "kimi_coding": "moonshotai", "glm_coding": "zai", "minimax_coding": "minimax",
+		"codex_subscription": "openai", "claude_subscription": "anthropic", "grok_subscription": "xai", "antigravity_subscription": "google", "kimi_coding": "moonshotai", "glm_coding": "zai", "minimax_coding": "minimax",
 		"deepseek": "deepseek", "qwen": "alibaba", "moonshot": "moonshotai", "glm": "zai", "minimax": "minimax", "xai": "xai"}[kind]
 	return Config{Provider: provider, Bindings: map[string]Binding{}, BillingDay: 1, TimeZone: "UTC"}
 }
@@ -108,11 +108,24 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
-func (c Config) Resolve(model string, prices []Price) (Price, bool) {
-	b, ok := c.Bindings[model]
-	if !ok {
-		b = Binding{Provider: c.Provider, Model: model}
+
+// Add built-in price aliases here; explicit service bindings take precedence.
+var defaultBindings = map[string]Binding{
+	"codex-auto-review": {Provider: "openai", Model: "gpt-5.6-luna"},
+}
+
+func (c Config) ResolveBinding(model string) Binding {
+	if b, ok := c.Bindings[model]; ok {
+		return b
 	}
+	if b, ok := defaultBindings[model]; ok && (c.Provider == b.Provider || c.Provider == "") {
+		return b
+	}
+	return Binding{Provider: c.Provider, Model: model}
+}
+
+func (c Config) Resolve(model string, prices []Price) (Price, bool) {
+	b := c.ResolveBinding(model)
 	var match Price
 	count := 0
 	for _, p := range prices {

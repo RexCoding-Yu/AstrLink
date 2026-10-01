@@ -5,10 +5,13 @@ import {
 } from "./service-test-model";
 import { parseChannelBindingAudit } from "./channel-binding-model";
 import {
+  parseClientIdentities,
   parseRoutingSettings,
+  type ClientIdentities,
   type RoutingSettings,
 } from "./failure-policy-model";
 import { invoke as invokeCommand } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   parseServiceProxyProbe,
   type ServiceProxyProbeInput,
@@ -16,6 +19,10 @@ import {
 } from "./service-proxy-model";
 
 import { i18n } from "./i18n";
+import {
+  parseProviderImportNotice,
+  type ProviderImportNotice,
+} from "./provider-import-model";
 import { parseUsageSummary } from "./usage-summary-model";
 import type { UsageSummary, UsageWindow } from "./usage-range";
 
@@ -29,6 +36,7 @@ import {
   parseServiceModelProbe,
   parseServiceRecord,
   parseSubscriptionRiskEvents,
+  type HTTPServiceCreateInput,
   type ServiceCreateInput,
   type ServicePage,
   type ServicePatchInput,
@@ -40,12 +48,11 @@ import {
 } from "./service-model";
 import {
   parseAccessTokenCreateResult,
+  parseAccessTokenCopied,
   parseAccessTokenPage,
-  parseAccessTokenRevealResult,
   parseAccessTokenUsageResponse,
   type AccessTokenCreateResult,
   type AccessTokenPage,
-  type AccessTokenRevealResult,
   type AccessTokenUsageResponse,
 } from "./access-token-model";
 import {
@@ -92,10 +99,30 @@ import {
   type RequestSessionPage,
 } from "./request-record-model";
 import {
+  parseRawAccessGrant,
+  parseRawAccessList,
+  parseRawAccessProofOutcome,
+  type RawAccessDecision,
+  type RawAccessGrant,
+  type RawAccessList,
+  type RawAccessProofOutcome,
+} from "./raw-access-model";
+import {
+  parseRawSealingOutcome,
+  parseRawSealingState,
+  parseRawSealingStatus,
+  type RawPasswordAction,
+  type RawProof,
+  type RawSealingOutcome,
+  type RawSealingState,
+  type RawSealingStatus,
+} from "./raw-sealing-model";
+import {
   parseAuditSettings,
   type AuditSettings,
   type AuditSettingsPatch,
 } from "./audit-settings-model";
+import { parseLocalDataStatus, type LocalDataStatus } from "./local-data-model";
 import {
   parseAuthorizationSession,
   parseBeginCodexAuthorizationResult,
@@ -106,6 +133,8 @@ import {
 import {
   parseSubscriptionUsage,
   parseSubscriptionUsageReset,
+  parseResetCreditsDetails,
+  type ResetCreditsDetails,
   type SubscriptionUsage,
   type SubscriptionUsageReset,
 } from "./subscription-usage-model";
@@ -118,10 +147,24 @@ import {
 import { parseTrayState, type TrayAction, type TrayState } from "./tray-model";
 import { downloadTextFile } from "./download-text-file";
 import {
+  parseClientConfigApplyOutcome,
+  parseClientConfigCopied,
+  parseClientConfigSnippet,
+  parseClientConfigStatuses,
+  parseClientProxyCheck,
+  type ClientConfigApplyOutcome,
+  type ClientConfigClient,
+  type ClientConfigModels,
+  type ClientConfigStatus,
+  type ClientProxyCheck,
+  type DirectClient,
+} from "./client-config-model";
+import {
   parseAgentInstallReceipt,
   parseAgentInstallStatus,
   type AgentInstallReceipt,
   type AgentInstallStatus,
+  type AgentSkillId,
   type AgentToolId,
 } from "./agent-install-model";
 
@@ -327,6 +370,15 @@ export async function getServiceUsage(
       serviceId,
       fresh: options.fresh ?? false,
     }),
+  );
+}
+
+export async function getServiceResetCredits(
+  serviceId: string,
+): Promise<ResetCreditsDetails> {
+  requireNativeBridge();
+  return parseResetCreditsDetails(
+    await invoke<unknown>("get_service_reset_credits", { serviceId }),
   );
 }
 
@@ -616,6 +668,99 @@ export async function getRequestAuditContent(
   );
 }
 
+export async function listRawAccess(): Promise<RawAccessList> {
+  requireNativeBridge();
+  return parseRawAccessList(await invoke<unknown>("list_raw_access"));
+}
+
+/**
+ * Decides one agent raw access request. While Core is unlocked an approval
+ * needs no proof; otherwise it carries the raw password, which the host
+ * forwards once and keeps no copy of. Denying carries none.
+ */
+export async function decideRawAccess(
+  grantId: string,
+  decision: RawAccessDecision,
+  proof?: RawProof,
+): Promise<RawAccessProofOutcome> {
+  requireNativeBridge();
+  return parseRawAccessProofOutcome(
+    await invoke<unknown>("decide_raw_access", {
+      grantId,
+      decision,
+      proof: decision === "deny" ? null : (proof ?? null),
+    }),
+  );
+}
+
+/** Ends a running timed grant before it expires. */
+export async function revokeRawGrant(grantId: string): Promise<RawAccessGrant> {
+  requireNativeBridge();
+  return parseRawAccessGrant(
+    await invoke<unknown>("revoke_raw_grant", { grantId }),
+  );
+}
+
+export async function getRawSealingStatus(): Promise<RawSealingState> {
+  requireNativeBridge();
+  return parseRawSealingState(await invoke<unknown>("raw_sealing_status"));
+}
+
+/** Opens the operator's raw unlock session; Core ends it after idling. */
+export async function unlockRaw(proof: RawProof): Promise<RawSealingOutcome> {
+  requireNativeBridge();
+  return parseRawSealingOutcome(await invoke<unknown>("unlock_raw", { proof }));
+}
+
+/**
+ * Accepts a raw key replaced outside the desktop, such as by the operator's
+ * own `astrlink-core raw-password`. It takes that key's password; Core only
+ * checks it, so raw content stays locked.
+ */
+export async function acknowledgeRawKey(
+  proof: RawProof,
+): Promise<RawSealingOutcome> {
+  requireNativeBridge();
+  return parseRawSealingOutcome(
+    await invoke<unknown>("acknowledge_raw_key", { proof }),
+  );
+}
+
+export async function lockRaw(): Promise<RawSealingStatus> {
+  requireNativeBridge();
+  return parseRawSealingStatus(await invoke<unknown>("lock_raw"));
+}
+
+/**
+ * Calls `onChange` whenever any window locks, unlocks, or changes the raw
+ * password. Core's own idle lock sends nothing; watch the unlock expiry too.
+ */
+export async function listenRawSealingChanged(
+  onChange: () => void,
+): Promise<() => void> {
+  if (!hasNativeBridge()) return () => {};
+  return listen("raw-sealing-changed", () => onChange());
+}
+
+/**
+ * Sets, changes, or resets the raw password. `password` is the new one;
+ * `proof` opens the existing key where Core needs it.
+ */
+export async function setRawPassword(
+  action: RawPasswordAction,
+  password?: string,
+  proof?: RawProof,
+): Promise<RawSealingOutcome> {
+  requireNativeBridge();
+  return parseRawSealingOutcome(
+    await invoke<unknown>("set_raw_password", {
+      action,
+      password: password ?? null,
+      proof: proof ?? null,
+    }),
+  );
+}
+
 export async function getAuditSettings(): Promise<AuditSettings> {
   requireNativeBridge();
   return parseAuditSettings(await invoke<unknown>("get_audit_settings"));
@@ -628,6 +773,12 @@ export async function updateAuditSettings(
   return parseAuditSettings(
     await invoke<unknown>("update_audit_settings", { patch }),
   );
+}
+
+/** Counts of saved data this device can no longer decrypt. */
+export async function getLocalDataStatus(): Promise<LocalDataStatus> {
+  requireNativeBridge();
+  return parseLocalDataStatus(await invoke<unknown>("local_data_status"));
 }
 
 export async function listAccessTokens(): Promise<AccessTokenPage> {
@@ -668,12 +819,14 @@ export async function createAccessToken(
   );
 }
 
-export async function revealAccessToken(
-  tokenId: string,
-): Promise<AccessTokenRevealResult> {
+/**
+ * Has the host copy the token to the clipboard; the token never reaches the
+ * webview. False when the clipboard refused it.
+ */
+export async function copyAccessToken(tokenId: string): Promise<boolean> {
   requireNativeBridge();
-  return parseAccessTokenRevealResult(
-    await invoke<unknown>("reveal_access_token", { tokenId }),
+  return parseAccessTokenCopied(
+    await invoke<unknown>("copy_access_token", { tokenId }),
   );
 }
 
@@ -682,29 +835,124 @@ export async function deleteAccessToken(tokenId: string): Promise<void> {
   await invoke("delete_access_token", { tokenId });
 }
 
-export type CCSwitchClient =
-  | "claude"
-  | "codex"
-  | "gemini"
-  | "opencode"
-  | "openclaw";
-
-export interface CCSwitchModels {
-  model?: string;
-  haikuModel?: string;
-  sonnetModel?: string;
-  opusModel?: string;
+export interface ClientConfigTarget {
+  tokenId: string;
+  client: DirectClient;
+  models: ClientConfigModels;
+  inferenceUrl: string;
 }
 
+/**
+ * What AstrLink wrote to Claude Code and Codex. Outside the desktop there are
+ * no local clients to configure.
+ */
+export async function getClientConfigStatus(
+  inferenceUrl: string | null,
+): Promise<ClientConfigStatus[]> {
+  if (!hasNativeBridge()) return [];
+  return parseClientConfigStatuses(
+    await invoke<unknown>("client_config_status", { inferenceUrl }),
+  );
+}
+
+/**
+ * Whether the system proxy keeps Codex from reaching the gateway. Read-only:
+ * nothing on the system changes. Outside the desktop there is no Codex.
+ */
+export async function checkClientProxy(
+  inferenceUrl: string,
+): Promise<ClientProxyCheck | null> {
+  if (!hasNativeBridge()) return null;
+  return parseClientProxyCheck(
+    await invoke<unknown>("check_client_proxy", { inferenceUrl }),
+  );
+}
+
+/** Writes the connection, or names the keys that need `replace` first. */
+export async function applyClientConfig(
+  input: ClientConfigTarget & { replace: boolean },
+): Promise<ClientConfigApplyOutcome> {
+  requireNativeBridge();
+  return parseClientConfigApplyOutcome(
+    await invoke<unknown>("apply_client_config", { ...input }),
+  );
+}
+
+export async function removeClientConfig(client: DirectClient): Promise<void> {
+  requireNativeBridge();
+  await invoke("remove_client_config", { client });
+}
+
+/** The config for a fresh setup, with the token shown as its hint. */
+export async function previewClientConfigSnippet(
+  input: ClientConfigTarget,
+): Promise<string> {
+  requireNativeBridge();
+  return parseClientConfigSnippet(
+    await invoke<unknown>("preview_client_config_snippet", { ...input }),
+  );
+}
+
+/**
+ * Has the host copy the config with the real token to the clipboard. False
+ * when the clipboard refused it.
+ */
+export async function copyClientConfigSnippet(
+  input: ClientConfigTarget,
+): Promise<boolean> {
+  requireNativeBridge();
+  return parseClientConfigCopied(
+    await invoke<unknown>("copy_client_config_snippet", { ...input }),
+  );
+}
+
+/** Whether the OS has an app registered for CC Switch's import links. */
+export async function isCCSwitchInstalled(): Promise<boolean> {
+  if (!hasNativeBridge()) return false;
+  return (await invoke<unknown>("cc_switch_installed")) === true;
+}
+
+/** CC Switch names the provider after the token. */
 export async function openCCSwitchImport(input: {
   tokenId: string;
-  client: CCSwitchClient;
-  name: string;
-  models: CCSwitchModels;
+  client: ClientConfigClient;
+  models: ClientConfigModels;
   inferenceUrl: string;
 }): Promise<void> {
   requireNativeBridge();
   await invoke("open_cc_switch_import", input);
+}
+
+/** The provider link waiting for confirmation, e.g. the one that launched the app. */
+export async function getPendingProviderImport(): Promise<ProviderImportNotice | null> {
+  if (!hasNativeBridge()) return null;
+  const value = await invoke<unknown>("pending_provider_import");
+  return value === null ? null : parseProviderImportNotice(value);
+}
+
+export async function listenProviderImport(
+  onNotice: (notice: ProviderImportNotice) => void,
+): Promise<() => void> {
+  if (!hasNativeBridge()) return () => {};
+  return listen<unknown>("provider-import", ({ payload }) => {
+    onNotice(parseProviderImportNotice(payload));
+  });
+}
+
+/** Creates the linked provider; the host attaches the link's API key. */
+export async function confirmProviderImport(
+  id: string,
+  input: HTTPServiceCreateInput,
+): Promise<ServiceRecord> {
+  requireNativeBridge();
+  return parseServiceRecord(
+    await invoke<unknown>("confirm_provider_import", { id, input }),
+  );
+}
+
+export async function dismissProviderImport(id: string): Promise<void> {
+  if (!hasNativeBridge()) return;
+  await invoke("dismiss_provider_import", { id });
 }
 
 export async function listPrivacyPolicies(): Promise<PrivacyPolicyPage> {
@@ -748,6 +996,14 @@ export async function getPrivacyModelCatalog(): Promise<PrivacyModelCatalog> {
   requireNativeBridge();
   return parsePrivacyModelCatalog(
     await invoke<unknown>("get_privacy_model_catalog"),
+  );
+}
+
+/** Newest compatible releases of catalog models, pinned to their commits. */
+export async function getPrivacyModelReleases(): Promise<PrivacyModelCatalog> {
+  requireNativeBridge();
+  return parsePrivacyModelCatalog(
+    await invoke<unknown>("get_privacy_model_releases"),
   );
 }
 
@@ -852,11 +1108,12 @@ export async function getAgentDebugStatus(): Promise<AgentInstallStatus> {
 }
 
 export async function installAgentDebug(
+  skillIds: AgentSkillId[],
   toolIds: AgentToolId[],
 ): Promise<AgentInstallReceipt> {
   requireNativeBridge();
   return parseAgentInstallReceipt(
-    await invoke<unknown>("install_agent_debug", { toolIds }),
+    await invoke<unknown>("install_agent_debug", { skillIds, toolIds }),
   );
 }
 
@@ -890,6 +1147,10 @@ export async function updateRoutingSettings(
   return parseRoutingSettings(
     await invoke<unknown>("update_routing_settings", { patch }),
   );
+}
+export async function getClientIdentities(): Promise<ClientIdentities> {
+  requireNativeBridge();
+  return parseClientIdentities(await invoke<unknown>("get_client_identities"));
 }
 
 export async function builtinToolAction(

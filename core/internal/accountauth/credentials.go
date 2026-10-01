@@ -25,6 +25,8 @@ type AccountTokens struct {
 	TokenType        string    `json:"token_type,omitempty"`
 	Scope            string    `json:"scope,omitempty"`
 	AccountID        string    `json:"account_id,omitempty"`
+	ProjectID        string    `json:"project_id,omitempty"`
+	PlanType         string    `json:"plan_type,omitempty"`
 	ExpiresAt        time.Time `json:"expires_at"`
 	RawIDTokenClaims string    `json:"-"`
 }
@@ -60,9 +62,8 @@ func UnmarshalAccountTokens(raw []byte) (AccountTokens, error) {
 	return tokens, nil
 }
 
-// AccountCredentialStore persists OAuth tokens outside SQLite endpoint
-// credentials. Implementations must fail closed when the secure backend is
-// unavailable.
+// AccountCredentialStore persists OAuth tokens apart from service API keys.
+// Implementations must fail closed when the secure backend is unavailable.
 type AccountCredentialStore interface {
 	Available(context.Context) error
 	Get(context.Context, contract.SubscriptionAccountID) (AccountTokens, error)
@@ -70,8 +71,11 @@ type AccountCredentialStore interface {
 	Delete(context.Context, contract.SubscriptionAccountID) error
 }
 
+// CredentialRefFor names the database row holding an account's sealed OAuth
+// tokens. Accounts connected before that row existed reference
+// keyring://astrlink/subscription/<id> until their tokens move.
 func CredentialRefFor(accountID contract.SubscriptionAccountID) string {
-	return "keyring://astrlink/subscription/" + string(accountID)
+	return "local://subscription/" + string(accountID)
 }
 
 // MemoryCredentialStore is a test-only in-process store.

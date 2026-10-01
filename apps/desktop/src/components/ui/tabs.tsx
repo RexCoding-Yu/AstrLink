@@ -81,8 +81,20 @@ function TabsTrigger({
   );
 }
 
+const PANEL_REVEAL = "panel-reveal";
+const PANEL_SELECTOR = "[data-slot='tabs-content']";
+
+function revealAnimations(panel: Element) {
+  return panel
+    .getAnimations()
+    .filter(
+      (animation) => (animation as CSSAnimation).animationName === PANEL_REVEAL,
+    );
+}
+
 function TabsContent({
   className,
+  onAnimationStart,
   onFocus,
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.Content>) {
@@ -90,6 +102,22 @@ function TabsContent({
     <TabsPrimitive.Content
       data-slot="tabs-content"
       className={cn("panel-transition flex-1 outline-none", className)}
+      onAnimationStart={(event) => {
+        // Showing a panel restarts the reveal of every active panel nested in
+        // it. Compounded with the outer fade, the nested content lags behind
+        // its surroundings; the outer reveal carries it.
+        const panel = event.currentTarget;
+        if (event.target === panel && event.animationName === PANEL_REVEAL) {
+          let outer = panel.parentElement?.closest(PANEL_SELECTOR);
+          while (outer && revealAnimations(outer).length === 0) {
+            outer = outer.parentElement?.closest(PANEL_SELECTOR);
+          }
+          if (outer) {
+            for (const animation of revealAnimations(panel)) animation.finish();
+          }
+        }
+        onAnimationStart?.(event);
+      }}
       onFocus={(event) => {
         // Radix focuses the newly selected panel. The browser then
         // scrollIntoView's it, which jumps any ancestor overflow scroller.

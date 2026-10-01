@@ -9,6 +9,7 @@ use std::{
 
 use crate::control_session;
 use crate::i18n::{self, Locale};
+use crate::kek_store::{self, LocalKeyStorage, ResolvedKey};
 use reqwest::{header, Client, Method};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -16,6 +17,7 @@ use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent, TerminatedPayload},
     ShellExt,
 };
+use zeroize::Zeroizing;
 
 // Legacy installation migration and ordinary startup filesystem work can still
 // take longer on slow disks even though model weights are verified lazily.
@@ -50,6 +52,7 @@ const AUDIT_CONTENT_TIMEOUT: Duration = Duration::from_secs(60);
 const SUPPORTED_CONTROL_API_VERSION: &str = "v1";
 const SUPPORTED_PROTOCOL_CONTRACT_VERSION: &str = "v1";
 const PRIVACY_MODEL_CATALOG_PATH: &str = "/control/v1/privacy-model-catalog";
+const PRIVACY_MODEL_RELEASES_PATH: &str = "/control/v1/privacy-model-catalog/releases";
 const PRIVACY_MODELS_PATH: &str = "/control/v1/privacy-models";
 const PRIVACY_MODEL_PROBE_PATH: &str = "/control/v1/privacy-models/probe";
 const LOCAL_PRIVACY_MODEL_PROBE_PATH: &str = "/control/v1/privacy-models/local/probe";
@@ -243,6 +246,7 @@ fn sidecar_args(
         "--control-listen".to_string(),
         "127.0.0.1:0".to_string(),
         "--control-token-stdin".to_string(),
+        "--observer-token-stdin".to_string(),
         "--max-concurrent-inspections".to_string(),
         max_concurrent_inspections.to_string(),
         "--response-start-timeout-seconds".to_string(),
@@ -279,7 +283,7 @@ fn publish_control_session_from_inner(inner: &CoreInner) {
         &home,
         data_directory,
         &ready.control_url,
-        inner.control_token.as_deref(),
+        inner.observer_token.as_deref(),
         inner.pid,
     ) {
         eprintln!("unable to publish AstrLink control session: {error}");
@@ -292,6 +296,42 @@ fn clear_published_control_session() {
             eprintln!("unable to clear AstrLink control session: {error}");
         }
     }
+}
+
+/// Core arguments that say where its local key comes from. They name a flag or
+/// a path, never the key.
+fn local_key_args(local_key: &ResolvedKey) -> Result<Vec<String>, String> {
+    let mut arguments = Vec::new();
+    if local_key.stdin_hex.is_some() {
+        arguments.push("--kek-stdin".to_string());
+    }
+    if let Some(path) = &local_key.key_file {
+        let path = path
+            .to_str()
+            .ok_or_else(|| "AstrLink local key path is not valid UTF-8".to_string())?;
+        arguments.push(format!("--kek-file={path}"));
+    }
+    Ok(arguments)
+}
+
+/// Stdin carries one secret per line in a fixed order that Core's
+/// `readTokenLines` mirrors: the operator control token, the local key from
+/// the keychain (empty when Core uses a key file), and the observer token
+/// handed to agent tools.
+fn sidecar_stdin(
+    control_token: &str,
+    local_key_hex: Option<&str>,
+    observer_token: &str,
+) -> Zeroizing<String> {
+    let local_key_hex = local_key_hex.unwrap_or_default();
+    let mut payload = Zeroizing::new(String::with_capacity(
+        control_token.len() + local_key_hex.len() + observer_token.len() + 3,
+    ));
+    for line in [control_token, local_key_hex, observer_token] {
+        payload.push_str(line);
+        payload.push('\n');
+    }
+    payload
 }
 
 fn generate_control_token() -> Result<String, String> {
@@ -312,6 +352,9 @@ pub struct ReadyAnnouncement {
     pub control_api_version: String,
     pub protocol_contract_version: String,
     pub inference_url: String,
+    /// The address clients are configured with: `http://localhost:<port>`
+    /// while Core also serves `[::1]`, otherwise `inference_url`.
+    pub client_inference_url: String,
     pub control_url: String,
 }
 
@@ -399,6 +442,9 @@ struct CoreInner {
     version: Option<VersionResponse>,
     capabilities: Option<CapabilitiesResponse>,
     control_token: Option<String>,
+    /// Observer-role token published to agent tools on Windows. The operator
+    /// `control_token` never leaves desktop memory.
+    observer_token: Option<String>,
     last_error: Option<String>,
     app_handle: Option<AppHandle>,
     inference_port: u16,
@@ -413,7 +459,16 @@ struct CoreInner {
     recovery_scheduled_at: Option<Instant>,
     /// Last agent-side control request, as reported by `/control/v1/observers`.
     observer_seen_at: Option<Instant>,
+    observer_read_level: Option<ObserverReadLevel>,
+    pending_raw_access: u32,
+    active_raw_grants: u32,
+    raw_password_required: bool,
+    raw_key_event: Option<RawKeyEvent>,
+    /// The desktop's latest verdict on this Core's raw key pin.
+    raw_key_replaced: bool,
     data_directory: Option<PathBuf>,
+    /// Where the running Core's local key lives, for the Settings status line.
+    local_key_storage: Option<LocalKeyStorage>,
     #[cfg(windows)]
     job: Option<windows_job::JobObject>,
 }
@@ -431,6 +486,7 @@ impl Default for CoreInner {
             version: None,
             capabilities: None,
             control_token: None,
+            observer_token: None,
             last_error: None,
             app_handle: None,
             inference_port: crate::preferences::DEFAULT_INFERENCE_PORT,
@@ -444,7 +500,14 @@ impl Default for CoreInner {
             recovery_attempt: 0,
             recovery_scheduled_at: None,
             observer_seen_at: None,
+            observer_read_level: None,
+            pending_raw_access: 0,
+            active_raw_grants: 0,
+            raw_password_required: false,
+            raw_key_event: None,
+            raw_key_replaced: false,
             data_directory: None,
+            local_key_storage: None,
             #[cfg(windows)]
             job: None,
         }
@@ -457,31 +520,174 @@ impl Default for CoreInner {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CoreView {
     pub phase: CorePhase,
+    /// The client-facing inference address (`client_inference_url`), which is
+    /// what the tray shows, copies, and syncs into client configs.
     pub inference_url: Option<String>,
     pub core_version: Option<String>,
     pub inference_port_fallback: Option<InferencePortFallback>,
     pub last_error: Option<String>,
     pub recovery_attempt: u8,
     pub recovery_scheduled: bool,
-    /// An agent is reading records through the MCP bridge right now.
+    /// An agent is reading records through the agent CLI right now.
     pub observer_active: bool,
+    /// How far that agent's latest read reached, while it is active.
+    pub observer_read_level: Option<ObserverReadLevel>,
+    /// Agent requests for raw audit content awaiting the operator.
+    pub pending_raw_access: u32,
+    /// Timed agent grants still running; the approval window lists them.
+    pub active_raw_grants: u32,
+    /// No raw password is set yet; the tray points at the main window's
+    /// setup, which is the only place that sets it.
+    pub raw_password_required: bool,
+    /// The latest raw password or key change this Core recorded, whoever
+    /// made it.
+    pub raw_key_event: Option<RawKeyEvent>,
+    /// The raw key differs from the one the desktop pinned; like the raw
+    /// password setup, only the main window resolves it.
+    pub raw_key_replaced: bool,
+}
+
+/// A raw password or key change, as Core's observer log names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RawKeyEventKind {
+    #[serde(rename = "raw_password_set")]
+    PasswordSet,
+    #[serde(rename = "raw_password_changed")]
+    PasswordChanged,
+    #[serde(rename = "raw_key_reset")]
+    KeyReset,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RawKeyEvent {
+    pub kind: RawKeyEventKind,
+    /// Core's RFC 3339 timestamp, rendered by the popover in local time.
+    pub at: String,
+}
+
+/// The level of an agent-side read, as Core classifies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObserverReadLevel {
+    Metadata,
+    Shareable,
+    Raw,
+}
+
+/// The parts of `/control/v1/observers` the desktop renders.
+#[derive(Debug, Default, PartialEq)]
+struct ObserverState {
+    age: Option<Duration>,
+    read_level: Option<ObserverReadLevel>,
+    pending_raw_access: u32,
+    active_raw_grants: u32,
+    raw_password_required: bool,
+    raw_key_event: Option<RawKeyEvent>,
+}
+
+fn parse_observer_state(
+    body: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ObserverState, String> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("observer state returned invalid JSON: {error}"))?;
+    let age = value
+        .get("last_seen_at")
+        .and_then(|seen| seen.as_str())
+        .and_then(|seen| chrono::DateTime::parse_from_rfc3339(seen).ok())
+        .map(|seen| {
+            (now - seen.with_timezone(&chrono::Utc))
+                .to_std()
+                .unwrap_or_default()
+        });
+    let read_level = match value.get("read_level").and_then(|level| level.as_str()) {
+        Some("metadata") => Some(ObserverReadLevel::Metadata),
+        Some("shareable") => Some(ObserverReadLevel::Shareable),
+        Some("raw") => Some(ObserverReadLevel::Raw),
+        _ => None,
+    };
+    let pending_raw_access = value
+        .get("pending_raw_access")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(0, |count| count.min(u64::from(u32::MAX)) as u32);
+    let active_raw_grants = value
+        .get("active_raw_grants")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(0, |count| count.min(u64::from(u32::MAX)) as u32);
+    let raw_password_required = value
+        .get("raw_password_required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let raw_key_event = value
+        .get("raw_access_events")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|events| events.iter().rev().find_map(raw_key_event));
+    Ok(ObserverState {
+        age,
+        read_level,
+        pending_raw_access,
+        active_raw_grants,
+        raw_password_required,
+        raw_key_event,
+    })
+}
+
+fn raw_key_event(event: &serde_json::Value) -> Option<RawKeyEvent> {
+    let kind = match event.get("kind")?.as_str()? {
+        "raw_password_set" => RawKeyEventKind::PasswordSet,
+        "raw_password_changed" => RawKeyEventKind::PasswordChanged,
+        "raw_key_reset" => RawKeyEventKind::KeyReset,
+        _ => return None,
+    };
+    let at = event.get("at")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(at).ok()?;
+    Some(RawKeyEvent {
+        kind,
+        at: at.to_string(),
+    })
 }
 
 impl CoreInner {
     fn view(&self) -> CoreView {
         CoreView {
             phase: self.phase,
-            inference_url: self.ready.as_ref().map(|ready| ready.inference_url.clone()),
+            inference_url: self
+                .ready
+                .as_ref()
+                .map(|ready| ready.client_inference_url.clone()),
             core_version: self.ready.as_ref().map(|ready| ready.core_version.clone()),
             inference_port_fallback: self.inference_port_fallback(),
             last_error: self.last_error.clone(),
             recovery_attempt: self.recovery_attempt,
             recovery_scheduled: self.recovery_scheduled_at.is_some(),
-            observer_active: self.phase == CorePhase::Ready
-                && self
-                    .observer_seen_at
-                    .is_some_and(|at| at.elapsed() < OBSERVER_ACTIVE_WINDOW),
+            observer_active: self.observer_active(),
+            observer_read_level: self
+                .observer_active()
+                .then_some(self.observer_read_level)
+                .flatten(),
+            pending_raw_access: if self.phase == CorePhase::Ready {
+                self.pending_raw_access
+            } else {
+                0
+            },
+            active_raw_grants: if self.phase == CorePhase::Ready {
+                self.active_raw_grants
+            } else {
+                0
+            },
+            raw_password_required: self.phase == CorePhase::Ready && self.raw_password_required,
+            raw_key_event: (self.phase == CorePhase::Ready)
+                .then(|| self.raw_key_event.clone())
+                .flatten(),
+            raw_key_replaced: self.phase == CorePhase::Ready && self.raw_key_replaced,
         }
+    }
+
+    fn observer_active(&self) -> bool {
+        self.phase == CorePhase::Ready
+            && self
+                .observer_seen_at
+                .is_some_and(|at| at.elapsed() < OBSERVER_ACTIVE_WINDOW)
     }
 
     fn inference_port_fallback(&self) -> Option<InferencePortFallback> {
@@ -504,6 +710,20 @@ impl CoreInner {
         }
     }
 
+    /// Why a start cannot proceed now, if it cannot.
+    fn start_refusal(&self) -> Result<(), String> {
+        if self.update_in_progress {
+            return Err("Application update in progress".into());
+        }
+        if !start_allowed(&self.lifecycle(), self.child.is_some()) {
+            return Err(self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "astrlink-core is already running or stopping".to_string()));
+        }
+        Ok(())
+    }
+
     fn apply_lifecycle(&mut self, state: LifecycleState) {
         self.generation = state.generation;
         self.phase = state.phase;
@@ -513,12 +733,19 @@ impl CoreInner {
 
     fn clear_handshake(&mut self) {
         self.observer_seen_at = None;
+        self.observer_read_level = None;
+        self.pending_raw_access = 0;
+        self.active_raw_grants = 0;
+        self.raw_password_required = false;
+        self.raw_key_event = None;
+        self.raw_key_replaced = false;
         self.ready = None;
         self.started_inference_port = None;
         self.health = None;
         self.version = None;
         self.capabilities = None;
         self.control_token = None;
+        self.observer_token = None;
     }
 
     fn clear_process_guard(&mut self) {
@@ -626,19 +853,26 @@ impl CoreManager {
     }
 
     pub fn start(self: &Arc<Self>, app: &AppHandle) -> Result<(), String> {
+        // Turn down a start that cannot proceed before touching the keychain:
+        // resolving the key may migrate or delete `local.key`, which must not
+        // happen beside a running Core. The check repeats under the lock below.
+        self.lock_inner().start_refusal()?;
+        // Read the keychain before taking the manager lock, so a keychain
+        // prompt never blocks readers of Core state.
+        let location = app
+            .path()
+            .app_data_dir()
+            .map(|directory| {
+                let local_key = kek_store::resolve_for_start(&directory);
+                (directory, local_key)
+            })
+            .map_err(|error| format!("unable to resolve AstrLink data directory: {error}"));
         // Keep the manager lock from publishing Spawning until the child and its
         // platform process guard are published. A concurrent stop therefore
         // cannot observe "no child" and return before this start completes.
         let (generation, receiver) = {
             let mut inner = self.lock_inner();
-            if inner.update_in_progress {
-                return Err("Application update in progress".into());
-            }
-            if !start_allowed(&inner.lifecycle(), inner.child.is_some()) {
-                return Err(inner.last_error.clone().unwrap_or_else(|| {
-                    "astrlink-core is already running or stopping".to_string()
-                }));
-            }
+            inner.start_refusal()?;
 
             inner.generation = inner.generation.wrapping_add(1);
             inner.app_handle = Some(app.clone());
@@ -651,17 +885,19 @@ impl CoreManager {
             inner.clear_process_guard();
             clear_published_control_session();
             let generation = inner.generation;
-            let data_directory = match app.path().app_data_dir() {
-                Ok(path) => path,
-                Err(error) => {
-                    let message = format!("unable to resolve AstrLink data directory: {error}");
+            let (data_directory, local_key) = match location {
+                Ok(location) => location,
+                Err(message) => {
                     Self::fail_generation_locked(&mut inner, generation, message.clone());
                     return Err(message);
                 }
             };
             inner.data_directory = Some(data_directory.clone());
-            let control_token = match generate_control_token() {
-                Ok(token) => token,
+            inner.local_key_storage = Some(local_key.storage);
+            let (control_token, observer_token) = match generate_control_token()
+                .and_then(|control| generate_control_token().map(|observer| (control, observer)))
+            {
+                Ok(tokens) => tokens,
                 Err(message) => {
                     Self::fail_generation_locked(&mut inner, generation, message.clone());
                     return Err(message);
@@ -675,7 +911,11 @@ impl CoreManager {
                 inner.response_start_timeout_seconds,
                 inner.max_request_body_mib,
                 inner.use_system_proxy,
-            ) {
+            )
+            .and_then(|mut arguments| {
+                arguments.extend(local_key_args(&local_key)?);
+                Ok(arguments)
+            }) {
                 Ok(arguments) => arguments,
                 Err(message) => {
                     Self::fail_generation_locked(&mut inner, generation, message.clone());
@@ -720,7 +960,13 @@ impl CoreManager {
                 }
             };
 
-            if let Err(error) = child.write(format!("{control_token}\n").as_bytes()) {
+            let stdin = sidecar_stdin(
+                &control_token,
+                local_key.stdin_hex.as_deref().map(String::as_str),
+                &observer_token,
+            );
+            drop(local_key);
+            if let Err(error) = child.write(stdin.as_bytes()) {
                 let pid = child.pid();
                 let message =
                     format!("unable to deliver local control token to astrlink-core: {error}");
@@ -782,6 +1028,7 @@ impl CoreManager {
             inner.pid = Some(child.pid());
             inner.child = Some(child);
             inner.control_token = Some(control_token);
+            inner.observer_token = Some(observer_token);
             inner.phase = CorePhase::WaitingForReady;
             #[cfg(windows)]
             {
@@ -1008,6 +1255,50 @@ impl CoreManager {
             }
             tokio::time::sleep(STOP_POLL_DELAY).await;
         }
+    }
+
+    /// Where the last Core start found its local key.
+    pub fn local_key_storage(&self) -> Option<LocalKeyStorage> {
+        self.lock_inner().local_key_storage
+    }
+
+    /// The data directory of the last Core start.
+    pub fn data_directory(&self) -> Option<PathBuf> {
+        self.lock_inner().data_directory.clone()
+    }
+
+    /// A ready Core for `data_directory`, without starting one.
+    #[cfg(test)]
+    pub(crate) fn ready_for_tests(&self, data_directory: PathBuf) {
+        let mut inner = self.lock_inner();
+        inner.phase = CorePhase::Ready;
+        inner.data_directory = Some(data_directory);
+    }
+
+    /// Like `ready_for_tests`, with the control API served at `control_url`.
+    #[cfg(test)]
+    pub(crate) fn serve_control_for_tests(&self, data_directory: PathBuf, control_url: String) {
+        self.ready_for_tests(data_directory);
+        let mut inner = self.lock_inner();
+        inner.control_token = Some("local-test-token".into());
+        inner.ready = Some(ReadyAnnouncement {
+            event: "ready".into(),
+            core_version: "0.1.0".into(),
+            control_api_version: "v1".into(),
+            protocol_contract_version: "v1".into(),
+            inference_url: control_url.clone(),
+            client_inference_url: control_url.clone(),
+            control_url,
+        });
+    }
+
+    /// Records the desktop's verdict on the raw key pin for the tray and
+    /// returns whether it differs from the previous one.
+    pub fn note_raw_key_replaced(&self, replaced: bool) -> bool {
+        let mut inner = self.lock_inner();
+        let changed = inner.raw_key_replaced != replaced;
+        inner.raw_key_replaced = replaced;
+        changed
     }
 
     pub fn snapshot(&self) -> CoreSnapshot {
@@ -1270,20 +1561,120 @@ impl CoreManager {
         let (_, body) = self
             .authenticated_control(Method::GET, "/control/v1/observers", None, None)
             .await?;
-        let value: serde_json::Value = serde_json::from_slice(&body)
-            .map_err(|error| format!("observer state returned invalid JSON: {error}"))?;
-        let age = value
-            .get("last_seen_at")
-            .and_then(|seen| seen.as_str())
-            .and_then(|seen| chrono::DateTime::parse_from_rfc3339(seen).ok())
-            .map(|seen| {
-                (chrono::Utc::now() - seen.with_timezone(&chrono::Utc))
-                    .to_std()
-                    .unwrap_or_default()
-            });
+        let state = parse_observer_state(&body, chrono::Utc::now())?;
         let mut inner = self.lock_inner();
-        inner.observer_seen_at = age.and_then(|age| Instant::now().checked_sub(age));
+        inner.observer_seen_at = state.age.and_then(|age| Instant::now().checked_sub(age));
+        inner.observer_read_level = state.read_level;
+        inner.pending_raw_access = state.pending_raw_access;
+        inner.active_raw_grants = state.active_raw_grants;
+        inner.raw_password_required = state.raw_password_required;
+        inner.raw_key_event = state.raw_key_event;
         Ok(())
+    }
+
+    /// Agent requests for raw audit content awaiting the operator's
+    /// decision, the timed grants still running, and whether an approval
+    /// needs the raw password.
+    pub async fn list_raw_access(&self) -> Result<serde_json::Value, String> {
+        let (_, body) = self
+            .authenticated_control(Method::GET, crate::raw_access::RAW_ACCESS_PATH, None, None)
+            .await?;
+        crate::raw_access::parse_list(&body)
+    }
+
+    /// Decides one agent request for raw audit content. A proof, when the
+    /// window asked for one, goes into one wiped buffer and is sent once;
+    /// refusals the window recovers from come back as outcomes.
+    pub async fn decide_raw_access(
+        &self,
+        grant_id: &str,
+        decision: &str,
+        proof: Option<&crate::raw_access::Proof>,
+    ) -> Result<serde_json::Value, String> {
+        let body = crate::raw_access::decision_body(grant_id, decision, proof)?;
+        let path = crate::raw_access::decision_path(grant_id);
+        let (status, _, response) = self
+            .authenticated_control_encoded(Method::POST, &path, Some(&body), None)
+            .await?;
+        let outcome = crate::raw_access::decision_outcome(status, &response)
+            .ok_or_else(|| control_status_error(&Method::POST, &path, status, &response))?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+
+    /// Revokes one running timed grant and zeroes the key it holds.
+    pub async fn revoke_raw_grant(&self, grant_id: &str) -> Result<serde_json::Value, String> {
+        let path = crate::raw_access::grant_path(grant_id)?;
+        let (_, body) = self
+            .authenticated_control(Method::DELETE, &path, None, None)
+            .await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("raw grant revoke returned invalid JSON: {error}"))
+    }
+
+    /// Raw sealing state: whether a raw password is set and whether the
+    /// operator has unlocked raw parts.
+    pub async fn raw_sealing_status(&self) -> Result<serde_json::Value, String> {
+        let (_, body) = self
+            .authenticated_control(Method::GET, crate::raw_access::RAW_SEALING_PATH, None, None)
+            .await?;
+        crate::raw_access::parse_sealing_status(&body)
+    }
+
+    /// Unlocks raw parts for the operator's own reading.
+    pub async fn unlock_raw(
+        &self,
+        proof: &crate::raw_access::Proof,
+    ) -> Result<serde_json::Value, String> {
+        let body = crate::raw_access::unlock_body(proof)?;
+        self.send_sealing_proof(crate::raw_access::RAW_UNLOCK_PATH, &body)
+            .await
+    }
+
+    /// Checks a proof without unlocking: Core zeroes the raw key at once and
+    /// leaves any unlock session as it was.
+    pub async fn verify_raw(
+        &self,
+        proof: &crate::raw_access::Proof,
+    ) -> Result<serde_json::Value, String> {
+        let body = crate::raw_access::unlock_body(proof)?;
+        self.send_sealing_proof(crate::raw_access::RAW_VERIFY_PATH, &body)
+            .await
+    }
+
+    /// Sets, changes, or resets the raw password.
+    pub async fn change_raw_password(
+        &self,
+        action: &str,
+        password: Option<&str>,
+        proof: Option<&crate::raw_access::Proof>,
+    ) -> Result<serde_json::Value, String> {
+        let body = crate::raw_access::password_body(action, password, proof)?;
+        self.send_sealing_proof(crate::raw_access::RAW_PASSWORD_PATH, &body)
+            .await
+    }
+
+    async fn send_sealing_proof(
+        &self,
+        path: &str,
+        body: &[u8],
+    ) -> Result<serde_json::Value, String> {
+        let (status, _, response) = self
+            .authenticated_control_encoded(Method::POST, path, Some(body), None)
+            .await?;
+        let outcome = crate::raw_access::sealing_outcome(status, &response)
+            .ok_or_else(|| control_status_error(&Method::POST, path, status, &response))?;
+        serde_json::to_value(outcome).map_err(|error| error.to_string())
+    }
+
+    /// Ends the operator's raw unlock session at once. The operator's own
+    /// lock also revokes every agent grant; the automatic lock when the main
+    /// window hides keeps them.
+    pub async fn lock_raw(&self, keep_agent_grants: bool) -> Result<serde_json::Value, String> {
+        let body = keep_agent_grants.then(|| serde_json::json!({"keep_agent_grants": true}));
+        let (_, body) = self
+            .authenticated_control(Method::POST, crate::raw_access::RAW_LOCK_PATH, body, None)
+            .await?;
+        crate::raw_access::parse_sealing_status(&body)
     }
 
     pub async fn list_access_tokens(&self) -> Result<serde_json::Value, String> {
@@ -1427,6 +1818,13 @@ impl CoreManager {
     pub async fn get_privacy_model_catalog(&self) -> Result<serde_json::Value, String> {
         let (_, body) = self
             .authenticated_control(Method::GET, PRIVACY_MODEL_CATALOG_PATH, None, None)
+            .await?;
+        parse_privacy_model_catalog(&body)
+    }
+
+    pub async fn get_privacy_model_releases(&self) -> Result<serde_json::Value, String> {
+        let (_, body) = self
+            .authenticated_control(Method::GET, PRIVACY_MODEL_RELEASES_PATH, None, None)
             .await?;
         parse_privacy_model_catalog(&body)
     }
@@ -1680,6 +2078,18 @@ impl CoreManager {
             eprintln!("astrlink: GET {path} failed: {message}");
             message
         })
+    }
+
+    pub async fn get_service_reset_credits(
+        &self,
+        service_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        validate_resource_id(service_id)?;
+        let path = format!("{SERVICES_PATH}/{service_id}/usage/reset-credits");
+        let (_, body) = self
+            .authenticated_control(Method::GET, &path, None, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "reset credits returned invalid JSON".into())
     }
 
     pub async fn reset_service_usage(&self, service_id: &str) -> Result<serde_json::Value, String> {
@@ -2110,12 +2520,30 @@ impl CoreManager {
         Ok(value)
     }
 
+    /// Learned and built-in Codex and Claude Code identity versions.
+    pub async fn get_client_identities(&self) -> Result<serde_json::Value, String> {
+        let (_, body) = self
+            .authenticated_control(Method::GET, "/control/v1/client-identities", None, None)
+            .await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("client identities returned invalid JSON: {error}"))
+    }
+
     pub async fn get_audit_settings(&self) -> Result<serde_json::Value, String> {
         let (_, body) = self
             .authenticated_control(Method::GET, "/control/v1/audit-settings", None, None)
             .await?;
         serde_json::from_slice(&body)
             .map_err(|error| format!("audit settings returned invalid JSON: {error}"))
+    }
+
+    /// Counts of saved data this device can no longer decrypt (plan §5.7).
+    pub async fn local_data_status(&self) -> Result<serde_json::Value, String> {
+        let (_, body) = self
+            .authenticated_control(Method::GET, "/control/v1/local-data", None, None)
+            .await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("local data status returned invalid JSON: {error}"))
     }
 
     pub async fn update_audit_settings(
@@ -2171,6 +2599,24 @@ impl CoreManager {
         body: Option<serde_json::Value>,
         if_match: Option<&str>,
     ) -> Result<(reqwest::StatusCode, Option<String>, Vec<u8>), String> {
+        let encoded_body = match body {
+            Some(value) => Some(
+                serde_json::to_vec(&value)
+                    .map_err(|error| format!("unable to encode control request: {error}"))?,
+            ),
+            None => None,
+        };
+        self.authenticated_control_encoded(method, path, encoded_body.as_deref(), if_match)
+            .await
+    }
+
+    async fn authenticated_control_encoded(
+        &self,
+        method: Method,
+        path: &str,
+        encoded_body: Option<&[u8]>,
+        if_match: Option<&str>,
+    ) -> Result<(reqwest::StatusCode, Option<String>, Vec<u8>), String> {
         let (base_url, control_token) = {
             let inner = self.lock_inner();
             if inner.phase != CorePhase::Ready {
@@ -2189,13 +2635,6 @@ impl CoreManager {
         };
 
         let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-        let encoded_body = match body {
-            Some(value) => Some(
-                serde_json::to_vec(&value)
-                    .map_err(|error| format!("unable to encode control request: {error}"))?,
-            ),
-            None => None,
-        };
         let mut last_error = None;
         for attempt in 0..2 {
             match self
@@ -2203,7 +2642,7 @@ impl CoreManager {
                     method.clone(),
                     &url,
                     path,
-                    encoded_body.as_deref(),
+                    encoded_body,
                     if_match,
                     &control_token,
                 )
@@ -2213,6 +2652,7 @@ impl CoreManager {
                 Err(error) => {
                     if attempt == 0
                         && !is_builtin_tool_test(&method, path)
+                        && !crate::raw_access::is_proof_request(&method, path)
                         && is_control_transport_error(&error)
                     {
                         last_error = Some(error);
@@ -2256,6 +2696,9 @@ impl CoreManager {
             } else {
                 "application/json"
             };
+            // reqwest owns what it sends, so a password body is copied out of
+            // its zeroizing buffer here and freed without being wiped; handing
+            // the buffer over would need `bytes` as a direct dependency.
             request = request
                 .header(header::CONTENT_TYPE, content_type)
                 .body(body.to_vec());
@@ -2507,6 +2950,9 @@ fn is_builtin_tool_test(method: &Method, path: &str) -> bool {
 
 fn control_request_timeout(method: &Method, path: &str) -> Duration {
     let path = control_path(path);
+    if crate::raw_access::is_proof_request(method, path) {
+        return crate::raw_access::PROOF_TIMEOUT;
+    }
     if is_builtin_tool_test(method, path) {
         return if path.contains("/image_generation/") {
             Duration::from_secs(195)
@@ -2531,11 +2977,12 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     {
         return SERVICE_MODEL_PROBE_TIMEOUT;
     }
-    if method == Method::POST
+    if (method == Method::POST
         && (path == PRIVACY_MODEL_PROBE_PATH
             || path == LOCAL_PRIVACY_MODEL_PROBE_PATH
             || path == PRIVACY_MODELS_PATH
-            || (path.starts_with(&format!("{PRIVACY_MODELS_PATH}/")) && path.ends_with("/resume")))
+            || (path.starts_with(&format!("{PRIVACY_MODELS_PATH}/")) && path.ends_with("/resume"))))
+        || (method == Method::GET && path == PRIVACY_MODEL_RELEASES_PATH)
     {
         return PRIVACY_MODEL_METADATA_TIMEOUT;
     }
@@ -3470,6 +3917,8 @@ fn validate_privacy_catalog_model(model: &serde_json::Value) -> Result<(), Strin
             "languages",
             "adapter",
             "variants",
+            "version",
+            "recommended",
         ],
         "privacy catalog model",
     )?;
@@ -3491,7 +3940,26 @@ fn validate_privacy_catalog_model(model: &serde_json::Value) -> Result<(), Strin
     validate_metadata_string(&object["license"], 1, 64, "privacy catalog model license")?;
     validate_string_array(&object["languages"], 32, "privacy catalog model languages")?;
     validate_privacy_model_adapter(&object["adapter"])?;
+    if !object["version"].is_null() && !is_release_version(&object["version"]) {
+        return Err("privacy catalog model version is invalid".to_string());
+    }
+    if !object["recommended"].is_boolean() {
+        return Err("privacy catalog model recommended must be boolean".to_string());
+    }
     validate_privacy_model_variants(&object["variants"])
+}
+
+fn is_release_version(value: &serde_json::Value) -> bool {
+    let Some(version) = value.as_str() else {
+        return false;
+    };
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            (1..=6).contains(&part.len())
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (*part == "0" || !part.starts_with('0'))
+        })
 }
 
 fn validate_privacy_model_variants(value: &serde_json::Value) -> Result<(), String> {
@@ -3928,12 +4396,12 @@ fn validate_rfc3339_timestamp<'a>(
             .ok()
             .and_then(|part| part.parse::<u32>().ok())
     };
-    let year = parse(0..4).ok_or_else(&invalid)?;
-    let month = parse(5..7).ok_or_else(&invalid)?;
-    let day = parse(8..10).ok_or_else(&invalid)?;
-    let hour = parse(11..13).ok_or_else(&invalid)?;
-    let minute = parse(14..16).ok_or_else(&invalid)?;
-    let second = parse(17..19).ok_or_else(&invalid)?;
+    let year = parse(0..4).ok_or_else(invalid)?;
+    let month = parse(5..7).ok_or_else(invalid)?;
+    let day = parse(8..10).ok_or_else(invalid)?;
+    let hour = parse(11..13).ok_or_else(invalid)?;
+    let minute = parse(14..16).ok_or_else(invalid)?;
+    let second = parse(17..19).ok_or_else(invalid)?;
     let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let days_in_month = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -3968,11 +4436,11 @@ fn validate_rfc3339_timestamp<'a>(
             let offset_hour = std::str::from_utf8(&bytes[cursor + 1..cursor + 3])
                 .ok()
                 .and_then(|part| part.parse::<u32>().ok())
-                .ok_or_else(&invalid)?;
+                .ok_or_else(invalid)?;
             let offset_minute = std::str::from_utf8(&bytes[cursor + 4..cursor + 6])
                 .ok()
                 .and_then(|part| part.parse::<u32>().ok())
-                .ok_or_else(&invalid)?;
+                .ok_or_else(invalid)?;
             if offset_hour > 23 || offset_minute > 59 {
                 return Err(invalid());
             }
@@ -4038,7 +4506,7 @@ fn validate_resource_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-const SUBSCRIPTION_PROVIDERS: &[&str] = &["openai_codex", "claude_code", "xai_grok"];
+const SUBSCRIPTION_PROVIDERS: &[&str] = &["openai_codex", "claude_code", "xai_grok", "antigravity"];
 const AUTHORIZATION_SESSION_STATUSES: &[&str] =
     &["pending", "completed", "cancelled", "expired", "failed"];
 const AUTHORIZATION_FLOWS: &[&str] = &["browser", "device_code", "authorization_code"];
@@ -4230,6 +4698,9 @@ fn parse_authorization_session_value(
     validate_authorization_flow(flow)?;
 
     if (provider == "claude_code") != (flow == "authorization_code") {
+        return Err("authorization flow is unsupported by provider".to_string());
+    }
+    if provider == "antigravity" && flow != "browser" {
         return Err("authorization flow is unsupported by provider".to_string());
     }
     if provider == "xai_grok" && flow != "device_code" {
@@ -4619,12 +5090,9 @@ fn validate_audit_settings_patch(patch: &serde_json::Value) -> Result<(), String
                     );
                 }
             }
-            "audit_risk_acknowledged" => {
+            "audit_risk_acknowledged" | "agent_raw_access_enabled" => {
                 if !value.is_boolean() {
-                    return Err(
-                        "audit settings patch audit_risk_acknowledged must be a boolean"
-                            .to_string(),
-                    );
+                    return Err(format!("audit settings patch {key} must be a boolean"));
                 }
             }
             other => {
@@ -4690,6 +5158,15 @@ fn parse_ready_announcement(line: &str) -> Result<ReadyAnnouncement, String> {
     }
 
     ready.inference_url = validate_loopback_url(&ready.inference_url, "inference_url")?;
+    let localhost = ready
+        .inference_url
+        .replacen("http://127.0.0.1:", "http://localhost:", 1);
+    if ready.client_inference_url != ready.inference_url && ready.client_inference_url != localhost
+    {
+        return Err(
+            "client_inference_url must be inference_url or localhost on the same port".to_string(),
+        );
+    }
     ready.control_url = validate_loopback_url(&ready.control_url, "control_url")?;
     Ok(ready)
 }
@@ -4988,6 +5465,129 @@ mod tests {
     use super::*;
 
     #[test]
+    fn observer_state_reads_age_level_and_pending_approvals() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T10:00:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let state = parse_observer_state(
+            br#"{"last_seen_at":"2026-09-28T10:00:00Z","read_level":"raw","pending_raw_access":3,"active_raw_grants":1}"#,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            state,
+            ObserverState {
+                age: Some(Duration::from_secs(5)),
+                read_level: Some(ObserverReadLevel::Raw),
+                pending_raw_access: 3,
+                active_raw_grants: 1,
+                ..ObserverState::default()
+            }
+        );
+
+        // The setup gate and the latest raw password or key change, whoever
+        // made it; agent steps after it do not hide it.
+        let state = parse_observer_state(
+            br#"{"raw_password_required":true,"raw_access_events":[
+                {"at":"2026-09-28T09:00:00Z","kind":"raw_password_set","client_name":""},
+                {"at":"2026-09-28T09:30:00Z","kind":"raw_key_reset","client_name":""},
+                {"at":"2026-09-28T09:40:00Z","kind":"requested","client_name":"astrlink-cli"},
+                {"at":"not a time","kind":"raw_password_changed","client_name":""}]}"#,
+            now,
+        )
+        .unwrap();
+        assert!(state.raw_password_required);
+        assert_eq!(
+            state.raw_key_event,
+            Some(RawKeyEvent {
+                kind: RawKeyEventKind::KeyReset,
+                at: "2026-09-28T09:30:00Z".to_string(),
+            })
+        );
+        // The popover reads Core's own event names.
+        for (kind, name) in [
+            (RawKeyEventKind::PasswordSet, "raw_password_set"),
+            (RawKeyEventKind::PasswordChanged, "raw_password_changed"),
+            (RawKeyEventKind::KeyReset, "raw_key_reset"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        }
+
+        // No read yet, an unknown level, and a clock ahead of the desktop.
+        let state = parse_observer_state(
+            br#"{"last_seen_at":"2026-09-28T10:00:09Z","read_level":"future"}"#,
+            now,
+        )
+        .unwrap();
+        assert_eq!(state.age, Some(Duration::ZERO));
+        assert_eq!(state.read_level, None);
+        assert_eq!(state.pending_raw_access, 0);
+        assert_eq!(
+            parse_observer_state(br#"{"read_level":""}"#, now).unwrap(),
+            ObserverState::default()
+        );
+        assert!(parse_observer_state(b"not json", now).is_err());
+    }
+
+    #[test]
+    fn observer_fields_leave_the_view_with_the_ready_phase() {
+        let mut inner = CoreInner {
+            phase: CorePhase::Ready,
+            observer_seen_at: Some(Instant::now()),
+            observer_read_level: Some(ObserverReadLevel::Shareable),
+            pending_raw_access: 2,
+            active_raw_grants: 1,
+            raw_password_required: true,
+            raw_key_event: Some(RawKeyEvent {
+                kind: RawKeyEventKind::PasswordChanged,
+                at: "2026-09-28T09:00:00Z".to_string(),
+            }),
+            raw_key_replaced: true,
+            ..CoreInner::default()
+        };
+        let view = inner.view();
+        assert!(view.observer_active);
+        assert!(view.raw_password_required);
+        assert!(view.raw_key_event.is_some());
+        assert!(view.raw_key_replaced);
+        assert_eq!(view.observer_read_level, Some(ObserverReadLevel::Shareable));
+        assert_eq!(view.pending_raw_access, 2);
+        assert_eq!(view.active_raw_grants, 1);
+
+        inner.observer_seen_at = None;
+        let view = inner.view();
+        assert_eq!(view.observer_read_level, None);
+        assert_eq!(view.pending_raw_access, 2);
+
+        inner.phase = CorePhase::Stopped;
+        assert_eq!(inner.view().pending_raw_access, 0);
+        assert_eq!(inner.view().active_raw_grants, 0);
+        assert!(!inner.view().raw_password_required);
+        assert_eq!(inner.view().raw_key_event, None);
+        assert!(!inner.view().raw_key_replaced);
+        inner.clear_handshake();
+        assert!(!inner.raw_password_required);
+        assert_eq!(inner.raw_key_event, None);
+        assert!(!inner.raw_key_replaced);
+    }
+
+    #[test]
+    fn a_raw_key_verdict_reaches_the_tray_only_when_it_changes() {
+        let manager = CoreManager::new();
+        manager.lock_inner().phase = CorePhase::Ready;
+        let mut changes = manager.subscribe();
+        changes.borrow_and_update();
+
+        assert!(manager.note_raw_key_replaced(true));
+        assert!(changes.has_changed().unwrap());
+        assert!(changes.borrow_and_update().raw_key_replaced);
+        assert!(!manager.note_raw_key_replaced(true));
+        assert!(!changes.has_changed().unwrap());
+        assert!(manager.note_raw_key_replaced(false));
+        assert!(!changes.borrow_and_update().raw_key_replaced);
+    }
+
+    #[test]
     fn every_lock_release_publishes_a_changed_view_exactly_once() {
         let manager = CoreManager::new();
         let mut changes = manager.subscribe();
@@ -5019,13 +5619,14 @@ mod tests {
                 control_api_version: "v1".to_string(),
                 protocol_contract_version: "v1".to_string(),
                 inference_url: "http://127.0.0.1:8324".to_string(),
+                client_inference_url: "http://localhost:8324".to_string(),
                 control_url: "http://127.0.0.1:43117".to_string(),
             });
             inner.started_inference_port = Some(8317);
         }
         let view = changes.borrow_and_update().clone();
         assert_eq!(view.phase, CorePhase::Ready);
-        assert_eq!(view.inference_url.as_deref(), Some("http://127.0.0.1:8324"));
+        assert_eq!(view.inference_url.as_deref(), Some("http://localhost:8324"));
         assert_eq!(
             view.inference_port_fallback,
             Some(InferencePortFallback {
@@ -5051,6 +5652,22 @@ mod tests {
         browser["flow"] = serde_json::json!("browser");
         browser["authorization_url"] = serde_json::json!("https://auth.openai.com/oauth/authorize");
         assert!(parse_authorization_session_value(&browser).is_ok());
+
+        let mut antigravity = browser.clone();
+        antigravity["provider"] = serde_json::json!("antigravity");
+        antigravity["authorization_url"] =
+            serde_json::json!("https://accounts.google.com/o/oauth2/v2/auth");
+        assert!(parse_authorization_session_value(&antigravity).is_ok());
+        antigravity["flow"] = serde_json::json!("device_code");
+        antigravity
+            .as_object_mut()
+            .unwrap()
+            .remove("authorization_url");
+        antigravity["device_code"] = serde_json::json!({
+            "verification_url": "https://accounts.google.com/device",
+            "user_code": "ABCD-EFGH"
+        });
+        assert!(parse_authorization_session_value(&antigravity).is_err());
 
         let mut claude = browser.clone();
         claude["provider"] = serde_json::json!("claude_code");
@@ -5110,6 +5727,9 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(10));
                         continue;
                     };
+                    // BSD sockets inherit O_NONBLOCK from the listener, so reads
+                    // could fail with WouldBlock before the request arrives.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
@@ -5145,6 +5765,7 @@ mod tests {
                     control_api_version: "v1".into(),
                     protocol_contract_version: "v1".into(),
                     inference_url: format!("http://{address}"),
+                    client_inference_url: format!("http://{address}"),
                     control_url: format!("http://{address}"),
                 });
             }
@@ -5243,6 +5864,10 @@ mod tests {
         assert_eq!(
             control_request_timeout(&Method::GET, PRIVACY_MODEL_CATALOG_PATH),
             REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            control_request_timeout(&Method::GET, PRIVACY_MODEL_RELEASES_PATH),
+            PRIVACY_MODEL_METADATA_TIMEOUT
         );
         assert_eq!(
             control_request_timeout(&Method::POST, SERVICE_MODEL_PROBES_PATH),
@@ -5461,7 +6086,7 @@ mod tests {
 
     fn ready_line(control_url: &str) -> String {
         format!(
-            r#"{{"event":"ready","core_version":"0.1.0-dev","control_api_version":"v1","protocol_contract_version":"v1","inference_url":"http://127.0.0.1:8317","control_url":"{control_url}"}}"#
+            r#"{{"event":"ready","core_version":"0.1.0-dev","control_api_version":"v1","protocol_contract_version":"v1","inference_url":"http://127.0.0.1:8317","client_inference_url":"http://localhost:8317","control_url":"{control_url}"}}"#
         )
     }
 
@@ -5520,6 +6145,36 @@ mod tests {
         assert_eq!(ready.event, "ready");
         assert_eq!(ready.control_url, "http://127.0.0.1:43210");
         assert_eq!(ready.inference_url, "http://127.0.0.1:8317");
+        assert_eq!(ready.client_inference_url, "http://localhost:8317");
+    }
+
+    #[test]
+    fn ready_client_url_must_name_the_same_inference_port() {
+        let line = ready_line("http://127.0.0.1:43210");
+        let ipv4_only = line.replace(
+            r#""client_inference_url":"http://localhost:8317""#,
+            r#""client_inference_url":"http://127.0.0.1:8317""#,
+        );
+        assert_eq!(
+            parse_ready_announcement(&ipv4_only)
+                .unwrap()
+                .client_inference_url,
+            "http://127.0.0.1:8317"
+        );
+        for client_url in [
+            "http://localhost:8318",
+            "http://[::1]:8317",
+            "http://localhost:8317/",
+            "http://127.0.0.1:43210",
+        ] {
+            let line = line.replace("http://localhost:8317", client_url);
+            assert!(
+                parse_ready_announcement(&line).is_err(),
+                "{client_url} should be rejected"
+            );
+        }
+        let missing = line.replace(r#""client_inference_url":"http://localhost:8317","#, "");
+        assert!(parse_ready_announcement(&missing).is_err());
     }
 
     #[test]
@@ -6107,11 +6762,41 @@ mod tests {
                 "license": "apache-2.0",
                 "languages": ["en"],
                 "adapter": "hf_token_classification",
-                "variants": [privacy_variant_value()]
+                "variants": [privacy_variant_value()],
+                "version": "0.2.0",
+                "recommended": true
             }]
         }))
         .unwrap();
         assert!(parse_privacy_model_catalog(&catalog).is_ok());
+        let mut catalog_model: serde_json::Value = serde_json::from_slice(&catalog).unwrap();
+        catalog_model = catalog_model["items"][0].take();
+        for (field, value, valid) in [
+            ("version", serde_json::Value::Null, true),
+            ("version", serde_json::json!("10.0.123456"), true),
+            ("version", serde_json::json!("v0.2.0"), false),
+            ("version", serde_json::json!("0.02.0"), false),
+            ("version", serde_json::json!("0.2"), false),
+            ("version", serde_json::json!("1234567.0.0"), false),
+            ("version", serde_json::json!(2), false),
+            ("recommended", serde_json::json!("yes"), false),
+            ("recommended", serde_json::Value::Null, false),
+        ] {
+            let mut model = catalog_model.clone();
+            model[field] = value;
+            assert_eq!(
+                validate_privacy_catalog_model(&model).is_ok(),
+                valid,
+                "{field}={}",
+                model[field]
+            );
+        }
+        let mut missing_recommended = catalog_model.clone();
+        missing_recommended
+            .as_object_mut()
+            .unwrap()
+            .remove("recommended");
+        assert!(validate_privacy_catalog_model(&missing_recommended).is_err());
 
         let probe = serde_json::to_vec(&serde_json::json!({
             "repo_id": "example/privacy-filter",
@@ -6303,7 +6988,9 @@ mod tests {
                 "license": "apache-2.0",
                 "languages": ["en"],
                 "adapter": "hf_token_classification",
-                "variants": [padded_catalog_variant]
+                "variants": [padded_catalog_variant],
+                "version": null,
+                "recommended": false
             }]
         }))
         .unwrap();
@@ -6322,7 +7009,9 @@ mod tests {
                 "license": "apache-2.0",
                 "languages": ["en"],
                 "adapter": "hf_token_classification",
-                "variants": [controlled_catalog_variant]
+                "variants": [controlled_catalog_variant],
+                "version": null,
+                "recommended": false
             }]
         }))
         .unwrap();
@@ -6380,6 +7069,10 @@ mod tests {
         );
         assert_eq!(PRIVACY_MODELS_PATH, "/control/v1/privacy-models");
         assert_ne!(PRIVACY_MODEL_CATALOG_PATH, PRIVACY_MODELS_PATH);
+        assert_eq!(
+            PRIVACY_MODEL_RELEASES_PATH,
+            "/control/v1/privacy-model-catalog/releases"
+        );
     }
 
     #[test]
@@ -6403,6 +7096,7 @@ mod tests {
             });
             inner.capabilities = Some(alpha_capabilities());
             inner.control_token = Some("control-token".to_string());
+            inner.observer_token = Some("observer-token".to_string());
         }
         manager.handle_terminated(
             7,
@@ -6422,6 +7116,7 @@ mod tests {
         {
             let inner = manager.lock_inner();
             assert!(inner.control_token.is_none());
+            assert!(inner.observer_token.is_none());
         }
 
         {
@@ -6468,6 +7163,7 @@ mod tests {
                 "--control-listen".to_string(),
                 "127.0.0.1:0".to_string(),
                 "--control-token-stdin".to_string(),
+                "--observer-token-stdin".to_string(),
                 "--max-concurrent-inspections".to_string(),
                 "16".to_string(),
                 "--response-start-timeout-seconds".to_string(),
@@ -6544,6 +7240,49 @@ mod tests {
             linux_onnx_runtime_path(Path::new("/usr/lib/AstrLink")),
             PathBuf::from("/usr/lib/AstrLink/onnxruntime/libonnxruntime.so.1.23.2")
         );
+    }
+
+    #[test]
+    fn sidecar_stdin_places_tokens_on_their_fixed_lines() {
+        let payload = sidecar_stdin("control", None, "observer");
+        let lines: Vec<&str> = payload.split_terminator('\n').collect();
+        assert_eq!(lines, ["control", "", "observer"]);
+        assert!(payload.ends_with('\n'));
+
+        let key = "ab".repeat(32);
+        let payload = sidecar_stdin("control", Some(&key), "observer");
+        let lines: Vec<&str> = payload.split_terminator('\n').collect();
+        assert_eq!(lines, ["control", key.as_str(), "observer"]);
+    }
+
+    #[test]
+    fn local_key_reaches_core_on_stdin_and_never_in_arguments() {
+        let key = "cd".repeat(32);
+        let keychain = ResolvedKey {
+            storage: LocalKeyStorage::Keychain,
+            stdin_hex: Some(Zeroizing::new(key.clone())),
+            key_file: None,
+        };
+        let arguments = local_key_args(&keychain).unwrap();
+        assert_eq!(arguments, ["--kek-stdin"]);
+        assert!(!arguments.iter().any(|argument| argument.contains(&key)));
+
+        let fallback = ResolvedKey {
+            storage: LocalKeyStorage::KeychainUnavailable,
+            stdin_hex: None,
+            key_file: Some(PathBuf::from("/tmp/astrlink-data/local.fallback.key")),
+        };
+        assert_eq!(
+            local_key_args(&fallback).unwrap(),
+            ["--kek-file=/tmp/astrlink-data/local.fallback.key"]
+        );
+
+        let core_default = ResolvedKey {
+            storage: LocalKeyStorage::File,
+            stdin_hex: None,
+            key_file: None,
+        };
+        assert!(local_key_args(&core_default).unwrap().is_empty());
     }
 
     #[test]
@@ -6633,6 +7372,27 @@ mod tests {
             false
         ));
         assert!(!start_allowed(&lifecycle(CorePhase::Stopped, None), true));
+    }
+
+    // start() asks this before it resolves the keychain key, so a refused
+    // start never migrates `local.key` beside a running Core.
+    #[test]
+    fn start_refusal_names_why_a_start_cannot_proceed() {
+        let mut inner = CoreInner::default();
+        assert_eq!(inner.start_refusal(), Ok(()));
+        inner.phase = CorePhase::Ready;
+        assert_eq!(
+            inner.start_refusal(),
+            Err("astrlink-core is already running or stopping".to_string())
+        );
+        inner.last_error = Some("previous failure".to_string());
+        assert_eq!(inner.start_refusal(), Err("previous failure".to_string()));
+        inner.phase = CorePhase::Stopped;
+        inner.update_in_progress = true;
+        assert_eq!(
+            inner.start_refusal(),
+            Err("Application update in progress".to_string())
+        );
     }
 
     #[test]

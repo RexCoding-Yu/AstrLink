@@ -64,75 +64,6 @@ func (resolver candidateResolver) ResolveCandidates(context.Context, endpoint.Re
 	return candidates, nil
 }
 
-type healthRecordingResolver struct {
-	candidate endpoint.Resolved
-	begins    chan struct{}
-	successes chan struct{}
-	failures  chan struct{}
-	abandons  chan struct{}
-}
-
-func (resolver *healthRecordingResolver) Resolve(
-	context.Context,
-	endpoint.ResolveRequest,
-) (endpoint.Resolved, error) {
-	return resolver.candidate, nil
-}
-
-func (resolver *healthRecordingResolver) ResolveCandidates(
-	context.Context,
-	endpoint.ResolveRequest,
-) ([]endpoint.Resolved, error) {
-	return []endpoint.Resolved{resolver.candidate}, nil
-}
-
-func (resolver *healthRecordingResolver) BeginAttempt(endpoint.Resolved) bool {
-	resolver.begins <- struct{}{}
-	return true
-}
-
-func (resolver *healthRecordingResolver) RecordSuccess(endpoint.Resolved) {
-	resolver.successes <- struct{}{}
-}
-
-func (resolver *healthRecordingResolver) RecordFailure(endpoint.Resolved) {
-	resolver.failures <- struct{}{}
-}
-
-func (resolver *healthRecordingResolver) AbandonAttempt(endpoint.Resolved) {
-	resolver.abandons <- struct{}{}
-}
-
-type healthTrackingCandidateResolver struct {
-	candidateResolver
-	mu        sync.Mutex
-	successes []contract.ServiceID
-	failures  []contract.ServiceID
-	abandons  []contract.ServiceID
-}
-
-func (resolver *healthTrackingCandidateResolver) BeginAttempt(endpoint.Resolved) bool {
-	return true
-}
-
-func (resolver *healthTrackingCandidateResolver) RecordSuccess(candidate endpoint.Resolved) {
-	resolver.mu.Lock()
-	defer resolver.mu.Unlock()
-	resolver.successes = append(resolver.successes, candidate.Endpoint.ID)
-}
-
-func (resolver *healthTrackingCandidateResolver) RecordFailure(candidate endpoint.Resolved) {
-	resolver.mu.Lock()
-	defer resolver.mu.Unlock()
-	resolver.failures = append(resolver.failures, candidate.Endpoint.ID)
-}
-
-func (resolver *healthTrackingCandidateResolver) AbandonAttempt(candidate endpoint.Resolved) {
-	resolver.mu.Lock()
-	defer resolver.mu.Unlock()
-	resolver.abandons = append(resolver.abandons, candidate.Endpoint.ID)
-}
-
 type endpointPageReader struct {
 	items []storage.EndpointRecord
 }
@@ -279,7 +210,10 @@ func TestProductionInferenceGateRequiresCanonicalHostOriginBoundaryAndLocalToken
 		code       string
 		resolves   bool
 	}{
-		{name: "wrong Host", host: "localhost:8317", headerName: "Authorization", header: "Bearer " + token, status: http.StatusMisdirectedRequest, code: "host_forbidden"},
+		{name: "wrong Host", host: "attacker.example:8317", headerName: "Authorization", header: "Bearer " + token, status: http.StatusMisdirectedRequest, code: "host_forbidden"},
+		{name: "localhost on another port", host: "localhost:8318", headerName: "Authorization", header: "Bearer " + token, status: http.StatusMisdirectedRequest, code: "host_forbidden"},
+		{name: "localhost Host", host: "LocalHost:8317", headerName: "Authorization", header: "Bearer " + token, status: http.StatusUnprocessableEntity, code: "missing_protocol_capability", resolves: true},
+		{name: "IPv6 loopback Host", host: "[::1]:8317", headerName: "Authorization", header: "Bearer " + token, status: http.StatusUnprocessableEntity, code: "missing_protocol_capability", resolves: true},
 		{name: "browser Origin", host: "127.0.0.1:8317", origin: "https://attacker.example", headerName: "Authorization", header: "Bearer " + token, status: http.StatusForbidden, code: "origin_forbidden"},
 		{name: "browser Origin after empty value", host: "127.0.0.1:8317", origins: []string{"", "https://attacker.example"}, headerName: "Authorization", header: "Bearer " + token, status: http.StatusForbidden, code: "origin_forbidden"},
 		{name: "missing token", host: "127.0.0.1:8317", status: http.StatusUnauthorized, code: "invalid_access_token"},
@@ -322,6 +256,80 @@ func TestProductionInferenceGateRequiresCanonicalHostOriginBoundaryAndLocalToken
 				if strings.HasPrefix(http.CanonicalHeaderKey(name), "Access-Control-") {
 					t.Fatalf("CORS header leaked: %s", name)
 				}
+			}
+		})
+	}
+}
+
+func TestReachabilityProbeSkipsTokenAndRecordsButKeepsLocalGate(t *testing.T) {
+	store := &memoryRequestRecordStore{}
+	handler, err := NewProduction(Dependencies{
+		Resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			t.Fatal("reachability probe must not resolve an endpoint")
+			return endpoint.Resolved{}, endpoint.ErrNoEndpoint
+		}),
+		Authorizer: authorizerFunc(func(context.Context, contract.Endpoint) (http.Header, error) {
+			return nil, errors.New("authorizer must not run")
+		}),
+		AccessTokenAuthenticator: AccessTokenAuthenticatorFunc(func(context.Context, string) (contract.AccessTokenID, error) {
+			t.Fatal("reachability probe must not authenticate")
+			return "", errors.New("unreachable")
+		}),
+		RequestRecords: store,
+		AllowedHost:    "127.0.0.1:8317",
+	})
+	if err != nil {
+		t.Fatalf("NewProduction: %v", err)
+	}
+	tests := []struct {
+		name   string
+		method string
+		host   string
+		status int
+		marked bool
+	}{
+		{name: "IPv4", method: http.MethodGet, host: "127.0.0.1:8317", status: http.StatusNoContent, marked: true},
+		{name: "localhost", method: http.MethodGet, host: "localhost:8317", status: http.StatusNoContent, marked: true},
+		{name: "IPv6", method: http.MethodGet, host: "[::1]:8317", status: http.StatusNoContent, marked: true},
+		{name: "POST", method: http.MethodPost, host: "localhost:8317", status: http.StatusMethodNotAllowed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, ReachabilityPath, nil)
+			request.Host = test.host
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d", response.Code, test.status)
+			}
+			if got := response.Header().Get(ReachabilityHeader) == "1"; got != test.marked {
+				t.Fatalf("marker present = %t, want %t", got, test.marked)
+			}
+		})
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("reachability probes were recorded: %#v", store.records)
+	}
+
+	for _, test := range []struct {
+		name, host, origin string
+		status             int
+		code               string
+	}{
+		{name: "foreign Host", host: "attacker.example:8317", status: http.StatusMisdirectedRequest, code: "host_forbidden"},
+		{name: "browser Origin", host: "localhost:8317", origin: "https://attacker.example", status: http.StatusForbidden, code: "origin_forbidden"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, ReachabilityPath, nil)
+			request.Host = test.host
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			assertInferenceError(t, response, test.status, test.code)
+			if response.Header().Get(ReachabilityHeader) != "" {
+				t.Fatal("rejected probe carried the reachability marker")
 			}
 		})
 	}
@@ -1229,11 +1237,7 @@ func TestInferencePlanePublishesPendingThenUpdatesSameRecord(t *testing.T) {
 		)
 		close(done)
 	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("forwarder did not start")
-	}
+	<-started
 	if len(store.records) != 1 || store.records[0].Status != contract.RequestStatusPending {
 		t.Fatalf("pending records=%#v", store.records)
 	}
@@ -1245,11 +1249,7 @@ func TestInferencePlanePublishesPendingThenUpdatesSameRecord(t *testing.T) {
 		t.Fatalf("pending record completed_at=%v", store.records[0].CompletedAt)
 	}
 	close(release)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not finish")
-	}
+	<-done
 	if len(store.records) != 1 {
 		t.Fatalf("records=%#v", store.records)
 	}
@@ -1307,17 +1307,9 @@ func TestInferencePlaneRecordsFailedCancelledBlockedAndStreaming(t *testing.T) {
 			handler.ServeHTTP(response, request)
 			close(done)
 		}()
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("forwarder did not start")
-		}
+		<-started
 		cancel()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("handler did not return after cancel")
-		}
+		<-done
 		if len(store.records) != 1 || store.records[0].Status != contract.RequestStatusCancelled {
 			t.Fatalf("records=%#v", store.records)
 		}
@@ -1392,6 +1384,67 @@ func TestInferencePlaneRecordsFailedCancelledBlockedAndStreaming(t *testing.T) {
 			t.Fatalf("usage=%#v", record.Usage)
 		}
 	})
+}
+
+// Codex closes the stream once response.completed arrives, which can be
+// before upstream EOF. Only a hangup before the terminal event is a cancel.
+func TestInferencePlaneClientHangupAfterTerminalEventSucceeds(t *testing.T) {
+	const completed = "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
+	const delta = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"
+	for _, test := range []struct {
+		name string
+		sent string
+		want contract.RequestStatus
+	}{
+		{name: "after terminal", sent: delta + completed, want: contract.RequestStatusSucceeded},
+		{name: "before terminal", sent: delta, want: contract.RequestStatusCancelled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &memoryRequestRecordStore{}
+			delivered := make(chan struct{})
+			handler := NewWithDependencies(Dependencies{
+				Resolver: candidateResolver{candidates: []endpoint.Resolved{{
+					Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, true),
+				}}},
+				RequestRecords: store,
+				Forwarder: forwarderFunc(func(writer http.ResponseWriter, request *http.Request, _ transport.Target) error {
+					writer.Header().Set("Content-Type", "text/event-stream")
+					writer.WriteHeader(http.StatusOK)
+					if _, err := writer.Write([]byte(test.sent)); err != nil {
+						return err
+					}
+					close(delivered)
+					// Upstream EOF never arrives before the client hangs up.
+					<-request.Context().Done()
+					return transport.NewResponseError(request.Context().Err())
+				}),
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			request := httptest.NewRequest(
+				http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"hi","stream":true}`),
+			).WithContext(ctx)
+			response := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				handler.ServeHTTP(response, request)
+				close(done)
+			}()
+			<-delivered
+			cancel()
+			<-done
+			if len(store.records) != 1 {
+				t.Fatalf("records=%d", len(store.records))
+			}
+			record := store.records[0]
+			if record.Status != test.want {
+				t.Fatalf("status=%q want %q, record=%#v", record.Status, test.want, record)
+			}
+			if test.want == contract.RequestStatusSucceeded &&
+				(record.Usage == nil || record.Usage.BillingIncomplete || record.Usage.TotalTokens != 3) {
+				t.Fatalf("usage=%#v", record.Usage)
+			}
+		})
+	}
 }
 
 func TestInferencePlaneModelRewriteStreamsUpstreamSSEUnchanged(t *testing.T) {
@@ -1759,11 +1812,7 @@ func TestResponseStartTimeoutHasOneDeterministicWinner(t *testing.T) {
 
 	t.Run("elapsed timeout cannot be overwritten by late headers", func(t *testing.T) {
 		attempt := newResponseStartContext(context.Background(), time.Millisecond)
-		select {
-		case <-attempt.Context().Done():
-		case <-time.After(time.Second):
-			t.Fatal("response-start timeout did not fire")
-		}
+		<-attempt.Context().Done()
 		attempt.ResponseStarted()
 		if !attempt.TimedOut() ||
 			!errors.Is(context.Cause(attempt.Context()), context.DeadlineExceeded) {
@@ -1777,158 +1826,7 @@ func TestResponseStartTimeoutHasOneDeterministicWinner(t *testing.T) {
 	})
 }
 
-func TestInferencePlaneCompletesHealthProbeAtResponseStart(t *testing.T) {
-	tests := []struct {
-		name       string
-		status     int
-		wantSignal func(*healthRecordingResolver) <-chan struct{}
-	}{
-		{
-			name:   "successful headers close probe",
-			status: http.StatusOK,
-			wantSignal: func(resolver *healthRecordingResolver) <-chan struct{} {
-				return resolver.successes
-			},
-		},
-		{
-			name:   "server error headers reopen probe",
-			status: http.StatusServiceUnavailable,
-			wantSignal: func(resolver *healthRecordingResolver) <-chan struct{} {
-				return resolver.failures
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			candidate := validEndpoint(contract.ProtocolOpenAIResponses, true)
-			resolver := &healthRecordingResolver{
-				candidate: endpoint.Resolved{Endpoint: candidate},
-				begins:    make(chan struct{}, 1),
-				successes: make(chan struct{}, 1),
-				failures:  make(chan struct{}, 1),
-				abandons:  make(chan struct{}, 1),
-			}
-			releaseStream := make(chan struct{})
-			handler := NewWithDependencies(Dependencies{
-				Resolver: resolver,
-				Forwarder: forwarderFunc(func(
-					writer http.ResponseWriter,
-					_ *http.Request,
-					_ transport.Target,
-				) error {
-					writer.Header().Set("Content-Type", "text/event-stream")
-					writer.WriteHeader(test.status)
-					if err := http.NewResponseController(writer).Flush(); err != nil {
-						return err
-					}
-					<-releaseStream
-					_, err := writer.Write([]byte("data: done\n\n"))
-					return err
-				}),
-			})
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				handler.ServeHTTP(
-					httptest.NewRecorder(),
-					httptest.NewRequest(
-						http.MethodPost,
-						"/v1/responses",
-						strings.NewReader(`{"stream":true}`),
-					),
-				)
-			}()
-
-			select {
-			case <-resolver.begins:
-			case <-time.After(time.Second):
-				t.Fatal("upstream attempt did not begin")
-			}
-			select {
-			case <-test.wantSignal(resolver):
-				// Health is settled while the SSE remains open.
-			case <-time.After(time.Second):
-				t.Fatal("response headers did not settle endpoint health")
-			}
-			select {
-			case <-done:
-				t.Fatal("stream completed before the test released it")
-			default:
-			}
-			close(releaseStream)
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-				t.Fatal("stream did not finish")
-			}
-			select {
-			case <-resolver.abandons:
-				t.Fatal("settled health probe was abandoned a second time")
-			default:
-			}
-		})
-	}
-}
-
-func TestInferencePlaneAcquiresHealthProbeImmediatelyBeforeUpstreamIO(t *testing.T) {
-	candidate := validEndpoint(contract.ProtocolOpenAIResponses, false)
-	resolver := &healthRecordingResolver{
-		candidate: endpoint.Resolved{Endpoint: candidate},
-		begins:    make(chan struct{}, 1),
-		successes: make(chan struct{}, 1),
-		failures:  make(chan struct{}, 1),
-		abandons:  make(chan struct{}, 1),
-	}
-	authorizerEntered := make(chan struct{})
-	releaseAuthorizer := make(chan struct{})
-	handler := NewWithDependencies(Dependencies{
-		Resolver: resolver,
-		Authorizer: authorizerFunc(func(context.Context, contract.Endpoint) (http.Header, error) {
-			close(authorizerEntered)
-			<-releaseAuthorizer
-			return nil, nil
-		}),
-		Forwarder: forwarderFunc(func(http.ResponseWriter, *http.Request, transport.Target) error {
-			return nil
-		}),
-	})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		handler.ServeHTTP(
-			httptest.NewRecorder(),
-			httptest.NewRequest(
-				http.MethodPost,
-				"/v1/responses",
-				strings.NewReader(`{"model":"gpt-5"}`),
-			),
-		)
-	}()
-
-	select {
-	case <-authorizerEntered:
-	case <-time.After(time.Second):
-		t.Fatal("authorizer did not run")
-	}
-	select {
-	case <-resolver.begins:
-		t.Fatal("half-open probe was reserved during local credential preparation")
-	default:
-	}
-	close(releaseAuthorizer)
-	select {
-	case <-resolver.begins:
-	case <-time.After(time.Second):
-		t.Fatal("upstream I/O did not acquire the health probe")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("request did not finish")
-	}
-}
-
-func TestInferencePlaneCircuitExcludesUnhealthyAutomaticCandidate(t *testing.T) {
+func TestInferencePlaneNeverWithholdsAProviderAfterFailures(t *testing.T) {
 	first := validEndpoint(contract.ProtocolOpenAIModels, false)
 	first.ID = "endpoint_a"
 	first.Name = "endpoint_a"
@@ -1963,10 +1861,9 @@ func TestInferencePlaneCircuitExcludesUnhealthyAutomaticCandidate(t *testing.T) 
 		})),
 	})
 
-	// Model discovery fans out to every capable endpoint, so each of the first
-	// three requests fails endpoint_a once while endpoint_b keeps serving the
-	// partial aggregate. The third consecutive failure opens endpoint_a's
-	// circuit and the fourth request must exclude it entirely.
+	// Model discovery fans out to every capable endpoint, so each request fails
+	// endpoint_a once while endpoint_b keeps serving the partial aggregate.
+	// Repeated failures must never stop AstrLink from trying endpoint_a.
 	const wantBody = `{"object":"list","data":[{"id":"model-b"}],"first_id":"model-b","has_more":false,"last_id":"model-b"}`
 	for requestIndex := 0; requestIndex < 4; requestIndex++ {
 		response := httptest.NewRecorder()
@@ -1981,8 +1878,8 @@ func TestInferencePlaneCircuitExcludesUnhealthyAutomaticCandidate(t *testing.T) 
 
 	mu.Lock()
 	defer mu.Unlock()
-	if attempts["endpoint-a.example"] != 3 || attempts["endpoint-b.example"] != 4 {
-		t.Fatalf("attempts = %v, want endpoint-a.example=3 endpoint-b.example=4", attempts)
+	if attempts["endpoint-a.example"] != 4 || attempts["endpoint-b.example"] != 4 {
+		t.Fatalf("attempts = %v, want endpoint-a.example=4 endpoint-b.example=4", attempts)
 	}
 }
 
@@ -2358,11 +2255,7 @@ func TestInferencePlaneMetadataConcurrencyWaitHonorsCancellation(t *testing.T) {
 		close(done)
 	}()
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("metadata concurrency wait ignored request cancellation")
-	}
+	<-done
 	if response.Body.Len() != 0 {
 		t.Fatalf("canceled response body = %q", response.Body.String())
 	}
@@ -2399,19 +2292,11 @@ func TestInferencePlaneDoesNotHoldInspectionPermitDuringUpstreamStream(t *testin
 		}()
 	}
 	for range inFlight {
-		select {
-		case <-forwardEntered:
-		case <-time.After(time.Second):
-			t.Fatal("inspection permit blocked concurrent in-flight AI requests")
-		}
+		<-forwardEntered
 	}
 	releaseOnce.Do(func() { close(releaseForward) })
 	for range inFlight {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("inference request did not finish")
-		}
+		<-done
 	}
 }
 

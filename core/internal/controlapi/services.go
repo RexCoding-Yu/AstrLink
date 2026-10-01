@@ -14,10 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
 	"github.com/QuantumNous/astrlink/core/internal/codingplan"
+	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/servicemodel"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 	"github.com/QuantumNous/astrlink/core/internal/subscription"
@@ -62,15 +64,77 @@ func (handler *Handler) publicService(service contract.Service) contract.Service
 	return service
 }
 
+// serviceDetail is the operator's single-service read. It adds the saved API
+// key's last characters so the editor can show which key is stored; the hint
+// is derived on each read and never persisted.
+type serviceDetail struct {
+	contract.Service
+	HTTP *serviceHTTPDetail `json:"http,omitempty"`
+}
+
+type serviceHTTPDetail struct {
+	contract.HTTPConnection
+	CredentialHint string `json:"credential_hint,omitempty"`
+}
+
+func (handler *Handler) serviceDetail(request *http.Request, service contract.Service) any {
+	service = handler.publicService(service)
+	if requestRole(request) < RoleOperator || service.HTTP == nil || service.HTTP.CredentialRef == "" {
+		return service
+	}
+	secrets, ok := handler.serviceStore.(secretstore.SecretStore)
+	if !ok {
+		return service
+	}
+	secret, err := secrets.Get(request.Context(), secretstore.Ref(service.HTTP.CredentialRef))
+	defer clear(secret)
+	if err != nil {
+		return service
+	}
+	hint := credentialHint(secret)
+	if hint == "" {
+		return service
+	}
+	return serviceDetail{
+		Service: service,
+		HTTP:    &serviceHTTPDetail{HTTPConnection: *service.HTTP, CredentialHint: hint},
+	}
+}
+
+// credentialHint shows the last characters of an API key, like "…a1b2". Short
+// keys get no hint so the suffix never reveals most of one.
+func credentialHint(secret []byte) string {
+	const visibleSuffix = 4
+	if utf8.RuneCount(secret) < 3*visibleSuffix {
+		return ""
+	}
+	start := len(secret)
+	for range visibleSuffix {
+		_, size := utf8.DecodeLastRune(secret[:start])
+		start -= size
+	}
+	return "…" + string(secret[start:])
+}
+
 type authorizationStartRequest struct {
 	Flow *contract.AuthorizationFlow `json:"flow"`
 }
 
 func (handler *Handler) registerServiceRoutes() {
-	handler.mux.HandleFunc(ServicesPath, handler.authenticated(handler.serviceCollection))
-	handler.mux.HandleFunc(ServicesPath+"/", handler.authenticated(handler.serviceItem))
-	handler.mux.HandleFunc(ServiceModelProbesPath, handler.authenticated(handler.probeDraftServiceModels))
-	handler.mux.HandleFunc(ServiceProxyProbesPath, handler.authenticated(handler.probeServiceProxy))
+	handler.mux.HandleFunc(ServicesPath, handler.authenticated(handler.serviceCollection, RoleObserver))
+	handler.mux.HandleFunc(ServicesPath+"/", handler.authenticatedBy(handler.serviceItem, serviceItemRole))
+	handler.mux.HandleFunc(ServiceModelProbesPath, handler.authenticated(handler.probeDraftServiceModels, RoleOperator))
+	handler.mux.HandleFunc(ServiceProxyProbesPath, handler.authenticated(handler.probeServiceProxy, RoleOperator))
+}
+
+// serviceItemRole lets observers read a service and its usage and risk
+// events. The OAuth authorization session carries device codes and sign-in
+// URLs, so every method on it is operator-only, like all writes.
+func serviceItemRole(request *http.Request) Role {
+	if isSafeMethod(request.Method) && !strings.HasSuffix(request.URL.Path, "/authorization") {
+		return RoleObserver
+	}
+	return RoleOperator
 }
 
 func (handler *Handler) serviceCollection(writer http.ResponseWriter, request *http.Request) {
@@ -97,6 +161,14 @@ func (handler *Handler) serviceItem(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	if len(parts) == 3 {
+		if parts[1] == "usage" && parts[2] == "reset-credits" {
+			if request.Method != http.MethodGet {
+				writeMethodNotAllowed(writer, http.MethodGet)
+				return
+			}
+			handler.getServiceResetCredits(writer, request, id)
+			return
+		}
 		if parts[1] == "usage" && parts[2] == "reset" {
 			if request.Method != http.MethodPost {
 				writeMethodNotAllowed(writer, http.MethodPost)
@@ -310,7 +382,7 @@ func (handler *Handler) getService(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writer.Header().Set("ETag", record.ETag)
-	writeJSON(writer, http.StatusOK, handler.publicService(record.Service))
+	writeJSON(writer, http.StatusOK, handler.serviceDetail(request, record.Service))
 }
 
 func (handler *Handler) patchService(writer http.ResponseWriter, request *http.Request, id contract.ServiceID) {
@@ -790,6 +862,18 @@ func (handler *Handler) getServiceUsage(writer http.ResponseWriter, request *htt
 	writeJSON(writer, http.StatusOK, usage)
 }
 
+func (handler *Handler) getServiceResetCredits(writer http.ResponseWriter, request *http.Request, id contract.ServiceID) {
+	if !handler.requireSubscriptionService(writer, request, id) {
+		return
+	}
+	result, err := handler.subscriptions.ResetCredits(request.Context(), id)
+	if err != nil {
+		writeServiceResetError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (handler *Handler) resetServiceUsage(writer http.ResponseWriter, request *http.Request, id contract.ServiceID) {
 	if handler.subscriptions == nil {
 		writeError(writer, http.StatusServiceUnavailable, "subscription_unavailable", "subscription services are unavailable")
@@ -822,9 +906,9 @@ type serviceRiskEventsResponse struct {
 	Items []contract.SubscriptionRiskEvent `json:"items"`
 }
 
-// subscriptionServiceForRisk loads a subscription service for the risk
+// requireSubscriptionService loads a subscription service for subscription
 // endpoints and writes the error response when it is unavailable.
-func (handler *Handler) subscriptionServiceForRisk(writer http.ResponseWriter, request *http.Request, id contract.ServiceID) bool {
+func (handler *Handler) requireSubscriptionService(writer http.ResponseWriter, request *http.Request, id contract.ServiceID) bool {
 	if handler.subscriptions == nil {
 		writeError(writer, http.StatusServiceUnavailable, "subscription_unavailable", "subscription services are unavailable")
 		return false
@@ -835,14 +919,14 @@ func (handler *Handler) subscriptionServiceForRisk(writer http.ResponseWriter, r
 		return false
 	}
 	if !record.Service.Kind.IsSubscription() {
-		writeError(writer, http.StatusConflict, "service_not_subscription", "service does not support subscription risk controls")
+		writeError(writer, http.StatusConflict, "service_not_subscription", "service does not support subscription controls")
 		return false
 	}
 	return true
 }
 
 func (handler *Handler) clearServiceRisk(writer http.ResponseWriter, request *http.Request, id contract.ServiceID) {
-	if !handler.subscriptionServiceForRisk(writer, request, id) {
+	if !handler.requireSubscriptionService(writer, request, id) {
 		return
 	}
 	if _, err := handler.subscriptions.ClearRisk(request.Context(), id); err != nil {
@@ -873,7 +957,7 @@ func (handler *Handler) listServiceRiskEvents(writer http.ResponseWriter, reques
 		}
 		limit = parsed
 	}
-	if !handler.subscriptionServiceForRisk(writer, request, id) {
+	if !handler.requireSubscriptionService(writer, request, id) {
 		return
 	}
 	events, err := handler.subscriptions.RiskEvents(request.Context(), id, limit)

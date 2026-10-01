@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
@@ -107,11 +106,7 @@ func TestShutdownRequiresAuthenticationAndAcknowledgesBeforeCancellation(t *test
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("shutdown status = %d, want 202", response.Code)
 	}
-	select {
-	case <-cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("shutdown was not requested")
-	}
+	<-cancelled
 }
 
 func TestNewWithDependenciesRequiresServiceStoreAndStrongToken(t *testing.T) {

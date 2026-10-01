@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import type { ComponentProps } from "react";
+import type { ComponentProps, MouseEvent } from "react";
 
 import { ArrowUpRight } from "@/components/icons";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,18 @@ import { openExternalURL } from "@/bridge";
 import { i18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { notify } from "@/notify";
+
+/** The desktop WebView ignores `target="_blank"`; hand the URL to the OS. */
+export function openInSystemBrowser(
+  event: MouseEvent<HTMLAnchorElement>,
+  href: string,
+) {
+  if (!isTauri()) return;
+  event.preventDefault();
+  void openExternalURL(href).catch(() => {
+    notify.error(i18n.t("common.openLinkFailed"));
+  });
+}
 
 export function ExternalLink({
   children,
@@ -30,13 +42,7 @@ export function ExternalLink({
         href={href}
         target="_blank"
         rel="noopener noreferrer"
-        onClick={(event) => {
-          if (!isTauri()) return;
-          event.preventDefault();
-          void openExternalURL(href).catch(() => {
-            notify.error(i18n.t("common.openLinkFailed"));
-          });
-        }}
+        onClick={(event) => openInSystemBrowser(event, href)}
       >
         {children}
         <ArrowUpRight aria-hidden="true" className="size-3" />

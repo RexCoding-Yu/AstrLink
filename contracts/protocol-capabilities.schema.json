@@ -306,12 +306,13 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "pattern": "^(?:local://service/[a-z][a-z0-9_-]{2,95}|keyring://[A-Za-z0-9._~-]+/[A-Za-z0-9._~!$&'()*+,;=:@/-]*[A-Za-z0-9._~!$&'()*+,;=:@-])$",
+      "pattern": "^(?:local://(?:service|subscription)/[a-z][a-z0-9_-]{2,95}|keyring://[A-Za-z0-9._~-]+/[A-Za-z0-9._~!$&'()*+,;=:@/-]*[A-Za-z0-9._~!$&'()*+,;=:@-])$",
       "examples": [
         "local://service/service_01",
+        "local://subscription/service_codex_01",
         "keyring://astrlink/subscription/service_codex_01"
       ],
-      "description": "Opaque, non-secret credential locator. local://service/<id> is the HTTP-service default; keyring:// is used by secure subscription adapters."
+      "description": "Opaque, non-secret credential locator. local://service/<id> is the HTTP-service default; local://subscription/<id> names a subscription account's sealed OAuth tokens; keyring:// remains on subscription accounts whose tokens have not yet moved out of the OS keystore."
     },
     "AuthScheme": {
       "type": "string",
@@ -493,7 +494,8 @@
         "request_body_max_bytes",
         "response_content_max_bytes",
         "metadata_retention_days",
-        "content_retention_days"
+        "content_retention_days",
+        "agent_raw_access_enabled"
       ],
       "properties": {
         "request_body_enabled": {
@@ -534,6 +536,11 @@
           "minimum": 1,
           "maximum": 365,
           "default": 7
+        },
+        "agent_raw_access_enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Lets agent tools ask for unfiltered audit parts. Each read still needs a desktop approval with proof."
         },
         "extensions": {
           "$ref": "#/$defs/Extensions"

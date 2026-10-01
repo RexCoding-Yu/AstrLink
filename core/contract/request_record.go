@@ -168,6 +168,34 @@ type ErrorSummary struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
+	// Upstream is the provider's own HTTP error response, kept verbatim.
+	Upstream *UpstreamErrorResponse `json:"upstream,omitempty"`
+}
+
+// MaxUpstreamErrorBodyBytes bounds the verbatim upstream error body a failed
+// record keeps; anything longer is cut and marked truncated.
+const MaxUpstreamErrorBodyBytes = 16 * 1024
+
+// UpstreamErrorResponse is an upstream HTTP error as the provider sent it:
+// its status, media type, and decoded body text, unredacted.
+type UpstreamErrorResponse struct {
+	Status      int    `json:"status"`
+	ContentType string `json:"content_type,omitempty"`
+	Body        string `json:"body"`
+	Truncated   bool   `json:"truncated"`
+}
+
+func (response UpstreamErrorResponse) Validate() error {
+	if response.Status < 400 || response.Status > 599 {
+		return fmt.Errorf("upstream error status must be between 400 and 599")
+	}
+	if utf8.RuneCountInString(response.ContentType) > 256 {
+		return fmt.Errorf("upstream error content type must not exceed 256 characters")
+	}
+	if len(response.Body) > MaxUpstreamErrorBodyBytes || !utf8.ValidString(response.Body) {
+		return fmt.Errorf("upstream error body must be valid UTF-8 within %d bytes", MaxUpstreamErrorBodyBytes)
+	}
+	return nil
 }
 
 var errorSummaryTokenPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -183,6 +211,9 @@ func (summary ErrorSummary) Validate() error {
 	}
 	if summary.Message == "" || utf8.RuneCountInString(summary.Message) > 1024 {
 		return fmt.Errorf("error message must contain 1 to 1024 characters")
+	}
+	if summary.Upstream != nil {
+		return summary.Upstream.Validate()
 	}
 	return nil
 }
@@ -252,6 +283,78 @@ func (summary PrivacyRestoreSummary) Validate() error {
 			return fmt.Errorf("privacy restore hit kinds must be unique")
 		}
 		seen[hit.Kind] = struct{}{}
+	}
+	return nil
+}
+
+// PrivacyDecision is the structured request-time privacy outcome. Retries of
+// one request combine to the most severe decision any attempt reached, since
+// they all forwarded the same client body.
+type PrivacyDecision string
+
+const (
+	// PrivacyDecisionNone means no privacy policy applied to the request.
+	PrivacyDecisionNone     PrivacyDecision = "none"
+	PrivacyDecisionAllow    PrivacyDecision = "allow"
+	PrivacyDecisionWarn     PrivacyDecision = "warn"
+	PrivacyDecisionRedact   PrivacyDecision = "redact"
+	PrivacyDecisionBlock    PrivacyDecision = "block"
+	PrivacyDecisionFailOpen PrivacyDecision = "fail_open"
+)
+
+const (
+	MaxPrivacyFindings         = 64
+	MaxPrivacyFindingPathRunes = 256
+)
+
+func (decision PrivacyDecision) Valid() bool {
+	return decision.Severity() > 0
+}
+
+// Severity orders decisions by how much of the client body they withheld from
+// the upstream; unknown values are 0.
+func (decision PrivacyDecision) Severity() int {
+	switch decision {
+	case PrivacyDecisionNone:
+		return 1
+	case PrivacyDecisionAllow:
+		return 2
+	case PrivacyDecisionWarn:
+		return 3
+	case PrivacyDecisionFailOpen:
+		return 4
+	case PrivacyDecisionRedact:
+		return 5
+	case PrivacyDecisionBlock:
+		return 6
+	default:
+		return 0
+	}
+}
+
+// PrivacyFinding says where accepted matches of one kind were found. It is
+// stored for block and redact so a withheld body can still be explained; it
+// never contains the matched value or a placeholder.
+type PrivacyFinding struct {
+	Kind     CanonicalKind `json:"kind"`
+	JSONPath string        `json:"json_path"`
+	Count    int           `json:"count"`
+}
+
+func validatePrivacyFindings(findings []PrivacyFinding) error {
+	if len(findings) > MaxPrivacyFindings {
+		return fmt.Errorf("privacy_findings must contain at most %d items", MaxPrivacyFindings)
+	}
+	for _, finding := range findings {
+		if !finding.Kind.Valid() {
+			return fmt.Errorf("privacy finding kind is invalid")
+		}
+		if err := validateBoundedText("privacy finding json_path", finding.JSONPath, MaxPrivacyFindingPathRunes, false); err != nil {
+			return err
+		}
+		if finding.Count < 1 {
+			return fmt.Errorf("privacy finding counts must be positive")
+		}
 	}
 	return nil
 }
@@ -364,19 +467,27 @@ type RequestRecord struct {
 	RoutingDecision    *RequestRoutingDecision `json:"routing_decision,omitempty"`
 	LocalAccessTokenID *AccessTokenID          `json:"local_access_token_id"`
 	Plan               *ExecutionPlan          `json:"plan"`
-	HTTPStatus         *int                    `json:"http_status"`
-	LatencyMs          *int                    `json:"latency_ms"`
+	// ConversionDiagnostics lists what this attempt's local protocol
+	// conversion dropped or rewrote; empty for unconverted plans and
+	// historical records.
+	ConversionDiagnostics []ConversionDiagnostic `json:"conversion_diagnostics,omitempty"`
+	HTTPStatus            *int                   `json:"http_status"`
+	LatencyMs             *int                   `json:"latency_ms"`
 	// FirstTokenMs measures upstream send to first generated stream content
 	// (text, reasoning, or tool call). Nil for non-streaming and historical calls.
-	FirstTokenMs       *int                   `json:"first_token_ms"`
-	Usage              *Usage                 `json:"usage"`
-	Error              *ErrorSummary          `json:"error"`
-	Audit              AuditRecordSummary     `json:"audit"`
-	PrivacyRestore     *PrivacyRestoreSummary `json:"privacy_restore"`
-	SessionID          *SessionID             `json:"session_id"`
-	PreviousResponseID *string                `json:"previous_response_id"`
-	OutputResponseID   *string                `json:"output_response_id"`
-	InputPreview       *string                `json:"input_preview"`
+	FirstTokenMs   *int                   `json:"first_token_ms"`
+	Usage          *Usage                 `json:"usage"`
+	Error          *ErrorSummary          `json:"error"`
+	Audit          AuditRecordSummary     `json:"audit"`
+	PrivacyRestore *PrivacyRestoreSummary `json:"privacy_restore"`
+	// PrivacyDecision is nil on historical records and while the decision is
+	// still pending.
+	PrivacyDecision    *PrivacyDecision `json:"privacy_decision,omitempty"`
+	PrivacyFindings    []PrivacyFinding `json:"privacy_findings,omitempty"`
+	SessionID          *SessionID       `json:"session_id"`
+	PreviousResponseID *string          `json:"previous_response_id"`
+	OutputResponseID   *string          `json:"output_response_id"`
+	InputPreview       *string          `json:"input_preview"`
 	// TurnIndex is the 1-based user turn within the session. Every model call
 	// of one agent loop shares the same value. Null when the protocol has no
 	// user turns or on legacy rows.
@@ -502,6 +613,15 @@ func (record RequestRecord) Validate() error {
 		if err := record.PrivacyRestore.Validate(); err != nil {
 			return err
 		}
+	}
+	if record.PrivacyDecision != nil && !record.PrivacyDecision.Valid() {
+		return fmt.Errorf("unknown privacy decision %q", *record.PrivacyDecision)
+	}
+	if err := validatePrivacyFindings(record.PrivacyFindings); err != nil {
+		return err
+	}
+	if err := validateConversionDiagnostics(record.ConversionDiagnostics); err != nil {
+		return err
 	}
 	if record.SessionID != nil {
 		if err := record.SessionID.Validate(); err != nil {

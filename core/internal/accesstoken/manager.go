@@ -130,6 +130,11 @@ func (manager *Manager) Authenticate(ctx context.Context, raw string) (contract.
 		}
 		return "", fmt.Errorf("authenticate access token: %w", err)
 	}
+	// The stored value stays sealed on this path; the hint still ties the
+	// metadata row to the presented token.
+	if token.Hint != tokenHint(raw) {
+		return "", ErrInvalidToken
+	}
 	return token.ID, nil
 }
 

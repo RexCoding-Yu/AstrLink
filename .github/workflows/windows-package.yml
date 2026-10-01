@@ -32,18 +32,22 @@ jobs:
       run:
         working-directory: apps/desktop
     steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # Never restore a cached Bun binary into a job that holds release secrets.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
+          no-cache: true
       - name: Configure Bun cache
         run: '"BUN_INSTALL_CACHE_DIR=$env:RUNNER_TEMP/bun-cache" >> $env:GITHUB_ENV'
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.BUN_INSTALL_CACHE_DIR }}
           key: bun-packages-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/bun.lock') }}
           restore-keys: bun-packages-v1-${{ runner.os }}-${{ runner.arch }}-
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: core/go.mod
           cache-dependency-path: |
@@ -86,8 +90,10 @@ jobs:
       run:
         working-directory: apps/desktop
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: core/go.mod
           cache-dependency-path: |
@@ -96,17 +102,21 @@ jobs:
             convo/go.mod
             contracts/go.mod
             contracts/go.sum
-      - uses: oven-sh/setup-bun@v2
+      # Never restore a cached Bun binary into a job that holds release secrets.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
+          no-cache: true
       - name: Configure Bun cache
         run: '"BUN_INSTALL_CACHE_DIR=$env:RUNNER_TEMP/bun-cache" >> $env:GITHUB_ENV'
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.BUN_INSTALL_CACHE_DIR }}
           key: bun-packages-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/bun.lock') }}
           restore-keys: bun-packages-v1-${{ runner.os }}-${{ runner.arch }}-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
       - name: Compute worker executable cache key
         id: keys
         shell: pwsh
@@ -121,7 +131,7 @@ jobs:
           # symlink into the ort download cache; build-sidecar.mjs now stores
           # a real copy, so older entries must never be reused.
           "workers=windows-workers-v3-$hash-$env:WORKER_HASH" >> $env:GITHUB_OUTPUT
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: astrlink-native
           env-vars: ImageOS ImageVersion MACOSX_DEPLOYMENT_TARGET
@@ -133,7 +143,7 @@ jobs:
           cache-directories: apps/privacy-worker/target/onnxruntime
       - name: Restore unchanged worker executables
         id: workers
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           # No prefix fallback: skipping compilation requires identical sources and tools.
           key: ${{ steps.keys.outputs.workers }}
@@ -168,7 +178,7 @@ jobs:
         run: ./scripts/verify-windows-package.ps1
       - name: Save verified worker executables
         if: steps.workers.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           key: ${{ steps.keys.outputs.workers }}
           path: |
@@ -188,7 +198,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun scripts/release-updates.mjs stage windows-x86_64 "$env:RELEASE_TAG"
       - name: Upload candidate installer
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows-candidate-${{ github.sha }}
           path: apps/desktop/package/*
@@ -196,7 +206,7 @@ jobs:
           retention-days: 3
       - name: Upload startup diagnostics
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Windows-smoke-diagnostics
           path: ${{ runner.temp }}/astrlink-smoke/*
@@ -208,11 +218,11 @@ jobs:
     needs: [checks, package]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-candidate-${{ github.sha }}
           path: installer
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: AstrLink-Windows-x86_64
           path: installer/*
