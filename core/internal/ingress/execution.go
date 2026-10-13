@@ -160,6 +160,14 @@ func (handler *Handler) executeCandidatesWithTest(
 	var lastNetworkFailure executionFailure
 	var replayLastHTTP func()
 	records := recordSessionFromContext(request.Context())
+	// Privacy was decided once before routing; every attempt (and every
+	// failover) restores from the same redactions. There is no per-candidate
+	// privacy call left in this loop.
+	privacyResult := privacyOutcome{}
+	if records != nil && records.privacy != nil {
+		privacyResult = records.privacy.outcome
+	}
+	redactions := privacyResult.redactions
 	for {
 		candidateIndex, hasNext := schedule.next(request.Context())
 		if !hasNext {
@@ -295,32 +303,12 @@ func (handler *Handler) executeCandidatesWithTest(
 		}
 
 		resetResponseHeaders(downstream.Header(), initialHeaders)
-		finishPrivacy, privacyResult, privacyErr := handler.applyPrivacy(
-			downstream,
-			attemptRequest,
-			classified,
-			candidate.Service.ID,
-		)
-		redactions := privacyResult.redactions
-		if request.Context().Err() != nil {
-			finishPrivacy()
-			_ = attemptRequest.Body.Close()
-			return
-		}
-		if privacyErr != nil {
-			finishPrivacy()
-			_ = attemptRequest.Body.Close()
-			records.noteAttemptedService(candidate.Service.ID)
-			handler.writePrivacyError(downstream, request, privacyErr)
-			return
-		}
 		// conversion belongs to this attempt only: its state must reach this
 		// attempt's response conversion and never a retry's.
 		var conversion relaykitbridge.ConvertRequestOutput
 		if plan.Type == contract.PlanTypeRelayKit {
 			convertedInput, readErr := io.ReadAll(attemptRequest.Body)
 			if readErr != nil {
-				finishPrivacy()
 				_ = attemptRequest.Body.Close()
 				last = executionFailure{kind: executionFailureConversionUnsupported, err: readErr, endpointID: candidate.Service.ID}
 				records.noteCandidateRejected(last.endpointID, last.code())
@@ -333,7 +321,6 @@ func (handler *Handler) executeCandidatesWithTest(
 				Body: convertedInput, PublicModel: classified.Model, UpstreamModel: upstreamModel, Streaming: classified.Streaming,
 			})
 			if convertErr != nil || adaptRelayKitRequest(attemptRequest, plan.UpstreamProtocol, classified.Streaming, upstreamModel, conversion.Body) != nil {
-				finishPrivacy()
 				last = executionFailure{kind: executionFailureConversionUnsupported, err: convertErr, endpointID: candidate.Service.ID}
 				records.noteCandidateRejected(last.endpointID, last.code())
 				continue
@@ -369,7 +356,6 @@ func (handler *Handler) executeCandidatesWithTest(
 				}
 				forced, err := prepareCodexSubscriptionRequest(attemptRequest, plan.UpstreamProtocol, options)
 				if err != nil {
-					finishPrivacy()
 					kind := executionFailureConfiguration
 					if converted {
 						kind = executionFailureConversionUnsupported
@@ -416,7 +402,6 @@ func (handler *Handler) executeCandidatesWithTest(
 					}
 				}
 				if err := prepareClaudeSubscriptionRequest(attemptRequest, options); err != nil {
-					finishPrivacy()
 					last = executionFailure{kind: executionFailureConfiguration, endpointID: candidate.Service.ID, err: err}
 					records.noteCandidateRejected(last.endpointID, last.code())
 					continue
@@ -447,7 +432,6 @@ func (handler *Handler) executeCandidatesWithTest(
 			authorizeErr = headersErr
 		}
 		if authorizeErr != nil {
-			finishPrivacy()
 			_ = attemptRequest.Body.Close()
 			if request.Context().Err() != nil {
 				return
@@ -468,7 +452,6 @@ func (handler *Handler) executeCandidatesWithTest(
 		}
 		baseURL, parseErr := url.Parse(candidate.BaseURL)
 		if parseErr != nil {
-			finishPrivacy()
 			_ = attemptRequest.Body.Close()
 			last = executionFailure{
 				kind:       executionFailureConfiguration,
@@ -498,7 +481,6 @@ func (handler *Handler) executeCandidatesWithTest(
 				rateLimited = append(rateLimited, endpoint.RateLimitedCandidate{
 					Service: candidate.Service.ID, ServiceName: candidate.Service.Name, Model: upstreamModel, Until: until,
 				})
-				finishPrivacy()
 				_ = attemptRequest.Body.Close()
 				if !body.Replayable() {
 					break
@@ -559,7 +541,6 @@ func (handler *Handler) executeCandidatesWithTest(
 				outWriter, handler.conversionEngine, plan, classified.Model, upstreamModel, conversion.State,
 			)
 			if planErr != nil {
-				finishPrivacy()
 				_ = attemptRequest.Body.Close()
 				last = executionFailure{kind: executionFailureConversionUnsupported, err: planErr, endpointID: candidate.Service.ID}
 				continue
@@ -701,6 +682,22 @@ func (handler *Handler) executeCandidatesWithTest(
 					}
 				}
 				recovering := false
+				if repaired != nil {
+					// A repaired body is derived content, not the preflight's
+					// sanitized bytes: rebuilding it can move text into positions
+					// the detector treats differently. Re-inspect it under the
+					// same policy before it may leave; an unusable repair just
+					// falls back to normal failure handling.
+					sanitized, extraRedactions, usable := handler.sanitizeRepairedBody(request.Context(), records, classified.Protocol, repaired)
+					if !usable {
+						repaired = nil
+					} else {
+						repaired = sanitized
+						if len(extraRedactions) > 0 {
+							redactions = append(redactions, extraRedactions...)
+						}
+					}
+				}
 				if repaired != nil && schedule.repair(candidateIndex) {
 					repairedTargets[repairTarget] = repaired
 					recovering = true
@@ -796,7 +793,6 @@ func (handler *Handler) executeCandidatesWithTest(
 		if retryHTTP == nil && relayWriter != nil && forwardErr != nil && !downstream.Committed() {
 			_ = relayWriter.streamClose()
 		}
-		finishPrivacy()
 		_ = attemptRequest.Body.Close()
 
 		if retryHTTP != nil {

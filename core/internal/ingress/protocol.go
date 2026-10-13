@@ -50,14 +50,22 @@ type Request struct {
 	Conversation convo.RequestSummary
 	// lastUserText is classifier input only. Never persist, log, or cache it.
 	lastUserText string
+	// routingText is a bounded, request-local text view for literal keyword facts.
+	routingText string
 	// RedirectedModel is the routing model chosen by an enabled model
 	// redirect rule. Model keeps the client's original id so records still
 	// report what the client asked for.
 	RedirectedModel string
+	// ModelRoutingMember is the concrete target selected from a virtual group.
+	// It is internal and never serialized or forwarded to an upstream.
+	ModelRoutingMember *contract.ModelRoutingMember
 }
 
 // routingModel is the model id used to select services and sent upstream.
 func (request Request) routingModel() string {
+	if request.ModelRoutingMember != nil {
+		return request.ModelRoutingMember.Model
+	}
 	if request.RedirectedModel != "" {
 		return request.RedirectedModel
 	}
@@ -134,6 +142,7 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 		if err != nil {
 			return Request{}, err
 		}
+		result.routingText = boundedRoutingText(raw)
 		attachAutoClassifyText(&result, request, raw, maxBodyBytes)
 		return validateClassifiedRequest(result)
 	}
@@ -154,6 +163,7 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	result.ConversationID = metadata.ConversationID
 	result.InputPreview = metadata.InputPreview
 	result.Conversation = metadata.Conversation
+	result.routingText = boundedRoutingText(metadata.raw)
 	if result.Protocol == contract.ProtocolOpenAIResponses || result.Protocol == contract.ProtocolOpenAIResponsesCompact {
 		// Read the caller's identity before subscription forwarding scopes it
 		// to an upstream account. A fork can retain its parent's cache key and
@@ -169,6 +179,32 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	}
 	attachAutoClassifyText(&result, request, metadata.raw, maxBodyBytes)
 	return validateClassifiedRequest(result)
+}
+
+func boundedRoutingText(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if len(raw) > 64*1024 {
+		raw = raw[:64*1024]
+	}
+	return string(raw)
+}
+
+// classifiedWithSanitizedText rebuilds every text view the routing evaluator
+// reads from the sanitized request bytes. Routing facts must not keep a
+// pre-redaction copy: the classifier and literal keyword matching share the
+// same sanitized view the upstreams receive.
+func classifiedWithSanitizedText(classified Request, sanitized []byte) Request {
+	classified.routingText = boundedRoutingText(sanitized)
+	// Unconditional reassignment: a pre-redaction copy must never survive the
+	// rebuild, even when the sanitized body yields no extractable user text —
+	// the empty extraction is the sanitized truth, not a reason to keep raw text.
+	extracted := autotext.ExtractLastUserText(classified.Protocol, sanitized)
+	classified.lastUserText = extracted
+	classified.Conversation.LastUserText = extracted
+	classified.InputPreview = sanitizePreview(extracted)
+	return classified
 }
 
 func validateClassifiedRequest(request Request) (Request, error) {

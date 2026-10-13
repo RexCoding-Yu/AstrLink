@@ -3,8 +3,10 @@ package controlapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 const RoutingSettingsPath = "/control/v1/routing-settings"
@@ -79,6 +81,8 @@ func (handler *Handler) routingSettingsResource(writer http.ResponseWriter, requ
 				destination = &settings.BuiltinTools
 			case "model_redirects":
 				destination = &settings.ModelRedirects
+			case "model_routing_groups":
+				destination = &settings.ModelRoutingGroups
 			case "channel_stickiness":
 				destination = &settings.ChannelStickiness
 			case "default_failure_policy":
@@ -100,11 +104,21 @@ func (handler *Handler) routingSettingsResource(writer http.ResponseWriter, requ
 		}
 		settings = normalizeRoutingSettings(settings)
 		if err := settings.Validate(); err != nil {
-			writeError(writer, http.StatusUnprocessableEntity, "invalid_routing_settings", err.Error())
+			code := "invalid_routing_settings"
+			if strings.Contains(err.Error(), "unsupported_routing_field") {
+				code = "unsupported_routing_field"
+			}
+			writeError(writer, http.StatusUnprocessableEntity, code, err.Error())
 			return
 		}
-		if err := handler.routingSettings.UpdateRoutingSettings(request.Context(), settings); err != nil {
-			handler.writeStoreError(writer, err)
+		var updateErr error
+		if coordinator, ok := handler.routingSettings.(storage.ModelRoutingWriteCoordinator); ok {
+			updateErr = coordinator.UpdateRoutingSettingsAtomic(request.Context(), settings)
+		} else {
+			updateErr = handler.routingSettings.UpdateRoutingSettings(request.Context(), settings)
+		}
+		if updateErr != nil {
+			handler.writeStoreError(writer, updateErr)
 			return
 		}
 		writeJSON(writer, http.StatusOK, settings)
@@ -119,6 +133,9 @@ func (handler *Handler) routingSettingsResource(writer http.ResponseWriter, requ
 func normalizeRoutingSettings(settings contract.RoutingSettings) contract.RoutingSettings {
 	if settings.ModelRedirects == nil {
 		settings.ModelRedirects = []contract.ModelRedirect{}
+	}
+	if settings.ModelRoutingGroups == nil {
+		settings.ModelRoutingGroups = []contract.ModelRoutingGroup{}
 	}
 	return settings
 }

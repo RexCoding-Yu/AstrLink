@@ -22,28 +22,15 @@ func (store *Store) GetRoutingSettings(ctx context.Context) (contract.RoutingSet
 	if settings.ModelRedirects == nil {
 		settings.ModelRedirects = []contract.ModelRedirect{}
 	}
+	if settings.ModelRoutingGroups == nil {
+		settings.ModelRoutingGroups = []contract.ModelRoutingGroup{}
+	}
 	if err := settings.Validate(); err != nil {
 		return settings, fmt.Errorf("%w: routing settings: %v", storage.ErrInvalidRecord, err)
 	}
 	return settings, nil
 }
 
-func (store *Store) UpdateRoutingSettings(ctx context.Context, settings contract.RoutingSettings) (err error) {
-	tx, err := store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer rollbackOnError(tx, &err)
-	if err := settings.Validate(); err != nil {
-		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
-	}
-	document, err := json.Marshal(settings)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `UPDATE routing_settings SET document_json = ? WHERE id = 1`, string(document))
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+func (store *Store) UpdateRoutingSettings(ctx context.Context, settings contract.RoutingSettings) error {
+	return store.UpdateRoutingSettingsAtomic(ctx, settings)
 }

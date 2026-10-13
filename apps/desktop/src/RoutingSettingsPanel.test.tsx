@@ -17,10 +17,7 @@ import {
   subscriptionProtectionKeys,
   type FailurePolicy,
 } from "./failure-policy-model";
-import {
-  RoutingSettingsPanel,
-  routingAutosaveDelay,
-} from "./RoutingSettingsPanel";
+import { RoutingSettingsPanel } from "./RoutingSettingsPanel";
 import { RecoveryChain, RecoveryDetails } from "./components/RecoveryDetails";
 import type { RequestRecord } from "./request-record-model";
 import { applyLocale } from "./i18n";
@@ -56,8 +53,18 @@ describe("shared global recovery settings", () => {
     vi.useRealTimers();
   });
 
+  /** The only path that submits a draft now; kept named after the old timer. */
+  function saveButton() {
+    return [...container.querySelectorAll("button")].find(
+      (element) => element.textContent === "保存",
+    );
+  }
+
   async function flushAutosave() {
-    await act(async () => vi.advanceTimersByTimeAsync(routingAutosaveDelay));
+    await act(async () => {
+      saveButton()?.click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
   }
 
   async function selectTab(label: string) {
@@ -584,9 +591,9 @@ describe("shared global recovery settings", () => {
       ),
     );
     expect(
-      [...container.querySelectorAll('[role="tab"]')].map(
-        (tab) => tab.textContent,
-      ),
+      [
+        ...container.querySelectorAll('[data-slot="tabs-list"] [role="tab"]'),
+      ].map((tab) => tab.textContent),
     ).toEqual(["模型与工具", "恢复与重试", "错误规则", "会话粘性", "转发身份"]);
     await selectTab("恢复与重试");
     await act(async () =>
@@ -794,9 +801,10 @@ describe("shared global recovery settings", () => {
       )!.set!.call(input, "gpt-");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
+    // Half-typed text is not a draft; the explicit save refuses to submit it.
     await flushAutosave();
     expect(bridge.updateRoutingSettings).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("输入完成后自动保存");
+    expect(container.textContent).toContain("输入完成后可保存");
     await typeRedirect("Codex 自动审查的目标模型", "gpt-5");
     await flushAutosave();
     expect(bridge.updateRoutingSettings).toHaveBeenCalledExactlyOnceWith({
@@ -856,7 +864,7 @@ describe("shared global recovery settings", () => {
       ],
     });
     expect(dirty).toHaveBeenLastCalledWith(false);
-    expect(container.textContent).toContain("已自动保存");
+    expect(container.textContent).toContain("已保存");
   });
 
   it("keeps failed edits without retrying in a loop and retries after another edit", async () => {
@@ -874,14 +882,15 @@ describe("shared global recovery settings", () => {
     );
     await typeRedirect("Codex 自动审查的目标模型", "gpt-5");
     await flushAutosave();
-    expect(container.textContent).toContain("自动保存失败，修改已保留。");
+    expect(container.textContent).toContain("保存失败，修改已保留。");
     expect(redirectField("Codex 自动审查的目标模型").value).toBe("gpt-5");
+    // A failed save stays put; nothing retries on its own.
     await act(async () => vi.advanceTimersByTimeAsync(10000));
     expect(bridge.updateRoutingSettings).toHaveBeenCalledTimes(1);
     await typeRedirect("Codex 自动审查的目标模型", "claude-sonnet-4-5");
     await flushAutosave();
     expect(bridge.updateRoutingSettings).toHaveBeenCalledTimes(2);
-    expect(container.textContent).not.toContain("自动保存失败");
+    expect(container.textContent).not.toContain("保存失败");
   });
 
   it("blocks saving until every redirect is valid", async () => {

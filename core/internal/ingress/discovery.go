@@ -52,12 +52,10 @@ const (
 )
 
 type discoveryResult struct {
-	outcome    discoveryOutcome
-	entries    []discoveryEntry
-	warning    string
-	failure    executionFailure
-	privacyErr error
-	rateLimit  *endpoint.RateLimitedCandidate
+	outcome   discoveryOutcome
+	entries   []discoveryEntry
+	failure   executionFailure
+	rateLimit *endpoint.RateLimitedCandidate
 }
 
 // discoveryEntry keeps the upstream's original entry bytes together with the
@@ -107,27 +105,9 @@ func (handler *Handler) aggregateModelDiscovery(
 	if request.Context().Err() != nil {
 		return
 	}
-	// Privacy stays fail closed for the whole request, matching the execution
-	// path: an unavailable or blocking policy must not be silently narrowed
-	// into skipping one endpoint's contribution.
-	for _, result := range results {
-		if result.privacyErr != nil {
-			handler.writePrivacyError(writer, request, result.privacyErr)
-			return
-		}
-	}
-	if session := recordSessionFromContext(request.Context()); session != nil {
-		decision := "allow"
-		outcome := contract.PrivacyDecisionAllow
-		for _, result := range results {
-			if result.warning != "" {
-				decision = "warn"
-				outcome = contract.PrivacyDecisionWarn
-			}
-		}
-		session.notePrivacyDecision(decision, contract.RequestStatusSucceeded)
-		session.notePrivacyOutcome(outcome, nil)
-	}
+	// Privacy was decided by the single request-level preflight before the
+	// candidates were resolved; a blocking or unavailable policy never reaches
+	// this aggregation. Nothing per-service remains here.
 	merged, succeeded := mergeDiscoveryEntries(results)
 	if succeeded == 0 {
 		handler.writeDiscoveryFailure(writer, request, classified, results)
@@ -139,7 +119,12 @@ func (handler *Handler) aggregateModelDiscovery(
 			visible = append(visible, entry)
 		}
 	}
-	merged, err := appendRedirectDiscoveryEntries(classified.Protocol, visible, redirects)
+	var err error
+	visible, err = appendModelRoutingDiscoveryEntries(classified.Protocol, visible, settingsGroupsFromSession(request.Context()))
+	if err == nil {
+		visible, err = appendRedirectDiscoveryEntries(classified.Protocol, visible, redirects)
+	}
+	merged = visible
 	var body []byte
 	if err == nil {
 		if wantsCodexModelCatalog(request, classified.Protocol) {
@@ -160,11 +145,6 @@ func (handler *Handler) aggregateModelDiscovery(
 		return
 	}
 	header := writer.Header()
-	for _, result := range results {
-		if result.outcome == discoveryOutcomeFetched && result.warning != "" {
-			header.Set(PolicyWarningHeader, result.warning)
-		}
-	}
 	header.Set("Cache-Control", "no-store")
 	header.Set("Content-Type", "application/json")
 	header.Set("X-Content-Type-Options", "nosniff")
@@ -223,7 +203,8 @@ func (handler *Handler) fetchModelDiscovery(
 	fetchContext, cancelFetch := context.WithTimeout(request.Context(), defaultDiscoveryTimeout)
 	defer cancelFetch()
 	// Discovery fans out concurrently; only the aggregator may mutate the
-	// client request record. Policy evaluation still runs for each service.
+	// client request record. Privacy is the request-level preflight in
+	// ServeHTTP; the fetch below has no body to inspect.
 	fetchRequest := request.Clone(withRecordSession(fetchContext, nil))
 	fetchRequest.Body = http.NoBody
 	fetchRequest.GetBody = nil
@@ -236,20 +217,6 @@ func (handler *Handler) fetchModelDiscovery(
 	fetchRequest.Header.Set("Accept-Encoding", transport.SupportedResponseEncodings)
 
 	recorder := newDiscoveryResponseRecorder(maxResponseInspectionBytes)
-	finishPrivacy, _, privacyErr := handler.applyPrivacy(
-		recorder,
-		fetchRequest,
-		classified,
-		candidate.Service.ID,
-	)
-	finishPrivacy()
-	if request.Context().Err() != nil {
-		return discoveryResult{outcome: discoveryOutcomeAborted}
-	}
-	if privacyErr != nil {
-		return discoveryResult{outcome: discoveryOutcomeExcluded, privacyErr: privacyErr}
-	}
-
 	authorizationEndpoint, authorizeErr := candidate.AuthorizationEndpoint()
 	proxyContext := request.Context()
 	if authorizeErr == nil {
@@ -383,7 +350,6 @@ func (handler *Handler) fetchModelDiscovery(
 	return discoveryResult{
 		outcome: discoveryOutcomeFetched,
 		entries: entries,
-		warning: recorder.Header().Get(PolicyWarningHeader),
 	}
 }
 
@@ -540,6 +506,61 @@ func encodeDiscoveryList(protocol contract.ProtocolID, entries []discoveryEntry)
 // that is already listed keeps its entry, and targets are never hidden. The
 // retired astrlink/auto stays unlisted, and Gemini skips sources containing
 // "/" because they cannot form a models/<id> path segment.
+func settingsGroupsFromSession(ctx context.Context) []contract.ModelRoutingGroup {
+	session := recordSessionFromContext(ctx)
+	if session == nil || session.routingSettings == nil {
+		return nil
+	}
+	return session.routingSettings.ModelRoutingGroups
+}
+
+func appendModelRoutingDiscoveryEntries(protocol contract.ProtocolID, entries []discoveryEntry, groups []contract.ModelRoutingGroup) ([]discoveryEntry, error) {
+	if len(groups) == 0 {
+		return entries, nil
+	}
+	listed := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		listed[discoveryModelID(protocol, entry.id)] = struct{}{}
+	}
+	for _, group := range groups {
+		if !group.Enabled || group.Validate() != nil {
+			continue
+		}
+		available := true
+		for _, member := range group.Members {
+			if _, ok := listed[member.Model]; !ok {
+				available = false
+				break
+			}
+		}
+		if !available || group.PublicModelID() == contract.AstrLinkAutoModelID {
+			continue
+		}
+		publicID := group.PublicModelID()
+		if _, exists := listed[publicID]; exists {
+			continue
+		}
+		var raw json.RawMessage
+		var err error
+		if protocol == contract.ProtocolGoogleModels {
+			raw, err = json.Marshal(googleSynthesizedModel{Name: "models/" + publicID, DisplayName: publicID})
+		} else {
+			raw, err = json.Marshal(openAISynthesizedModel{ID: publicID, Object: "model", Created: 0, OwnedBy: "system"})
+		}
+		if err != nil {
+			return nil, err
+		}
+		entryID := publicID
+		if protocol == contract.ProtocolGoogleModels {
+			entryID = "models/" + publicID
+		}
+		entries = append(entries, discoveryEntry{id: entryID, raw: raw})
+		listed[publicID] = struct{}{}
+	}
+	sort.Slice(entries, func(left, right int) bool { return entries[left].id < entries[right].id })
+	return entries, nil
+}
+
 func appendRedirectDiscoveryEntries(
 	protocol contract.ProtocolID,
 	entries []discoveryEntry,

@@ -1,4 +1,8 @@
 import { parseBuiltinTools, type BuiltinTools } from "./builtin-tools-model";
+import {
+  parseModelRoutingGroups,
+  type ModelRoutingGroup,
+} from "./model-routing-group-model";
 export type FailureAction =
   | "stop"
   | "retry"
@@ -200,6 +204,11 @@ export interface RoutingSettings {
   claude_identity_version?: string;
   grok_identity_version?: string;
   model_redirects?: ModelRedirect[];
+  /**
+   * Model routing groups, replaced wholesale by one PATCH. Absent means none;
+   * a present `null` is rejected, mirroring the control API.
+   */
+  model_routing_groups?: ModelRoutingGroup[];
   channel_stickiness?: ChannelStickiness;
   default_recovery_paths?: Record<string, string>;
   default_failure_policy: FailurePolicy;
@@ -470,6 +479,7 @@ export function parseRoutingSettings(value: unknown): RoutingSettings {
       "default_recovery_paths",
       "channel_stickiness",
       "model_redirects",
+      "model_routing_groups",
       "builtin_tools",
       ...forwardingSwitchKeys,
       ...identityVersionKeys,
@@ -477,6 +487,9 @@ export function parseRoutingSettings(value: unknown): RoutingSettings {
     "routing_settings",
   );
   const redirects = parseModelRedirects(settings.model_redirects);
+  const modelRoutingGroups = parseModelRoutingGroups(
+    settings.model_routing_groups,
+  );
   const parsed = parseFailoverPolicy({
     enabled: settings.allow_unmatched_failover,
     strategy: settings.strategy,
@@ -534,6 +547,7 @@ export function parseRoutingSettings(value: unknown): RoutingSettings {
     ) as Record<(typeof forwardingSwitchKeys)[number], boolean>),
     ...versions,
     model_redirects: redirects,
+    model_routing_groups: modelRoutingGroups,
     ...(settings.builtin_tools !== undefined
       ? { builtin_tools: parseBuiltinTools(settings.builtin_tools) }
       : {}),

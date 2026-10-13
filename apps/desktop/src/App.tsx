@@ -3,6 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Activity,
+  Brain,
   CircleHelp,
   Bot,
   Home as House,
@@ -44,6 +45,10 @@ import {
 } from "./core-model";
 import { Overview, type ServiceCatalog } from "./Overview";
 import { GettingStarted } from "./GettingStarted";
+import {
+  IntelligentRouting,
+  type IntelligentRoutingView,
+} from "./IntelligentRouting";
 import { useOnboarding } from "./use-onboarding";
 import { i18n, useT } from "./i18n";
 import { RequestGate } from "./request-gate";
@@ -84,6 +89,7 @@ type WorkspacePage =
   | { kind: "safety"; view?: "models" }
   | { kind: "records"; tokenId?: string }
   | { kind: "routing" }
+  | { kind: "intelligentRouting"; view?: IntelligentRoutingView }
   | { kind: "agentTools"; preselectSkill?: AgentSkillId }
   | { kind: "settings" }
   | { kind: "about" }
@@ -93,6 +99,7 @@ type IconName =
   | "about"
   | "activity"
   | "bot"
+  | "brain"
   | "home"
   | "key"
   | "route"
@@ -151,6 +158,7 @@ export function trayNavigationTarget(kind: unknown): WorkspacePage | null {
     case "safety":
     case "records":
     case "routing":
+    case "intelligentRouting":
     case "agentTools":
     case "settings":
     case "about":
@@ -171,6 +179,7 @@ const icons: Record<IconName, AnimatedIcon> = {
   server: Server,
   settings: Settings,
   shield: ShieldCheck,
+  brain: Brain,
 };
 
 function Icon({ className, name }: { className?: string; name: IconName }) {
@@ -615,10 +624,17 @@ export default function App() {
             next.serviceId !== page.serviceId));
       const leavingRouteEditor =
         page.kind === "routing" && next.kind !== "routing";
+      // The routing groups editor now lives under intelligent routing.
+      const leavingIntelligentRouting =
+        page.kind === "intelligentRouting" &&
+        next.kind !== "intelligentRouting";
       const leavingSettings =
         page.kind === "settings" && next.kind !== "settings";
       const leavingEditor =
-        leavingServiceEditor || leavingRouteEditor || leavingSettings;
+        leavingServiceEditor ||
+        leavingRouteEditor ||
+        leavingIntelligentRouting ||
+        leavingSettings;
       if (leavingEditor && editorDirtyRef.current) {
         setPendingPage(next);
         return;
@@ -843,8 +859,14 @@ export default function App() {
             <NavButton
               active={page.kind === "routing"}
               icon="route"
-              label={t("nav.routing")}
+              label={t("nav.providerRouting")}
               onClick={() => navigate({ kind: "routing" })}
+            />
+            <NavButton
+              active={page.kind === "intelligentRouting"}
+              icon="brain"
+              label={t("nav.intelligentRouting")}
+              onClick={() => navigate({ kind: "intelligentRouting" })}
             />
 
             <span className="mt-4 px-2 pb-1.5 text-xs font-medium tracking-[0.08em] text-muted-foreground uppercase max-[960px]:mx-2 max-[960px]:mt-3 max-[960px]:mb-2 max-[960px]:h-px max-[960px]:bg-border max-[960px]:p-0 max-[960px]:text-transparent">
@@ -915,6 +937,7 @@ export default function App() {
                 "records",
                 "safety",
                 "routing",
+                "intelligentRouting",
                 "agentTools",
                 "settings",
               ].includes(page.kind)
@@ -1042,6 +1065,13 @@ export default function App() {
               <RouteManager
                 services={catalog.items}
                 isReady={isReady}
+                onDirtyChange={handleEditorDirtyChange}
+              />
+            ) : page.kind === "intelligentRouting" ? (
+              <IntelligentRouting
+                initialView={page.view}
+                ready={isReady}
+                services={catalog.items}
                 onDirtyChange={handleEditorDirtyChange}
               />
             ) : page.kind === "agentTools" ? (

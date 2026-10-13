@@ -49,7 +49,9 @@ it("shows default-setting tabs and clears dirty state on unmount under StrictMod
     expect(
       container.querySelector('[data-testid="routing-defaults-panel"]'),
     ).not.toBeNull();
-    const tabs = [...container.querySelectorAll('[role="tab"]')];
+    const tabs = [
+      ...container.querySelectorAll('[data-slot="tabs-list"] [role="tab"]'),
+    ];
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "模型与工具",
       "恢复与重试",

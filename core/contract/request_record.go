@@ -457,6 +457,8 @@ type RequestRecord struct {
 	// ModelRedirect is set when a routing-settings redirect replaced
 	// RequestedModel for provider selection.
 	ModelRedirect *RequestModelRedirect `json:"model_redirect,omitempty"`
+	// ModelRouting records the selected member for a virtual model group.
+	ModelRouting *ModelRoutingDecision `json:"model_routing,omitempty"`
 	// ReasoningEffort is the explicitly requested level; nil means unspecified or historical.
 	ReasoningEffort *string    `json:"reasoning_effort"`
 	Streaming       bool       `json:"streaming"`
@@ -560,6 +562,11 @@ func (record RequestRecord) Validate() error {
 	if record.ModelRedirect != nil {
 		if err := record.ModelRedirect.Validate(); err != nil {
 			return err
+		}
+	}
+	if record.ModelRouting != nil {
+		if err := record.ModelRouting.Validate(); err != nil {
+			return fmt.Errorf("model_routing: %w", err)
 		}
 	}
 	if record.RoutingDecision != nil {

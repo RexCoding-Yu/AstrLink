@@ -56,6 +56,13 @@ import {
   type AccessTokenUsageResponse,
 } from "./access-token-model";
 import {
+  parseClassifierCredentialStatus,
+  parseClassifierDryRunResult,
+  parseClassifierSettings,
+  type ClassifierDryRunResult,
+  type ClassifierSettings,
+} from "./classifier-settings-model";
+import {
   parsePrivacyDryRunResult,
   parsePrivacyModelCatalog,
   parsePrivacyModelInstallation,
@@ -1169,4 +1176,49 @@ export async function builtinToolAction(
     action,
     input,
   });
+}
+
+/**
+ * The classifier settings are a singleton resource of their own: the provider
+ * routing whitelist in `failure_policy.rs` stays untouched, and no API key
+ * travels in this document.
+ */
+export async function getClassifierSettings(): Promise<ClassifierSettings> {
+  requireNativeBridge();
+  return parseClassifierSettings(
+    await invoke<unknown>("get_classifier_settings"),
+  );
+}
+
+export async function updateClassifierSettings(
+  settings: ClassifierSettings,
+): Promise<ClassifierSettings> {
+  requireNativeBridge();
+  return parseClassifierSettings(
+    await invoke<unknown>("update_classifier_settings", { settings }),
+  );
+}
+
+export async function classifierCredentialAction(
+  action: "status" | "save_key" | "delete_key",
+  secret?: string,
+): Promise<{ configured: boolean }> {
+  requireNativeBridge();
+  // The host declares this argument as `secret`; Tauri matches by name and
+  // passes None for anything it does not recognise, so `key` here silently
+  // reduced every save to "missing classifier API key".
+  return parseClassifierCredentialStatus(
+    await invoke<unknown>("classifier_credential_action", { action, secret }),
+  );
+}
+
+/** Runs one classification against the local Core; never a real upstream call. */
+export async function classifierDryRun(input: {
+  text: string;
+  group_id?: string;
+}): Promise<ClassifierDryRunResult> {
+  requireNativeBridge();
+  return parseClassifierDryRunResult(
+    await invoke<unknown>("classifier_dry_run", { input }),
+  );
 }

@@ -1,4 +1,5 @@
 import { i18n } from "./i18n";
+import { modelRoutingWireContract } from "./model-routing-wire-contract";
 
 export const CLIENT_TYPES = [
   "unknown",
@@ -142,6 +143,114 @@ export interface RoutingSkip {
 }
 
 /**
+ * Why the model routing group picked a member. This is a **separate namespace**
+ * from {@link RoutingSelection}, which explains provider selection only: a
+ * group-scoped session reuse is `group_binding`, never the provider-side
+ * `session_binding`.
+ */
+export type ModelRoutingSelectionSource =
+  | "rule"
+  | "default_member"
+  | "group_binding"
+  | "response_affinity"
+  | "websocket_connection";
+
+/** Lifecycle of the one logical route decision a request makes. */
+export type ModelRoutingExecutionState =
+  | "pending"
+  | "selected"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export type ModelRoutingPrivacyDecision =
+  | "none"
+  | "allow"
+  | "reject"
+  | "unknown";
+
+/**
+ * What one evaluated field contributed. Carries no prompt text, media URL,
+ * literal keyword or classifier raw text — only the field identity, its source,
+ * whether it was resolvable, and stable codes.
+ */
+export interface ModelRoutingFieldObservation {
+  field: string;
+  source: string;
+  known: boolean;
+  match_count?: number;
+  /** Upstream-reported score, passed through verbatim. Absent on every fallback. */
+  classifier_confidence?: number;
+  /** A stable classifier ID, never free text. */
+  classifier_id?: string;
+  skip_reason?: string;
+  error_code?: string;
+  /**
+   * The classifier's candidate sequence for this field: value, rank, score and
+   * which one was chosen. Absent on records written before the field existed
+   * and on fields that took no scored fallback — an empty array means the same
+   * thing, so both read as "no candidate detail" rather than being told apart.
+   *
+   * This carries no evaluation semantics: it is the shape the classifier
+   * returned, never an input to selection, comparison or scoring.
+   */
+  candidates?: ModelRoutingCandidateObservation[];
+}
+
+/** One candidate value the classifier returned for a field. */
+export interface ModelRoutingCandidateObservation {
+  value: string;
+  /** Upstream score, passed through verbatim; the upstream ranges it over 0–1. */
+  score: number;
+  /** 0-based rank within the candidate sequence. */
+  rank: number;
+  /** True for the candidate whose value was substituted into the condition. */
+  chosen: boolean;
+}
+
+export interface ModelRoutingExecution {
+  status: ModelRoutingExecutionState;
+  attempt_count: number;
+  error_code?: string;
+}
+
+/** One concrete attempt's privacy gate outcome. */
+export interface ModelRoutingPrivacyAttempt {
+  attempt_index: number;
+  service_id: string;
+  decision: ModelRoutingPrivacyDecision;
+  finding_count: number;
+  duration_ms: number;
+  error_code?: string;
+}
+
+/**
+ * The V1 model routing decision attached to a record. V1 has no Fusion fields:
+ * branch, lead/sidekick, compaction and dual-route cost are absent from the
+ * schema entirely, not present as empty placeholders.
+ */
+export interface ModelRoutingDecision {
+  schema_version: number;
+  virtual_model_id: string;
+  group_id: string;
+  config_snapshot_version: string;
+  selection_source: ModelRoutingSelectionSource;
+  rule_id?: string;
+  rule_priority?: number;
+  used_default: boolean;
+  fields: ModelRoutingFieldObservation[];
+  member_id: string;
+  member_service_id: string;
+  member_model: string;
+  fallback_reason?: string;
+  execution: ModelRoutingExecution;
+  privacy_attempts: ModelRoutingPrivacyAttempt[];
+  duration_ms: number;
+  classifier_duration_ms?: number;
+  error_code?: string;
+}
+
+/**
  * Why routing chose service_id. `selected` is absent when no provider could be
  * selected. `skipped` lists, in priority order, the providers ranked ahead of
  * service_id that routing excluded (every excluded provider when none was
@@ -229,6 +338,11 @@ export interface RequestRecord {
   service_id: string | null;
   /** Absent on historical records, discovery, and pending calls. */
   routing_decision?: RequestRoutingDecision;
+  /**
+   * The model routing group decision; absent on historical records and on calls
+   * that did not name a virtual `astrlink/<slug>` model. Absence is not an error.
+   */
+  model_routing?: ModelRoutingDecision;
   /** Absent when this attempt's conversion lost nothing or none ran. */
   conversion_diagnostics?: ConversionDiagnostic[];
   local_access_token_id: string | null;
@@ -473,6 +587,14 @@ function nullableStringAt(value: unknown, path: string): string | null {
 function intAt(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isInteger(value)) {
     return invalid(path, "应为整数");
+  }
+  return value;
+}
+
+/** A finite float: classifier confidence is a ratio, not a count. */
+function numberAt(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return invalid(path, "应为数字");
   }
   return value;
 }
@@ -791,6 +913,193 @@ function optionalRoutingDecision(
   return { routing_decision: parsed };
 }
 
+const modelRoutingSelectionSources = new Set<ModelRoutingSelectionSource>([
+  "rule",
+  "default_member",
+  "group_binding",
+  "response_affinity",
+  "websocket_connection",
+]);
+const modelRoutingExecutionStates = new Set<ModelRoutingExecutionState>([
+  "pending",
+  "selected",
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+const modelRoutingPrivacyDecisions = new Set<ModelRoutingPrivacyDecision>([
+  "none",
+  "allow",
+  "reject",
+  "unknown",
+]);
+
+/** V1 decision schema version; anything else is a shape this build cannot read. */
+const modelRoutingSchemaVersion = 1;
+const maxModelRoutingObservations = 64;
+const maxModelRoutingPrivacyAttempts = 64;
+const maxModelRoutingCandidates = 64;
+
+function optionalModelRouting(
+  value: unknown,
+  path: string,
+): { model_routing?: ModelRoutingDecision } {
+  if (value == null) return {};
+  const decision = objectAt(value, path);
+  if (decision.schema_version !== modelRoutingSchemaVersion)
+    invalid(`${path}.schema_version`, "模型路由 schema 版本不支持");
+  if (
+    typeof decision.selection_source !== "string" ||
+    !modelRoutingSelectionSources.has(
+      decision.selection_source as ModelRoutingSelectionSource,
+    )
+  )
+    invalid(`${path}.selection_source`, "选择来源无效");
+
+  if (!Array.isArray(decision.fields)) invalid(`${path}.fields`, "应为数组");
+  if (decision.fields.length > maxModelRoutingObservations)
+    invalid(`${path}.fields`, "条目过多");
+  const fields = decision.fields.map((item, index) => {
+    const at = `${path}.fields[${index}]`;
+    const observation = objectAt(item, at);
+    const field: ModelRoutingFieldObservation = {
+      field: stringAt(observation.field, `${at}.field`),
+      source: stringAt(observation.source, `${at}.source`),
+      known: boolAt(observation.known, `${at}.known`),
+      match_count: intAt(observation.match_count, `${at}.match_count`),
+    };
+    // The observation is a bounded, typed summary: never prompt text, a media
+    // URL, a matched keyword or classifier raw text.
+    if (observation.classifier_confidence !== undefined)
+      field.classifier_confidence = numberAt(
+        observation.classifier_confidence,
+        `${at}.classifier_confidence`,
+      );
+    if (observation.candidates !== undefined) {
+      if (!Array.isArray(observation.candidates))
+        invalid(`${at}.candidates`, "应为数组");
+      if (observation.candidates.length > maxModelRoutingCandidates)
+        invalid(`${at}.candidates`, "条目过多");
+      field.candidates = observation.candidates.map((item, index) => {
+        const candidateAt = `${at}.candidates[${index}]`;
+        const candidate = objectAt(item, candidateAt);
+        return {
+          value: stringAt(candidate.value, `${candidateAt}.value`),
+          score: numberAt(candidate.score, `${candidateAt}.score`),
+          rank: intAt(candidate.rank, `${candidateAt}.rank`),
+          chosen: boolAt(candidate.chosen, `${candidateAt}.chosen`),
+        };
+      });
+      // A record from before this field existed carries no `candidates` key at
+      // all; one that carries an empty array means the same. Neither is an
+      // error and neither is upgraded into a placeholder list.
+      if (field.candidates.length === 0) delete field.candidates;
+    }
+    for (const key of modelRoutingWireContract.fieldObservation.optional) {
+      if (key === "classifier_confidence" || key === "candidates") continue;
+      if (observation[key] !== undefined)
+        field[key] = stringAt(observation[key], `${at}.${key}`);
+    }
+    return field;
+  });
+
+  const executionValue = objectAt(decision.execution, `${path}.execution`);
+  if (
+    typeof executionValue.status !== "string" ||
+    !modelRoutingExecutionStates.has(
+      executionValue.status as ModelRoutingExecutionState,
+    )
+  )
+    invalid(`${path}.execution.status`, "执行状态无效");
+  const execution: ModelRoutingExecution = {
+    status: executionValue.status as ModelRoutingExecutionState,
+    attempt_count: intAt(
+      executionValue.attempt_count,
+      `${path}.execution.attempt_count`,
+    ),
+  };
+  for (const key of modelRoutingWireContract.execution.optional) {
+    if (executionValue[key] !== undefined)
+      execution[key] = stringAt(
+        executionValue[key],
+        `${path}.execution.${key}`,
+      );
+  }
+
+  if (!Array.isArray(decision.privacy_attempts))
+    invalid(`${path}.privacy_attempts`, "应为数组");
+  if (decision.privacy_attempts.length > maxModelRoutingPrivacyAttempts)
+    invalid(`${path}.privacy_attempts`, "条目过多");
+  // Privacy runs per concrete attempt, so this is an array, not one decision.
+  const privacyAttempts = decision.privacy_attempts.map((item, index) => {
+    const at = `${path}.privacy_attempts[${index}]`;
+    const attempt = objectAt(item, at);
+    if (
+      typeof attempt.decision !== "string" ||
+      !modelRoutingPrivacyDecisions.has(
+        attempt.decision as ModelRoutingPrivacyDecision,
+      )
+    )
+      invalid(`${at}.decision`, "隐私决定无效");
+    const parsed: ModelRoutingPrivacyAttempt = {
+      attempt_index: intAt(attempt.attempt_index, `${at}.attempt_index`),
+      service_id: stringAt(attempt.service_id, `${at}.service_id`),
+      decision: attempt.decision as ModelRoutingPrivacyDecision,
+      finding_count: intAt(attempt.finding_count, `${at}.finding_count`),
+      duration_ms: intAt(attempt.duration_ms, `${at}.duration_ms`),
+    };
+    if (attempt.error_code !== undefined)
+      parsed.error_code = stringAt(attempt.error_code, `${at}.error_code`);
+    return parsed;
+  });
+
+  const parsed: ModelRoutingDecision = {
+    schema_version: modelRoutingSchemaVersion,
+    virtual_model_id: stringAt(
+      decision.virtual_model_id,
+      `${path}.virtual_model_id`,
+    ),
+    group_id: stringAt(decision.group_id, `${path}.group_id`),
+    config_snapshot_version: stringAt(
+      decision.config_snapshot_version,
+      `${path}.config_snapshot_version`,
+    ),
+    selection_source: decision.selection_source as ModelRoutingSelectionSource,
+    used_default: boolAt(decision.used_default, `${path}.used_default`),
+    fields,
+    member_id: stringAt(decision.member_id, `${path}.member_id`),
+    member_service_id: stringAt(
+      decision.member_service_id,
+      `${path}.member_service_id`,
+    ),
+    member_model: stringAt(decision.member_model, `${path}.member_model`),
+    execution,
+    privacy_attempts: privacyAttempts,
+    duration_ms: intAt(decision.duration_ms, `${path}.duration_ms`),
+  };
+  if (decision.rule_id !== undefined)
+    parsed.rule_id = stringAt(decision.rule_id, `${path}.rule_id`);
+  if (decision.rule_priority !== undefined)
+    parsed.rule_priority = intAt(
+      decision.rule_priority,
+      `${path}.rule_priority`,
+    );
+  for (const key of ["fallback_reason", "error_code"] as const) {
+    if (decision[key] !== undefined)
+      parsed[key] = stringAt(decision[key], `${path}.${key}`);
+  }
+  if (decision.classifier_duration_ms !== undefined)
+    parsed.classifier_duration_ms = intAt(
+      decision.classifier_duration_ms,
+      `${path}.classifier_duration_ms`,
+    );
+
+  // A rule-sourced decision names its rule; a default one must not pretend to.
+  if (parsed.selection_source === "rule" && parsed.rule_id === undefined)
+    invalid(`${path}.rule_id`, "命中规则时必须给出规则 ID");
+  return { model_routing: parsed };
+}
+
 const conversionPhases = new Set(["request", "response"]);
 const conversionSeverities = new Set(["warning", "error"]);
 
@@ -900,6 +1209,7 @@ function parseRequestRecordAt(value: unknown, path: string): RequestRecord {
       record.routing_decision,
       `${path}.routing_decision`,
     ),
+    ...optionalModelRouting(record.model_routing, `${path}.model_routing`),
     ...optionalConversionDiagnostics(
       record.conversion_diagnostics,
       `${path}.conversion_diagnostics`,

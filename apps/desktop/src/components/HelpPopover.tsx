@@ -15,6 +15,7 @@ export function HelpPopover({
   open,
   onOpenChange,
   onTriggerClick,
+  triggerClassName,
   triggerRef,
 }: {
   label: string;
@@ -23,6 +24,8 @@ export function HelpPopover({
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   onTriggerClick?: MouseEventHandler<HTMLButtonElement>;
+  /** Extra classes for the trigger, e.g. to align it with a control's baseline. */
+  triggerClassName?: string;
   triggerRef?: Ref<HTMLButtonElement>;
 }) {
   return (
@@ -35,6 +38,7 @@ export function HelpPopover({
           size="icon-xs"
           type="button"
           variant="ghost"
+          className={triggerClassName}
         >
           <CircleHelp aria-hidden="true" className="text-muted-foreground" />
         </Button>

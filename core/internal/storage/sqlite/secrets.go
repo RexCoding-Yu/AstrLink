@@ -24,6 +24,7 @@ const (
 	builtinToolCredentialsTable  = "builtin_tool_credentials"
 	serviceProxyCredentialsTable = "service_proxy_credentials"
 	subscriptionCredentialsTable = "subscription_credentials"
+	classifierCredentialsTable   = "classifier_credentials"
 
 	subscriptionRefPrefix = "local://subscription/"
 	// maxSubscriptionCredentialLen bounds one account's OAuth token JSON.
@@ -43,6 +44,7 @@ var secretColumns = []secretColumn{
 	{table: builtinToolCredentialsTable, key: "kind", value: "credential_value", flagged: true},
 	{table: serviceProxyCredentialsTable, key: "service_id", value: "credential_value", flagged: true},
 	{table: subscriptionCredentialsTable, key: "service_id", value: "credential_value"},
+	{table: classifierCredentialsTable, key: "id", value: "credential_value", flagged: true},
 }
 
 // openSecret returns the plaintext of one stored value. It takes ownership of

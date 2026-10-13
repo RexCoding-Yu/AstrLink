@@ -275,8 +275,11 @@ func TestIngressAuditExposureSettlesPendingRequestAfterDecision(t *testing.T) {
 		done <- response.Code
 	}()
 	<-filter.entered
-	if got := blobExposures(blobs)[storage.AuditDirectionRequest]; got != storage.AuditExposurePending {
-		t.Fatalf("undecided request exposure=%q, want pending", got)
+	// The single request-level preflight decides before execution, so while
+	// the inspection is held nothing has been sealed at all — strictly safer
+	// than the old pending blob, which pre-decision persistence created.
+	if got := blobExposures(blobs)[storage.AuditDirectionRequest]; got != "" {
+		t.Fatalf("undecided request exposure=%q, want none sealed yet", got)
 	}
 	updatesBeforeDecision := blobs.exposureUpdates
 	close(filter.release)
@@ -286,9 +289,10 @@ func TestIngressAuditExposureSettlesPendingRequestAfterDecision(t *testing.T) {
 	if got := blobExposures(blobs)[storage.AuditDirectionRequest]; got != storage.AuditExposureShareable {
 		t.Fatalf("settled request exposure=%q, want shareable", got)
 	}
-	// One relabel, written with the metadata that follows the decision.
-	if blobs.exposureUpdates-updatesBeforeDecision != 1 {
-		t.Fatalf("exposure updates=%d, want 1", blobs.exposureUpdates-updatesBeforeDecision)
+	// The decision precedes the seal, so the blob is labeled directly and no
+	// relabel is needed.
+	if blobs.exposureUpdates-updatesBeforeDecision != 0 {
+		t.Fatalf("exposure updates=%d, want 0", blobs.exposureUpdates-updatesBeforeDecision)
 	}
 	if filter.inspects != 1 {
 		t.Fatalf("inspections=%d, want 1", filter.inspects)

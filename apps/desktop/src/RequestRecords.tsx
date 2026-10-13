@@ -134,6 +134,7 @@ import {
   type SessionStatus,
 } from "./request-record-model";
 import { RequestConversation } from "./RequestConversation";
+import { RequestModelRoutingPanel } from "./components/RequestModelRoutingPanel";
 import { RequestTrajectory } from "./RequestTrajectory";
 import {
   applyQueuedSessions,
@@ -171,7 +172,8 @@ type DetailTab =
   | "trajectory"
   | "content"
   | "audit"
-  | "binding";
+  | "binding"
+  | "modelRouting";
 // Copies started from a menu lose their button when it closes, so their
 // outcome is announced beside the actions instead.
 const MENU_COPY_KEYS: ReadonlySet<string> = new Set([
@@ -185,6 +187,7 @@ const DETAIL_TABS: readonly DetailTab[] = [
   "content",
   "audit",
   "binding",
+  "modelRouting",
 ];
 type PendingConfirm =
   | { kind: "audit-risk"; patch: AuditSettingsPatch }
@@ -2549,12 +2552,20 @@ function RecordDetail({
             >
               {t("records.tabContent")}
             </TabsTrigger>
-            {!isModelDiscoveryProtocol(session.input_protocol) && (
+            {!discovery && (
               <TabsTrigger
                 value="binding"
                 onClick={() => setDetailTab("binding")}
               >
                 {t("binding.tab")}
+              </TabsTrigger>
+            )}
+            {!discovery && (
+              <TabsTrigger
+                value="modelRouting"
+                onClick={() => setDetailTab("modelRouting")}
+              >
+                {t("modelRouting.tab")}
               </TabsTrigger>
             )}
             <TabsTrigger onClick={() => setDetailTab("audit")} value="audit">
@@ -2697,6 +2708,19 @@ function RecordDetail({
             }}
           />
         </TabsContent>
+
+        {!discovery && (
+          <TabsContent
+            className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+            value="modelRouting"
+          >
+            <RequestModelRoutingPanel
+              key={record.id}
+              record={record}
+              onOpenProviderRouting={() => setDetailTab("trajectory")}
+            />
+          </TabsContent>
+        )}
 
         {!discovery && (
           <TabsContent

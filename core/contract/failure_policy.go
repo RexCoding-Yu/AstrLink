@@ -171,6 +171,7 @@ type RoutingSettings struct {
 	GrokIdentityVersion   string `json:"grok_identity_version,omitempty"`
 	// ModelRedirects is always emitted; nil documents load as an empty table.
 	ModelRedirects         []ModelRedirect               `json:"model_redirects"`
+	ModelRoutingGroups     []ModelRoutingGroup           `json:"model_routing_groups"`
 	ChannelStickiness      *ChannelStickiness            `json:"channel_stickiness,omitempty"`
 	DefaultRecoveryPaths   map[ProtocolID]RecoveryPathID `json:"default_recovery_paths,omitempty"`
 	DefaultFailurePolicy   FailurePolicy                 `json:"default_failure_policy"`
@@ -193,6 +194,7 @@ func DefaultRoutingSettings() RoutingSettings {
 		CodexIdentityAutoLearn:       true,
 		GrokIdentityAutoLearn:        true,
 		ModelRedirects:               []ModelRedirect{},
+		ModelRoutingGroups:           []ModelRoutingGroup{},
 		ChannelStickiness:            &ChannelStickiness{Enabled: true, TTLSeconds: 3600},
 		DefaultFailurePolicy:         DefaultFailurePolicy(),
 		AllowUnmatchedFailover:       true,
@@ -219,6 +221,9 @@ func (settings RoutingSettings) Validate() error {
 		}
 	}
 	if err := ValidateModelRedirects(settings.ModelRedirects); err != nil {
+		return err
+	}
+	if err := ValidateModelRoutingGroups(settings.ModelRoutingGroups, settings.ModelRedirects); err != nil {
 		return err
 	}
 	if settings.ChannelStickiness != nil {

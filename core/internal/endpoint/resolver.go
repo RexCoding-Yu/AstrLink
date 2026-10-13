@@ -174,6 +174,12 @@ type ServiceResolver interface {
 	ResolveService(context.Context, contract.ServiceID) (Resolved, error)
 }
 
+// ExactTargetResolver plans only the concrete service/model selected by a
+// model routing group. It must never widen the target to another service.
+type ExactTargetResolver interface {
+	ResolveMemberCandidates(context.Context, ResolveRequest, contract.ServiceID, string) ([]Resolved, error)
+}
+
 // RankedService is one configured provider in routing priority order. Skip is
 // empty when the provider was eligible for the request.
 type RankedService struct {

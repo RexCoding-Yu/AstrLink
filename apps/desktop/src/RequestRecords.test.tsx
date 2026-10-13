@@ -2759,6 +2759,174 @@ describe("RequestRecords", () => {
     ).toBeNull();
   });
 
+  it("shows the model routing tab beside the call trace and its own empty state", async () => {
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${secondRecord.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    // The two routing surfaces are separate tabs: the group decision lives here,
+    // the provider's ordering, skips and failover stay in 追踪.
+    const tabs = [
+      ...container.querySelectorAll<HTMLButtonElement>(
+        `[aria-label="${i18n.t("records.sections")}"] [role="tab"]`,
+      ),
+    ].map((tab) => tab.textContent?.trim());
+    expect(tabs).toContain(i18n.t("modelRouting.tab"));
+    expect(tabs).toContain(i18n.t("binding.tab"));
+    expect(
+      container.querySelector('[data-testid="model-routing-panel"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      exactButton(i18n.t("modelRouting.tab")).click();
+      await Promise.resolve();
+    });
+    await flush();
+    // secondRecord carries no decision: an absence, not a failure.
+    expect(container.textContent).toContain(i18n.t("modelRouting.empty"));
+    expect(container.textContent).not.toContain(
+      i18n.t("modelRouting.selectionSummary", {
+        source: i18n.t("modelRouting.selectionSource.rule"),
+      }),
+    );
+    expect(
+      container.querySelector('[data-testid="trajectory-list"]'),
+    ).toBeNull();
+  });
+
+  it("reads a recorded group decision without leaking the matched content", async () => {
+    const decision: RequestRecord["model_routing"] = {
+      schema_version: 1,
+      virtual_model_id: "astrlink/superclaude",
+      group_id: "superclaude",
+      config_snapshot_version: "6f1c0b",
+      selection_source: "rule",
+      rule_id: "coding",
+      rule_priority: 100,
+      used_default: false,
+      fields: [
+        { field: "streaming", source: "local", known: true, match_count: 0 },
+        {
+          field: "task_type",
+          source: "classifier",
+          known: false,
+          match_count: 0,
+          skip_reason: "classifier_unavailable",
+          error_code: "classifier_timeout",
+        },
+      ],
+      member_id: "strong",
+      member_service_id: "service_01",
+      member_model: "gpt-4.1",
+      execution: { status: "succeeded", attempt_count: 1 },
+      privacy_attempts: [
+        {
+          attempt_index: 0,
+          service_id: "service_01",
+          decision: "allow",
+          finding_count: 0,
+          duration_ms: 3,
+        },
+      ],
+      duration_ms: 12,
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [sessionFromRecord({ ...firstRecord, model_routing: decision })],
+      next_cursor: null,
+    });
+    bridgeMocks.listRequestRecords.mockResolvedValue({
+      items: [{ ...firstRecord, model_routing: decision }],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValue(
+      sessionDetail({ ...firstRecord, model_routing: decision }),
+    );
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${firstRecord.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      exactButton(i18n.t("modelRouting.tab")).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const panel = container.querySelector(
+      '[data-testid="model-routing-panel"]',
+    );
+    expect(panel).not.toBeNull();
+    // The virtual model, the group it resolved through and the member chosen.
+    expect(container.textContent).toContain("astrlink/superclaude");
+    expect(container.textContent).toContain("superclaude");
+    expect(container.textContent).toContain("6f1c0b");
+    expect(container.textContent).toContain(
+      i18n.t("modelRouting.selectionSource.rule"),
+    );
+    expect(container.textContent).toContain(
+      i18n.t("modelRouting.fields.title"),
+    );
+    // An unknown field explains itself instead of looking like a false match.
+    expect(container.textContent).toContain(
+      i18n.t("modelRouting.fields.unknown"),
+    );
+    expect(container.textContent).toContain(
+      i18n.t("modelRouting.codes.classifier_timeout"),
+    );
+    // Privacy is per attempt, so the count and the service are both visible.
+    expect(container.textContent).toContain(
+      i18n.t("modelRouting.privacy.title"),
+    );
+    // The decision payload carries no prompt, media URL or matched keyword.
+    expect(panel?.textContent).not.toContain("secret");
+    expect(panel?.textContent).not.toContain("Bearer");
+  });
+
+  it("hides the model routing tab for model discovery calls", async () => {
+    // The detail view reads the protocol from the session, not from the row.
+    const discoveryRecord: RequestRecord = {
+      ...firstRecord,
+      input_protocol: "openai.models",
+      service_id: null,
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [sessionFromRecord(discoveryRecord)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValue(
+      sessionDetail(discoveryRecord),
+    );
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${firstRecord.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await flush();
+    const tabs = [
+      ...container.querySelectorAll<HTMLButtonElement>(
+        `[aria-label="${i18n.t("records.sections")}"] [role="tab"]`,
+      ),
+    ].map((tab) => tab.textContent?.trim());
+    // A discovery call names no virtual model, so the tab would only ever be empty.
+    expect(tabs).not.toContain(i18n.t("modelRouting.tab"));
+  });
+
   it("shows a friendly message for records without http metadata", async () => {
     bridgeMocks.getRequestAuditContent.mockResolvedValue({
       request_id: firstRecord.id,

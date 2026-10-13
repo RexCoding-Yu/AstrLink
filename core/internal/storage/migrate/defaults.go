@@ -860,5 +860,34 @@ WHEN NEW.layout = 'whole' AND OLD.layout <> 'whole' BEGIN
 END`,
 			`UPDATE audit_settings SET request_body_max_bytes = 33554432 WHERE request_body_max_bytes = 1048576`,
 		}},
+		{Version: 50, Name: "model_routing_classifier", Statements: []string{
+			`ALTER TABLE request_records ADD COLUMN model_routing_json TEXT`,
+			`CREATE TABLE model_routing_bindings (
+    principal TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    virtual_model_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    config_snapshot_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (principal, session_id, protocol, virtual_model_id)
+)`,
+			`CREATE INDEX model_routing_bindings_expires_at_idx ON model_routing_bindings (expires_at)`,
+			`CREATE TABLE classifier_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    document_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)`,
+			`CREATE TABLE classifier_credentials (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    credential_value BLOB NOT NULL,
+    sealed INTEGER NOT NULL DEFAULT 1
+)`,
+		}},
 	}
 }

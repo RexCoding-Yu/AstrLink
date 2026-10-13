@@ -27,8 +27,6 @@ import { PageHeader } from "./PageHeader";
 import type { RoutableService } from "./service-model";
 import { UpstreamIdentitySettings } from "./UpstreamIdentitySettings";
 
-export const routingAutosaveDelay = 500;
-
 const routingSettingKeys = [
   "default_failure_policy",
   "allow_unmatched_failover",
@@ -138,74 +136,66 @@ export function RoutingSettingsPanel({
   }, [ready, reload, t, setSettings]);
 
   const changeDraft = (next: RoutingSettings) => {
-    setError(null);
     setValidationError(false);
     setShowRedirectIssues(false);
     setDraft(next);
   };
 
-  useEffect(() => {
-    if (!draft || !dirty || !ready || saving || error || editingRedirect)
-      return;
+  /**
+   * Saving is explicit: the draft is only submitted when the user asks for it.
+   * An earlier autosave timer turned every keystroke into a submission attempt,
+   * so a half-typed field re-raised the same error banner on each character.
+   */
+  const save = () => {
+    if (!draft || !ready || saving) return;
+    // A redirect being typed is committed on blur; saving mid-edit would submit
+    // the half-typed model name.
+    if (editingRedirect) return;
     const submitted = draft;
-    const timer = setTimeout(() => {
-      try {
-        parseRoutingSettings(submitted);
-      } catch {
-        setValidationError(true);
-        setShowRedirectIssues(true);
-        return;
-      }
-      const original = JSON.parse(baseline) as RoutingSettings;
-      const patch: Partial<RoutingSettings> = {};
-      for (const key of routingSettingKeys) {
-        if (JSON.stringify(submitted[key]) !== JSON.stringify(original[key]))
-          Object.assign(patch, { [key]: submitted[key] });
-      }
-      mutationVersion.current += 1;
-      setSaving(true);
-      void updateRoutingSettings(patch)
-        .then((result) => {
-          const saved = withRedirects(result);
-          setSettings(saved);
-          setBaseline(JSON.stringify(saved));
-          // A response acknowledges only its submitted version. Keep edits made
-          // while it was in flight, including a change back to the old value.
-          setDraft((current) => {
-            if (!current || current === submitted) return saved;
-            const merged = { ...saved };
-            for (const key of routingSettingKeys) {
-              if (
-                JSON.stringify(current[key]) !== JSON.stringify(submitted[key])
-              )
-                Object.assign(merged, { [key]: current[key] });
-            }
-            return merged;
-          });
-          setSavedOnce(true);
-        })
-        .catch((error: unknown) => {
-          // Newer edits get their own attempt; an unchanged failed draft pauses
-          // until the user edits it or retries, rather than looping requests.
-          if (draftRef.current === submitted)
-            setError(
-              error instanceof Error ? error.message : t("routing.saveFailed"),
-            );
-        })
-        .finally(() => setSaving(false));
-    }, routingAutosaveDelay);
-    return () => clearTimeout(timer);
-  }, [
-    draft,
-    dirty,
-    ready,
-    saving,
-    error,
-    editingRedirect,
-    baseline,
-    setSettings,
-    t,
-  ]);
+    if (JSON.stringify(submitted) === baseline) return;
+    try {
+      parseRoutingSettings(submitted);
+    } catch {
+      setValidationError(true);
+      setShowRedirectIssues(true);
+      return;
+    }
+    const original = JSON.parse(baseline) as RoutingSettings;
+    const patch: Partial<RoutingSettings> = {};
+    for (const key of routingSettingKeys) {
+      if (JSON.stringify(submitted[key]) !== JSON.stringify(original[key]))
+        Object.assign(patch, { [key]: submitted[key] });
+    }
+    setValidationError(false);
+    setError(null);
+    mutationVersion.current += 1;
+    setSaving(true);
+    void updateRoutingSettings(patch)
+      .then((result) => {
+        const saved = withRedirects(result);
+        setSettings(saved);
+        setBaseline(JSON.stringify(saved));
+        // A response acknowledges only its submitted version. Keep edits made
+        // while it was in flight, including a change back to the old value.
+        setDraft((current) => {
+          if (!current || current === submitted) return saved;
+          const merged = { ...saved };
+          for (const key of routingSettingKeys) {
+            if (JSON.stringify(current[key]) !== JSON.stringify(submitted[key]))
+              Object.assign(merged, { [key]: current[key] });
+          }
+          return merged;
+        });
+        setSavedOnce(true);
+      })
+      .catch((error: unknown) => {
+        if (draftRef.current === submitted)
+          setError(
+            error instanceof Error ? error.message : t("routing.saveFailed"),
+          );
+      })
+      .finally(() => setSaving(false));
+  };
 
   return (
     <div
@@ -215,25 +205,35 @@ export function RoutingSettingsPanel({
       <PageHeader
         variant="compact"
         className="mb-0"
-        title={t("nav.routing")}
+        title={t("routing.providerTitle")}
         titleId={titleId}
         actions={
-          <span
-            role="status"
-            className="shrink-0 text-xs text-muted-foreground"
-            aria-live="polite"
-          >
-            {error || validationError
-              ? t("routing.notSaved")
-              : !ready && dirty
+          <span className="flex shrink-0 items-center gap-2">
+            <span
+              role="status"
+              className="text-xs text-muted-foreground"
+              aria-live="polite"
+            >
+              {!ready && dirty
                 ? t("routing.waitingConnection")
-                : editingRedirect && dirty
-                  ? t("routing.editing")
-                  : saving || dirty
-                    ? t("common.saving")
-                    : savedOnce
-                      ? t("routing.autoSaved")
-                      : t("routing.autosave")}
+                : saving
+                  ? t("common.saving")
+                  : editingRedirect && dirty
+                    ? t("routing.editing")
+                    : dirty
+                      ? t("routing.notSaved")
+                      : savedOnce
+                        ? t("routing.saved")
+                        : ""}
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              disabled={!ready || !dirty || saving}
+              onClick={save}
+            >
+              {t("routing.save")}
+            </Button>
           </span>
         }
       />
@@ -251,20 +251,23 @@ export function RoutingSettingsPanel({
       ) : null}
       {error ? (
         <FormMessage tone="error">
-          {t("routing.autosaveFailed")} {error}
+          {t("routing.saveFailedNotice")} {error}
           <Button
             type="button"
             variant="ghost"
             size="sm"
             disabled={!ready}
-            onClick={() => setError(null)}
+            onClick={() => {
+              setError(null);
+              setValidationError(false);
+            }}
           >
             {t("common.retry")}
           </Button>
         </FormMessage>
       ) : null}
       {validationError && !redirectsInvalid ? (
-        <FormMessage tone="error">{t("routing.autosaveInvalid")}</FormMessage>
+        <FormMessage tone="error">{t("routing.invalidNotice")}</FormMessage>
       ) : null}
       <Tabs
         value={tab}
@@ -273,7 +276,7 @@ export function RoutingSettingsPanel({
       >
         <TabsList
           scrollable
-          aria-label={t("nav.routing")}
+          aria-label={t("routing.providerTitle")}
           className="min-w-0 shrink-0"
         >
           {routingTabs.map((value) => (

@@ -28,6 +28,13 @@ const bridgeMocks = vi.hoisted(() => ({
     .mockRejectedValue(new Error("tray unavailable in tests")),
   trayAction: vi.fn().mockRejectedValue(new Error("tray unavailable in tests")),
   getRoutingSettings: vi.fn(),
+  updateRoutingSettings: vi.fn(),
+  // All three intelligent-routing tabs stay mounted, so the classifier panel
+  // loads its singleton even while another tab is showing.
+  getClassifierSettings: vi.fn(),
+  updateClassifierSettings: vi.fn(),
+  classifierCredentialAction: vi.fn().mockResolvedValue({ configured: false }),
+  classifierDryRun: vi.fn(),
   getServiceOrder: vi
     .fn()
     .mockResolvedValue({ service_ids: [], etag: '"order"' }),
@@ -113,10 +120,11 @@ vi.mock("./use-privacy-model-update", () => ({
   usePrivacyModelUpdate: () => modelUpdate.current,
 }));
 
-import App from "./App";
+import App, { trayNavigationTarget } from "./App";
 import type { AppSnapshot } from "./core-model";
 import { defaultTrayPreferences } from "./preferences-model";
 import { defaultFailurePolicy } from "./failure-policy-model";
+import { defaultClassifierSettings } from "./classifier-settings-model";
 import { defaultPrivacyKindRules } from "./privacy-policy-model";
 import { ONBOARDING_STORAGE_KEY } from "./use-onboarding";
 
@@ -321,6 +329,9 @@ describe("App workspace navigation", () => {
       strategy: "retry_first",
       max_attempts: 6,
     });
+    bridgeMocks.getClassifierSettings.mockResolvedValue(
+      defaultClassifierSettings(),
+    );
     bridgeMocks.getCoreStatus.mockResolvedValue(readySnapshot);
     bridgeMocks.listServices.mockResolvedValue({
       items: [
@@ -991,7 +1002,7 @@ describe("App workspace navigation", () => {
         content: "Primary gateway",
       },
       {
-        nav: "路由",
+        nav: "提供商路由",
         read: bridgeMocks.getRoutingSettings,
         content: "Codex 自动审查",
       },
@@ -1323,7 +1334,7 @@ describe("App workspace navigation", () => {
     });
     await renderApp();
 
-    expect(button("路由").disabled).toBe(false);
+    expect(button("提供商路由").disabled).toBe(false);
     expect(button("安全").disabled).toBe(false);
     expect(button("请求").disabled).toBe(false);
     await act(async () => {
@@ -1426,6 +1437,70 @@ describe("App workspace navigation", () => {
     expect(bridgeMocks.getAgentDebugStatus).toHaveBeenCalled();
   });
 
+  it("opens intelligent routing as its own sidebar entry with in-page tabs", async () => {
+    await renderApp();
+
+    const sidebarText = container.querySelector(
+      '[data-slot="sidebar-navigation"]',
+    )?.textContent;
+    expect(sidebarText).toContain("智能路由");
+
+    await act(async () => {
+      button("智能路由").click();
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain("智能路由");
+    expect(workspaceHeading().textContent).toBe("智能路由");
+    expect(
+      container.querySelector('[data-testid="intelligent-routing-panel"]'),
+    ).not.toBeNull();
+    // The four tabs live inside the page, never as sidebar sub-items.
+    expect(
+      [
+        ...container.querySelectorAll('[data-slot="tabs-list"] [role="tab"]'),
+      ].map((tab) => tab.textContent?.trim()),
+    ).toEqual(["模型路由组", "字段类型", "分类器配置", "试运行"]);
+    expect(
+      container
+        .querySelector('[data-slot="sidebar-navigation"]')
+        ?.querySelectorAll('[role="tab"]').length,
+    ).toBe(0);
+  });
+
+  it("keeps the intelligent routing page from issuing upstream calls", async () => {
+    await renderApp();
+    const serviceCalls = bridgeMocks.listServices.mock.calls.length;
+    const routingSettingsCalls =
+      bridgeMocks.getRoutingSettings.mock.calls.length;
+
+    await act(async () => {
+      button("智能路由").click();
+      await Promise.resolve();
+    });
+
+    // The groups editor, the field catalog and the dry run each read the local
+    // Core once; none is an upstream call. All three stay mounted, so all three
+    // read on the first open.
+    expect(bridgeMocks.getRoutingSettings).toHaveBeenCalledTimes(
+      routingSettingsCalls + 3,
+    );
+    // Opening the page must never write, relay, or classify anything.
+    expect(bridgeMocks.updateRoutingSettings).not.toHaveBeenCalled();
+    expect(bridgeMocks.listServices).toHaveBeenCalledTimes(serviceCalls);
+    expect(container.textContent).not.toContain("astrlink/auto");
+  });
+
+  it("accepts the intelligent routing tray jump and rejects unknown kinds", () => {
+    // The tray path is a separate whitelist: missing it silently dead-ends.
+    expect(trayNavigationTarget("intelligentRouting")).toEqual({
+      kind: "intelligentRouting",
+    });
+    expect(trayNavigationTarget("notAPage")).toBeNull();
+  });
+
   it("protects unsaved desktop preferences during navigation", async () => {
     bridgeMocks.getPreferences.mockResolvedValue({
       values: {
@@ -1479,14 +1554,14 @@ describe("App workspace navigation", () => {
     const requestCalls = bridgeMocks.getUsageSummary.mock.calls.length;
 
     await act(async () => {
-      button("路由").click();
+      button("提供商路由").click();
       await Promise.resolve();
     });
 
     expect(
       document.querySelector('[aria-current="page"]')?.textContent,
-    ).toContain("路由");
-    expect(workspaceHeading().textContent).toBe("路由");
+    ).toContain("提供商路由");
+    expect(workspaceHeading().textContent).toBe("提供商路由与故障转移");
     expect(
       container.querySelector('[data-testid="routing-defaults-panel"]'),
     ).not.toBeNull();
@@ -1495,10 +1570,11 @@ describe("App workspace navigation", () => {
     expect(container.textContent).not.toContain("训练中 · 不可启用");
     expect(container.textContent).not.toContain("固定路由与别名");
     expect(container.textContent).not.toContain("还没有固定路由");
+    // 模型路由组 moved to 智能路由, so the provider page keeps five tabs.
     expect(
-      [...container.querySelectorAll('[role="tab"]')].map(
-        (tab) => tab.textContent,
-      ),
+      [
+        ...container.querySelectorAll('[data-slot="tabs-list"] [role="tab"]'),
+      ].map((tab) => tab.textContent),
     ).toEqual(["模型与工具", "恢复与重试", "错误规则", "会话粘性", "转发身份"]);
     expect(container.textContent).not.toContain("mmBERT");
     expect(bridgeMocks.listServices).toHaveBeenCalledTimes(serviceCalls);
@@ -1773,7 +1849,7 @@ describe("App workspace navigation", () => {
     expect(workspaceHeading().textContent).toBe("添加 API 提供商");
 
     await act(async () => {
-      button("路由").click();
+      button("提供商路由").click();
     });
     expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
 
@@ -1781,11 +1857,11 @@ describe("App workspace navigation", () => {
       button("放弃修改并离开").click();
     });
     expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-    expect(workspaceHeading().textContent).toBe("路由");
+    expect(workspaceHeading().textContent).toBe("提供商路由与故障转移");
   });
   it("protects default-policy drafts when leaving routing", async () => {
     await renderApp();
-    await act(async () => button("路由").click());
+    await act(async () => button("提供商路由").click());
     await act(async () => button("恢复与重试").click());
     const label = "最多重试几次";
     const input = [...container.querySelectorAll("label")]
@@ -1803,7 +1879,7 @@ describe("App workspace navigation", () => {
     });
     await act(async () => button("概览").click());
     expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
-    expect(workspaceHeading().textContent).toBe("路由");
+    expect(workspaceHeading().textContent).toBe("提供商路由与故障转移");
     await act(async () => button("继续编辑").click());
     expect(input.value).toBe("4");
     await act(async () => button("概览").click());

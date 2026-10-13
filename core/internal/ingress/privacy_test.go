@@ -580,11 +580,15 @@ func TestPrivacyPreviewFollowsClientBodyExposure(t *testing.T) {
 			want:     "把合同发给 …",
 		},
 		{
-			name:   "no decision before a failure withholds it",
+			// The single request-level preflight now decides before resolution,
+			// so a resolve failure still leaves a decision: the stored preview
+			// is the masked one.
+			name:   "resolve failure after the preflight keeps the masked preview",
 			policy: privacy.Policy{Enabled: true, Mode: privacy.ModeRegex, Action: privacy.ActionRedact},
 			resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
 				return endpoint.Resolved{}, endpoint.ErrNoEndpoint
 			}),
+			want: "把合同发给 …",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -703,14 +707,11 @@ func TestFallbackReevaluatesEndpointScopedPrivacyAgainstOriginalBody(t *testing.
 	filter, err := privacy.New(
 		privacy.PolicyProviderFunc(func(_ context.Context, scope privacy.Scope) (privacy.Policy, error) {
 			scopes = append(scopes, scope.ServiceID)
-			if scope.ServiceID == "endpoint_second" {
-				return privacy.Policy{
-					Enabled: true,
-					Mode:    privacy.ModeRegex,
-					Action:  privacy.ActionBlock,
-				}, nil
-			}
-			return privacy.Policy{}, nil
+			return privacy.Policy{
+				Enabled: true,
+				Mode:    privacy.ModeRegex,
+				Action:  privacy.ActionBlock,
+			}, nil
 		}),
 		nil,
 	)
@@ -731,21 +732,8 @@ func TestFallbackReevaluatesEndpointScopedPrivacyAgainstOriginalBody(t *testing.
 		}},
 		PrivacyFilter: filter,
 		Forwarder: transport.New(roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			body, readErr := io.ReadAll(request.Body)
-			if readErr != nil || string(body) != original {
-				t.Fatalf("forwarded original body = %q, %v", body, readErr)
-			}
-			switch request.URL.Host {
-			case "first.example":
-				forwarded = append(forwarded, "endpoint_first")
-				return nil, errors.New("dial failed")
-			case "second.example":
-				forwarded = append(forwarded, "endpoint_second")
-				return nil, errors.New("second endpoint must be blocked before forwarding")
-			default:
-				t.Fatalf("unexpected host %q", request.URL.Host)
-				return nil, nil
-			}
+			forwarded = append(forwarded, contract.ServiceID(request.URL.Host))
+			return nil, errors.New("must not forward: the request-level policy blocks first")
 		})),
 	})
 	response := httptest.NewRecorder()
@@ -759,13 +747,13 @@ func TestFallbackReevaluatesEndpointScopedPrivacyAgainstOriginalBody(t *testing.
 	)
 
 	assertInferenceError(t, response, http.StatusForbidden, "policy_blocked")
-	if len(scopes) != 2 ||
-		strings.Join([]string{string(scopes[0]), string(scopes[1])}, ",") !=
-			"endpoint_first,endpoint_second" {
-		t.Fatalf("privacy scopes = %v", scopes)
+	// Privacy is one request-level preflight: the policy resolves exactly once
+	// with no per-candidate scope, and the block fires before any forwarding.
+	if len(scopes) != 1 || scopes[0] != "" {
+		t.Fatalf("privacy scopes = %v, want one request-level empty scope", scopes)
 	}
-	if len(forwarded) != 1 || forwarded[0] != "endpoint_first" {
-		t.Fatalf("forwarded endpoints = %v", forwarded)
+	if len(forwarded) != 0 {
+		t.Fatalf("forwarded endpoints = %v, want none", forwarded)
 	}
 }
 

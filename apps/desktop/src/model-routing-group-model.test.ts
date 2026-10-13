@@ -1,0 +1,619 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  maxModelRoutingGroups,
+  maxModelRoutingKeywords,
+  maxModelRoutingListItems,
+  maxModelRoutingMembersPerGroup,
+  maxModelRoutingPriority,
+  modelRoutingConditionOperator,
+  modelRoutingGroupSlug,
+  modelRoutingPublicModelID,
+  isModelRoutingRange,
+  isModelRoutingTime,
+  parseModelRoutingGroups,
+  validateModelRoutingDraft,
+  type ModelRoutingCondition,
+  type ModelRoutingGroup,
+} from "./model-routing-group-model";
+
+/** A valid two-member group; each test perturbs one aspect of it. */
+function group(patch: Partial<ModelRoutingGroup> = {}): ModelRoutingGroup {
+  return {
+    id: "superclaude",
+    enabled: true,
+    members: [
+      { id: "fast", service_id: "anthropic", model: "claude-haiku" },
+      { id: "strong", service_id: "anthropic", model: "claude-sonnet" },
+    ],
+    default_member_id: "fast",
+    rules: [],
+    ...patch,
+  };
+}
+
+/** A group carrying exactly one rule whose condition is `when`. */
+function groupWithRule(when: unknown, target = "fast"): ModelRoutingGroup {
+  return group({
+    rules: [
+      {
+        id: "r",
+        priority: 1,
+        when: when as ModelRoutingCondition,
+        target_member_id: target,
+      },
+    ],
+  });
+}
+
+describe("model routing group grammar", () => {
+  it("accepts the shape the design froze", () => {
+    const parsed = parseModelRoutingGroups([
+      groupWithRule({ field: "task_type", in: ["coding"] }, "strong"),
+    ]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].members.map((member) => member.id)).toEqual([
+      "fast",
+      "strong",
+    ]);
+    expect(parsed[0].rules[0].when).toEqual({
+      field: "task_type",
+      in: ["coding"],
+    });
+  });
+
+  it("validates empty draft lists and recursively finds task_type", () => {
+    const issues = validateModelRoutingDraft([
+      groupWithRule({
+        not: {
+          all: [
+            { field: "streaming", equals_bool: true },
+            {
+              not: {
+                any: [
+                  { field: "language", in: [] },
+                  { field: "task_type", in: ["coding"] },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    ]);
+    expect(issues).toEqual([
+      {
+        kind: "empty-values",
+        groupIndex: 0,
+        ruleIndex: 0,
+        conditionPath: [0, 1, 0, 0],
+      },
+      {
+        kind: "task-type-without-classifier",
+        groupIndex: 0,
+        ruleIndex: 0,
+        conditionPath: [0, 1, 0, 1],
+      },
+    ]);
+    const withTaskTypeRule = (patch: Partial<ModelRoutingGroup>) =>
+      group({
+        rules: [
+          {
+            id: "r",
+            priority: 1,
+            when: { field: "task_type", in: ["coding"] },
+            target_member_id: "fast",
+          },
+        ],
+        ...patch,
+      });
+
+    // Only a field Core actually reads counts as a configured classifier:
+    // classifier_output_fmt is persisted but no consumer exists, so it must not
+    // open the gate.
+    expect(
+      validateModelRoutingDraft([
+        withTaskTypeRule({ classifier_output_fmt: "json" }),
+      ]),
+    ).toEqual([
+      {
+        kind: "task-type-without-classifier",
+        groupIndex: 0,
+        ruleIndex: 0,
+        conditionPath: [],
+      },
+    ]);
+    expect(
+      validateModelRoutingDraft([
+        withTaskTypeRule({ classifier_prompt: "classify this" }),
+      ]),
+    ).toEqual([]);
+    expect(
+      validateModelRoutingDraft([
+        withTaskTypeRule({ classifier_fallback: "skip" }),
+      ]),
+    ).toEqual([]);
+    expect(
+      validateModelRoutingDraft([
+        withTaskTypeRule({ classifier_timeout_ms: 500 }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("treats a missing key as no groups and rejects a non-array", () => {
+    expect(parseModelRoutingGroups(undefined)).toEqual([]);
+    expect(parseModelRoutingGroups(null)).toEqual([]);
+    expect(() => parseModelRoutingGroups({})).toThrow();
+  });
+
+  it("sorts rules by priority so array order does not matter", () => {
+    const rules = [
+      groupWithRule({ field: "streaming", equals_bool: true }, "strong")
+        .rules[0],
+      {
+        id: "a",
+        priority: 10,
+        when: {
+          field: "streaming",
+          equals_bool: false,
+        } as ModelRoutingCondition,
+        target_member_id: "fast",
+      },
+    ];
+    const [forward] = parseModelRoutingGroups([group({ rules })]);
+    const [reversed] = parseModelRoutingGroups([
+      group({ rules: [...rules].reverse() }),
+    ]);
+    // priority 1 (r) sorts ahead of priority 10 (a), either way round.
+    expect(forward.rules.map((rule) => rule.id)).toEqual(["r", "a"]);
+    expect(reversed.rules.map((rule) => rule.id)).toEqual(["r", "a"]);
+  });
+
+  it("rejects duplicate rule priority", () => {
+    const rules = [
+      {
+        id: "a",
+        priority: 10,
+        when: {
+          field: "streaming",
+          equals_bool: true,
+        } as ModelRoutingCondition,
+        target_member_id: "fast",
+      },
+      {
+        id: "b",
+        priority: 10,
+        when: {
+          field: "streaming",
+          equals_bool: false,
+        } as ModelRoutingCondition,
+        target_member_id: "strong",
+      },
+    ];
+    expect(() => parseModelRoutingGroups([group({ rules })])).toThrow(
+      /priority/,
+    );
+  });
+
+  it("rejects an unknown field, an unknown operator, and a misplaced operator", () => {
+    // domains/intent/workload_complexity are not V1 fields.
+    expect(() =>
+      parseModelRoutingGroups([groupWithRule({ field: "intent", in: ["x"] })]),
+    ).toThrow(/不属于 V1/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "task_type", contains_any: ["x"] }),
+      ]),
+    ).toThrow();
+    // A boolean field cannot carry `in`.
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "streaming", in: ["true"] }),
+      ]),
+    ).toThrow();
+    // Two operators on one leaf is not a valid shape.
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "task_type", in: ["coding"], equals: "coding" }),
+      ]),
+    ).toThrow();
+  });
+
+  it("accepts both numeric bounds and enforces their ordering", () => {
+    expect(
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", gte: 2, lte: 8 }),
+      ])[0].rules[0].when,
+    ).toEqual({ field: "turn_count", gte: 2, lte: 8 });
+    // Either bound may stand alone.
+    expect(
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", gt: 2 }),
+      ])[0].rules[0].when,
+    ).toEqual({ field: "turn_count", gt: 2 });
+    expect(
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", lt: 8 }),
+      ])[0].rules[0].when,
+    ).toEqual({ field: "turn_count", lt: 8 });
+    // A zero-width range is still a range.
+    expect(
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", gt: 5, lte: 5 }),
+      ])[0].rules[0].when,
+    ).toEqual({ field: "turn_count", gt: 5, lte: 5 });
+    expect(() =>
+      parseModelRoutingGroups([groupWithRule({ field: "turn_count" })]),
+    ).toThrow(/至少需要一个边界/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", gte: 9, lte: 2 }),
+      ]),
+    ).toThrow(/下界不得大于上界/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", gte: -1 }),
+      ]),
+    ).toThrow();
+  });
+
+  it("reads the retired min/max keys as gte/lte and normalizes them", () => {
+    // min and max were both inclusive, so the rename is lossless.
+    expect(
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", min: 2, max: 8 }),
+      ])[0].rules[0].when,
+    ).toEqual({ field: "turn_count", gte: 2, lte: 8 });
+    expect(
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", min: 1 }),
+      ])[0].rules[0].when,
+    ).toEqual({ field: "turn_count", gte: 1 });
+    expect(
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", max: 4 }),
+      ])[0].rules[0].when,
+    ).toEqual({ field: "turn_count", lte: 4 });
+    // A legacy key next to its replacement is a duplicate bound, not a merge.
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", min: 1, gte: 2 }),
+      ]),
+    ).toThrow(/下界只能有一个/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", max: 1, lte: 2 }),
+      ]),
+    ).toThrow(/上界只能有一个/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", gt: 1, gte: 2 }),
+      ]),
+    ).toThrow(/下界只能有一个/);
+    // The legacy pair keeps its ordering check across the rename.
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "turn_count", min: 9, max: 2 }),
+      ]),
+    ).toThrow(/下界不得大于上界/);
+  });
+
+  it("round-trips the classifier settings without touching the conditions", () => {
+    const parsed = parseModelRoutingGroups([
+      {
+        ...groupWithRule({ field: "task_type", in: ["coding"] }, "strong"),
+        classifier_prompt: "label the request",
+        classifier_output_fmt: "regex",
+        classifier_json_path: "$.label",
+        classifier_regex: "^\\s*(\\w+)",
+        classifier_fallback: "general",
+        classifier_timeout_ms: 2500,
+      },
+    ]);
+    expect(parsed[0].classifier_prompt).toBe("label the request");
+    expect(parsed[0].classifier_output_fmt).toBe("regex");
+    expect(parsed[0].classifier_regex).toBe("^\\s*(\\w+)");
+    expect(parsed[0].classifier_timeout_ms).toBe(2500);
+    // The four frozen task_type values are still what this round validates.
+    expect(parsed[0].rules[0].when).toEqual({
+      field: "task_type",
+      in: ["coding"],
+    });
+  });
+
+  it("refuses classifier settings outside the frozen vocabulary", () => {
+    // 这些值在类型上就不合法；用 `unknown` 模拟后端或旧版本写出的文档。
+    for (const patch of [
+      { classifier_output_fmt: "yaml" },
+      { classifier_timeout_ms: 0 },
+      { classifier_timeout_ms: 60_001 },
+    ] as unknown as Partial<ModelRoutingGroup>[]) {
+      expect(() => parseModelRoutingGroups([group(patch)])).toThrow();
+    }
+    // An unknown classifier key is not silently ignored either.
+    expect(() =>
+      parseModelRoutingGroups([
+        group({
+          classifier_note: "x",
+        } as unknown as Partial<ModelRoutingGroup>),
+      ]),
+    ).toThrow(/未知字段/);
+  });
+
+  it("bounds branches, keys, lists and keywords", () => {
+    expect(() => parseModelRoutingGroups([groupWithRule({ all: [] })])).toThrow(
+      /不得为空数组/,
+    );
+    // An unknown key inside a condition is not silently ignored.
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({
+          all: [{ field: "streaming", equals_bool: true }],
+          extra: 1,
+        }),
+      ]),
+    ).toThrow(/未知字段/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({
+          field: "literal_keyword",
+          contains_any: Array.from(
+            { length: maxModelRoutingKeywords + 1 },
+            (_, index) => `k${index}`,
+          ),
+        }),
+      ]),
+    ).toThrow(/关键词过多/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({
+          field: "task_type",
+          in: Array.from(
+            { length: maxModelRoutingListItems + 1 },
+            (_, index) => `t${index}`,
+          ),
+        }),
+      ]),
+    ).toThrow(/列表过长/);
+  });
+
+  it("rejects a condition tree deeper than the bound", () => {
+    // Five nested `all` levels exceed the depth-4 limit.
+    let when: unknown = { field: "streaming", equals_bool: true };
+    for (let level = 0; level < 5; level += 1) when = { all: [when] };
+    expect(() => parseModelRoutingGroups([groupWithRule(when)])).toThrow(
+      /条件过深/,
+    );
+  });
+
+  it("requires a member default and a target that is a member", () => {
+    expect(() =>
+      parseModelRoutingGroups([group({ default_member_id: "missing" })]),
+    ).toThrow(/默认成员不存在/);
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "streaming", equals_bool: true }, "other"),
+      ]),
+    ).toThrow(/目标成员不存在/);
+    expect(() => parseModelRoutingGroups([group({ members: [] })])).toThrow(
+      /至少需要一个成员/,
+    );
+  });
+
+  it("rejects duplicate member and rule ids", () => {
+    expect(() =>
+      parseModelRoutingGroups([
+        group({
+          members: [
+            { id: "fast", service_id: "anthropic", model: "claude-haiku" },
+            { id: "fast", service_id: "anthropic", model: "claude-sonnet" },
+          ],
+        }),
+      ]),
+    ).toThrow(/ID 必须唯一/);
+  });
+
+  it("rejects reserved slugs and malformed ids", () => {
+    for (const id of ["auto", "text-v1"]) {
+      expect(() => parseModelRoutingGroups([group({ id })])).toThrow(/保留 ID/);
+    }
+    for (const id of ["-lead", "trail-", "Upper", "has space", ""]) {
+      expect(() => parseModelRoutingGroups([group({ id })])).toThrow();
+    }
+  });
+
+  it("rejects excess group and member counts", () => {
+    const many = Array.from({ length: maxModelRoutingGroups + 1 }, (_, index) =>
+      group({ id: `g${index}` }),
+    );
+    expect(() => parseModelRoutingGroups(many)).toThrow(/组过多/);
+    const members = Array.from(
+      { length: maxModelRoutingMembersPerGroup + 1 },
+      (_, index) => ({
+        id: `m${index}`,
+        service_id: "anthropic",
+        model: "claude-haiku",
+      }),
+    );
+    expect(() => parseModelRoutingGroups([group({ members })])).toThrow(
+      /成员过多/,
+    );
+  });
+
+  it("rejects excess priority and a malformed member model", () => {
+    expect(() =>
+      parseModelRoutingGroups([
+        group({
+          rules: [
+            {
+              id: "r",
+              priority: maxModelRoutingPriority + 1,
+              when: { field: "streaming", equals_bool: true },
+              target_member_id: "fast",
+            },
+          ],
+        }),
+      ]),
+    ).toThrow(/优先级过大/);
+    expect(() =>
+      parseModelRoutingGroups([
+        group({
+          members: [{ id: "fast", service_id: "anthropic", model: " padded " }],
+          default_member_id: "fast",
+        }),
+      ]),
+    ).toThrow(/模型名无效/);
+  });
+});
+
+describe("model routing time leaf", () => {
+  it("accepts a two-value within window and round-trips it", () => {
+    const parsed = parseModelRoutingGroups([
+      groupWithRule({ field: "system_time", within: ["09:00", "12:00"] }),
+    ]);
+    expect(parsed[0].rules[0].when).toEqual({
+      field: "system_time",
+      within: ["09:00", "12:00"],
+    });
+  });
+
+  it("accepts a window that crosses midnight and one that names an instant", () => {
+    // Both shapes are legal wire values; the half-open/crossing semantics are
+    // the evaluator's call, so the parser must not reject either.
+    for (const within of [
+      ["22:00", "02:00"],
+      ["09:00", "09:00"],
+    ]) {
+      const parsed = parseModelRoutingGroups([
+        groupWithRule({ field: "system_time", within }),
+      ]);
+      expect(parsed[0].rules[0].when).toEqual({ field: "system_time", within });
+    }
+  });
+
+  it("requires exactly two values", () => {
+    for (const within of [[], ["09:00"], ["09:00", "12:00", "13:00"]]) {
+      expect(() =>
+        parseModelRoutingGroups([
+          groupWithRule({ field: "system_time", within }),
+        ]),
+      ).toThrow(/within/);
+    }
+  });
+
+  it("rejects a value that is not HH:mm and refuses 24:00", () => {
+    // 24:00 is not a wall-clock time: the Go validator refuses it, so the
+    // strict parser has to refuse it too rather than letting it reach a save.
+    for (const value of ["9:00", "09:60", "24:00", "09-00", "0900", "09:00 "]) {
+      expect(() =>
+        parseModelRoutingGroups([
+          groupWithRule({ field: "system_time", within: [value, "12:00"] }),
+        ]),
+      ).toThrow(/HH:mm/);
+    }
+  });
+
+  it("refuses within on a non-time field and a system_time leaf without it", () => {
+    expect(() =>
+      parseModelRoutingGroups([
+        groupWithRule({ field: "task_type", within: ["09:00", "12:00"] }),
+      ]),
+    ).toThrow();
+    expect(() =>
+      parseModelRoutingGroups([groupWithRule({ field: "system_time" })]),
+    ).toThrow();
+  });
+
+  it("refuses an empty window draft and clears the issue once both ends are set", () => {
+    const empty = validateModelRoutingDraft([
+      groupWithRule({ field: "system_time" }),
+    ]);
+    expect(empty.map((issue) => issue.kind)).toEqual(["empty-values"]);
+
+    const complete = validateModelRoutingDraft([
+      groupWithRule({ field: "system_time", within: ["22:00", "02:00"] }),
+    ]);
+    expect(complete).toEqual([]);
+  });
+
+  it("recognizes a time leaf and never treats it as a range leaf", () => {
+    // `within` is not one of the numeric bounds, so the range predicate would
+    // otherwise claim this leaf and hand it the wrong editor.
+    const time: ModelRoutingCondition = {
+      field: "system_time",
+      within: ["09:00", "12:00"],
+    };
+    expect(isModelRoutingTime(time)).toBe(true);
+    expect(isModelRoutingRange(time)).toBe(false);
+    expect(modelRoutingConditionOperator(time)).toBeNull();
+  });
+});
+
+describe("model routing condition helpers", () => {
+  it("distinguishes a value leaf from a range leaf", () => {
+    expect(
+      modelRoutingConditionOperator({ field: "task_type", in: ["coding"] }),
+    ).toBe("in");
+    expect(
+      modelRoutingConditionOperator({ field: "streaming", equals_bool: true }),
+    ).toBe("equals_bool");
+    // A range leaf carries no operator key.
+    expect(
+      modelRoutingConditionOperator({ field: "turn_count", gte: 1 }),
+    ).toBeNull();
+  });
+});
+
+describe("model routing public ids", () => {
+  it("builds the one namespace and reads a slug back", () => {
+    expect(modelRoutingPublicModelID("superclaude")).toBe(
+      "astrlink/superclaude",
+    );
+    expect(modelRoutingGroupSlug("astrlink/superclaude")).toBe("superclaude");
+    // astrlink/auto is retired, astrlink-text-v1 is a classifier id.
+    expect(modelRoutingGroupSlug("astrlink/auto")).toBe("auto");
+    expect(modelRoutingGroupSlug("astrlink-text-v1")).toBeNull();
+    expect(modelRoutingGroupSlug("astrlink/")).toBeNull();
+    expect(modelRoutingGroupSlug("claude-sonnet")).toBeNull();
+  });
+});
+
+it("round-trips a group-scoped custom task_type label set", () => {
+  const parsed = parseModelRoutingGroups([
+    group({
+      task_type_labels: ["general", "custom-review"],
+      rules: [
+        {
+          id: "r",
+          priority: 1,
+          when: { field: "task_type", in: ["custom-review"] },
+          target_member_id: "strong",
+        },
+      ],
+    }),
+  ]);
+  expect(parsed[0].task_type_labels).toEqual(["general", "custom-review"]);
+  expect(parsed[0].rules[0].when).toEqual({
+    field: "task_type",
+    in: ["custom-review"],
+  });
+});
+
+it("treats an empty task_type_labels list as the legacy built-in domain", () => {
+  const parsed = parseModelRoutingGroups([group({ task_type_labels: [] })]);
+  expect(parsed[0].task_type_labels).toBeUndefined();
+  expect(() =>
+    parseModelRoutingGroups([
+      group({
+        task_type_labels: ["general"],
+        rules: [
+          {
+            id: "r",
+            priority: 1,
+            when: { field: "task_type", in: ["coding"] },
+            target_member_id: "fast",
+          },
+        ],
+      }),
+    ]),
+  ).toThrow(/不在当前组标签集合中/);
+});

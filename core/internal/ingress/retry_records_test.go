@@ -228,7 +228,9 @@ func TestFailedRequestRecordsAttemptedServiceWithoutRoundTrip(t *testing.T) {
 		wantRejected []string
 	}{
 		{name: "credential", candidates: []contract.Endpoint{endpointA}, denied: "endpoint_attempt_a", code: "credential_unavailable", wantService: "endpoint_attempt_a", wantRejected: []string{"endpoint_attempt_a · credential_unavailable"}},
-		{name: "privacy", candidates: []contract.Endpoint{endpointA}, policyErr: errors.New("policy offline"), code: "privacy_policy_unavailable", wantService: "endpoint_attempt_a"},
+		// The request-level privacy preflight fails before any candidate is
+		// resolved, so no endpoint was attempted and the root keeps none.
+		{name: "privacy", candidates: []contract.Endpoint{endpointA}, policyErr: errors.New("policy offline"), code: "privacy_policy_unavailable", wantService: ""},
 		// The client sees A's network failure, so the root keeps A.
 		{name: "network then credential", candidates: []contract.Endpoint{endpointA, endpointB}, denied: "endpoint_attempt_b", code: "upstream_unavailable", wantService: "endpoint_attempt_a", wantTrips: 1, wantRejected: []string{"endpoint_attempt_b · credential_unavailable"}},
 	}
@@ -295,7 +297,11 @@ func TestFailedRequestRecordsAttemptedServiceWithoutRoundTrip(t *testing.T) {
 			if root.Status != contract.RequestStatusFailed || root.Error == nil || root.Error.Code != test.code {
 				t.Fatalf("root status=%s error=%#v, want failed %s; body=%s", root.Status, root.Error, test.code, response.Body.String())
 			}
-			if root.ServiceID == nil || string(*root.ServiceID) != test.wantService {
+			if test.wantService == "" {
+				if root.ServiceID != nil {
+					t.Fatalf("root service=%v, want none attempted", *root.ServiceID)
+				}
+			} else if root.ServiceID == nil || string(*root.ServiceID) != test.wantService {
 				t.Fatalf("root service=%v, want %s", root.ServiceID, test.wantService)
 			}
 			if got := rejectedCandidates(root); strings.Join(got, "\n") != strings.Join(test.wantRejected, "\n") {

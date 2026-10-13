@@ -1,0 +1,450 @@
+package ingress
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/autoclassifier"
+	"github.com/QuantumNous/astrlink/core/internal/endpoint"
+	"github.com/QuantumNous/astrlink/core/internal/privacy"
+	"github.com/QuantumNous/astrlink/core/internal/secretstore"
+	"github.com/QuantumNous/astrlink/core/internal/transport"
+)
+
+func privacyPolicyRedact() privacy.Policy {
+	return privacy.Policy{Enabled: true, Mode: privacy.ModeRegex, Action: privacy.ActionRedact}
+}
+
+// memorySecretStore answers one fixed ref with one fixed secret.
+type memorySecretStore struct {
+	ref    secretstore.Ref
+	secret []byte
+}
+
+func (store memorySecretStore) Get(_ context.Context, ref secretstore.Ref) ([]byte, error) {
+	if ref != store.ref {
+		return nil, secretstore.ErrNotFound
+	}
+	return append([]byte(nil), store.secret...), nil
+}
+
+func (store memorySecretStore) Put(context.Context, secretstore.Ref, []byte) error {
+	return nil
+}
+
+func (store memorySecretStore) Delete(context.Context, secretstore.Ref) error {
+	return nil
+}
+
+// cloudTestGroup routes task_type=coding to the strong member; the default is fast.
+func cloudTestGroup(labels []string, fallback string) contract.ModelRoutingGroup {
+	group := contract.ModelRoutingGroup{
+		ID: "superclaude", Enabled: true,
+		Members: []contract.ModelRoutingMember{
+			{ID: "fast", ServiceID: "endpoint_test", Model: "fast-model"},
+			{ID: "strong", ServiceID: "endpoint_test", Model: "strong-model"},
+		},
+		DefaultMemberID: "fast",
+		Rules: []contract.ModelRoutingRule{{
+			ID: "coding", Priority: 1,
+			When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"coding"}},
+			TargetMemberID: "strong",
+		}},
+	}
+	group.TaskTypeLabels = labels
+	group.ClassifierFallback = fallback
+	return group
+}
+
+func enabledClassifierSettings(serverURL, protocol string) contract.ClassifierSettings {
+	return contract.ClassifierSettings{
+		Enabled:          true,
+		ClassifierSource: contract.ClassifierSourceInline,
+		Inline: &contract.ClassifierInlineSource{
+			Protocol:      protocol,
+			Endpoint:      serverURL,
+			CredentialRef: contract.ClassifierCredentialRef,
+			Model:         "jev-latest",
+		},
+	}
+}
+
+// cloudRoutingHandler wires a handler whose classification goes to the given
+// cloud server through the settings store and the fixed credential.
+func cloudRoutingHandler(t *testing.T, cloudServer *httptest.Server, protocol string, group contract.ModelRoutingGroup, records *redirectSettingsStore, forwarder Forwarder) *Handler {
+	t.Helper()
+	settings := enabledClassifierSettings(cloudServer.URL, protocol)
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(_ context.Context, request endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false), UpstreamModel: request.Model}, nil
+		}),
+		RequestRecords:     records,
+		ClassifierSettings: ClassifierSettingsProviderFunc(func(context.Context) (contract.ClassifierSettings, error) { return settings, nil }),
+		ProxyCredentials:   memorySecretStore{ref: contract.ClassifierCredentialRef, secret: []byte("cloud-key")},
+	})
+	if forwarder != nil {
+		handler.forwarder = forwarder
+	} else {
+		handler.forwarder = forwarderFunc(func(writer http.ResponseWriter, request *http.Request, _ transport.Target) error {
+			_, _ = writer.Write([]byte(`{"model":"fast-model"}`))
+			return nil
+		})
+	}
+	records.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{group}
+	return handler
+}
+
+func cloudTestForwarder(t *testing.T) (Forwarder, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies []string
+	forwarder := transport.New(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		data, _ := io.ReadAll(request.Body)
+		mu.Lock()
+		bodies = append(bodies, string(data))
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"model":"fast-model"}`)),
+		}, nil
+	}))
+	snapshot := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), bodies...)
+	}
+	return forwarder, snapshot
+}
+
+func serveCloudRouting(t *testing.T, handler *Handler, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	request.Header.Set("X-AstrLink-Routing-Debug", "local-only")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// Low confidence is not a failure: the fact becomes unknown (triUnknown), the
+// task_type rule is skipped, and the record carries the dedicated code —
+// never the availability fallback.
+func TestModelRoutingLowConfidenceBecomesUnknownNotUnavailable(t *testing.T) {
+	for _, labels := range [][]string{nil, {"general", "research", "coding", "architect"}} {
+		cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			_, _ = writer.Write([]byte(`{"answers":{"task_type":{"choice":"coding","confidence":0.2}}}`))
+		}))
+		defer cloudServer.Close()
+		store := newRedirectSettingsStore()
+		forwarder, bodies := cloudTestForwarder(t)
+		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(labels, ""), store, forwarder)
+		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		record := store.root(t)
+		if record.ModelRouting == nil || !record.ModelRouting.UsedDefault || record.ModelRouting.RuleID != "" {
+			t.Fatalf("decision = %+v, want the task_type rule skipped", record.ModelRouting)
+		}
+		if record.ModelRouting.FallbackReason != "classifier_low_confidence" {
+			t.Fatalf("fallback reason = %q, want classifier_low_confidence", record.ModelRouting.FallbackReason)
+		}
+		if upstreames := bodies(); len(upstreames) != 1 || !strings.Contains(upstreames[0], "fast-model") {
+			t.Fatalf("upstream bodies = %v", upstreames)
+		}
+	}
+}
+
+func TestModelRoutingCloudHighConfidenceSelectsRule(t *testing.T) {
+	var received []byte
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		data, _ := io.ReadAll(request.Body)
+		received = data
+		_, _ = writer.Write([]byte(`{"answers":{"task_type":{"choice":"coding","confidence":0.95}}}`))
+	}))
+	defer cloudServer.Close()
+	store := newRedirectSettingsStore()
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil, ""), store, nil)
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	record := store.root(t)
+	if record.ModelRouting == nil || record.ModelRouting.MemberModel != "strong-model" || record.ModelRouting.UsedDefault {
+		t.Fatalf("decision = %+v, want the coding rule member", record.ModelRouting)
+	}
+	if !strings.Contains(string(received), `"criteria"`) {
+		t.Fatalf("cloud request missing criteria: %s", received)
+	}
+	for _, field := range record.ModelRouting.Fields {
+		if field.Field == "task_type" && field.ClassifierConfidence != 0.95 {
+			t.Fatalf("recorded confidence = %v, want 0.95", field.ClassifierConfidence)
+		}
+	}
+}
+
+// The whole failure matrix stays fail-open: the request succeeds on the
+// deterministic path whatever the classifier does.
+func TestModelRoutingCloudFailureMatrixFailsOpen(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol string
+		status   int
+		body     string
+		want     string
+	}{
+		{name: "rate limited", protocol: contract.ClassifierProtocolOpenAIDecisions, status: 429, body: `{}`, want: "classifier_busy"},
+		{name: "overloaded", protocol: contract.ClassifierProtocolJev, status: 529, body: `{}`, want: "classifier_busy"},
+		{name: "server error", protocol: contract.ClassifierProtocolJev, status: 500, body: `{}`, want: "classifier_unavailable"},
+		{name: "jev missing answer", protocol: contract.ClassifierProtocolJev, status: 200, body: `{"answers":{}}`, want: "classifier_invalid_output"},
+		{name: "openai refusal", protocol: contract.ClassifierProtocolOpenAIDecisions, status: 200, body: `{"answers":[{"type":"refusal","name":"task_type"}]}`, want: "classifier_refusal"},
+		{name: "garbage", protocol: contract.ClassifierProtocolJev, status: 200, body: `nope`, want: "classifier_invalid_output"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.WriteHeader(test.status)
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer cloudServer.Close()
+			store := newRedirectSettingsStore()
+			handler := cloudRoutingHandler(t, cloudServer, test.protocol, cloudTestGroup(nil, ""), store, nil)
+			response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			record := store.root(t)
+			if record.ModelRouting == nil || record.ModelRouting.FallbackReason != test.want {
+				t.Fatalf("fallback reason = %q, want %q", record.ModelRouting.FallbackReason, test.want)
+			}
+			if !record.ModelRouting.UsedDefault {
+				t.Fatalf("decision did not use the deterministic default: %+v", record.ModelRouting)
+			}
+		})
+	}
+}
+
+func TestModelRoutingCloudTimeoutFailsOpen(t *testing.T) {
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		time.Sleep(5 * time.Second)
+	}))
+	defer cloudServer.Close()
+	store := newRedirectSettingsStore()
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil, ""), store, nil)
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	record := store.root(t)
+	if record.ModelRouting.FallbackReason != "classifier_timeout" {
+		t.Fatalf("fallback reason = %q, want classifier_timeout", record.ModelRouting.FallbackReason)
+	}
+}
+
+// fallback=error keeps fail-open: it only records a code and still routes to
+// the deterministic default instead of failing the request.
+func TestModelRoutingCloudFallbackErrorNeverBlocks(t *testing.T) {
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer cloudServer.Close()
+	store := newRedirectSettingsStore()
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil, contract.ClassifierFallbackError), store, nil)
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s — fallback=error must never block", response.Code, response.Body.String())
+	}
+	record := store.root(t)
+	if record.ModelRouting.FallbackReason != "classifier_error" {
+		t.Fatalf("fallback reason = %q, want classifier_error", record.ModelRouting.FallbackReason)
+	}
+	if !record.ModelRouting.UsedDefault {
+		t.Fatalf("decision = %+v, want deterministic default", record.ModelRouting)
+	}
+}
+
+// fallback=general engages only when the group's label set contains general.
+func TestModelRoutingCloudFallbackGeneral(t *testing.T) {
+	t.Run("general selects the rule", func(t *testing.T) {
+		cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.WriteHeader(http.StatusTooManyRequests)
+		}))
+		defer cloudServer.Close()
+		store := newRedirectSettingsStore()
+		group := cloudTestGroup(nil, contract.ClassifierFallbackGeneral)
+		group.Rules = []contract.ModelRoutingRule{{
+			ID: "general", Priority: 1,
+			When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"general"}},
+			TargetMemberID: "strong",
+		}}
+		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
+		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		record := store.root(t)
+		if record.ModelRouting.MemberModel != "strong-model" || record.ModelRouting.FallbackReason != "classifier_busy" {
+			t.Fatalf("decision = %+v", record.ModelRouting)
+		}
+	})
+	t.Run("custom labels degrade to skip", func(t *testing.T) {
+		cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.WriteHeader(http.StatusTooManyRequests)
+		}))
+		defer cloudServer.Close()
+		store := newRedirectSettingsStore()
+		group := cloudTestGroup([]string{"alpha", "beta"}, contract.ClassifierFallbackGeneral)
+		group.Rules = []contract.ModelRoutingRule{{
+			ID: "alpha-rule", Priority: 1,
+			When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"alpha"}},
+			TargetMemberID: "strong",
+		}}
+		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
+		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		record := store.root(t)
+		if record.ModelRouting.FallbackReason != "classifier_fallback_invalid" || !record.ModelRouting.UsedDefault {
+			t.Fatalf("decision = %+v, want degraded skip", record.ModelRouting)
+		}
+	})
+}
+
+// The cloud classifier must receive the group's custom label set, and a
+// confident custom answer routes; an answer outside the set is invalid.
+func TestModelRoutingCloudCustomLabelsRoundTrip(t *testing.T) {
+	var criteria map[string]any
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		data, _ := io.ReadAll(request.Body)
+		var envelope struct {
+			Questions struct {
+				TaskType struct {
+					Criteria map[string]any `json:"criteria"`
+				} `json:"task_type"`
+			} `json:"questions"`
+		}
+		_ = json.Unmarshal(data, &envelope)
+		criteria = envelope.Questions.TaskType.Criteria
+		_, _ = writer.Write([]byte(`{"answers":{"task_type":{"choice":"storyboard","confidence":0.9}}}`))
+	}))
+	defer cloudServer.Close()
+	store := newRedirectSettingsStore()
+	group := cloudTestGroup([]string{"storyboard", "general"}, "")
+	group.Rules = []contract.ModelRoutingRule{{
+		ID: "storyboard", Priority: 1,
+		When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"storyboard"}},
+		TargetMemberID: "strong",
+	}}
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"draw a storyboard"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(criteria) != 2 || criteria["storyboard"] != "storyboard" {
+		t.Fatalf("criteria = %v, want the custom label set", criteria)
+	}
+	record := store.root(t)
+	if record.ModelRouting.MemberModel != "strong-model" {
+		t.Fatalf("decision = %+v, want the storyboard rule member", record.ModelRouting)
+	}
+}
+
+// Retry attempts all read the same sanitized bytes: the classifier saw them,
+// and every upstream attempt forwards identical placeholders.
+func TestModelRoutingSanitizedBytesSharedWithFailover(t *testing.T) {
+	var cloudBodies []string
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		data, _ := io.ReadAll(request.Body)
+		cloudBodies = append(cloudBodies, string(data))
+		_, _ = writer.Write([]byte(`{"answers":{"task_type":{"choice":"coding","confidence":0.99}}}`))
+	}))
+	defer cloudServer.Close()
+	retryPolicy := contract.DefaultFailurePolicy()
+	retryPolicy.InitialDelayMS = 0
+	retryPolicy.NetworkError = contract.FailureRetry
+	retryPolicy.MaxRetries = 2
+	var upstreamBodies []string
+	store := newRedirectSettingsStore()
+	settings := enabledClassifierSettings(cloudServer.URL, contract.ClassifierProtocolJev)
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(_ context.Context, request endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			resolved := endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false), UpstreamModel: request.Model}
+			resolved.FailurePolicy = &retryPolicy
+			return resolved, nil
+		}),
+		RequestRecords:     store,
+		ClassifierSettings: ClassifierSettingsProviderFunc(func(context.Context) (contract.ClassifierSettings, error) { return settings, nil }),
+		ProxyCredentials:   memorySecretStore{ref: contract.ClassifierCredentialRef, secret: []byte("cloud-key")},
+		PrivacyFilter:      testPrivacyEngine(t, privacyPolicyRedact(), nil),
+		Forwarder: transport.New(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			data, _ := io.ReadAll(request.Body)
+			upstreamBodies = append(upstreamBodies, string(data))
+			if len(upstreamBodies) == 1 {
+				return nil, context.DeadlineExceeded
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"model":"fast-model"}`)),
+			}, nil
+		})),
+	})
+	group := cloudTestGroup(nil, "")
+	store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{group}
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"email alice@example.com about coding"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if len(cloudBodies) != 1 || strings.Contains(cloudBodies[0], "alice@example.com") {
+		t.Fatalf("cloud bodies = %v", cloudBodies)
+	}
+	if len(upstreamBodies) != 2 {
+		t.Fatalf("upstream attempts = %d, want a retry", len(upstreamBodies))
+	}
+	for _, body := range upstreamBodies {
+		if strings.Contains(body, "alice@example.com") {
+			t.Fatalf("upstream received unredacted body: %q", body)
+		}
+	}
+	if upstreamBodies[0] != upstreamBodies[1] {
+		t.Fatalf("failover attempts used different bytes:\n%s\n%s", upstreamBodies[0], upstreamBodies[1])
+	}
+	if !strings.Contains(upstreamBodies[0], "<PRIVATE_EMAIL_") {
+		t.Fatalf("upstream body missing placeholder: %q", upstreamBodies[0])
+	}
+}
+
+// Settings read failures degrade to the deterministic fallback; an unreadable
+// classifier must never fail the request.
+func TestModelRoutingClassifierSettingsErrorFailsOpen(t *testing.T) {
+	store := newRedirectSettingsStore()
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(_ context.Context, request endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false), UpstreamModel: request.Model}, nil
+		}),
+		RequestRecords: store,
+		ClassifierSettings: ClassifierSettingsProviderFunc(func(context.Context) (contract.ClassifierSettings, error) {
+			return contract.ClassifierSettings{}, context.DeadlineExceeded
+		}),
+		Forwarder: forwarderFunc(func(writer http.ResponseWriter, request *http.Request, _ transport.Target) error {
+			_, _ = writer.Write([]byte(`{"model":"fast-model"}`))
+			return nil
+		}),
+	})
+	store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{cloudTestGroup(nil, "")}
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	record := store.root(t)
+	if record.ModelRouting.FallbackReason != autoclassifier.FallbackUnavailable || !record.ModelRouting.UsedDefault {
+		t.Fatalf("decision = %+v, want deterministic fallback", record.ModelRouting)
+	}
+}

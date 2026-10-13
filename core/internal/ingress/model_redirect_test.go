@@ -297,13 +297,14 @@ func TestModelRedirectRecordsClosedEventAfterAccepted(t *testing.T) {
 	if err := record.Validate(); err != nil {
 		t.Fatalf("record invalid: %v", err)
 	}
-	// The redirect comes right after accepted, before privacy and routing.
+	// The single privacy preflight runs before routing, so the redirect comes
+	// after privacy and before the routed event.
 	kinds := eventKinds(record.Events)
-	want := []string{"accepted", "model_redirect", "privacy", "routed", "upstream", "completed"}
+	want := []string{"accepted", "privacy", "model_redirect", "routed", "upstream", "completed"}
 	if strings.Join(kinds, ",") != strings.Join(want, ",") {
 		t.Fatalf("event kinds = %v, want %v", kinds, want)
 	}
-	accepted, redirect := record.Events[0], record.Events[1]
+	accepted, redirect := record.Events[0], record.Events[2]
 	if !strings.HasPrefix(accepted.Summary, "client-model · ") {
 		t.Fatalf("accepted summary = %q, want client model", accepted.Summary)
 	}
@@ -366,7 +367,7 @@ func TestModelRedirectRetryChildrenInheritRedirect(t *testing.T) {
 	if children != 1 {
 		t.Fatalf("children = %d", children)
 	}
-	if kinds := eventKinds(store.root(t).Events); len(kinds) < 2 || kinds[1] != "model_redirect" {
+	if kinds := eventKinds(store.root(t).Events); len(kinds) < 2 || kinds[1] != "privacy" || kinds[2] != "model_redirect" {
 		t.Fatalf("root event kinds = %v", kinds)
 	}
 }

@@ -185,10 +185,14 @@ type recordSession struct {
 	channelBinding *channelBindingAttempt
 	// routingSettings is the request's single settings read; nil when the
 	// store has none or the read failed.
-	routingSettings       *contract.RoutingSettings
+	routingSettings *contract.RoutingSettings
+	// privacy is the one request-level privacy preflight plan; execution and
+	// discovery reuse its outcome and redactions instead of re-inspecting.
+	privacy               *privacyPlan
 	pendingAttempt        *pendingAttemptRecord
 	recovery              *contract.RequestRecovery
 	modelRedirect         *contract.RequestModelRedirect
+	modelRouting          *contract.ModelRoutingDecision
 	id                    contract.RequestID
 	startedAt             time.Time
 	classified            Request
@@ -595,6 +599,12 @@ func (session *recordSession) recordSnapshot(
 		redirect := *session.modelRedirect
 		record.ModelRedirect = &redirect
 	}
+	if session.modelRouting != nil {
+		decision := *session.modelRouting
+		decision.Fields = cloneModelRoutingFields(session.modelRouting.Fields)
+		decision.PrivacyAttempts = cloneModelRoutingPrivacyAttempts(session.modelRouting.PrivacyAttempts)
+		record.ModelRouting = &decision
+	}
 	record.RoutingDecision = session.routingDecision()
 	record.Cursors = mergeSessionCursors(session.inboundCursors, session.outputCursors)
 	return record
@@ -729,9 +739,33 @@ func (session *recordSession) noteAttemptedService(id contract.ServiceID) {
 	session.endpointID = &id
 }
 
-// noteModelRedirect records that routing uses to instead of the client's
-// requested model from. It is a closed point event right after accepted; the
-// requested model stays from, and retry children inherit the redirect.
+// noteModelRouting records the immutable group selection and makes the
+// decision visible on pending request rows before provider execution.
+func (session *recordSession) noteModelRouting(ctx context.Context, decision contract.ModelRoutingDecision) {
+	if session == nil {
+		return
+	}
+	if err := decision.Validate(); err != nil {
+		return
+	}
+	copy := decision
+	copy.Fields = cloneModelRoutingFields(decision.Fields)
+	copy.PrivacyAttempts = cloneModelRoutingPrivacyAttempts(decision.PrivacyAttempts)
+	session.modelRouting = &copy
+	summary := decision.MemberModel
+	if decision.RuleID != "" {
+		summary += " · " + decision.RuleID
+	} else if decision.UsedDefault {
+		summary += " · default_member"
+	}
+	session.addEvent(contract.RequestEventRouted, contract.RequestStatusSucceeded, summary)
+	event := &session.events[len(session.events)-1]
+	ended := event.StartedAt
+	event.EndedAt = &ended
+	session.persistLiveMetadata(ctx)
+}
+
+// noteModelRedirect records that routing uses to instead of the client's requested model from.
 func (session *recordSession) noteModelRedirect(ctx context.Context, from, to string) {
 	if session == nil || from == "" || to == "" || from == to {
 		return
@@ -1064,6 +1098,7 @@ func (session *recordSession) noteSucceeded() {
 		return
 	}
 	session.status = contract.RequestStatusSucceeded
+	session.updateModelRoutingExecution(contract.ModelRoutingExecutionSucceeded, "")
 }
 
 func (session *recordSession) noteBlocked(summary contract.ErrorSummary) {
@@ -1072,6 +1107,7 @@ func (session *recordSession) noteBlocked(summary contract.ErrorSummary) {
 	}
 	session.status = contract.RequestStatusBlocked
 	session.errorSummary = &summary
+	session.updateModelRoutingExecution(contract.ModelRoutingExecutionFailed, summary.Code)
 }
 
 func (session *recordSession) noteFailed(summary contract.ErrorSummary) {
@@ -1084,6 +1120,7 @@ func (session *recordSession) noteFailed(summary contract.ErrorSummary) {
 	}
 	session.status = contract.RequestStatusFailed
 	session.errorSummary = &summary
+	session.updateModelRoutingExecution(contract.ModelRoutingExecutionFailed, summary.Code)
 }
 
 func (session *recordSession) noteCancelled() {
@@ -1094,6 +1131,7 @@ func (session *recordSession) noteCancelled() {
 		return
 	}
 	session.status = contract.RequestStatusCancelled
+	session.updateModelRoutingExecution(contract.ModelRoutingExecutionCancelled, "cancelled")
 }
 
 // clientReceivedTerminal reports whether the client-facing stream already

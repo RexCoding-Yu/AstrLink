@@ -68,7 +68,7 @@ func main() {
 	flag.IntVar(&parentPID, "parent-pid", 0, "optional desktop parent PID to watch on Unix")
 	flag.StringVar(&dataDirectory, "data-dir", "", "optional persistent application data directory")
 	flag.StringVar(&privacyWorkerPath, "privacy-worker", "", "optional bundled privacy worker executable")
-	flag.StringVar(&classifierWorkerPath, "classifier-worker", "", "optional bundled classifier worker executable")
+	flag.StringVar(&classifierWorkerPath, "classifier-worker", "", "optional bundled classifier worker executable; defaults to the sibling binary")
 	flag.BoolVar(&controlTokenStdin, "control-token-stdin", false, "read the per-start control token from stdin")
 	flag.BoolVar(&observerTokenStdin, "observer-token-stdin", false, "read the per-start observer token from the third stdin line")
 	flag.BoolVar(&localKeyStdin, "kek-stdin", false, "read the local key as 64 hex digits from the second stdin line")
@@ -200,6 +200,19 @@ func main() {
 			os.Exit(1)
 		}
 		defer privacyWorker.Close()
+		// The bundled local ONNX classifier composes fail-open: when the
+		// worker binary or model registry is missing, construction returns
+		// nil and model routing keeps the external cloud classifier or its
+		// deterministic fallback. When present, it backs the local
+		// classifier seam in production.
+		classifierDependency, closeClassifier := buildClassifierDependency(classifierOptions{
+			workerPath:    classifierWorkerPath,
+			dataDirectory: dataDirectory,
+			logf:          logger.Printf,
+		})
+		if closeClassifier != nil {
+			defer closeClassifier()
+		}
 		policyRecord, err := store.GetPolicy(ctx, contract.DefaultPrivacyPolicyID)
 		if err != nil {
 			_ = store.Close()
@@ -290,12 +303,18 @@ func main() {
 			AuditBlobs:               store,
 			RecordLogger:             logger.Printf,
 			ConversionEngine:         conversionEngine,
+			Classifier:               classifierDependency,
+			ClassifierSettings:       store,
 			MaxConcurrentInspections: maxConcurrentInspections,
 			MaxRequestBodyMiB:        uint32(maxRequestBodyMiB),
 			ResponseStartTimeout:     time.Duration(responseStartTimeoutSeconds) * time.Second,
 			SubscriptionRisk:         subscriptionRiskReporter{manager: subscriptionManager},
 			Identities:               identities,
 		}
+		// One shared inference handler backs both control-plane seams: the
+		// builtin tool tester and the model classification caller used by the
+		// classifier dry-run for existing_model sources.
+		gatewayTester := ingress.NewWithDependencies(gatewayDependencies)
 		handler, err := controlapi.NewWithDependencies(config.Version, controlapi.Dependencies{
 			ServiceStore: store,
 			PricingStore: store, PricingManager: pricingManager,
@@ -315,7 +334,8 @@ func main() {
 			CodingPlans:        codingplan.New(store, nil),
 			ServiceModels:      servicemodel.New(store, subscriptionManager, nil),
 			ServiceTester:      servicetest.NewWithDependencies(gatewayDependencies, subscriptionManager.APIBaseURLFor),
-			BuiltinToolTester:  ingress.NewWithDependencies(gatewayDependencies),
+			BuiltinToolTester:  gatewayTester,
+			ModelClassifier:    gatewayTester,
 			ControlToken:       controlToken,
 			ObserverToken:      tokens.observer,
 			ConversionEngine:   conversionEngine,

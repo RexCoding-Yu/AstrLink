@@ -62,7 +62,9 @@ func onlyGatewayRecord(t *testing.T, store *sqlite.Store) contract.RequestRecord
 func gatewayPrivacy(t *testing.T, policy privacy.Policy) *privacy.Engine {
 	t.Helper()
 	filter, err := privacy.New(privacy.PolicyProviderFunc(func(_ context.Context, scope privacy.Scope) (privacy.Policy, error) {
-		if scope.ServiceID != "service_test" || scope.AccessTokenID != "" {
+		// The single request-level preflight resolves the policy once with no
+		// per-candidate service scope.
+		if scope.ServiceID != "" || scope.AccessTokenID != "" {
 			t.Errorf("privacy scope=%+v", scope)
 		}
 		return policy, nil
