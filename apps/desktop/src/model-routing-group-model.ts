@@ -28,14 +28,6 @@ export const maxModelRoutingPriority = 1_000_000_000;
 /** member.model 沿用既有 256 字符上限。 */
 export const maxModelRoutingModelLength = 256;
 
-/** 分类器配置的长度上限，与后端契约保持一致。 */
-export const maxModelRoutingClassifierPromptRunes = 4096;
-export const maxModelRoutingClassifierJSONPathRunes = 256;
-export const maxModelRoutingClassifierRegexRunes = 512;
-export const maxModelRoutingClassifierFallbackRunes = 128;
-export const minModelRoutingClassifierTimeoutMS = 1;
-export const maxModelRoutingClassifierTimeoutMS = 60000;
-
 /** 保留字：既不作为 slug，也不作为公共 ID 出现。 */
 export const reservedModelRoutingSlugs: readonly string[] = ["auto", "text-v1"];
 export const reservedModelRoutingIDs: readonly string[] = [
@@ -330,19 +322,10 @@ export interface ModelRoutingGroup {
   rules: ModelRoutingRule[];
   /** Non-empty labels replace the built-in task_type domain for this group. */
   task_type_labels?: string[];
-  /** 分类器配置：本轮只做配置读写，不参与判定。 */
-  classifier_prompt?: string;
-  classifier_output_fmt?: ModelRoutingClassifierOutputFormat;
-  classifier_json_path?: string;
-  classifier_regex?: string;
-  classifier_fallback?: string;
-  classifier_timeout_ms?: number;
 }
 
-/** 保存前面向编辑器草稿的两类跨字段校验错误。 */
-export type ModelRoutingDraftIssueKind =
-  | "empty-values"
-  | "task-type-without-classifier";
+/** 保存前面向编辑器草稿的跨字段校验错误。 */
+export type ModelRoutingDraftIssueKind = "empty-values";
 
 export interface ModelRoutingDraftIssue {
   kind: ModelRoutingDraftIssueKind;
@@ -350,27 +333,6 @@ export interface ModelRoutingDraftIssue {
   ruleIndex: number;
   /** 根叶子为空数组；组合节点按 child index 记录路径，not 只有一个 child。 */
   conditionPath: number[];
-}
-
-/**
- * 至少填写一项分类器配置，才算该组已配置分类器。
- *
- * 只算生产真正读取的字段：Core 的 ResolveCallPlan 取 classifier_prompt、
- * classifier_timeout_ms、classifier_fallback（见 core/contract/classifier_settings.go）。
- * classifier_output_fmt / json_path / regex 目前只被持久化、没有任何消费者，
- * 拿它们当"已配置"的凭据，会让只填输出格式的组通过校验却在运行时静默退化为
- * 无法分类。
- */
-export function modelRoutingClassifierConfigured(
-  group: ModelRoutingGroup,
-): boolean {
-  return [
-    group.classifier_prompt,
-    group.classifier_fallback,
-    group.classifier_timeout_ms,
-  ].some((value) =>
-    typeof value === "string" ? value.trim().length > 0 : value !== undefined,
-  );
 }
 
 const modelRoutingListOperators = [
@@ -389,21 +351,12 @@ export function validateModelRoutingDraft(
 ): ModelRoutingDraftIssue[] {
   const issues: ModelRoutingDraftIssue[] = [];
   for (const [groupIndex, group] of groups.entries()) {
-    const classifierConfigured = modelRoutingClassifierConfigured(group);
     const visit = (
       condition: ModelRoutingCondition,
       ruleIndex: number,
       conditionPath: number[],
     ): void => {
       if ("field" in condition) {
-        if (condition.field === "task_type" && !classifierConfigured) {
-          issues.push({
-            kind: "task-type-without-classifier",
-            groupIndex,
-            ruleIndex,
-            conditionPath,
-          });
-        }
         if (isModelRoutingTimeField(condition.field)) {
           const within = (condition as ModelRoutingTimeCondition).within;
           if (
@@ -465,30 +418,6 @@ export function validateModelRoutingDraft(
     group.rules.forEach((rule, ruleIndex) => visit(rule.when, ruleIndex, []));
   }
   return issues;
-}
-
-export const modelRoutingClassifierOutputFormats = [
-  "json",
-  "first_line",
-  "keyword_match",
-  "regex",
-] as const;
-
-export type ModelRoutingClassifierOutputFormat =
-  (typeof modelRoutingClassifierOutputFormats)[number];
-
-/** 只有 regex 输出格式才需要正则输入框。 */
-export function modelRoutingClassifierUsesRegex(
-  format: ModelRoutingClassifierOutputFormat | undefined,
-): boolean {
-  return format === "regex";
-}
-
-/** json 格式需要一个 JSONPath 取标签；其余格式不需要。 */
-export function modelRoutingClassifierUsesJSONPath(
-  format: ModelRoutingClassifierOutputFormat | undefined,
-): boolean {
-  return format === undefined || format === "json";
 }
 
 export function emptyModelRoutingGroup(id = ""): ModelRoutingGroup {
@@ -858,15 +787,7 @@ function groupAt(value: unknown, path: string): ModelRoutingGroup {
   keysAt(
     group,
     ["id", "enabled", "members", "default_member_id", "rules"],
-    [
-      "classifier_prompt",
-      "classifier_output_fmt",
-      "classifier_json_path",
-      "classifier_regex",
-      "classifier_fallback",
-      "classifier_timeout_ms",
-      "task_type_labels",
-    ],
+    ["task_type_labels"],
     path,
   );
   const id = routingIDAt(group.id, `${path}.id`);
@@ -920,86 +841,7 @@ function groupAt(value: unknown, path: string): ModelRoutingGroup {
     default_member_id: defaultMemberID,
     rules: [...rules].sort((left, right) => left.priority - right.priority),
     ...taskTypeLabelResult,
-    ...classifierAt(group, path),
   };
-}
-
-/**
- * 分类器配置字段：本轮只做配置读写与形状校验，不参与判定。
- *
- * 一律 optional；缺省时不出现在结果里，避免把 `undefined` 写进 wire。
- */
-function classifierAt(
-  group: Record<string, unknown>,
-  path: string,
-): Pick<
-  ModelRoutingGroup,
-  | "classifier_prompt"
-  | "classifier_output_fmt"
-  | "classifier_json_path"
-  | "classifier_regex"
-  | "classifier_fallback"
-  | "classifier_timeout_ms"
-> {
-  const result: Pick<
-    ModelRoutingGroup,
-    | "classifier_prompt"
-    | "classifier_output_fmt"
-    | "classifier_json_path"
-    | "classifier_regex"
-    | "classifier_fallback"
-    | "classifier_timeout_ms"
-  > = {};
-  if (Object.hasOwn(group, "classifier_prompt"))
-    result.classifier_prompt = textAt(
-      group.classifier_prompt,
-      `${path}.classifier_prompt`,
-      maxModelRoutingClassifierPromptRunes,
-    );
-  if (Object.hasOwn(group, "classifier_output_fmt")) {
-    const format = textAt(
-      group.classifier_output_fmt,
-      `${path}.classifier_output_fmt`,
-    );
-    if (
-      !modelRoutingClassifierOutputFormats.includes(
-        format as ModelRoutingClassifierOutputFormat,
-      )
-    )
-      fail(`${path}.classifier_output_fmt`, "输出格式不属于 V1");
-    result.classifier_output_fmt = format as ModelRoutingClassifierOutputFormat;
-  }
-  if (Object.hasOwn(group, "classifier_json_path"))
-    result.classifier_json_path = textAt(
-      group.classifier_json_path,
-      `${path}.classifier_json_path`,
-      maxModelRoutingClassifierJSONPathRunes,
-    );
-  if (Object.hasOwn(group, "classifier_regex"))
-    result.classifier_regex = textAt(
-      group.classifier_regex,
-      `${path}.classifier_regex`,
-      maxModelRoutingClassifierRegexRunes,
-    );
-  if (Object.hasOwn(group, "classifier_fallback"))
-    result.classifier_fallback = textAt(
-      group.classifier_fallback,
-      `${path}.classifier_fallback`,
-      maxModelRoutingClassifierFallbackRunes,
-    );
-  if (Object.hasOwn(group, "classifier_timeout_ms")) {
-    const timeout = countAt(
-      group.classifier_timeout_ms,
-      `${path}.classifier_timeout_ms`,
-    );
-    if (
-      timeout < minModelRoutingClassifierTimeoutMS ||
-      timeout > maxModelRoutingClassifierTimeoutMS
-    )
-      fail(`${path}.classifier_timeout_ms`, "超时不在允许范围内");
-    result.classifier_timeout_ms = timeout;
-  }
-  return result;
 }
 
 function assertUniqueIDs(ids: readonly string[], path: string) {

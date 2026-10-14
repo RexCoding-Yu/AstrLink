@@ -305,93 +305,41 @@ func TestModelRoutingConditionBoundsKeywordAndStringLists(t *testing.T) {
 	}
 }
 
-func TestModelRoutingConditionAcceptsClassifierFieldsOnGroup(t *testing.T) {
-	// Absent: a group that predates the fields still validates.
-	if err := routingConditionError(t, `{"field":"protocol","equals":"openai_chat"}`); err != nil {
-		t.Fatalf("group without classifier fields rejected: %v", err)
-	}
-	// Well-formed: stored, and the values survive a decode round trip.
-	document := `{"id":"g","enabled":true,"members":[{"id":"a","service_id":"service_01","model":"m"}],"default_member_id":"a","rules":[],
-		"classifier_prompt":"classify the request","classifier_output_fmt":"keyword_match","classifier_json_path":"$.category",
-		"classifier_regex":"^code","classifier_fallback":"general","classifier_timeout_ms":2500}`
-	var group ModelRoutingGroup
-	if err := json.Unmarshal([]byte(document), &group); err != nil {
-		t.Fatal(err)
-	}
-	if err := group.Validate(); err != nil {
-		t.Fatalf("well-formed classifier fields rejected: %v", err)
-	}
-	if group.ClassifierOutputFmt != "keyword_match" || group.ClassifierTimeoutMS == nil || *group.ClassifierTimeoutMS != 2500 {
-		t.Fatalf("classifier fields did not survive decode: %+v", group)
-	}
-	reencoded, err := json.Marshal(group)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var roundTrip ModelRoutingGroup
-	if err := json.Unmarshal(reencoded, &roundTrip); err != nil {
-		t.Fatalf("classifier fields did not round-trip: %v", err)
-	}
-	if roundTrip.ClassifierPrompt != "classify the request" || roundTrip.ClassifierFallback != "general" {
-		t.Fatalf("classifier fields changed on round trip: %+v", roundTrip)
-	}
-	// Every documented output format is accepted, and the value set is closed.
-	for _, format := range ModelRoutingClassifierOutputFormats {
-		body := strings.Replace(document, `"keyword_match"`, `"`+format+`"`, 1)
-		if err := json.Unmarshal([]byte(body), &group); err != nil {
-			t.Fatal(err)
-		}
-		if err := group.Validate(); err != nil {
-			t.Fatalf("classifier_output_fmt %q rejected: %v", format, err)
-		}
-	}
-}
-
-func TestModelRoutingGroupRejectsMalformedClassifierFields(t *testing.T) {
+// The group-level classifier_* fields were removed before any release, so no
+// compatibility shell remains: a document carrying one is rejected at decode
+// with the offending key named, while a group without them — with or without
+// task_type_labels — still decodes and validates.
+func TestModelRoutingGroupRejectsRemovedClassifierFields(t *testing.T) {
+	base := `"id":"g","enabled":true,"members":[{"id":"a","service_id":"service_01","model":"m"}],"default_member_id":"a","rules":[]`
 	for _, field := range []string{
-		`"classifier_output_fmt":"yaml"`,
-		`"classifier_output_fmt":"JSON"`,
-		`"classifier_output_fmt":7`,
-		`"classifier_output_fmt":null`,
-		`"classifier_timeout_ms":0`,
-		`"classifier_timeout_ms":60001`,
-		`"classifier_timeout_ms":-1`,
-		`"classifier_timeout_ms":"500"`,
-		`"classifier_timeout_ms":null`,
-		`"classifier_prompt":"` + strings.Repeat("p", MaxModelRoutingClassifierPromptRunes+1) + `"`,
-		`"classifier_json_path":"` + strings.Repeat("j", MaxModelRoutingClassifierJSONPathRunes+1) + `"`,
-		`"classifier_regex":"` + strings.Repeat("r", MaxModelRoutingClassifierRegexRunes+1) + `"`,
-		`"classifier_fallback":"` + strings.Repeat("f", MaxModelRoutingClassifierFallbackRunes+1) + `"`,
+		`"classifier_prompt":"classify the request"`,
+		`"classifier_output_fmt":"keyword_match"`,
+		`"classifier_json_path":"$.category"`,
+		`"classifier_regex":"^code"`,
+		`"classifier_fallback":"general"`,
+		`"classifier_timeout_ms":2500`,
+		`"classifier_prompt":null`,
 	} {
-		document := `{"id":"g","enabled":true,"members":[{"id":"a","service_id":"service_01","model":"m"}],"default_member_id":"a","rules":[],` + field + `}`
+		document := `{` + base + `,` + field + `}`
 		var group ModelRoutingGroup
-		if err := json.Unmarshal([]byte(document), &group); err != nil {
-			continue
-		}
-		if err := group.Validate(); err == nil {
+		err := json.Unmarshal([]byte(document), &group)
+		if err == nil {
 			t.Fatalf("%s accepted", field)
 		}
+		if !strings.Contains(err.Error(), "classifier_") {
+			t.Fatalf("%s rejected without naming the key: %v", field, err)
+		}
 	}
-	// The per-field limits are inclusive: the boundary value is accepted.
-	for _, field := range []string{
-		`"classifier_prompt":"` + strings.Repeat("p", MaxModelRoutingClassifierPromptRunes) + `"`,
-		`"classifier_json_path":"` + strings.Repeat("j", MaxModelRoutingClassifierJSONPathRunes) + `"`,
-		`"classifier_regex":"` + strings.Repeat("r", MaxModelRoutingClassifierRegexRunes) + `"`,
-		`"classifier_fallback":"` + strings.Repeat("f", MaxModelRoutingClassifierFallbackRunes) + `"`,
-		// An empty string means "not configured" for every classifier_* field.
-		`"classifier_output_fmt":""`,
-		`"classifier_prompt":""`,
-		`"classifier_timeout_ms":1`,
-		`"classifier_timeout_ms":60000`,
-	} {
-		document := `{"id":"g","enabled":true,"members":[{"id":"a","service_id":"service_01","model":"m"}],"default_member_id":"a","rules":[],` + field + `}`
-		var group ModelRoutingGroup
-		if err := json.Unmarshal([]byte(document), &group); err != nil {
-			t.Fatal(err)
-		}
-		if err := group.Validate(); err != nil {
-			t.Fatalf("boundary %s rejected: %v", field, err)
-		}
+	clean := `{` + base + `,"task_type_labels":["coding"]}`
+	var group ModelRoutingGroup
+	if err := json.Unmarshal([]byte(clean), &group); err != nil {
+		t.Fatalf("group without classifier fields rejected: %v", err)
+	}
+	if err := group.Validate(); err != nil {
+		t.Fatalf("group without classifier fields invalid: %v", err)
+	}
+	if len(group.TaskTypeLabels) != 1 || group.TaskTypeLabels[0] != "coding" {
+		t.Fatalf("task_type_labels did not survive decode: %+v", group)
 	}
 }
 

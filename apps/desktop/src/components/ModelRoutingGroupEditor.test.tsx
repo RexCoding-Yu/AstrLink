@@ -656,7 +656,6 @@ describe("ModelRoutingGroupEditor", () => {
       "modelRoutingGroup.priorityDerivedHintLabel",
       "modelRoutingGroup.timeWindowHintLabel",
       "modelRoutingGroup.unknownHintLabel",
-      "modelRoutingGroup.fallbackErrorHintLabel",
       "modelRoutingGroup.rangeBoundsHintLabel",
     ];
     const triggers = expected.map((key) =>
@@ -1988,53 +1987,5 @@ describe("ModelRoutingGroupEditor 第二轮控件", () => {
       );
     });
     expect(lastWhen(change)).toEqual({ field: "language", in: ["*", "ja"] });
-  });
-
-  it("分类器字段按输出格式决定是否显示正则与 JSON 路径", async () => {
-    await act(async () =>
-      root.render(
-        <Harness
-          initial={[
-            {
-              ...groupWithWhen({ field: "task_type", in: ["coding"] }),
-              classifier_output_fmt: "json",
-            },
-          ]}
-        />,
-      ),
-    );
-    expect(input(t("modelRoutingGroup.classifierJSONPath"))).toBeTruthy();
-    expect(input(t("modelRoutingGroup.classifierRegex"))).toBeNull();
-
-    await pick(t("modelRoutingGroup.classifierOutputFmt"), "regex");
-    expect(input(t("modelRoutingGroup.classifierRegex"))).toBeTruthy();
-    expect(input(t("modelRoutingGroup.classifierJSONPath"))).toBeNull();
-  });
-
-  it("分类器的取值改动会写进分组", async () => {
-    const change = vi.fn();
-    await act(async () =>
-      root.render(
-        <Harness
-          change={change}
-          initial={[groupWithWhen({ field: "task_type", in: ["coding"] })]}
-        />,
-      ),
-    );
-    await act(async () => {
-      const field = input(t("modelRoutingGroup.classifierFallback"))!;
-      Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )!.set!.call(field, "general");
-      field.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    const [next] = change.mock.calls.at(-1) as [ModelRoutingGroup[]];
-    expect(next[0].classifier_fallback).toBe("general");
-    // 只新增字段，不因为分类器配置而改动条件。
-    expect(next[0].rules[0].when).toEqual({
-      field: "task_type",
-      in: ["coding"],
-    });
   });
 });

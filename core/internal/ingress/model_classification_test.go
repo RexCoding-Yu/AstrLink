@@ -177,7 +177,7 @@ func existingModelSettings() contract.ClassifierSettings {
 // upstream call.
 func TestModelRoutingExistingModelClassificationEndToEnd(t *testing.T) {
 	store := newRedirectSettingsStore()
-	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), cloudTestGroup(nil, ""), store)
+	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), cloudTestGroup(nil), store)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -223,44 +223,13 @@ func TestModelRoutingExistingModelClassificationEndToEnd(t *testing.T) {
 	}
 }
 
-// A group classifier prompt replaces only the task sentence: it is prepended
-// with {{labels}} substituted, and the constraint's JSON shape demand and
-// schema section stays appended after it. A stored prompt can never drop the
-// shape requirement, and the obedient JSON answer still routes by rule.
-func TestModelRoutingExistingModelGroupPromptPrependsShapeAndSchema(t *testing.T) {
-	group := cloudTestGroup(nil, "")
-	group.ClassifierPrompt = "Sort the ticket into one bucket. Buckets: {{labels}}."
-	store := newRedirectSettingsStore()
-	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), group, store)
-	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	calls := outbound()
-	if len(calls) < 2 {
-		t.Fatalf("upstream calls = %d, want classification plus business call", len(calls))
-	}
-	instructions := requestInstructions(calls[0].body)
-	wantPrefix := "Sort the ticket into one bucket. Buckets: general, research, coding, architect.\n\n"
-	if !strings.HasPrefix(instructions, wantPrefix) {
-		t.Fatalf("instructions = %q, want the group task sentence first", instructions)
-	}
-	if !strings.Contains(instructions, "Return exactly one JSON object") || !strings.Contains(instructions, "Schema:") {
-		t.Fatalf("instructions = %q, want the constraint section appended", instructions)
-	}
-	decision := store.records.records[0].ModelRouting
-	if decision == nil || decision.RuleID != "coding" || decision.FallbackReason != "" {
-		t.Fatalf("decision = %+v, want coding rule without fallback", decision)
-	}
-}
-
 // The production path must send instructions that actually ask for the JSON
 // shape the strict parser requires: the constraint-compiled shape demand and
 // schema section from the immutable label snapshot — never the legacy
 // bare-label prompt, whose obedient answers ParseTaskType always rejects.
 func TestModelRoutingExistingModelInstructionsDemandJSONShape(t *testing.T) {
 	store := newRedirectSettingsStore()
-	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), cloudTestGroup(nil, ""), store)
+	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), cloudTestGroup(nil), store)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -299,7 +268,7 @@ func TestModelRoutingExistingModelInstructionsDemandJSONShape(t *testing.T) {
 // actually leave through the transport, not the forwarding functions.
 func TestModelRoutingClassificationOutboundCarriesNoAstrLinkIdentity(t *testing.T) {
 	store := newRedirectSettingsStore()
-	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), cloudTestGroup(nil, ""), store)
+	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), cloudTestGroup(nil), store)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -337,7 +306,7 @@ func TestModelRoutingExistingModelVirtualTargetFailsOpen(t *testing.T) {
 		settings := existingModelSettings()
 		settings.ExistingModel.Model = model
 		store := newRedirectSettingsStore()
-		handler, outbound := classificationRoutingHandler(t, settings, cloudTestGroup(nil, ""), store)
+		handler, outbound := classificationRoutingHandler(t, settings, cloudTestGroup(nil), store)
 		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 		if response.Code != http.StatusOK {
 			t.Fatalf("model %q: status=%d body=%s", model, response.Code, response.Body.String())
@@ -386,7 +355,7 @@ func TestModelRoutingExistingModelInvalidOutputFailsOpen(t *testing.T) {
 					Body: io.NopCloser(strings.NewReader(body)),
 				}, nil
 			}))
-			store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{cloudTestGroup(nil, "")}
+			store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{cloudTestGroup(nil)}
 			response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 			if response.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -408,7 +377,7 @@ func TestModelRoutingExistingModelInvalidOutputFailsOpen(t *testing.T) {
 // including a fallback=general answer — contributes nothing, because a
 // fallback is not a measurement.
 func TestTaskTypeCandidateLabelsConversion(t *testing.T) {
-	group := cloudTestGroup(nil, "")
+	group := cloudTestGroup(nil)
 	tests := []struct {
 		name    string
 		outcome modelrouting.TaskTypeOutcome

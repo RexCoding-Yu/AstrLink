@@ -2879,8 +2879,6 @@
     "rowUnrepresentable": "这条规则的条件无法用决策表表达（旧格式的任一满足或嵌套取反）。改动它会改成决策表形态。",
     "priorityDerivedHint": "优先级由行序生成（间隔 {{step}}），随拖动自动更新，只读。",
     "priorityDerivedHintLabel": "优先级来源说明",
-    "fallbackErrorHint": "填写回退标签只是记录一次错误，路由仍继续：依赖分类器的规则把该字段判为未知。它不会阻断请求，不要把它当安全闸用。",
-    "fallbackErrorHintLabel": "回退行为说明",
     "addRule": "新增规则",
     "noRules": "还没有规则；所有请求都会使用默认成员。",
     "ruleID": "规则 ID",
@@ -2906,7 +2904,6 @@
     "keywords": "关键词",
     "emptyValueError": "请至少添加一个值。",
     "taskTypeClassifierHint": "该字段会调用{{source}}，带来额外延迟与费用。",
-    "taskTypeClassifierError": "使用 task_type 需先配置分类器；内置离线分类器不会产出自定义标签，依赖这些标签的规则不会命中。",
     "listHint": "最多 {{max}} 项。",
     "selectValue": "选择取值",
     "removeValue": "移除取值 {{value}}",
@@ -2963,28 +2960,7 @@
       "not_contains_any": "不包含任意"
     },
     "booleanTrue": "是",
-    "booleanFalse": "否",
-    "classifierTitle": "分类器",
-    "classifierHint": "分类器把请求的文本判定成 task_type 等标签，供依赖分类器的规则使用。取不到结果时规则按未知跳过。",
-    "classifierHintLabel": "分类器说明",
-    "classifierPrompt": "分类提示词",
-    "classifierPromptHint": "送进分类器的指令；留空表示不额外给出提示词。",
-    "classifierOutputFmt": "输出格式",
-    "classifierFormatUnset": "未设置，使用默认 JSON",
-    "classifierFormat": {
-      "json": "JSON",
-      "first_line": "首行",
-      "keyword_match": "关键词匹配",
-      "regex": "正则（高级）"
-    },
-    "classifierJSONPath": "JSON 路径",
-    "classifierJSONPathHint": "从 JSON 输出里取标签的路径，默认 $.label。",
-    "classifierRegex": "正则表达式",
-    "classifierRegexHint": "从输出里捕获标签的正则，仅在使用正则格式时生效。",
-    "classifierFallback": "兜底标签",
-    "classifierFallbackHint": "分类器取不到结果时使用的标签；留空表示按未知处理。",
-    "classifierTimeout": "超时（毫秒）",
-    "classifierTimeoutHint": "分类器调用的超时上限，范围 {{min}}–{{max}} 毫秒。"
+    "booleanFalse": "否"
   },
   "pricing": {
     "title": "费用明细",

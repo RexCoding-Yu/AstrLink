@@ -23,8 +23,7 @@ const (
 	ClassifierCredentialRef = "local://classifier/default"
 
 	MinClassifierTimeoutMS = 1
-	// MaxClassifierTimeoutMS bounds the global inline timeout. Group-level
-	// classifier_timeout_ms may only tighten, never loosen, this value.
+	// MaxClassifierTimeoutMS bounds the global inline timeout.
 	MaxClassifierTimeoutMS     = 5000
 	DefaultClassifierTimeoutMS = 1000
 	// The existing_model source carries an independent budget: calling a
@@ -35,7 +34,7 @@ const (
 	DefaultClassifierExistingModelTimeoutMS = 15000
 	MaxClassifierExistingModelTimeoutMS     = 60000
 	DefaultClassifierLowConfidence          = 0.5
-	MaxClassifierPromptRunes                = MaxModelRoutingClassifierPromptRunes
+	MaxClassifierPromptRunes                = 4096
 	MaxClassifierModelRunes                 = 256
 	MaxClassifierProviderRefRunes           = 256
 	ClassifierPromptLabelsPlaceholder       = "{{labels}}"
@@ -393,8 +392,8 @@ func (settings ClassifierSettings) CloudConfigured() bool {
 
 // ClassifierCallPlan is the resolved per-request classifier input shared by
 // the inference path and the control-plane dry-run, so both apply the same
-// precedence: group override first, global setting second, built-in default
-// last.
+// precedence: global setting first, built-in default last. The group
+// contributes only its task_type label domain.
 type ClassifierCallPlan struct {
 	Protocol               string
 	Endpoint               string
@@ -407,10 +406,9 @@ type ClassifierCallPlan struct {
 	Fallback               string
 }
 
-// ResolveCallPlan merges the global classifier settings with one group's
-// overrides. A group may tighten the timeout and replace the prompt or
-// fallback; unknown enum values in group fields fall back to the global
-// value instead of failing the request.
+// ResolveCallPlan resolves the global classifier settings against one group's
+// task_type label domain. Only the labels come from the group; the prompt,
+// timeout and fallback are global settings with built-in defaults.
 func (settings ClassifierSettings) ResolveCallPlan(group *ModelRoutingGroup) ClassifierCallPlan {
 	plan := ClassifierCallPlan{
 		Prompt:                 settings.EffectivePrompt(),
@@ -421,15 +419,6 @@ func (settings ClassifierSettings) ResolveCallPlan(group *ModelRoutingGroup) Cla
 	labels := DefaultModelRoutingTaskTypeLabels
 	if group != nil {
 		labels = EffectiveModelRoutingTaskTypeLabels(group.TaskTypeLabels)
-		if strings.TrimSpace(group.ClassifierPrompt) != "" {
-			plan.Prompt = group.ClassifierPrompt
-		}
-		if group.ClassifierTimeoutMS != nil && *group.ClassifierTimeoutMS > 0 && *group.ClassifierTimeoutMS < plan.TimeoutMS {
-			plan.TimeoutMS = *group.ClassifierTimeoutMS
-		}
-		if validClassifierFallback(group.ClassifierFallback) {
-			plan.Fallback = group.ClassifierFallback
-		}
 	}
 	plan.Labels = append([]string(nil), labels...)
 	plan.Prompt = strings.ReplaceAll(plan.Prompt, ClassifierPromptLabelsPlaceholder, strings.Join(plan.Labels, ", "))

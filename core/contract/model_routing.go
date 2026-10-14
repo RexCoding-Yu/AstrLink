@@ -30,19 +30,7 @@ const (
 	MaxModelRoutingPriority          = 1_000_000_000
 	MaxModelRoutingFactsTextRunes    = 64 * 1024
 	MaxModelRoutingObservationFields = 64
-	// Classifier configuration bounds. These fields are stored and validated
-	// only; they do not influence routing decisions in this step.
-	MaxModelRoutingClassifierPromptRunes   = 4096
-	MaxModelRoutingClassifierJSONPathRunes = 256
-	MaxModelRoutingClassifierRegexRunes    = 512
-	MaxModelRoutingClassifierFallbackRunes = 128
-	MinModelRoutingClassifierTimeoutMS     = 1
-	MaxModelRoutingClassifierTimeoutMS     = 60000
 )
-
-// ModelRoutingClassifierOutputFormats is the closed set of classifier_output_fmt
-// values. It is deliberately inert: only the accepted spelling is enforced.
-var ModelRoutingClassifierOutputFormats = []string{"json", "first_line", "keyword_match", "regex"}
 
 // DefaultModelRoutingTaskTypeLabels preserves the task_type domain of groups
 // created before configurable labels were added. A non-empty group label list
@@ -54,15 +42,6 @@ func EffectiveModelRoutingTaskTypeLabels(labels []string) []string {
 		return append([]string(nil), DefaultModelRoutingTaskTypeLabels...)
 	}
 	return append([]string(nil), labels...)
-}
-
-func validModelRoutingClassifierOutputFormat(value string) bool {
-	for _, format := range ModelRoutingClassifierOutputFormats {
-		if value == format {
-			return true
-		}
-	}
-	return false
 }
 
 type ModelRoutingSelectionSource string
@@ -224,14 +203,6 @@ type ModelRoutingGroup struct {
 	// built-in four-label domain for backward compatibility; non-empty replaces
 	// it, including whether built-in labels remain allowed.
 	TaskTypeLabels []string `json:"task_type_labels,omitempty"`
-	// Classifier configuration. These values are persisted for the configured
-	// classifier path and do not alter deterministic rule evaluation directly.
-	ClassifierPrompt    string `json:"classifier_prompt,omitempty"`
-	ClassifierOutputFmt string `json:"classifier_output_fmt,omitempty"`
-	ClassifierJSONPath  string `json:"classifier_json_path,omitempty"`
-	ClassifierRegex     string `json:"classifier_regex,omitempty"`
-	ClassifierFallback  string `json:"classifier_fallback,omitempty"`
-	ClassifierTimeoutMS *int   `json:"classifier_timeout_ms,omitempty"`
 }
 
 func (member *ModelRoutingMember) UnmarshalJSON(data []byte) error {
@@ -266,10 +237,7 @@ func (group *ModelRoutingGroup) UnmarshalJSON(data []byte) error {
 	}
 	type plain ModelRoutingGroup
 	var value plain
-	if err := decodePolicy(data, &value, []string{"id", "enabled", "members", "default_member_id", "rules"}, []string{
-		"classifier_prompt", "classifier_output_fmt", "classifier_json_path",
-		"classifier_regex", "classifier_fallback", "classifier_timeout_ms", "task_type_labels",
-	}); err != nil {
+	if err := decodePolicy(data, &value, []string{"id", "enabled", "members", "default_member_id", "rules"}, []string{"task_type_labels"}); err != nil {
 		return err
 	}
 	*group = ModelRoutingGroup(value)
@@ -284,9 +252,6 @@ func (group ModelRoutingGroup) Validate() error {
 	}
 	if group.ID == "auto" || group.ID == "text-v1" {
 		return fmt.Errorf("group id %q is reserved", group.ID)
-	}
-	if err := group.validateClassifierFields(); err != nil {
-		return err
 	}
 	if err := validateModelRoutingTaskTypeLabels(group.TaskTypeLabels); err != nil {
 		return err
@@ -371,33 +336,6 @@ func validateModelRoutingModel(field, value string) error {
 	}
 	if parsed, err := url.Parse(value); err == nil && (parsed.User != nil || parsed.Host != "") {
 		return fmt.Errorf("%s must not contain credentials or a URL", field)
-	}
-	return nil
-}
-
-// validateClassifierFields checks the optional, inert classifier_* fields. An
-// empty string or absent timeout means "not configured", so a group that
-// predates the fields always passes.
-func (group ModelRoutingGroup) validateClassifierFields() error {
-	for _, field := range []struct {
-		name  string
-		value string
-		max   int
-	}{
-		{"classifier_prompt", group.ClassifierPrompt, MaxModelRoutingClassifierPromptRunes},
-		{"classifier_json_path", group.ClassifierJSONPath, MaxModelRoutingClassifierJSONPathRunes},
-		{"classifier_regex", group.ClassifierRegex, MaxModelRoutingClassifierRegexRunes},
-		{"classifier_fallback", group.ClassifierFallback, MaxModelRoutingClassifierFallbackRunes},
-	} {
-		if utf8.RuneCountInString(field.value) > field.max {
-			return fmt.Errorf("%s must contain at most %d characters", field.name, field.max)
-		}
-	}
-	if group.ClassifierOutputFmt != "" && !validModelRoutingClassifierOutputFormat(group.ClassifierOutputFmt) {
-		return fmt.Errorf("classifier_output_fmt %q must be one of json, first_line, keyword_match or regex", group.ClassifierOutputFmt)
-	}
-	if group.ClassifierTimeoutMS != nil && (*group.ClassifierTimeoutMS < MinModelRoutingClassifierTimeoutMS || *group.ClassifierTimeoutMS > MaxModelRoutingClassifierTimeoutMS) {
-		return fmt.Errorf("classifier_timeout_ms must be between %d and %d", MinModelRoutingClassifierTimeoutMS, MaxModelRoutingClassifierTimeoutMS)
 	}
 	return nil
 }

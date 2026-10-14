@@ -20,12 +20,6 @@ const MAX_MODEL_ROUTING_LIST_ITEMS: usize = 16;
 const MAX_MODEL_ROUTING_TASK_TYPE_LABELS: usize = MAX_MODEL_ROUTING_LIST_ITEMS;
 const MAX_MODEL_ROUTING_KEYWORDS: usize = 32;
 const MAX_MODEL_ROUTING_VALUE_RUNES: usize = 128;
-const MAX_MODEL_ROUTING_CLASSIFIER_PROMPT_RUNES: usize = 4096;
-const MAX_MODEL_ROUTING_CLASSIFIER_JSON_PATH_RUNES: usize = 256;
-const MAX_MODEL_ROUTING_CLASSIFIER_REGEX_RUNES: usize = 512;
-const MAX_MODEL_ROUTING_CLASSIFIER_FALLBACK_RUNES: usize = 128;
-const MIN_MODEL_ROUTING_CLASSIFIER_TIMEOUT_MS: i64 = 1;
-const MAX_MODEL_ROUTING_CLASSIFIER_TIMEOUT_MS: i64 = 60_000;
 const MODEL_ROUTING_MODEL_PREFIX: &str = "astrlink/";
 const MODEL_ROUTING_RESERVED_GROUP_IDS: [&str; 2] = ["auto", "text-v1"];
 const ASTRLINK_TEXT_CLASSIFICATION_V1: &str = "astrlink-text-v1";
@@ -182,12 +176,6 @@ fn validate_model_routing_groups(
                 "members",
                 "default_member_id",
                 "rules",
-                "classifier_prompt",
-                "classifier_output_fmt",
-                "classifier_json_path",
-                "classifier_regex",
-                "classifier_fallback",
-                "classifier_timeout_ms",
                 "task_type_labels",
             ],
         )
@@ -197,7 +185,6 @@ fn validate_model_routing_groups(
         if MODEL_ROUTING_RESERVED_GROUP_IDS.contains(&id) {
             return Err(format!("group id {id:?} is reserved"));
         }
-        validate_classifier_fields(fields)?;
         let task_type_labels = validate_task_type_labels(fields)?;
         if !ids.insert(id) {
             return Err(format!("model routing group {id:?} is duplicated"));
@@ -340,30 +327,6 @@ fn fields_of<'a>(
     Some(object)
 }
 
-/// bounded_string mirrors the contract's rune-count bound for an optional
-/// string field: absent or empty passes, anything else must be a string within
-/// `max` characters.
-fn bounded_string(
-    fields: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    max: usize,
-) -> Result<(), String> {
-    match fields.get(key) {
-        None => Ok(()),
-        Some(value) => {
-            let value = value
-                .as_str()
-                .ok_or_else(|| format!("{key} must be a string"))?;
-            if value.chars().count() > max {
-                return Err(format!("{key} must contain at most {max} characters"));
-            }
-            Ok(())
-        }
-    }
-}
-
-/// validate_classifier_fields mirrors ModelRoutingGroup.validateClassifierFields.
-/// These keys are stored and validated only; they never reach evaluation.
 fn validate_task_type_labels(
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Vec<String>, String> {
@@ -402,57 +365,6 @@ fn validate_task_type_labels(
         result.push(label.to_owned());
     }
     Ok(result)
-}
-
-fn validate_classifier_fields(
-    fields: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
-    bounded_string(
-        fields,
-        "classifier_prompt",
-        MAX_MODEL_ROUTING_CLASSIFIER_PROMPT_RUNES,
-    )?;
-    bounded_string(
-        fields,
-        "classifier_json_path",
-        MAX_MODEL_ROUTING_CLASSIFIER_JSON_PATH_RUNES,
-    )?;
-    bounded_string(
-        fields,
-        "classifier_regex",
-        MAX_MODEL_ROUTING_CLASSIFIER_REGEX_RUNES,
-    )?;
-    bounded_string(
-        fields,
-        "classifier_fallback",
-        MAX_MODEL_ROUTING_CLASSIFIER_FALLBACK_RUNES,
-    )?;
-    if let Some(format) = fields.get("classifier_output_fmt") {
-        let format = format
-            .as_str()
-            .ok_or("classifier_output_fmt must be a string")?;
-        if !format.is_empty()
-            && !matches!(format, "json" | "first_line" | "keyword_match" | "regex")
-        {
-            return Err(format!(
-                "classifier_output_fmt {format:?} must be one of json, first_line, keyword_match or regex"
-            ));
-        }
-    }
-    if let Some(timeout) = fields.get("classifier_timeout_ms") {
-        timeout
-            .as_i64()
-            .filter(|timeout| {
-                (MIN_MODEL_ROUTING_CLASSIFIER_TIMEOUT_MS..=MAX_MODEL_ROUTING_CLASSIFIER_TIMEOUT_MS)
-                    .contains(timeout)
-            })
-            .ok_or_else(|| {
-                format!(
-                    "classifier_timeout_ms must be between {MIN_MODEL_ROUTING_CLASSIFIER_TIMEOUT_MS} and {MAX_MODEL_ROUTING_CLASSIFIER_TIMEOUT_MS}"
-                )
-            })?;
-    }
-    Ok(())
 }
 
 fn string_field<'a>(
@@ -1572,57 +1484,23 @@ mod tests {
     }
 
     #[test]
-    fn validates_classifier_fields_on_a_routing_group() {
-        // Absent: a group that predates the fields still passes.
-        assert_eq!(
-            groups(json!([group(
-                json!([member("fast", "service_openai", "m")]),
-                "fast"
-            )])),
-            Ok(())
-        );
-        let with_classifier = |field: serde_json::Value| {
-            let mut value = group(json!([member("fast", "service_openai", "m")]), "fast");
-            value["classifier_prompt"] = json!("classify the request");
-            value["classifier_output_fmt"] = json!("keyword_match");
-            value["classifier_json_path"] = json!("$.category");
-            value["classifier_regex"] = json!("^code");
-            value["classifier_fallback"] = json!("general");
-            value["classifier_timeout_ms"] = json!(2500);
-            for (key, replace) in field.as_object().unwrap() {
-                value[key] = replace.clone();
-            }
-            groups(json!([value]))
+    fn rejects_group_level_classifier_fields() {
+        // The group-scoped classifier keys were removed from the contract; the
+        // whitelist in `fields_of` now refuses them like any other unknown key.
+        let with_field = |key: &str, value: serde_json::Value| {
+            let mut group = group(json!([member("fast", "service_openai", "m")]), "fast");
+            group[key] = value;
+            groups(json!([group]))
         };
-        assert_eq!(with_classifier(json!({})), Ok(()));
-        for format in ["json", "first_line", "keyword_match", "regex", ""] {
-            assert_eq!(
-                with_classifier(json!({"classifier_output_fmt": format})),
-                Ok(()),
-                "{format}"
-            );
-        }
-        for timeout in [1, 60000] {
-            assert_eq!(
-                with_classifier(json!({"classifier_timeout_ms": timeout})),
-                Ok(()),
-                "{timeout}"
-            );
-        }
-        for field in [
-            json!({"classifier_output_fmt": "yaml"}),
-            json!({"classifier_output_fmt": "JSON"}),
-            json!({"classifier_output_fmt": 7}),
-            json!({"classifier_timeout_ms": 0}),
-            json!({"classifier_timeout_ms": 60001}),
-            json!({"classifier_timeout_ms": -1}),
-            json!({"classifier_timeout_ms": "500"}),
-            json!({"classifier_prompt": "p".repeat(MAX_MODEL_ROUTING_CLASSIFIER_PROMPT_RUNES + 1)}),
-            json!({"classifier_json_path": "j".repeat(MAX_MODEL_ROUTING_CLASSIFIER_JSON_PATH_RUNES + 1)}),
-            json!({"classifier_regex": "r".repeat(MAX_MODEL_ROUTING_CLASSIFIER_REGEX_RUNES + 1)}),
-            json!({"classifier_fallback": "f".repeat(MAX_MODEL_ROUTING_CLASSIFIER_FALLBACK_RUNES + 1)}),
+        for (key, value) in [
+            ("classifier_prompt", json!("classify the request")),
+            ("classifier_output_fmt", json!("keyword_match")),
+            ("classifier_json_path", json!("$.category")),
+            ("classifier_regex", json!("^code")),
+            ("classifier_fallback", json!("general")),
+            ("classifier_timeout_ms", json!(2500)),
         ] {
-            assert!(with_classifier(field.clone()).is_err(), "{field}");
+            assert!(with_field(key, value).is_err(), "{key}");
         }
     }
 

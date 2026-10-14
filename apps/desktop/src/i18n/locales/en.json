@@ -2879,8 +2879,6 @@
     "rowUnrepresentable": "This rule's condition cannot be expressed as a decision table (an old any-of or nested negation). Editing it converts the rule to the decision-table shape.",
     "priorityDerivedHint": "Priority comes from row order ({{step}} apart) and updates as you drag; it is read-only.",
     "priorityDerivedHintLabel": "About the derived priority",
-    "fallbackErrorHint": "Naming a fallback only records an error and routing continues: rules that depend on the classifier treat the field as unknown. It never blocks a request, so do not rely on it as a safety stop.",
-    "fallbackErrorHintLabel": "About the fallback behavior",
     "addRule": "Add rule",
     "noRules": "No rules yet; every request uses the default member.",
     "ruleID": "Rule ID",
@@ -2906,7 +2904,6 @@
     "keywords": "Keywords",
     "emptyValueError": "Add at least one value.",
     "taskTypeClassifierHint": "This field calls the {{source}}, adding latency and cost.",
-    "taskTypeClassifierError": "Configure a classifier before using task type. The bundled offline classifier does not emit custom labels, so rules that depend on them will not match.",
     "listHint": "Up to {{max}} items.",
     "selectValue": "Select a value",
     "removeValue": "Remove value {{value}}",
@@ -2963,28 +2960,7 @@
       "not_contains_any": "Contains none"
     },
     "booleanTrue": "Yes",
-    "booleanFalse": "No",
-    "classifierTitle": "Classifier",
-    "classifierHint": "The classifier turns request text into labels such as task_type for the rules that depend on them. A rule is skipped as unknown when no label comes back.",
-    "classifierHintLabel": "About the classifier",
-    "classifierPrompt": "Classifier prompt",
-    "classifierPromptHint": "The instruction sent to the classifier; leave empty to send none.",
-    "classifierOutputFmt": "Output format",
-    "classifierFormatUnset": "Not set, defaults to JSON",
-    "classifierFormat": {
-      "json": "JSON",
-      "first_line": "First line",
-      "keyword_match": "Keyword match",
-      "regex": "Regex (advanced)"
-    },
-    "classifierJSONPath": "JSON path",
-    "classifierJSONPathHint": "Path that reads the label out of JSON output; defaults to $.label.",
-    "classifierRegex": "Regular expression",
-    "classifierRegexHint": "Pattern that captures the label from the output; only used with the regex format.",
-    "classifierFallback": "Fallback label",
-    "classifierFallbackHint": "Label to use when the classifier returns nothing; leave empty to treat it as unknown.",
-    "classifierTimeout": "Timeout (ms)",
-    "classifierTimeoutHint": "Upper bound on the classifier call, {{min}}–{{max}} ms."
+    "booleanFalse": "No"
   },
   "pricing": {
     "title": "Cost details",

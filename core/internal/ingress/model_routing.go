@@ -410,12 +410,11 @@ func existingModelConfigured(settings contract.ClassifierSettings) bool {
 
 // classificationInstruction compiles the existing_model classification
 // instruction from one immutable label snapshot. The output constraint's JSON
-// shape demand and schema section is always present and always last: a group
-// prompt (when set) only replaces the task sentence in front of it, so no
-// stored value can drop the shape requirement the strict parser depends on.
-// There is deliberately no fallback to the legacy bare-label
-// DefaultClassifierPrompt — an obedient answer to it can never parse.
-func classificationInstruction(group contract.ModelRoutingGroup, labels []string) (string, error) {
+// shape demand and schema section is the whole instruction, so nothing stored
+// can drop the shape requirement the strict parser depends on. There is
+// deliberately no fallback to the legacy bare-label DefaultClassifierPrompt —
+// an obedient answer to it can never parse.
+func classificationInstruction(labels []string) (string, error) {
 	// The sub-call re-enters the pipeline as a native /v1/responses request;
 	// with no verified native capability recorded the plan is JSON-only, and
 	// SystemPrompt is identical in every constraint mode.
@@ -423,12 +422,7 @@ func classificationInstruction(group contract.ModelRoutingGroup, labels []string
 	if err != nil {
 		return "", err
 	}
-	groupPrompt := strings.TrimSpace(group.ClassifierPrompt)
-	if groupPrompt == "" {
-		return constraint.SystemPrompt(), nil
-	}
-	groupPrompt = strings.ReplaceAll(groupPrompt, contract.ClassifierPromptLabelsPlaceholder, strings.Join(labels, ", "))
-	return groupPrompt + "\n\n" + constraint.SystemPrompt(), nil
+	return constraint.SystemPrompt(), nil
 }
 
 // modelRoutingTaskTypeExistingModel classifies through an existing gateway
@@ -441,7 +435,7 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 		ClassifierID:           "existing_model",
 		LowConfidenceThreshold: plan.LowConfidenceThreshold,
 	}
-	instruction, err := classificationInstruction(group, plan.Labels)
+	instruction, err := classificationInstruction(plan.Labels)
 	if err != nil {
 		// Unreachable with a validated group (the label snapshot is never
 		// empty), but a broken catalog must still fail open, not block.

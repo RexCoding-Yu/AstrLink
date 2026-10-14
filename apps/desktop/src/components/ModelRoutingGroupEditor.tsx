@@ -51,21 +51,12 @@ import {
   modelRoutingPriorityStep,
   modelRoutingTimeStepSeconds,
   modelRoutingTimeWindowLength,
-  maxModelRoutingClassifierFallbackRunes,
-  maxModelRoutingClassifierJSONPathRunes,
-  maxModelRoutingClassifierPromptRunes,
-  maxModelRoutingClassifierRegexRunes,
-  maxModelRoutingClassifierTimeoutMS,
-  minModelRoutingClassifierTimeoutMS,
   maxModelRoutingGroups,
   maxModelRoutingKeywords,
   maxModelRoutingListItems,
   maxModelRoutingMembersPerGroup,
   maxModelRoutingRulesPerGroup,
   maxModelRoutingTaskTypeLabels,
-  modelRoutingClassifierOutputFormats,
-  modelRoutingClassifierUsesJSONPath,
-  modelRoutingClassifierUsesRegex,
   modelRoutingConditionOperator,
   type ModelRoutingDraftIssue,
   modelRoutingFieldOperators,
@@ -74,7 +65,6 @@ import {
   modelRoutingTaskTypes,
   modelRoutingPublicModelID,
   reservedModelRoutingSlugs,
-  type ModelRoutingClassifierOutputFormat,
   type ModelRoutingCondition,
   type ModelRoutingField,
   type ModelRoutingGroup,
@@ -240,14 +230,9 @@ export function ModelRoutingGroupEditor({
     const firstIssue = activeValidationIssues[0];
     if (!firstIssue) return;
     const path = firstIssue.conditionPath.join(".") || "root";
-    const target =
-      firstIssue.kind === "task-type-without-classifier"
-        ? document.querySelector<HTMLElement>(
-            '[data-model-routing-classifier="true"]',
-          )
-        : document.querySelector<HTMLElement>(
-            `[data-model-routing-condition-path="${path}"]`,
-          );
+    const target = document.querySelector<HTMLElement>(
+      `[data-model-routing-condition-path="${path}"]`,
+    );
     if (!target) return;
     target.scrollIntoView?.({ block: "center" });
     const focusTarget =
@@ -959,16 +944,6 @@ function GroupEditor({
           )}
         </Panel>
       </TaskTypeLabelsContext.Provider>
-
-      <ClassifierFields
-        group={group}
-        disabled={disabled}
-        validationError={validationIssues.some(
-          (issue) => issue.kind === "task-type-without-classifier",
-        )}
-        onChange={onChange}
-        onEditingChange={onEditingChange}
-      />
     </div>
   );
 }
@@ -1577,191 +1552,6 @@ function ConditionSummary({ condition }: { condition: ModelRoutingCondition }) {
       ))}
       {"]"}
     </span>
-  );
-}
-
-/**
- * 分类器配置。本轮只做配置的读写与形状约束，**不参与判定**，也不校验
- * `task_type` 的四个值 —— 那要等网关支持自定义标签。
- */
-function ClassifierFields({
-  group,
-  disabled,
-  validationError,
-  onChange,
-  onEditingChange,
-}: {
-  group: ModelRoutingGroup;
-  disabled: boolean;
-  validationError: boolean;
-  onChange: (patch: Partial<ModelRoutingGroup>) => void;
-  onEditingChange?: (editing: boolean) => void;
-}) {
-  const t = useT();
-  const outputFormat = group.classifier_output_fmt;
-  return (
-    <Panel
-      data-model-routing-classifier="true"
-      tabIndex={-1}
-      className={validationError ? "border-destructive" : undefined}
-    >
-      <PanelHeader>
-        <h3 className="flex items-center gap-1 text-sm font-semibold">
-          {t("modelRoutingGroup.classifierTitle")}
-          <HelpPopover label={t("modelRoutingGroup.classifierHintLabel")}>
-            {t("modelRoutingGroup.classifierHint")}
-          </HelpPopover>
-        </h3>
-      </PanelHeader>
-      <div className="grid min-w-0 gap-4 p-4">
-        {validationError ? (
-          <FormMessage tone="error" data-model-routing-validation-error>
-            {t("modelRoutingGroup.taskTypeClassifierError")}
-          </FormMessage>
-        ) : null}
-        <Field label={t("modelRoutingGroup.classifierOutputFmt")}>
-          <ModelSelect
-            options={modelRoutingClassifierOutputFormats}
-            value={outputFormat ?? ""}
-            disabled={disabled}
-            allowCustomValue={false}
-            optionLabel={(value) =>
-              t(`modelRoutingGroup.classifierFormat.${value}`)
-            }
-            placeholder={t("modelRoutingGroup.classifierFormatUnset")}
-            leadingIcon={null}
-            aria-label={t("modelRoutingGroup.classifierOutputFmt")}
-            onValueChange={(next) =>
-              onChange({
-                classifier_output_fmt:
-                  next as ModelRoutingClassifierOutputFormat,
-              })
-            }
-          />
-        </Field>
-        <Field
-          label={t("modelRoutingGroup.classifierPrompt")}
-          hint={t("modelRoutingGroup.classifierPromptHint")}
-        >
-          <textarea
-            className="min-h-20 w-full resize-y rounded-md border bg-background px-2 py-1.5 text-sm outline-none"
-            value={group.classifier_prompt ?? ""}
-            disabled={disabled}
-            maxLength={maxModelRoutingClassifierPromptRunes}
-            aria-label={t("modelRoutingGroup.classifierPrompt")}
-            onChange={(event) => {
-              onEditingChange?.(true);
-              onChange({ classifier_prompt: event.target.value });
-            }}
-            onBlur={() => onEditingChange?.(false)}
-          />
-        </Field>
-        {/* JSON 路径只在 JSON 输出下有意义；其余格式不必暴露。 */}
-        {modelRoutingClassifierUsesJSONPath(outputFormat) ? (
-          <Field
-            label={t("modelRoutingGroup.classifierJSONPath")}
-            hint={t("modelRoutingGroup.classifierJSONPathHint")}
-          >
-            <Input
-              className="h-8 font-mono"
-              value={group.classifier_json_path ?? ""}
-              disabled={disabled}
-              maxLength={maxModelRoutingClassifierJSONPathRunes}
-              placeholder="$.label"
-              aria-label={t("modelRoutingGroup.classifierJSONPath")}
-              onChange={(event) => {
-                onEditingChange?.(true);
-                onChange({ classifier_json_path: event.target.value });
-              }}
-              onBlur={() => onEditingChange?.(false)}
-            />
-          </Field>
-        ) : null}
-        {/* 正则属于高级选项，只有选了 regex 才出现。 */}
-        {modelRoutingClassifierUsesRegex(outputFormat) ? (
-          <Field
-            label={t("modelRoutingGroup.classifierRegex")}
-            hint={t("modelRoutingGroup.classifierRegexHint")}
-          >
-            <Input
-              className="h-8 font-mono"
-              value={group.classifier_regex ?? ""}
-              disabled={disabled}
-              maxLength={maxModelRoutingClassifierRegexRunes}
-              aria-label={t("modelRoutingGroup.classifierRegex")}
-              onChange={(event) => {
-                onEditingChange?.(true);
-                onChange({ classifier_regex: event.target.value });
-              }}
-              onBlur={() => onEditingChange?.(false)}
-            />
-          </Field>
-        ) : null}
-        <div className="grid min-w-0 gap-4 @[640px]:grid-cols-2">
-          <Field
-            label={t("modelRoutingGroup.classifierFallback")}
-            tooltipLabel={t("modelRoutingGroup.fallbackErrorHintLabel")}
-            tooltip={
-              <>
-                <p>{t("modelRoutingGroup.classifierFallbackHint")}</p>
-                <p className="mt-1.5">
-                  {t("modelRoutingGroup.fallbackErrorHint")}
-                </p>
-              </>
-            }
-          >
-            <Input
-              className="h-8"
-              value={group.classifier_fallback ?? ""}
-              disabled={disabled}
-              maxLength={maxModelRoutingClassifierFallbackRunes}
-              aria-label={t("modelRoutingGroup.classifierFallback")}
-              onChange={(event) => {
-                onEditingChange?.(true);
-                onChange({ classifier_fallback: event.target.value });
-              }}
-              onBlur={() => onEditingChange?.(false)}
-            />
-          </Field>
-          <Field
-            label={t("modelRoutingGroup.classifierTimeout")}
-            hint={t("modelRoutingGroup.classifierTimeoutHint", {
-              min: minModelRoutingClassifierTimeoutMS,
-              max: maxModelRoutingClassifierTimeoutMS,
-            })}
-          >
-            <Input
-              className="h-8 tabular-nums"
-              type="number"
-              min={minModelRoutingClassifierTimeoutMS}
-              max={maxModelRoutingClassifierTimeoutMS}
-              value={
-                group.classifier_timeout_ms === undefined
-                  ? ""
-                  : String(group.classifier_timeout_ms)
-              }
-              disabled={disabled}
-              aria-label={t("modelRoutingGroup.classifierTimeout")}
-              onChange={(event) => {
-                const text = event.target.value;
-                if (text === "") {
-                  onChange({ classifier_timeout_ms: undefined });
-                  return;
-                }
-                const parsed = Number(text);
-                if (!Number.isSafeInteger(parsed)) return;
-                onChange({
-                  classifier_timeout_ms: Math.min(
-                    Math.max(parsed, minModelRoutingClassifierTimeoutMS),
-                    maxModelRoutingClassifierTimeoutMS,
-                  ),
-                });
-              }}
-            />
-          </Field>
-        </div>
-      </div>
-    </Panel>
   );
 }
 

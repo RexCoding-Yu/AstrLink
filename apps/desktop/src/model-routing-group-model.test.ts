@@ -62,7 +62,7 @@ describe("model routing group grammar", () => {
     });
   });
 
-  it("validates empty draft lists and recursively finds task_type", () => {
+  it("validates empty draft lists recursively and accepts any task_type rule", () => {
     const issues = validateModelRoutingDraft([
       groupWithRule({
         not: {
@@ -87,54 +87,11 @@ describe("model routing group grammar", () => {
         ruleIndex: 0,
         conditionPath: [0, 1, 0, 0],
       },
-      {
-        kind: "task-type-without-classifier",
-        groupIndex: 0,
-        ruleIndex: 0,
-        conditionPath: [0, 1, 0, 1],
-      },
     ]);
-    const withTaskTypeRule = (patch: Partial<ModelRoutingGroup>) =>
-      group({
-        rules: [
-          {
-            id: "r",
-            priority: 1,
-            when: { field: "task_type", in: ["coding"] },
-            target_member_id: "fast",
-          },
-        ],
-        ...patch,
-      });
-
-    // Only a field Core actually reads counts as a configured classifier:
-    // classifier_output_fmt is persisted but no consumer exists, so it must not
-    // open the gate.
+    // task_type no longer depends on any group-scoped classifier configuration.
     expect(
       validateModelRoutingDraft([
-        withTaskTypeRule({ classifier_output_fmt: "json" }),
-      ]),
-    ).toEqual([
-      {
-        kind: "task-type-without-classifier",
-        groupIndex: 0,
-        ruleIndex: 0,
-        conditionPath: [],
-      },
-    ]);
-    expect(
-      validateModelRoutingDraft([
-        withTaskTypeRule({ classifier_prompt: "classify this" }),
-      ]),
-    ).toEqual([]);
-    expect(
-      validateModelRoutingDraft([
-        withTaskTypeRule({ classifier_fallback: "skip" }),
-      ]),
-    ).toEqual([]);
-    expect(
-      validateModelRoutingDraft([
-        withTaskTypeRule({ classifier_timeout_ms: 500 }),
+        groupWithRule({ field: "task_type", in: ["coding"] }),
       ]),
     ).toEqual([]);
   });
@@ -295,48 +252,6 @@ describe("model routing group grammar", () => {
         groupWithRule({ field: "turn_count", min: 9, max: 2 }),
       ]),
     ).toThrow(/下界不得大于上界/);
-  });
-
-  it("round-trips the classifier settings without touching the conditions", () => {
-    const parsed = parseModelRoutingGroups([
-      {
-        ...groupWithRule({ field: "task_type", in: ["coding"] }, "strong"),
-        classifier_prompt: "label the request",
-        classifier_output_fmt: "regex",
-        classifier_json_path: "$.label",
-        classifier_regex: "^\\s*(\\w+)",
-        classifier_fallback: "general",
-        classifier_timeout_ms: 2500,
-      },
-    ]);
-    expect(parsed[0].classifier_prompt).toBe("label the request");
-    expect(parsed[0].classifier_output_fmt).toBe("regex");
-    expect(parsed[0].classifier_regex).toBe("^\\s*(\\w+)");
-    expect(parsed[0].classifier_timeout_ms).toBe(2500);
-    // The four frozen task_type values are still what this round validates.
-    expect(parsed[0].rules[0].when).toEqual({
-      field: "task_type",
-      in: ["coding"],
-    });
-  });
-
-  it("refuses classifier settings outside the frozen vocabulary", () => {
-    // 这些值在类型上就不合法；用 `unknown` 模拟后端或旧版本写出的文档。
-    for (const patch of [
-      { classifier_output_fmt: "yaml" },
-      { classifier_timeout_ms: 0 },
-      { classifier_timeout_ms: 60_001 },
-    ] as unknown as Partial<ModelRoutingGroup>[]) {
-      expect(() => parseModelRoutingGroups([group(patch)])).toThrow();
-    }
-    // An unknown classifier key is not silently ignored either.
-    expect(() =>
-      parseModelRoutingGroups([
-        group({
-          classifier_note: "x",
-        } as unknown as Partial<ModelRoutingGroup>),
-      ]),
-    ).toThrow(/未知字段/);
   });
 
   it("bounds branches, keys, lists and keywords", () => {

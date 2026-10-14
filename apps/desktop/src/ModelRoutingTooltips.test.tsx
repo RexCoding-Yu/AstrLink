@@ -131,22 +131,17 @@ describe("model routing tooltip coverage", () => {
       body: "modelRoutingGroup.unknownHint",
       label: "modelRoutingGroup.unknownHintLabel",
     },
-    // 6 fallback error does not block.
-    {
-      body: "modelRoutingGroup.fallbackErrorHint",
-      label: "modelRoutingGroup.fallbackErrorHintLabel",
-    },
-    // 7 the dry run calls the classifier for real.
+    // 6 the dry run calls the classifier for real.
     {
       body: "classifier.dryRun.runHint",
       label: "classifier.dryRun.runHintLabel",
     },
-    // 8 global label changes affect every group.
+    // 7 global label changes affect every group.
     {
       body: "modelRoutingGroup.catalogGlobalLabelHint",
       label: "modelRoutingGroup.catalogGlobalLabelHintLabel",
     },
-    // 9 the "no" branch reuses existing credentials, not a provider list.
+    // 8 the "no" branch reuses existing credentials, not a provider list.
     {
       body: "classifier.standaloneModelHint",
       label: "classifier.standaloneModelHintLabel",

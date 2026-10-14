@@ -11,7 +11,7 @@ vi.mock("./bridge", () => bridge);
 vi.mock("./notify", () => ({ notify: { success: vi.fn() } }));
 
 import { defaultFailurePolicy } from "./failure-policy-model";
-import { applyLocale, i18n } from "./i18n";
+import { applyLocale } from "./i18n";
 import { ModelRoutingGroupsPanel } from "./ModelRoutingGroupsPanel";
 import type { RoutableService } from "./service-model";
 
@@ -126,7 +126,7 @@ describe("model routing groups panel", () => {
     expect(container.textContent).toContain("请至少添加一个值");
   });
 
-  it("blocks nested task_type without a classifier and saves after configuring one", async () => {
+  it("saves a nested task_type rule without demanding a group classifier", async () => {
     bridge.getRoutingSettings.mockResolvedValue({
       ...settings(),
       model_routing_groups: [
@@ -162,34 +162,14 @@ describe("model routing groups panel", () => {
         .click(),
     );
     await save();
-    expect(bridge.updateRoutingSettings).not.toHaveBeenCalled();
-    expect(container.textContent).toContain(
-      i18n.t("modelRoutingGroup.taskTypeClassifierError"),
-    );
-    expect(
-      container
-        .querySelector('[data-model-routing-classifier="true"]')
-        ?.contains(document.activeElement),
-    ).toBe(true);
-
-    const prompt = container.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="分类提示词"]',
-    )!;
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value",
-      )!.set!.call(prompt, "classify the request");
-      prompt.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await save();
+    // The group no longer owns a classifier, so a task_type rule is savable as
+    // written; the global classifier settings are the only place to configure it.
     expect(bridge.updateRoutingSettings).toHaveBeenCalledExactlyOnceWith({
-      model_routing_groups: [
-        expect.objectContaining({
-          classifier_prompt: "classify the request",
-        }),
-      ],
+      model_routing_groups: [expect.objectContaining({ enabled: false })],
     });
+    expect(
+      container.querySelector("[data-model-routing-classifier]"),
+    ).toBeNull();
   });
 
   it("keeps an unsaved draft when a reload lands", async () => {

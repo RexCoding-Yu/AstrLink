@@ -45,7 +45,7 @@ func (store memorySecretStore) Delete(context.Context, secretstore.Ref) error {
 }
 
 // cloudTestGroup routes task_type=coding to the strong member; the default is fast.
-func cloudTestGroup(labels []string, fallback string) contract.ModelRoutingGroup {
+func cloudTestGroup(labels []string) contract.ModelRoutingGroup {
 	group := contract.ModelRoutingGroup{
 		ID: "superclaude", Enabled: true,
 		Members: []contract.ModelRoutingMember{
@@ -60,7 +60,6 @@ func cloudTestGroup(labels []string, fallback string) contract.ModelRoutingGroup
 		}},
 	}
 	group.TaskTypeLabels = labels
-	group.ClassifierFallback = fallback
 	return group
 }
 
@@ -78,10 +77,12 @@ func enabledClassifierSettings(serverURL, protocol string) contract.ClassifierSe
 }
 
 // cloudRoutingHandler wires a handler whose classification goes to the given
-// cloud server through the settings store and the fixed credential.
-func cloudRoutingHandler(t *testing.T, cloudServer *httptest.Server, protocol string, group contract.ModelRoutingGroup, records *redirectSettingsStore, forwarder Forwarder) *Handler {
+// cloud server through the settings store and the fixed credential. The
+// fallback is the global inline fallback setting.
+func cloudRoutingHandler(t *testing.T, cloudServer *httptest.Server, protocol string, group contract.ModelRoutingGroup, records *redirectSettingsStore, forwarder Forwarder, fallback string) *Handler {
 	t.Helper()
 	settings := enabledClassifierSettings(cloudServer.URL, protocol)
+	settings.Inline.Fallback = fallback
 	handler := NewWithDependencies(Dependencies{
 		Resolver: resolverFunc(func(_ context.Context, request endpoint.ResolveRequest) (endpoint.Resolved, error) {
 			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false), UpstreamModel: request.Model}, nil
@@ -144,7 +145,7 @@ func TestModelRoutingLowConfidenceBecomesUnknownNotUnavailable(t *testing.T) {
 		defer cloudServer.Close()
 		store := newRedirectSettingsStore()
 		forwarder, bodies := cloudTestForwarder(t)
-		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(labels, ""), store, forwarder)
+		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(labels), store, forwarder, "")
 		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 		if response.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -171,7 +172,7 @@ func TestModelRoutingCloudHighConfidenceSelectsRule(t *testing.T) {
 	}))
 	defer cloudServer.Close()
 	store := newRedirectSettingsStore()
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil, ""), store, nil)
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil, "")
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -215,7 +216,7 @@ func TestModelRoutingCloudFailureMatrixFailsOpen(t *testing.T) {
 			}))
 			defer cloudServer.Close()
 			store := newRedirectSettingsStore()
-			handler := cloudRoutingHandler(t, cloudServer, test.protocol, cloudTestGroup(nil, ""), store, nil)
+			handler := cloudRoutingHandler(t, cloudServer, test.protocol, cloudTestGroup(nil), store, nil, "")
 			response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 			if response.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -237,7 +238,7 @@ func TestModelRoutingCloudTimeoutFailsOpen(t *testing.T) {
 	}))
 	defer cloudServer.Close()
 	store := newRedirectSettingsStore()
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil, ""), store, nil)
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil, "")
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -256,7 +257,7 @@ func TestModelRoutingCloudFallbackErrorNeverBlocks(t *testing.T) {
 	}))
 	defer cloudServer.Close()
 	store := newRedirectSettingsStore()
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil, contract.ClassifierFallbackError), store, nil)
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil, contract.ClassifierFallbackError)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s — fallback=error must never block", response.Code, response.Body.String())
@@ -278,13 +279,13 @@ func TestModelRoutingCloudFallbackGeneral(t *testing.T) {
 		}))
 		defer cloudServer.Close()
 		store := newRedirectSettingsStore()
-		group := cloudTestGroup(nil, contract.ClassifierFallbackGeneral)
+		group := cloudTestGroup(nil)
 		group.Rules = []contract.ModelRoutingRule{{
 			ID: "general", Priority: 1,
 			When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"general"}},
 			TargetMemberID: "strong",
 		}}
-		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
+		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil, contract.ClassifierFallbackGeneral)
 		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 		if response.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -300,13 +301,13 @@ func TestModelRoutingCloudFallbackGeneral(t *testing.T) {
 		}))
 		defer cloudServer.Close()
 		store := newRedirectSettingsStore()
-		group := cloudTestGroup([]string{"alpha", "beta"}, contract.ClassifierFallbackGeneral)
+		group := cloudTestGroup([]string{"alpha", "beta"})
 		group.Rules = []contract.ModelRoutingRule{{
 			ID: "alpha-rule", Priority: 1,
 			When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"alpha"}},
 			TargetMemberID: "strong",
 		}}
-		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
+		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil, contract.ClassifierFallbackGeneral)
 		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 		if response.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -337,13 +338,13 @@ func TestModelRoutingCloudCustomLabelsRoundTrip(t *testing.T) {
 	}))
 	defer cloudServer.Close()
 	store := newRedirectSettingsStore()
-	group := cloudTestGroup([]string{"storyboard", "general"}, "")
+	group := cloudTestGroup([]string{"storyboard", "general"})
 	group.Rules = []contract.ModelRoutingRule{{
 		ID: "storyboard", Priority: 1,
 		When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"storyboard"}},
 		TargetMemberID: "strong",
 	}}
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil, "")
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"draw a storyboard"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -396,7 +397,7 @@ func TestModelRoutingSanitizedBytesSharedWithFailover(t *testing.T) {
 			}, nil
 		})),
 	})
-	group := cloudTestGroup(nil, "")
+	group := cloudTestGroup(nil)
 	store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{group}
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"email alice@example.com about coding"}`)
 	if response.Code != http.StatusOK {
@@ -438,7 +439,7 @@ func TestModelRoutingClassifierSettingsErrorFailsOpen(t *testing.T) {
 			return nil
 		}),
 	})
-	store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{cloudTestGroup(nil, "")}
+	store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{cloudTestGroup(nil)}
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())

@@ -82,8 +82,9 @@ func TestClassifierPromptPlaceholderValidation(t *testing.T) {
 
 func float64Ptr(value float64) *float64 { return &value }
 
-// Group overrides tighten or replace the global values; timeout may only
-// shrink and unknown enum values fall back to the global setting.
+// The plan resolves from the global settings with built-in defaults; a group
+// contributes only its task_type label domain, never the prompt, timeout or
+// fallback.
 func TestClassifierResolveCallPlanPrecedence(t *testing.T) {
 	settings := enabledInlineSettings()
 	timeout := 1500
@@ -101,27 +102,13 @@ func TestClassifierResolveCallPlanPrecedence(t *testing.T) {
 		t.Fatalf("labels substitution missing: %q", plan.Prompt)
 	}
 
-	group := ModelRoutingGroup{
-		TaskTypeLabels:      []string{"alpha", "beta"},
-		ClassifierPrompt:    "choose {{labels}}",
-		ClassifierTimeoutMS: intPtrClassifier(500),
-		ClassifierFallback:  "not-an-enum",
-	}
+	group := ModelRoutingGroup{TaskTypeLabels: []string{"alpha", "beta"}}
 	groupPlan := settings.ResolveCallPlan(&group)
-	if groupPlan.TimeoutMS != 500 {
-		t.Fatalf("group timeout = %d, want 500", groupPlan.TimeoutMS)
-	}
-	if groupPlan.Fallback != ClassifierFallbackGeneral {
-		t.Fatalf("unknown group fallback must fall back to global: %q", groupPlan.Fallback)
-	}
 	if !strings.Contains(groupPlan.Prompt, "alpha, beta") {
 		t.Fatalf("custom labels missing: %q", groupPlan.Prompt)
 	}
-
-	loose := group
-	loose.ClassifierTimeoutMS = intPtrClassifier(4900)
-	if plan := settings.ResolveCallPlan(&loose); plan.TimeoutMS != 1500 {
-		t.Fatalf("group may only tighten the timeout, got %d", plan.TimeoutMS)
+	if groupPlan.TimeoutMS != plan.TimeoutMS || groupPlan.Fallback != plan.Fallback {
+		t.Fatalf("group must not alter the global timeout or fallback: %+v", groupPlan)
 	}
 
 	// The inline budget stays exactly 1000/5000 even as other sources gain
@@ -173,23 +160,6 @@ func TestClassifierExistingModelBudget(t *testing.T) {
 		t.Fatal("existing_model timeout 60001 must be rejected")
 	}
 
-	// A group may only tighten, whatever the source cap would allow.
-	existingModel.ExistingModel.TimeoutMS = nil
-	explicit := 30000
-	global := ClassifierSettings{
-		Enabled:          true,
-		ClassifierSource: ClassifierSourceExistingModel,
-		ExistingModel:    &ClassifierExistingModelSource{ServiceID: "service_01", Model: "claude-haiku", TimeoutMS: &explicit},
-	}
-	tighten := ModelRoutingGroup{ClassifierTimeoutMS: intPtrClassifier(20000)}
-	if plan := global.ResolveCallPlan(&tighten); plan.TimeoutMS != 20000 {
-		t.Fatalf("group 20000 against global 30000 = %d, want 20000 (tighten)", plan.TimeoutMS)
-	}
-	enlarge := ModelRoutingGroup{ClassifierTimeoutMS: intPtrClassifier(40000)}
-	if plan := existingModel.ResolveCallPlan(&enlarge); plan.TimeoutMS != 15000 {
-		t.Fatalf("group 40000 against global default 15000 = %d, want 15000 (no enlarge)", plan.TimeoutMS)
-	}
-
 	// One ResolveCallPlan call with both source blocks present: each source
 	// reads only its own budget.
 	inlineBudget := 1500
@@ -209,10 +179,6 @@ func TestClassifierExistingModelBudget(t *testing.T) {
 	if plan := mixed.ResolveCallPlan(nil); plan.TimeoutMS != 45000 {
 		t.Fatalf("existing_model plan picked up the inline budget: %d, want 45000", plan.TimeoutMS)
 	}
-	shrunk := ModelRoutingGroup{ClassifierTimeoutMS: intPtrClassifier(20000)}
-	if plan := mixed.ResolveCallPlan(&shrunk); plan.TimeoutMS != 20000 {
-		t.Fatalf("mixed plan with group 20000 = %d, want 20000 (tighten)", plan.TimeoutMS)
-	}
 	mirrored := enabledInlineSettings()
 	mirrored.ExistingModel = &ClassifierExistingModelSource{ServiceID: "service_01", Model: "claude-haiku", TimeoutMS: &existingBudget}
 	if timeout := mirrored.EffectiveTimeoutMS(); timeout != 1000 {
@@ -231,5 +197,3 @@ func TestClassifierExistingModelBudget(t *testing.T) {
 		t.Fatal("inline timeout above 5000 must be rejected")
 	}
 }
-
-func intPtrClassifier(value int) *int { return &value }

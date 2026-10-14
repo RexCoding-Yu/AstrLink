@@ -4340,33 +4340,6 @@ components:
             must belong to it. A custom label requires a classifier configured to
             emit that label; the bundled offline classifier emits only the four
             built-in labels.
-        classifier_prompt:
-          type: string
-          maxLength: 4096
-          description: >
-            Reserved for a future model-based classifier. Stored and validated
-            only; it never affects selection in this release.
-        classifier_output_fmt:
-          type: string
-          enum: [json, first_line, keyword_match, regex]
-          description: Shape the future classifier parses its answer as. Inert in this release.
-        classifier_json_path:
-          type: string
-          maxLength: 256
-          description: JSON path the json output format reads. Inert in this release.
-        classifier_regex:
-          type: string
-          maxLength: 512
-          description: Expression the regex output format matches with. Inert in this release.
-        classifier_fallback:
-          type: string
-          maxLength: 128
-          description: Category used when classification finds nothing. Inert in this release.
-        classifier_timeout_ms:
-          type: integer
-          minimum: 1
-          maximum: 60000
-          description: Upper bound on how long a future classifier may run. Inert in this release.
     ChannelBindingScope:
       type: object
       required: [session_id, local_access_token_id, protocol, model]
