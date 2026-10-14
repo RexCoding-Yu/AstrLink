@@ -152,7 +152,7 @@ export function ClassifierDryRunPanel({ ready }: { ready: boolean }) {
       className="gutter-scroller flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-auto pb-1"
       data-testid="classifier-dry-run-panel"
     >
-      <Panel className="flex flex-col gap-3 p-3">
+      <Panel className="flex shrink-0 flex-col gap-3 p-3">
         <Field
           label={t("classifier.dryRun.text")}
           tooltip={t("classifier.dryRun.textHint")}
@@ -202,7 +202,7 @@ export function ClassifierDryRunPanel({ ready }: { ready: boolean }) {
         <FormMessage tone="error">{state.message}</FormMessage>
       ) : null}
       {state.status === "done" ? (
-        <Panel className="flex flex-col gap-3 p-3">
+        <Panel className="flex shrink-0 flex-col gap-3 p-3">
           <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
             <dt className="text-muted-foreground">
               {t("classifier.dryRun.category")}

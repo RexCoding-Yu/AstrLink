@@ -65,7 +65,7 @@ export function ModelRoutingFieldCatalogPanel({ ready }: { ready: boolean }) {
       className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-clip"
       data-testid="model-routing-field-catalog-panel"
     >
-      <Panel className="flex min-h-0 flex-col">
+      <Panel className="flex min-h-0 flex-1 flex-col">
         <PanelHeader
           actions={
             <HelpPopover
@@ -133,7 +133,7 @@ export function ModelRoutingFieldCatalogPanel({ ready }: { ready: boolean }) {
           </Table>
         </div>
       </Panel>
-      <Panel className="flex min-h-0 flex-col">
+      <Panel className="flex min-h-0 shrink-0 flex-col">
         <PanelHeader>
           <h3 className="text-sm font-semibold">
             {t("modelRoutingGroup.catalogLabelsTitle")}

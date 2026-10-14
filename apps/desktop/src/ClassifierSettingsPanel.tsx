@@ -262,7 +262,7 @@ export function ClassifierSettingsPanel({
           disabled={!ready}
           className="gutter-scroller flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-auto border-0 p-0 pb-1"
         >
-          <Panel className="p-3">
+          <Panel className="shrink-0 p-3">
             <Field
               group
               label={t("classifier.enabled")}
@@ -280,7 +280,7 @@ export function ClassifierSettingsPanel({
               </div>
             </Field>
           </Panel>
-          <Panel className="flex flex-col gap-3 p-3">
+          <Panel className="flex shrink-0 flex-col gap-3 p-3">
             <Field
               group
               label={t("classifier.standaloneModel")}
@@ -314,7 +314,7 @@ export function ClassifierSettingsPanel({
             </Field>
           </Panel>
           {draft.classifier_source === "existing_model" ? (
-            <Panel className="flex flex-col gap-3 p-3">
+            <Panel className="flex shrink-0 flex-col gap-3 p-3">
               <Field
                 label={t("classifier.existingModelService")}
                 tooltip={t("classifier.existingModelServiceHint")}
@@ -368,7 +368,7 @@ export function ClassifierSettingsPanel({
               </Field>
             </Panel>
           ) : null}
-          <Panel className="flex flex-col gap-3 p-3">
+          <Panel className="flex shrink-0 flex-col gap-3 p-3">
             <Field
               group
               label={t("classifier.protocol")}
@@ -477,7 +477,7 @@ export function ClassifierSettingsPanel({
               <FieldIssue issue={issueFor(blocking, "apiKey")} />
             </Field>
           </Panel>
-          <Panel className="flex flex-col gap-3 p-3">
+          <Panel className="flex shrink-0 flex-col gap-3 p-3">
             <Field
               label={t("classifier.prompt")}
               tooltip={t("classifier.promptHint")}
@@ -512,7 +512,7 @@ export function ClassifierSettingsPanel({
               </div>
             </Field>
           </Panel>
-          <Panel className="flex flex-col gap-3 p-3">
+          <Panel className="flex shrink-0 flex-col gap-3 p-3">
             <h3 className="text-xs font-medium text-text-secondary">
               {t("classifier.advanced")}
             </h3>
