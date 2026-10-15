@@ -103,7 +103,20 @@ func (handler *Handler) routingSettingsResource(writer http.ResponseWriter, requ
 			}
 		}
 		settings = normalizeRoutingSettings(settings)
-		if err := settings.Validate(); err != nil {
+		// The dimensions live in the classifier-settings singleton, not in this
+		// document, so the save path supplies them: without the read a rule
+		// naming a user-defined dimension would be refused here even though the
+		// dimension-aware validator accepts it, and the feature would be
+		// unreachable through the API entirely. A store that cannot be read
+		// leaves the set empty, which is the built-in-only validation this path
+		// has always applied.
+		var dimensions []contract.ClassifierDimension
+		if handler.classifierSettings != nil {
+			if classifier, readErr := handler.classifierSettings.GetClassifierSettings(request.Context()); readErr == nil {
+				dimensions = classifier.Dimensions
+			}
+		}
+		if err := settings.ValidateWithDimensions(dimensions); err != nil {
 			code := "invalid_routing_settings"
 			if strings.Contains(err.Error(), "unsupported_routing_field") {
 				code = "unsupported_routing_field"

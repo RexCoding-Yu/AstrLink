@@ -247,6 +247,19 @@ func (group *ModelRoutingGroup) UnmarshalJSON(data []byte) error {
 func (group ModelRoutingGroup) PublicModelID() string { return ModelRoutingModelPrefix + group.ID }
 
 func (group ModelRoutingGroup) Validate() error {
+	return group.validate(nil)
+}
+
+// ValidateWithDimensions is Validate against a caller-supplied dimension set,
+// which lets a rule name a user-defined dimension. The group itself never
+// stores the dimensions — they are global classifier settings, not group
+// configuration — so a caller that has them passes them here. With no
+// dimensions this is identical to Validate.
+func (group ModelRoutingGroup) ValidateWithDimensions(dimensions []ClassifierDimension) error {
+	return group.validate(dimensions)
+}
+
+func (group ModelRoutingGroup) validate(dimensions []ClassifierDimension) error {
 	if err := validateModelRoutingSlug("group id", group.ID, 64); err != nil {
 		return err
 	}
@@ -302,7 +315,7 @@ func (group ModelRoutingGroup) Validate() error {
 		if _, ok := members[rule.TargetMemberID]; !ok {
 			return fmt.Errorf("rules[%d].target_member_id %q does not name a member", index, rule.TargetMemberID)
 		}
-		if err := rule.When.validateWithTaskTypeLabels(taskTypeLabels); err != nil {
+		if err := rule.When.validateWithTaskTypeLabels(taskTypeLabels, dimensions); err != nil {
 			return fmt.Errorf("rules[%d].when: %w", index, err)
 		}
 	}
@@ -384,15 +397,41 @@ var modelRoutingFields = map[string]struct {
 	"system_time":     {kind: "time"},
 }
 
+// modelRoutingFieldKind resolves a routing field against the built-in registry
+// and then the user-defined dimensions. A custom dimension is always string
+// kind: its options are free-form names, so it supports the same operators as
+// any other string field. With no dimensions this is exactly
+// modelRoutingFields[field].
+func modelRoutingFieldKind(field string, dimensions []ClassifierDimension) (string, bool) {
+	if entry, ok := modelRoutingFields[field]; ok {
+		return entry.kind, true
+	}
+	for _, dimension := range dimensions {
+		if dimension.Name == field {
+			return "string", true
+		}
+	}
+	return "", false
+}
+
 func (condition ModelRoutingCondition) Validate() error {
-	return condition.validateWithTaskTypeLabels(DefaultModelRoutingTaskTypeLabels)
+	return condition.validateWithTaskTypeLabels(DefaultModelRoutingTaskTypeLabels, nil)
 }
 
-func (condition ModelRoutingCondition) validateWithTaskTypeLabels(taskTypeLabels []string) error {
-	return validateModelRoutingCondition(condition, 1, new(int), taskTypeLabels)
+func (condition ModelRoutingCondition) validateWithTaskTypeLabels(taskTypeLabels []string, dimensions []ClassifierDimension) error {
+	return validateModelRoutingCondition(condition, 1, new(int), taskTypeLabels, dimensions)
 }
 
-func validateModelRoutingCondition(condition ModelRoutingCondition, depth int, nodes *int, taskTypeLabels []string) error {
+// ValidateWithDimensions is Validate against a caller-supplied dimension set.
+// Rules may name a user-defined dimension only through this entry point: the
+// zero-argument Validate cannot see the global dimension list and therefore
+// accepts built-in fields alone. Passing no dimensions makes this identical to
+// Validate.
+func (condition ModelRoutingCondition) ValidateWithDimensions(taskTypeLabels []string, dimensions []ClassifierDimension) error {
+	return validateModelRoutingCondition(condition, 1, new(int), taskTypeLabels, dimensions)
+}
+
+func validateModelRoutingCondition(condition ModelRoutingCondition, depth int, nodes *int, taskTypeLabels []string, dimensions []ClassifierDimension) error {
 	if depth > MaxModelRoutingConditionDepth {
 		return fmt.Errorf("condition depth exceeds %d", MaxModelRoutingConditionDepth)
 	}
@@ -431,19 +470,19 @@ func validateModelRoutingCondition(condition ModelRoutingCondition, depth int, n
 			return fmt.Errorf("%s must contain 1 to %d conditions", name, MaxModelRoutingListItems)
 		}
 		for index, child := range children {
-			if err := validateModelRoutingCondition(child, depth+1, nodes, taskTypeLabels); err != nil {
+			if err := validateModelRoutingCondition(child, depth+1, nodes, taskTypeLabels, dimensions); err != nil {
 				return fmt.Errorf("%s[%d]: %w", name, index, err)
 			}
 		}
 		return nil
 	}
 	if condition.Not != nil {
-		return validateModelRoutingCondition(*condition.Not, depth+1, nodes, taskTypeLabels)
+		return validateModelRoutingCondition(*condition.Not, depth+1, nodes, taskTypeLabels, dimensions)
 	}
-	if _, ok := modelRoutingFields[condition.Field]; !ok {
+	kind, ok := modelRoutingFieldKind(condition.Field, dimensions)
+	if !ok {
 		return fmt.Errorf("unsupported_routing_field: %s", condition.Field)
 	}
-	field := modelRoutingFields[condition.Field]
 	operators := 0
 	if condition.In != nil {
 		operators++
@@ -479,10 +518,10 @@ func validateModelRoutingCondition(condition ModelRoutingCondition, depth int, n
 	if operators != 1 {
 		return fmt.Errorf("field %q must contain exactly one supported operator", condition.Field)
 	}
-	if condition.Within != nil && field.kind != "time" {
+	if condition.Within != nil && kind != "time" {
 		return fmt.Errorf("field %q does not support within", condition.Field)
 	}
-	switch field.kind {
+	switch kind {
 	case "string":
 		if condition.EqualsBool != nil || condition.Min != nil || condition.Max != nil ||
 			condition.Gt != nil || condition.Gte != nil || condition.Lt != nil || condition.Lte != nil ||
@@ -667,13 +706,27 @@ func validateModelRoutingValue(field, value string) error {
 }
 
 func ValidateModelRoutingGroups(groups []ModelRoutingGroup, redirects []ModelRedirect) error {
+	return ValidateModelRoutingGroupsWithDimensions(groups, redirects, nil)
+}
+
+// ValidateModelRoutingGroupsWithDimensions is ValidateModelRoutingGroups
+// against a caller-supplied dimension set, so a group whose rules name a
+// user-defined dimension validates. The dimensions are global classifier
+// settings rather than group configuration, so a caller that holds them passes
+// them in; with none this is identical to ValidateModelRoutingGroups.
+//
+// The save path (controlapi) and the inference path (ingress) are the two
+// production callers: without them a dimension-aware rule could be written by
+// the API's own test surface and rejected by every real request, which is
+// exactly the state this entry point exists to end.
+func ValidateModelRoutingGroupsWithDimensions(groups []ModelRoutingGroup, redirects []ModelRedirect, dimensions []ClassifierDimension) error {
 	if len(groups) > MaxModelRoutingGroups {
 		return fmt.Errorf("model_routing_groups must contain at most %d groups", MaxModelRoutingGroups)
 	}
 	ids := make(map[string]struct{}, len(groups))
 	occupied := make(map[string]string)
 	for _, group := range groups {
-		if err := group.Validate(); err != nil {
+		if err := group.ValidateWithDimensions(dimensions); err != nil {
 			return err
 		}
 		if _, ok := ids[group.ID]; ok {
@@ -884,10 +937,37 @@ type ModelRoutingFacts struct {
 	Streaming, Continuation, HasTools, HasMedia, HasImage, HasAudio, HasVideo                                                                                          *bool
 	TurnCount, UserMessageCount, AssistantMessageCount, ToolMessageCount, ToolDeclarationCount, ToolCallCount, InputBytes, InputTextRunes, EstimatedInputContextTokens *int
 	LiteralText                                                                                                                                                        string
+	// Dimensions carries the user-defined dimensions' evaluated values. It
+	// never contains task_type, whose value stays in the TaskType fields
+	// above: those carry the candidate-replacement mechanism that task_type
+	// alone needs. Empty for a single-dimension configuration.
+	Dimensions map[string]DimensionFact
 	// SystemTime is the one local clock sample the request was evaluated
 	// under; nil means the time fact is unknown and system_time leaves stay
 	// triUnknown. It is evaluator input only, never persisted.
 	SystemTime *time.Time
+}
+
+// DimensionFact is one custom dimension's evaluated input. Known is false when
+// the dimension has no usable value, which leaves every rule that tests it
+// unknown and therefore unmatched — the classifier seam never blocks a request
+// over a missing dimension. Produced separates "the provider did not answer
+// this dimension" from "the provider answered with a value outside the
+// dimension's options": both stay unknown for selection, but only the former is
+// a provider-side gap worth reporting as such.
+//
+// Score is the provider-reported confidence for this dimension's answer. It is
+// compared against the same single LowConfidenceThreshold task_type uses — one
+// threshold for every dimension, not one per dimension — and an answer below it
+// leaves the dimension unknown exactly like a missing one. The field exists so
+// that comparison can happen in the fact builder, which is the only layer that
+// sees the threshold; the evaluator receives a dimension that is already
+// resolved to known-or-unknown and never ranks dimensions itself.
+type DimensionFact struct {
+	Value    string
+	Score    float64
+	Known    bool
+	Produced bool
 }
 
 func rejectDuplicateJSONKeys(data []byte) error {

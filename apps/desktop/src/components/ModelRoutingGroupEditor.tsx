@@ -57,9 +57,9 @@ import {
   maxModelRoutingMembersPerGroup,
   maxModelRoutingRulesPerGroup,
   maxModelRoutingTaskTypeLabels,
+  fieldOperators,
   modelRoutingConditionOperator,
   type ModelRoutingDraftIssue,
-  modelRoutingFieldOperators,
   modelRoutingFieldValues,
   modelRoutingFields,
   modelRoutingTaskTypes,
@@ -76,6 +76,7 @@ import {
   type ModelRoutingTimeCondition,
   type ModelRoutingValueCondition,
   type ModelRoutingValueOperator,
+  type ClassifierDimension,
 } from "@/model-routing-group-model";
 import {
   modelRoutingFieldLabel,
@@ -98,6 +99,8 @@ const TaskTypeLabelsContext = createContext<{
   labels: readonly string[];
   atCapacity: boolean;
 }>({ labels: modelRoutingTaskTypes, atCapacity: false });
+
+const CustomDimensionsContext = createContext<readonly ClassifierDimension[]>([]);
 
 /**
  * 候选列表 = 内置目录 + 用户自建值。自建值排在后面，且不重复已经存在的项；
@@ -129,6 +132,7 @@ export function ModelRoutingGroupEditor({
   value,
   onChange,
   services,
+  dimensions = [],
   disabled = false,
   onEditingChange,
   validationIssues = [],
@@ -136,10 +140,16 @@ export function ModelRoutingGroupEditor({
   value: readonly ModelRoutingGroup[];
   onChange: (value: ModelRoutingGroup[]) => void;
   services: readonly RoutableService[];
+  /**
+   * 自定义分类维度定义。带上选项而不只是名字：编辑器的候选值要直接取自
+   * 维度自己的选项集，否则用户能随手填一个分类器永远不会产出的值，写出
+   * 一条永不命中的规则。
+   */
+  dimensions?: readonly ClassifierDimension[];
   disabled?: boolean;
   /** 通知父级当前是否处于未提交的文本编辑中。 */
   onEditingChange?: (editing: boolean) => void;
-  /** 保存前校验发现的草稿错误；编辑器只负责行内呈现与定位。 */
+  /** 保存前校验发现的草稿错误;编辑器只负责行内呈现与定位。 */
   validationIssues?: readonly ModelRoutingDraftIssue[];
 }) {
   const t = useT();
@@ -378,33 +388,35 @@ export function ModelRoutingGroupEditor({
         </div>
 
         {active ? (
-          <RoutingCustomValuesContext.Provider value={routingCustom}>
-            <GroupEditor
-              group={active}
-              index={activeIndex}
-              publicModelID={modelRoutingPublicModelID(active.id)}
-              enabledServices={enabledServices}
-              disabled={disabled}
-              validationIssues={activeValidationIssues}
-              onChange={(patch) => updateGroup(activeIndex, patch)}
-              onEditingChange={onEditingChange}
-              onRemoveGroup={() => {
-                const next = value.filter(
-                  (_, current) => current !== activeIndex,
-                );
-                onChange(next);
-                setSelectedID(
-                  next[Math.min(activeIndex, next.length - 1)]?.id ?? "",
-                );
-              }}
-              onRequestRemoveMember={(member) =>
-                setRemoveMember({ group: activeIndex, member })
-              }
-              onRequestRemoveRule={(rule) =>
-                setRemoveRule({ group: activeIndex, rule })
-              }
-            />
-          </RoutingCustomValuesContext.Provider>
+          <CustomDimensionsContext.Provider value={dimensions}>
+            <RoutingCustomValuesContext.Provider value={routingCustom}>
+              <GroupEditor
+                group={active}
+                index={activeIndex}
+                publicModelID={modelRoutingPublicModelID(active.id)}
+                enabledServices={enabledServices}
+                disabled={disabled}
+                validationIssues={activeValidationIssues}
+                onChange={(patch) => updateGroup(activeIndex, patch)}
+                onEditingChange={onEditingChange}
+                onRemoveGroup={() => {
+                  const next = value.filter(
+                    (_, current) => current !== activeIndex,
+                  );
+                  onChange(next);
+                  setSelectedID(
+                    next[Math.min(activeIndex, next.length - 1)]?.id ?? "",
+                  );
+                }}
+                onRequestRemoveMember={(member) =>
+                  setRemoveMember({ group: activeIndex, member })
+                }
+                onRequestRemoveRule={(rule) =>
+                  setRemoveRule({ group: activeIndex, rule })
+                }
+              />
+            </RoutingCustomValuesContext.Provider>
+          </CustomDimensionsContext.Provider>
         ) : null}
       </div>
 
@@ -1383,6 +1395,14 @@ function ConditionPill({
   onRemove: () => void;
 }) {
   const t = useT();
+  const customDimensions = useContext(CustomDimensionsContext);
+  const allFields = useMemo(
+    () => [
+      ...modelRoutingFields,
+      ...customDimensions.map((dimension) => dimension.name),
+    ],
+    [customDimensions],
+  );
   const condition = pill.condition;
   const field = condition.field;
   const isRange = isModelRoutingRangeField(field);
@@ -1411,7 +1431,7 @@ function ConditionPill({
             tooltipLabel={t("modelRouting.fieldSource.classifier")}
           >
             <ModelSelect
-              options={modelRoutingFields}
+              options={allFields}
               value={field}
               disabled={disabled}
               allowCustomValue={false}
@@ -1870,15 +1890,16 @@ function ValueBounds({
 }) {
   const t = useT();
   const custom = useContext(RoutingCustomValuesContext);
+  const customDimensions = useContext(CustomDimensionsContext);
   const { labels: taskTypes, atCapacity: taskTypeLabelsAtCapacity } =
     useContext(TaskTypeLabelsContext);
-  const operators = modelRoutingFieldOperators[
-    condition.field
-  ] as readonly ModelRoutingValueOperator[];
+  const operators = fieldOperators(
+    condition.field,
+  ) as readonly ModelRoutingValueOperator[];
   const catalog =
     condition.field === "task_type"
       ? taskTypes
-      : modelRoutingFieldValues(condition.field);
+      : modelRoutingFieldValues(condition.field, customDimensions);
   const operator =
     modelRoutingConditionOperator(condition) ?? operators[0] ?? "in";
   // task_type is a group-scoped vocabulary: existing labels are suggestions,
@@ -2076,8 +2097,8 @@ export function defaultConditionFor(
 ): ModelRoutingCondition {
   if (isModelRoutingTimeField(field)) return { field, within: [] };
   if (isModelRoutingRangeField(field)) return { field, gte: 0 };
-  const operators = modelRoutingFieldOperators[field];
-  if ((operators as readonly string[]).includes("equals_bool"))
+  const operators = fieldOperators(field);
+  if (operators.includes("equals_bool"))
     return { field, equals_bool: true };
   if ((operators as readonly string[]).includes("contains_any"))
     return { field, contains_any: [] };

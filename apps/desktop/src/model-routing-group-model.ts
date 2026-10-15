@@ -98,10 +98,19 @@ export const modelRoutingFieldOperators = {
   system_time: ["within"],
 } as const;
 
-export type ModelRoutingField = keyof typeof modelRoutingFieldOperators;
+export type BuiltinModelRoutingField = keyof typeof modelRoutingFieldOperators;
+
+/**
+ * 规则字段 = 内建字段 ∪ 运行期自定义分类维度名。
+ *
+ * `(string & {})` 而不是裸 `string`：它保留内建字段的字面量补全与拼写检查，
+ * 同时允许维度名通过。**代价**是任何按字段索引操作符矩阵的地方都可能拿到
+ * `undefined`，因此必须走 `fieldOperators` 兜底，不能直接索引矩阵。
+ */
+export type ModelRoutingField = BuiltinModelRoutingField | (string & {});
 
 export type ModelRoutingOperator =
-  (typeof modelRoutingFieldOperators)[ModelRoutingField][number];
+  (typeof modelRoutingFieldOperators)[BuiltinModelRoutingField][number];
 
 /** 数值字段的比较操作符；它们不是「单操作符」叶子，而是可组合的边界。 */
 export const modelRoutingRangeOperators = ["gt", "gte", "lt", "lte"] as const;
@@ -129,11 +138,29 @@ export const modelRoutingValueOperators: readonly ModelRoutingValueOperator[] =
 
 export const modelRoutingFields = Object.keys(
   modelRoutingFieldOperators,
-) as ModelRoutingField[];
+) as BuiltinModelRoutingField[];
+
+/** 自定义维度的操作符集：与内建 string 类字段同形，顺序与矩阵声明序一致。 */
+export const modelRoutingCustomDimensionOperators = [
+  "in",
+  "not_in",
+  "equals",
+  "not_equals",
+] as const;
+
+/** 内建字段的操作符；未注册字段（自定义分类维度）一律视为 string 类。 */
+export function fieldOperators(
+  field: ModelRoutingField,
+): readonly string[] {
+  if (Object.hasOwn(modelRoutingFieldOperators, field)) {
+    return modelRoutingFieldOperators[field as BuiltinModelRoutingField];
+  }
+  return modelRoutingCustomDimensionOperators;
+}
 
 /** 计数字段用比较边界表达，而不是单一操作符。 */
 export function isModelRoutingRangeField(field: ModelRoutingField): boolean {
-  const operators: readonly string[] = modelRoutingFieldOperators[field];
+  const operators = fieldOperators(field);
   return operators.includes("gte");
 }
 
@@ -143,7 +170,7 @@ export function isModelRoutingRangeField(field: ModelRoutingField): boolean {
  * 叶子。它只有一个操作符 `within`，取值是恰好两个 `HH:mm` 组成的半开窗口。
  */
 export function isModelRoutingTimeField(field: ModelRoutingField): boolean {
-  const operators: readonly string[] = modelRoutingFieldOperators[field];
+  const operators = fieldOperators(field);
   return operators.includes("within");
 }
 
@@ -173,7 +200,11 @@ export const modelRoutingPriorityStep = 10;
 export function modelRoutingFieldSource(
   field: ModelRoutingField,
 ): ModelRoutingFieldSource {
-  return field === "task_type" ? "classifier" : "local";
+  if (field === "task_type") return "classifier";
+  if (!(modelRoutingFields as readonly string[]).includes(field)) {
+    return "classifier";
+  }
+  return "local";
 }
 
 /** `task_type` 继承冻结的四个标签；其他语义分类输出不属于 V1。 */
@@ -193,12 +224,26 @@ export const modelRoutingMediaKinds: readonly string[] = [
   "unknown",
 ];
 
+/**
+ * 维度类型的真相源在 `./classifier-settings-model.ts`（它镜像 Go 的
+ * `ClassifierDimension`）。这里只转出，不重复声明 —— 两份结构相同的接口
+ * 会各自漂移，而编辑器同时读这两边。
+ */
+import type { ClassifierDimension } from "./classifier-settings-model";
+
+export type { ClassifierDimension };
+
 /** 值的取值域仅用于编辑器候选与提示；后端权威校验接受任意合法字符串。 */
 export function modelRoutingFieldValues(
   field: ModelRoutingField,
+  dimensions?: readonly ClassifierDimension[],
 ): readonly string[] | undefined {
   if (field === "task_type") return modelRoutingTaskTypes;
   if (field === "media_kind") return modelRoutingMediaKinds;
+  if (dimensions) {
+    const dim = dimensions.find((d) => d.name === field);
+    if (dim) return dim.options.map((opt) => opt.name);
+  }
   return undefined;
 }
 
@@ -521,6 +566,7 @@ function conditionAt(
   value: unknown,
   path: string,
   depth: number,
+  knownDimensions: readonly string[] = [],
 ): ParsedCondition {
   if (depth > maxModelRoutingConditionDepth) fail(path, "条件过深");
   const node = objectAt(value, path);
@@ -537,7 +583,7 @@ function conditionAt(
     if (children.length === 0) fail(path, "不得为空数组");
     if (children.length > maxModelRoutingListItems) fail(path, "子节点过多");
     const parsed = children.map((child, index) =>
-      conditionAt(child, `${path}.${op}[${index}]`, depth + 1),
+      conditionAt(child, `${path}.${op}[${index}]`, depth + 1, knownDimensions),
     );
     return {
       condition: { [op]: parsed.map((item) => item.condition) },
@@ -547,19 +593,22 @@ function conditionAt(
 
   if (present[0] === "not") {
     keysAt(node, ["not"], [], path);
-    const child = conditionAt(node.not, `${path}.not`, depth + 1);
+    const child = conditionAt(node.not, `${path}.not`, depth + 1, knownDimensions);
     return { condition: { not: child.condition }, nodes: 1 + child.nodes };
   }
 
-  return { condition: leafConditionAt(node, path), nodes: 1 };
+  return { condition: leafConditionAt(node, path, knownDimensions), nodes: 1 };
 }
 
 function leafConditionAt(
   node: Record<string, unknown>,
   path: string,
+  knownDimensions: readonly string[] = [],
 ): ModelRoutingLeafCondition {
   const field = textAt(node.field, `${path}.field`);
-  if (!modelRoutingFields.includes(field as ModelRoutingField))
+  const isBuiltin = (modelRoutingFields as readonly string[]).includes(field);
+  const isKnownDimension = knownDimensions.includes(field);
+  if (!isBuiltin && !isKnownDimension)
     fail(`${path}.field`, "字段不属于 V1");
   const typed = field as ModelRoutingField;
 
@@ -575,7 +624,7 @@ function leafConditionAt(
     return { field: typed, ...rangeBounds(node, path) };
   }
 
-  const allowed: readonly string[] = modelRoutingFieldOperators[typed];
+  const allowed = fieldOperators(typed);
   const operators = allowed.filter((operator) => Object.hasOwn(node, operator));
   if (operators.length !== 1) fail(path, "操作符与字段不匹配");
   const operator = operators[0] as ModelRoutingValueOperator;
@@ -703,6 +752,7 @@ function ruleAt(
   value: unknown,
   path: string,
   memberIDs: ReadonlySet<string>,
+  knownDimensions: readonly string[],
 ): ModelRoutingRule {
   const rule = objectAt(value, path);
   keysAt(rule, ["id", "priority", "when", "target_member_id"], [], path);
@@ -713,7 +763,12 @@ function ruleAt(
   const priority = countAt(rule.priority, `${path}.priority`);
   if (priority > maxModelRoutingPriority)
     fail(`${path}.priority`, "优先级过大");
-  const { condition, nodes } = conditionAt(rule.when, `${path}.when`, 1);
+  const { condition, nodes } = conditionAt(
+    rule.when,
+    `${path}.when`,
+    1,
+    knownDimensions,
+  );
   if (nodes > maxModelRoutingConditionNodes)
     fail(`${path}.when`, "条件节点过多");
   return {
@@ -782,7 +837,11 @@ function validateTaskTypeConditionLabels(
   );
 }
 
-function groupAt(value: unknown, path: string): ModelRoutingGroup {
+function groupAt(
+  value: unknown,
+  path: string,
+  knownDimensions: readonly string[],
+): ModelRoutingGroup {
   const group = objectAt(value, path);
   keysAt(
     group,
@@ -818,7 +877,7 @@ function groupAt(value: unknown, path: string): ModelRoutingGroup {
   if (group.rules.length > maxModelRoutingRulesPerGroup)
     fail(`${path}.rules`, "规则过多");
   const rules = group.rules.map((rule, index) =>
-    ruleAt(rule, `${path}.rules[${index}]`, memberIDs),
+    ruleAt(rule, `${path}.rules[${index}]`, memberIDs, knownDimensions),
   );
   rules.forEach((rule, index) =>
     validateTaskTypeConditionLabels(
@@ -851,14 +910,19 @@ function assertUniqueIDs(ids: readonly string[], path: string) {
 /**
  * `model_routing_groups` 的严格 parser。`undefined`/`null` 规范化为空数组
  * （旧文档没有这个 key），其余任何非法输入抛错。
+ *
+ * @param knownDimensions - 分类器已配置的自定义维度名称列表，用于验证规则条件中的字段引用
  */
-export function parseModelRoutingGroups(value: unknown): ModelRoutingGroup[] {
+export function parseModelRoutingGroups(
+  value: unknown,
+  knownDimensions: readonly string[] = [],
+): ModelRoutingGroup[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) fail("model_routing_groups", "应为数组");
   if (value.length > maxModelRoutingGroups)
     fail("model_routing_groups", "组过多");
   const groups = value.map((group, index) =>
-    groupAt(group, `model_routing_groups[${index}]`),
+    groupAt(group, `model_routing_groups[${index}]`, knownDimensions),
   );
   assertUniqueIDs(
     groups.map((group) => group.id),

@@ -603,15 +603,36 @@ condition = openapi.dig("components", "schemas", "ModelRoutingCondition")
 if condition.nil?
   drifts << "ModelRoutingCondition: not defined"
 else
-  condition_facts = Array(condition.dig("properties", "field", "enum")).sort
-  if go_facts != condition_facts
-    drifts << "ModelRoutingCondition.field drift = #{((go_facts - condition_facts) | (condition_facts - go_facts)).inspect}"
-  end
-
   condition_properties = condition.fetch("properties", {})
   condition_keys = condition_properties.keys.sort
   if go_condition != condition_keys
     drifts << "ModelRoutingCondition.properties drift = #{((go_condition - condition_keys) | (condition_keys - go_condition)).inspect}"
+  end
+
+  # The field admits two disjoint name sets: the built-in facts Go registers,
+  # and the name of a dimension the classifier settings declare — a name that
+  # lives in a separate resource, so it cannot be enumerated here. The built-in
+  # half stays a closed enum compared to Go term by term, so the guard that
+  # catches a renamed or retired fact is unchanged; the second branch must
+  # negate exactly that set, or a name would fall through both branches.
+  field = condition_properties["field"]
+  if field.nil?
+    drifts << "ModelRoutingCondition.field: not defined"
+  else
+    branches = Array(field["oneOf"])
+    unless branches.length == 2
+      drifts << "ModelRoutingCondition.field.oneOf = #{branches.length} branches, want 2"
+    end
+
+    builtin_names = Array((branches[0] || {})["enum"]).sort
+    unless go_facts == builtin_names
+      drifts << "ModelRoutingCondition.field enum drift = #{((go_facts - builtin_names) | (builtin_names - go_facts)).inspect}"
+    end
+
+    negated = Array(branches.dig(1, "not", "enum")).sort
+    unless builtin_names == negated
+      drifts << "ModelRoutingCondition.field not.enum drift = #{((builtin_names - negated) | (negated - builtin_names)).inspect}"
+    end
   end
 
   # `within` is the time leaf. The schema is closed, so omitting the property
@@ -693,7 +714,7 @@ end
 # 3. Both classifier documents carry every source the Go validator accepts, and
 #    the response carries the existing_model shape as a reference.
 classifier_sources = go_string_constants(classifier_settings_source, classifier_settings_source[/^\s*(ClassifierSourceInline.*?)\n\n/m, 1].to_s).values
-classifier_settings_keys, = go_struct_fields(classifier_settings_source, "ClassifierSettings")
+classifier_settings_required, classifier_settings_optional = go_struct_fields(classifier_settings_source, "ClassifierSettings")
 classifier_existing_keys = go_struct_fields(classifier_settings_source, "ClassifierExistingModelSource").first
 classifier_existing = openapi.dig("components", "schemas", "ClassifierExistingModelSource")
 existing_properties = classifier_existing&.fetch("properties", {})
@@ -711,6 +732,24 @@ existing_properties = classifier_existing&.fetch("properties", {})
 
   raised = schema.dig("properties", "existing_model", "$ref")
   drifts << "#{schema_name}: existing_model prop = false" unless raised == "#/components/schemas/ClassifierExistingModelSource"
+
+  # The settings face is closed in Go as well (decodePolicy with
+  # DisallowUnknownFields), so an omitted property costs the same here as it
+  # does below: the schema would reject a write the Go validator accepts.
+  # `properties` lists the whole wire shape, required and omitempty alike, so
+  # it is compared against both halves; `required` is compared against the
+  # half that carries no omitempty. The response adds credential_configured,
+  # a fact about the credential store rather than a settings field, so that
+  # one name is the only thing expected on top of the Go struct.
+  missing_settings = (classifier_settings_required + classifier_settings_optional) - schema.fetch("properties", {}).keys
+  drifts << "#{schema_name}: properties drift=#{missing_settings.inspect}" unless missing_settings.empty?
+
+  expected_required = classifier_settings_required.sort
+  expected_required = (expected_required + ["credential_configured"]).sort if schema_name == "ClassifierSettingsResponse"
+  wire_required = Array(schema.fetch("required", [])).sort
+  unless expected_required == wire_required
+    drifts << "#{schema_name}.required drift = #{((expected_required - wire_required) | (wire_required - expected_required)).inspect}"
+  end
 end
 
 if classifier_existing.nil?
@@ -760,6 +799,37 @@ else
   end
 end
 
+# 5. The built-in field table has three hand-written mirrors — the Go
+#    registry the checks above read, the desktop model's operator table, and
+#    the Tauri sidecar's match arms — and a name added to one of them alone
+#    is a field that saves in one place and is unsupported in another. Only
+#    the name sets are compared: the three express kinds differently (the
+#    desktop model folds keyword into its label kind and has no keyword kind
+#    at all), so comparing kinds would report a false finding.
+desktop_routing_path = ROOT.join("../apps/desktop/src/model-routing-group-model.ts")
+desktop_routing_source = desktop_routing_path.read
+desktop_operators = desktop_routing_source[/export const modelRoutingFieldOperators = \{(.*?)\n\} as const;/m, 1]
+raise "no TS modelRoutingFieldOperators table" if desktop_operators.nil?
+
+desktop_facts = desktop_operators.scan(/^  ([a-z0-9_]+):/).flatten.sort
+
+tauri_routing_path = ROOT.join("../apps/desktop/src-tauri/src/failure_policy.rs")
+tauri_routing_source = tauri_routing_path.read
+tauri_kind = tauri_routing_source[/fn routing_field_kind\(.*?\n\}\n/m].to_s
+raise "no Rust routing_field_kind table" if tauri_kind.empty?
+
+# Only the literal arms carry a field name: the wildcard arms that follow
+# them resolve a runtime dimension and refuse an unsupported name, and a
+# kind literal on the right-hand side of an arm is a kind rather than a
+# field. Each arm is therefore split into its pattern side and its result
+# side, and only the pattern side is read.
+tauri_facts = tauri_kind.scan(/((?:"[a-z0-9_]+"\s*\|?\s*)+)\s*=>/).flatten.flat_map { |patterns| patterns.scan(/"([a-z0-9_]+)"/).flatten }.sort
+
+[["desktop model-routing-group-model.ts", desktop_facts], ["Tauri failure_policy.rs", tauri_facts]].each do |label, facts|
+  drift = (go_facts - facts) | (facts - go_facts)
+  drifts << "#{label} routing field set drift = #{drift.inspect}" unless drift.empty?
+end
+
 raise "model routing contract drifted from Go:\n  #{drifts.join("\n  ")}" unless drifts.empty?
 
-puts "validated #{reference_count} local $ref values, frozen fixtures, Alpha relay invariants, retired routing operations, and audit patch semantics"
+puts "validated #{reference_count} local $ref values, frozen fixtures, Alpha relay invariants, retired routing operations, audit patch semantics, and one routing field vocabulary across Go, TypeScript and Rust"

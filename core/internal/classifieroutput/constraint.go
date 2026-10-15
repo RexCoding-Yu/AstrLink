@@ -51,8 +51,9 @@ const (
 // The constraint narrows what the model is asked to emit; it never replaces
 // the local strict validation in extract.go and schema.go.
 type OutputConstraint struct {
-	mode   ConstraintMode
-	labels []string
+	mode       ConstraintMode
+	labels     []string
+	dimensions []contract.ClassifierDimension
 }
 
 // Plan resolves the output constraint for one protocol against the verified
@@ -61,6 +62,15 @@ type OutputConstraint struct {
 // validation. Anthropic and Gemini native configurations stay unimplemented
 // until a verification result exists for them, so they plan JSON-only here.
 func Plan(protocol contract.ProtocolID, capabilities CapabilitySet, labels []string) (OutputConstraint, error) {
+	return PlanWithDimensions(protocol, capabilities, labels, nil)
+}
+
+// PlanWithDimensions is Plan for a configuration that declares custom
+// dimensions. With an empty dimension slice it is exactly Plan: the emitted
+// schema, prompt, and native constraint are byte-identical to the
+// single-dimension plan, so an existing deployment's wire traffic does not
+// change when this is deployed.
+func PlanWithDimensions(protocol contract.ProtocolID, capabilities CapabilitySet, labels []string, dimensions []contract.ClassifierDimension) (OutputConstraint, error) {
 	if len(labels) == 0 {
 		return OutputConstraint{}, fmt.Errorf("classifier output constraint needs a non-empty label catalog")
 	}
@@ -70,7 +80,11 @@ func Plan(protocol contract.ProtocolID, capabilities CapabilitySet, labels []str
 		}
 	}
 	support := capabilities[protocol]
-	constraint := OutputConstraint{mode: ConstraintJSONOnly, labels: append([]string(nil), labels...)}
+	constraint := OutputConstraint{
+		mode:       ConstraintJSONOnly,
+		labels:     append([]string(nil), labels...),
+		dimensions: append([]contract.ClassifierDimension(nil), dimensions...),
+	}
 	if support != NativeVerified {
 		return constraint, nil
 	}
@@ -89,6 +103,27 @@ func Plan(protocol contract.ProtocolID, capabilities CapabilitySet, labels []str
 	return constraint, nil
 }
 
+// multiDimension reports whether this plan addresses more than the built-in
+// task_type. It is the single branch point between the pre-dimensions wire
+// shape and the dimensions shape: everything below defers to it rather than
+// testing len(constraint.dimensions) independently, so a future change to the
+// definition of "single dimension" lands in one place.
+func (constraint OutputConstraint) multiDimension() bool {
+	return len(DimensionKeys(constraint.dimensions)) > 1
+}
+
+// SchemaName is the native-constraint schema name. A single-dimension plan
+// keeps classifier_task_type — the name every existing deployment and test
+// expects — and only a multi-dimension plan uses classifier_dimensions, so the
+// two shapes can never be confused in a provider's logs or a recorded
+// verification run.
+func (constraint OutputConstraint) SchemaName() string {
+	if constraint.multiDimension() {
+		return "classifier_dimensions"
+	}
+	return "classifier_task_type"
+}
+
 // Mode reports the planned constraint mode.
 func (constraint OutputConstraint) Mode() ConstraintMode { return constraint.mode }
 
@@ -103,7 +138,7 @@ func (constraint OutputConstraint) SystemPrompt() string {
 	builder.WriteString("Use only the supplied field identifiers and label identifiers.\n")
 	builder.WriteString("Return no markdown, explanation, tool calls, or extra keys.\n")
 	builder.WriteString("\nSchema:\n")
-	builder.Write(promptSchemaJSON(constraint.labels))
+	builder.Write(constraint.promptSchemaJSON())
 	return builder.String()
 }
 
@@ -118,9 +153,9 @@ func (constraint OutputConstraint) ChatResponseFormat() json.RawMessage {
 	return marshalConstraint(map[string]any{
 		"type": "json_schema",
 		"json_schema": map[string]any{
-			"name":   "classifier_task_type",
+			"name":   constraint.SchemaName(),
 			"strict": true,
-			"schema": decodeRawMap(strictSchemaJSON(constraint.labels)),
+			"schema": decodeRawMap(constraint.strictSchemaJSON()),
 		},
 	})
 }
@@ -133,15 +168,99 @@ func (constraint OutputConstraint) ResponsesTextFormat() json.RawMessage {
 	}
 	return marshalConstraint(map[string]any{
 		"type":   "json_schema",
-		"name":   "classifier_task_type",
+		"name":   constraint.SchemaName(),
 		"strict": true,
-		"schema": decodeRawMap(strictSchemaJSON(constraint.labels)),
+		"schema": decodeRawMap(constraint.strictSchemaJSON()),
 	})
 }
 
 // promptSchemaJSON is the schema shown inside the system prompt. It states
 // exactly what local validation enforces: label or candidates must be
 // present, scores are optional bounded numbers, unknown keys are rejected.
+//
+// A multi-dimension plan wraps that same per-dimension object once per
+// addressed dimension rather than inventing a second field shape: every
+// dimension is checked by the same ParseTaskType, so every dimension is
+// described by the same schema.
+func (constraint OutputConstraint) promptSchemaJSON() []byte {
+	if !constraint.multiDimension() {
+		return promptSchemaJSON(constraint.labels)
+	}
+	properties := make(map[string]any, len(constraint.dimensionOptionSets()))
+	required := make([]string, 0, len(constraint.dimensionOptionSets()))
+	for name, options := range constraint.dimensionOptionSets() {
+		properties[name] = dimensionValueSchema(options)
+		required = append(required, name)
+	}
+	return marshalConstraint(map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           properties,
+		"required":             required,
+	})
+}
+
+// strictSchemaJSON is the schema for native json_schema constraints. The
+// strict dialect requires every property and forbids anyOf, so label, score,
+// and candidates are all mandatory and candidates may be empty — a shape
+// local validation accepts as a subset.
+func (constraint OutputConstraint) strictSchemaJSON() []byte {
+	if !constraint.multiDimension() {
+		return strictSchemaJSON(constraint.labels)
+	}
+	properties := make(map[string]any, len(constraint.dimensionOptionSets()))
+	required := make([]string, 0, len(constraint.dimensionOptionSets()))
+	for name, options := range constraint.dimensionOptionSets() {
+		properties[name] = dimensionValueSchema(options)
+		required = append(required, name)
+	}
+	return marshalConstraint(map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           properties,
+		"required":             required,
+	})
+}
+
+// dimensionOptionSets maps each addressed dimension name to the option names
+// that dimension accepts. task_type resolves against the caller's label
+// snapshot; each custom dimension resolves against its own option list, so a
+// label is only ever accepted in the dimension that declares it.
+func (constraint OutputConstraint) dimensionOptionSets() map[string][]string {
+	sets := make(map[string][]string, len(constraint.dimensions)+1)
+	sets[contract.BuiltInTaskTypeDimension] = append([]string(nil), constraint.labels...)
+	for _, dimension := range constraint.dimensions {
+		if dimension.Name == contract.BuiltInTaskTypeDimension {
+			continue
+		}
+		options := make([]string, 0, len(dimension.Options))
+		for _, option := range dimension.Options {
+			options = append(options, option.Name)
+		}
+		sets[dimension.Name] = options
+	}
+	return sets
+}
+
+// dimensionValueSchema is one dimension's value shape inside the multi
+// -dimension document: the single-dimension {label, score, candidates} object
+// with that dimension's own option list substituted for the label enum.
+func dimensionValueSchema(options []string) map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"label":      map[string]any{"type": "string", "enum": append([]string(nil), options...)},
+			"score":      map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"candidates": candidatesSchema(options),
+		},
+		"anyOf": []any{
+			map[string]any{"required": []string{"label"}},
+			map[string]any{"required": []string{"candidates"}},
+		},
+	}
+}
+
 func promptSchemaJSON(labels []string) []byte {
 	return marshalConstraint(map[string]any{
 		"type":                 "object",
@@ -158,10 +277,6 @@ func promptSchemaJSON(labels []string) []byte {
 	})
 }
 
-// strictSchemaJSON is the schema for native json_schema constraints. The
-// strict dialect requires every property and forbids anyOf, so label, score,
-// and candidates are all mandatory and candidates may be empty — a shape
-// local validation accepts as a subset.
 func strictSchemaJSON(labels []string) []byte {
 	return marshalConstraint(map[string]any{
 		"type":                 "object",

@@ -164,12 +164,18 @@ type classifierDryRunResponse struct {
 	Configured       bool                                    `json:"configured"`
 	Category         string                                  `json:"category,omitempty"`
 	Confidence       float64                                 `json:"confidence,omitempty"`
+	Dimensions       map[string]dryRunDimensionScore         `json:"dimensions,omitempty"`
 	FallbackReason   string                                  `json:"fallback_reason,omitempty"`
 	Privacy          string                                  `json:"privacy,omitempty"`
 	DurationMS       int                                     `json:"duration_ms"`
 	SanitizedPreview string                                  `json:"sanitized_preview,omitempty"`
 	Decision         *classifierDryRunDecision               `json:"decision,omitempty"`
 	Fields           []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
+}
+
+type dryRunDimensionScore struct {
+	Label string  `json:"label"`
+	Score float64 `json:"score"`
 }
 
 // classifierDryRun previews one classification locally: the text passes the
@@ -235,14 +241,15 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 	}
 	started := time.Now()
 	outcome := cloud.Classify(request.Context(), nil, cloud.Input{
-		Protocol:  cloud.Protocol(plan.Protocol),
-		Endpoint:  plan.Endpoint,
-		APIKey:    secret,
-		Model:     plan.Model,
-		Prompt:    plan.Prompt,
-		Labels:    plan.Labels,
-		Text:      sanitized,
-		TimeoutMS: plan.TimeoutMS,
+		Protocol:   cloud.Protocol(plan.Protocol),
+		Endpoint:   plan.Endpoint,
+		APIKey:     secret,
+		Model:      plan.Model,
+		Prompt:     plan.Prompt,
+		Labels:     plan.Labels,
+		Text:       sanitized,
+		TimeoutMS:  plan.TimeoutMS,
+		Dimensions: plan.Dimensions,
 	})
 	response.DurationMS = int(time.Since(started).Milliseconds())
 	response.Confidence = outcome.Confidence
@@ -256,12 +263,13 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		ClassifierID:           string(outcome.ClassifierID),
 		Candidates:             outcome.Candidates,
 		LowConfidenceThreshold: plan.LowConfidenceThreshold,
+		Dimensions:             dryRunDimensionScores(outcome.Dimensions),
 	}
 	if outcome.OK() {
 		if group != nil && !group.ValidTaskTypeLabel(outcome.Category) {
 			taskType.Code = "classifier_invalid_output"
 		} else if outcome.Confidence < plan.LowConfidenceThreshold {
-			taskType.Code = "classifier_low_confidence"
+			taskType.Code = modelrouting.CodeClassifierLowConfidence
 		} else {
 			taskType.Value = outcome.Category
 			taskType.Confidence = outcome.Confidence
@@ -282,6 +290,7 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 	}
 	response.Category = taskType.Value
 	response.FallbackReason = taskType.Code
+	response.Dimensions = dryRunDimensions(taskType.Dimensions)
 	if group != nil {
 		now := time.Now()
 		facts := contract.ModelRoutingFacts{
@@ -293,6 +302,10 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 			SystemTime:  &now,
 		}
 		facts.TaskTypeCandidates = modelrouting.TaskTypeCandidateLabels(taskType, *group)
+		// The dry-run preview must evaluate the same dimensions production
+		// routing does, or a saved-then-previewed configuration would report a
+		// different outcome than the live path.
+		facts.Dimensions = modelrouting.DimensionFacts(taskType)
 		selection := modelrouting.Evaluate(*group, facts)
 		candidateObservations := modelrouting.TaskTypeCandidateObservations(taskType, *group, selection.TaskTypeCandidateIndex)
 		if taskType.ClassifierID != "" || taskType.Confidence > 0 || candidateObservations != nil {
@@ -317,6 +330,39 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 }
 
 func boolPtrDryRun(value bool) *bool { return &value }
+
+// dryRunDimensionScores moves the cloud source's dimension answers onto the
+// shared carrier the dry-run evaluates. task_type is dropped: it already
+// travels in the carrier's Value and Candidates.
+func dryRunDimensionScores(dimensions map[string]autoclassifier.DimensionAnswer) map[string]modelrouting.DimensionScore {
+	if len(dimensions) == 0 {
+		return nil
+	}
+	scores := make(map[string]modelrouting.DimensionScore, len(dimensions))
+	for name, dimension := range dimensions {
+		if name == contract.BuiltInTaskTypeDimension {
+			continue
+		}
+		scores[name] = modelrouting.DimensionScore{Label: dimension.Label, Score: dimension.Score}
+	}
+	if len(scores) == 0 {
+		return nil
+	}
+	return scores
+}
+
+// dryRunDimensions converts the internal DimensionScore map to the HTTP
+// response shape, keeping the zero value nil for backward compatibility.
+func dryRunDimensions(dimensions map[string]modelrouting.DimensionScore) map[string]dryRunDimensionScore {
+	if len(dimensions) == 0 {
+		return nil
+	}
+	converted := make(map[string]dryRunDimensionScore, len(dimensions))
+	for name, score := range dimensions {
+		converted[name] = dryRunDimensionScore{Label: score.Label, Score: score.Score}
+	}
+	return converted
+}
 
 // dryRunPrivacy applies the production privacy filter to the dry-run text by
 // wrapping it in the chat envelope the detector understands. The sanitized

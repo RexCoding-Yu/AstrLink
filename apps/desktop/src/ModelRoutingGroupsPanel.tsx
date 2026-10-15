@@ -3,8 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { FormMessage } from "./components/FormMessage";
 import { ModelRoutingGroupEditor } from "./components/ModelRoutingGroupEditor";
 import { Button } from "./components/ui/button";
-import { getRoutingSettings, updateRoutingSettings } from "./bridge";
+import {
+  getRoutingSettings,
+  updateRoutingSettings,
+  getClassifierSettings,
+} from "./bridge";
 import type { RoutingSettings } from "./failure-policy-model";
+import type { ClassifierDimension } from "./classifier-settings-model";
 import { useT } from "./i18n";
 import {
   validateModelRoutingDraft,
@@ -37,6 +42,12 @@ export function ModelRoutingGroupsPanel({
     "routing-settings",
     null,
   );
+  // Shared with the field-catalog tab: a dimension saved there must reach this
+  // panel's field selector without a reload, because both tabs stay mounted.
+  const [dimensions, setDimensions] = useWorkspaceSnapshot<ClassifierDimension[]>(
+    "classifier-dimensions",
+    [],
+  );
   const [draft, setDraft] = useState<ModelRoutingGroup[] | null>(() =>
     settings ? groupsOf(settings) : null,
   );
@@ -65,14 +76,15 @@ export function ModelRoutingGroupsPanel({
     if (!ready) return;
     let active = true;
     const version = mutationVersion.current;
-    void getRoutingSettings()
-      .then((loaded) => {
+    void Promise.all([getRoutingSettings(), getClassifierSettings()])
+      .then(([loadedRouting, loadedClassifier]) => {
         if (!active || mutationVersion.current !== version) return;
-        setSettings(loaded);
+        setSettings(loadedRouting);
+        setDimensions(loadedClassifier.dimensions ?? []);
         // A reconnection must never replace an unsaved draft.
         if (!dirtyRef.current) {
-          setDraft(groupsOf(loaded));
-          setBaseline(JSON.stringify(groupsOf(loaded)));
+          setDraft(groupsOf(loadedRouting));
+          setBaseline(JSON.stringify(groupsOf(loadedRouting)));
         }
         setLoadError(null);
       })
@@ -181,6 +193,7 @@ export function ModelRoutingGroupsPanel({
           <ModelRoutingGroupEditor
             value={draft}
             services={services}
+            dimensions={dimensions}
             disabled={!ready}
             validationIssues={issues}
             onChange={(next) => {

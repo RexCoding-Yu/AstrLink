@@ -25,6 +25,20 @@ type TaskTypeOutcome struct {
 	Confidence             float64
 	Candidates             []autoclassifier.Candidate
 	LowConfidenceThreshold float64
+	// Dimensions carries the custom dimensions' raw answers, keyed by
+	// dimension name. A dimension the provider omitted is absent, which is the
+	// "not produced" case DimensionFacts turns into an unknown. Empty for a
+	// single-dimension configuration, where nothing downstream changes.
+	Dimensions map[string]DimensionScore
+}
+
+// DimensionScore is one custom dimension's raw provider answer: the chosen
+// option name and the confidence reported for it. It is the input side of
+// DimensionFact; the threshold comparison happens in DimensionFacts, the one
+// place that sees both the answer and the threshold.
+type DimensionScore struct {
+	Label string
+	Score float64
 }
 
 // TaskTypeCandidateScores is the one Outcome→sequence conversion both fact
@@ -84,6 +98,78 @@ func TaskTypeCandidateScores(outcome TaskTypeOutcome, group contract.ModelRoutin
 		}
 	}
 	return scored
+}
+
+// CodeClassifierLowConfidence is the recorded code for a classification that
+// completed but whose task_type fell below LowConfidenceThreshold. It is
+// deliberately distinct from the fallback codes: the provider answered, the
+// answer was simply too weak to select on. Every producer of a task_type
+// outcome (ingress for both classifier sources, controlapi for the dry-run)
+// names it through this constant so the three cannot drift apart.
+const CodeClassifierLowConfidence = "classifier_low_confidence"
+
+// isFallbackOutcome reports whether an attempt failed to produce a
+// measurement at all, as opposed to producing one that was too weak.
+//
+// The distinction is what CodeClassifierLowConfidence exists to carry. A
+// fallback code means no reply arrived (unavailable, busy, timeout) or the
+// reply was unusable (invalid output, refusal): nothing was measured, so the
+// custom dimensions are absent for the same reason task_type is. Low
+// confidence means the reply arrived and every dimension in it was measured —
+// only task_type's own score was weak, and that is a per-value judgement, not
+// a per-attempt one.
+func isFallbackOutcome(outcome TaskTypeOutcome) bool {
+	return outcome.Code != "" && outcome.Code != CodeClassifierLowConfidence
+}
+
+// DimensionFacts converts one attempt's raw dimension answers into the
+// evaluator's dimension facts, applying the same single threshold task_type
+// uses. There is exactly one LowConfidenceThreshold in the whole system and
+// every dimension is compared against it — the threshold is configured once
+// and applies everywhere, not once per dimension.
+//
+// A dimension lands in the result in one of three states:
+//
+//   - answered above the threshold: Known, the rule that tests it can match;
+//   - answered at or below it, or answered outside its option list: Known is
+//     false, so every rule testing it stays unknown and unmatched;
+//   - not answered at all: absent from the map, which reads as unknown with
+//     Produced false.
+//
+// Nothing here can fail a request. A dimension with no usable answer lowers
+// what the rules can match; it never returns an error, because the classifier
+// seam is fail-open and an unusable dimension is not a reason to refuse
+// service.
+//
+// A fallback attempt produces nothing: a fallback is not a measurement, which
+// is the same rule TaskTypeCandidateScores applies to task_type. But only a
+// real fallback counts. CodeClassifierLowConfidence is a completed
+// measurement whose task_type merely fell below the threshold, and the
+// dimensions it carried are as usable as any other reply's — dropping them
+// here would let a weak task_type silently erase a dimension the provider
+// answered at 0.95, which is exactly what the one-threshold-per-dimension rule
+// forbids.
+func DimensionFacts(outcome TaskTypeOutcome) map[string]contract.DimensionFact {
+	if isFallbackOutcome(outcome) || len(outcome.Dimensions) == 0 {
+		return nil
+	}
+	facts := make(map[string]contract.DimensionFact, len(outcome.Dimensions))
+	for name, answer := range outcome.Dimensions {
+		if answer.Label == "" {
+			// No value to select on. It stays in the map as a produced-but
+			// -unknown dimension so the record can still distinguish it from a
+			// dimension the provider never mentioned.
+			facts[name] = contract.DimensionFact{Score: answer.Score, Produced: true}
+			continue
+		}
+		facts[name] = contract.DimensionFact{
+			Value:    answer.Label,
+			Score:    answer.Score,
+			Known:    answer.Score >= outcome.LowConfidenceThreshold,
+			Produced: true,
+		}
+	}
+	return facts
 }
 
 // taskTypeCandidatesContainLabel reports whether the ranked sequence already

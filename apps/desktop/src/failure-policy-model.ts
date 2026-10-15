@@ -3,6 +3,7 @@ import {
   parseModelRoutingGroups,
   type ModelRoutingGroup,
 } from "./model-routing-group-model";
+import type { ClassifierDimension } from "./classifier-settings-model";
 export type FailureAction =
   | "stop"
   | "retry"
@@ -465,7 +466,10 @@ export function parseClientIdentities(value: unknown): ClientIdentities {
   };
 }
 
-export function parseRoutingSettings(value: unknown): RoutingSettings {
+export function parseRoutingSettings(
+  value: unknown,
+  dimensions?: ClassifierDimension[],
+): RoutingSettings {
   const settings = object(value, "routing_settings");
   keys(
     settings,
@@ -489,6 +493,7 @@ export function parseRoutingSettings(value: unknown): RoutingSettings {
   const redirects = parseModelRedirects(settings.model_redirects);
   const modelRoutingGroups = parseModelRoutingGroups(
     settings.model_routing_groups,
+    (dimensions ?? []).map((dimension) => dimension.name),
   );
   const parsed = parseFailoverPolicy({
     enabled: settings.allow_unmatched_failover,

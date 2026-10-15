@@ -39,6 +39,21 @@ const (
 	MaxClassifierProviderRefRunes           = 256
 	ClassifierPromptLabelsPlaceholder       = "{{labels}}"
 
+	// MaxClassifierDimensions bounds the total dimension count: task_type is
+	// built in and always occupies one of the slots, so at most
+	// MaxClassifierDimensions-1 custom dimensions may be defined. The
+	// "-1" is a structural consequence of task_type being built in, not an
+	// off-by-one: write len(dimensions) > MaxClassifierDimensions-1 when
+	// rejecting.
+	MaxClassifierDimensions = 6
+	// Built-inTaskTypeDimension names the one dimension that is never a
+	// member of ClassifierSettings.Dimensions.
+	BuiltInTaskTypeDimension = "task_type"
+	// MaxClassifierDimensionNameRunes bounds a dimension name and an option
+	// name. Names are unrestricted in character set (no slug rule) but must
+	// stay addressable from {{dim.<name>}} and bounded in length.
+	MaxClassifierDimensionNameRunes = 64
+
 	ClassifierFallbackSkip    = "skip"
 	ClassifierFallbackGeneral = "general"
 	ClassifierFallbackError   = "error"
@@ -68,6 +83,28 @@ type ClassifierSettings struct {
 	Inline           *ClassifierInlineSource        `json:"inline,omitempty"`
 	ProviderRef      *ClassifierProviderRef         `json:"provider_ref,omitempty"`
 	ExistingModel    *ClassifierExistingModelSource `json:"existing_model,omitempty"`
+	// Dimensions holds the user-defined classification dimensions. task_type
+	// is built in and must never appear here (see Validate). Empty means the
+	// settings are single-dimension: behaviour is byte-identical to the
+	// pre-dimensions classifier.
+	Dimensions []ClassifierDimension `json:"dimensions,omitempty"`
+}
+
+// ClassifierDimension is one user-defined classification dimension. Names are
+// deliberately not slug-constrained (task requirement: no character-set rule),
+// so a Chinese dimension name is valid.
+type ClassifierDimension struct {
+	Name        string                      `json:"name"`
+	Description string                      `json:"description,omitempty"`
+	Options     []ClassifierDimensionOption `json:"options"`
+}
+
+// ClassifierDimensionOption is one selectable value of a dimension. The
+// description is rendered next to the name in the prompt but is never part of
+// the {{dim.<name>}} token grammar, so it may contain braces freely.
+type ClassifierDimensionOption struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // ClassifierInlineSource describes one directly configured cloud classifier.
@@ -103,7 +140,7 @@ func (settings *ClassifierSettings) UnmarshalJSON(data []byte) error {
 	}
 	type plain ClassifierSettings
 	var value plain
-	if err := decodePolicy(data, &value, []string{"enabled", "classifier_source"}, []string{"inline", "provider_ref", "existing_model"}); err != nil {
+	if err := decodePolicy(data, &value, []string{"enabled", "classifier_source"}, []string{"inline", "provider_ref", "existing_model", "dimensions"}); err != nil {
 		return err
 	}
 	*settings = ClassifierSettings(value)
@@ -209,7 +246,141 @@ func (settings ClassifierSettings) Validate() error {
 			return fmt.Errorf("inline.credential_ref is required when enabled")
 		}
 	}
+	if err := settings.validateDimensions(); err != nil {
+		return err
+	}
+	// Satisfiability: every {{dim.X}} the prompt mentions must be a dimension
+	// that actually exists. This is the only place that can see both the
+	// dimensions and the prompt, which is why it lives at the top level
+	// rather than in ValidateClassifierPrompt (that function only sees the
+	// prompt string and therefore checks shape alone).
+	if settings.Inline != nil {
+		if err := settings.validatePromptPlaceholders(); err != nil {
+			return fmt.Errorf("inline.prompt %w", err)
+		}
+	}
 	return nil
+}
+
+// validateDimensions bounds the custom dimension set. task_type is built in
+// and is deliberately not a member of Dimensions, so the upper bound is
+// MaxClassifierDimensions-1 custom entries and the reserved name is refused.
+func (settings ClassifierSettings) validateDimensions() error {
+	if len(settings.Dimensions) > MaxClassifierDimensions-1 {
+		return fmt.Errorf("classifier dimensions must contain at most %d custom dimensions (%s is built in and always counts as one of the %d)",
+			MaxClassifierDimensions-1, BuiltInTaskTypeDimension, MaxClassifierDimensions)
+	}
+	seen := make(map[string]struct{}, len(settings.Dimensions))
+	for index, dimension := range settings.Dimensions {
+		if err := dimension.Validate(); err != nil {
+			return fmt.Errorf("dimensions[%d]: %w", index, err)
+		}
+		if dimension.Name == BuiltInTaskTypeDimension {
+			return fmt.Errorf("dimensions[%d].name %q is reserved: %s is a built-in dimension whose options come from the group's task_type_labels, so defining it here would be silently ignored",
+				index, dimension.Name, BuiltInTaskTypeDimension)
+		}
+		// The other built-in routing fields shadow a same-named custom
+		// dimension: the field registry resolves built-ins first, so a rule on
+		// "protocol" would read the request's protocol rather than the
+		// classifier's answer. That would classify into a field nothing reads.
+		if _, ok := modelRoutingFields[dimension.Name]; ok {
+			return fmt.Errorf("dimensions[%d].name %q is reserved: it is a built-in routing field evaluated from the request, not from the classifier",
+				index, dimension.Name)
+		}
+		if _, ok := seen[dimension.Name]; ok {
+			return fmt.Errorf("dimensions[%d].name %q is duplicated", index, dimension.Name)
+		}
+		seen[dimension.Name] = struct{}{}
+	}
+	return nil
+}
+
+// Validate bounds one dimension. An empty option list makes the dimension
+// undefined: a placeholder for it can never be satisfied (see
+// validatePromptPlaceholders), so it is refused here rather than left as a
+// configuration that silently classifies nothing.
+func (dimension ClassifierDimension) Validate() error {
+	name := strings.TrimSpace(dimension.Name)
+	if name == "" {
+		return fmt.Errorf("name must not be empty")
+	}
+	if utf8.RuneCountInString(dimension.Name) > MaxClassifierDimensionNameRunes {
+		return fmt.Errorf("name must contain at most %d runes", MaxClassifierDimensionNameRunes)
+	}
+	if strings.ContainsAny(dimension.Name, "{}") {
+		return fmt.Errorf("name must not contain braces: %s and }} delimit the {{dim.<name>}} placeholder", "{{")
+	}
+	// The token grammar trims the name it reads, so a name with leading or
+	// trailing whitespace would be stored but never addressable — no
+	// {{dim.X}} could ever resolve to it. Interior spaces are fine.
+	if dimension.Name != name {
+		return fmt.Errorf("name must not start or end with whitespace")
+	}
+	if len(dimension.Options) == 0 {
+		return fmt.Errorf("options must contain at least 1 option")
+	}
+	if len(dimension.Options) > MaxModelRoutingListItems {
+		return fmt.Errorf("options must contain at most %d options", MaxModelRoutingListItems)
+	}
+	seen := make(map[string]struct{}, len(dimension.Options))
+	for index, option := range dimension.Options {
+		if err := option.Validate(); err != nil {
+			return fmt.Errorf("options[%d]: %w", index, err)
+		}
+		if _, ok := seen[option.Name]; ok {
+			return fmt.Errorf("options[%d].name %q is duplicated", index, option.Name)
+		}
+		seen[option.Name] = struct{}{}
+	}
+	return nil
+}
+
+func (option ClassifierDimensionOption) Validate() error {
+	if strings.TrimSpace(option.Name) == "" {
+		return fmt.Errorf("name must not be empty")
+	}
+	if utf8.RuneCountInString(option.Name) > MaxClassifierDimensionNameRunes {
+		return fmt.Errorf("name must contain at most %d runes", MaxClassifierDimensionNameRunes)
+	}
+	return nil
+}
+
+// validatePromptPlaceholders enforces satisfiability: every {{dim.X}} token in
+// the prompt must name a defined dimension, or the built-in task_type, which is
+// always addressable. An unsatisfiable placeholder is refused at save time so a
+// deleted dimension cannot leave a prompt that silently renders its own token
+// text to the provider.
+func (settings ClassifierSettings) validatePromptPlaceholders() error {
+	for _, name := range dimensionPlaceholderNames(settings.EffectivePrompt()) {
+		if name == BuiltInTaskTypeDimension {
+			continue
+		}
+		defined := false
+		for _, dimension := range settings.Dimensions {
+			if dimension.Name == name && len(dimension.Options) > 0 {
+				defined = true
+				break
+			}
+		}
+		if !defined {
+			return fmt.Errorf("references undefined dimension %q: define it in dimensions or remove the placeholder", name)
+		}
+	}
+	return nil
+}
+
+// dimensionPlaceholderNames returns the dimension name of every well-formed
+// {{dim.<name>}} token in the prompt, in order. Malformed tokens are skipped
+// here: shape legality is ValidateClassifierPrompt's job, and this function is
+// only asked whether the names it can read are satisfied.
+func dimensionPlaceholderNames(prompt string) []string {
+	var names []string
+	for _, token := range promptTokens(prompt) {
+		if name, ok := dimensionTokenName(token); ok {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func (inline ClassifierInlineSource) Validate() error {
@@ -304,24 +475,69 @@ func ValidateClassifierEndpoint(value string) error {
 	return nil
 }
 
-// ValidateClassifierPrompt allows only the {{labels}} placeholder; any other
-// mustache-style token is a typo the caller cannot satisfy.
-func ValidateClassifierPrompt(prompt string) error {
+// promptTokens returns every mustache-style token in the prompt, in order. A
+// "{{" with no "}}" after it ends the scan and is treated as literal text: that
+// is the pre-existing behaviour and this task does not tighten it, since doing
+// so could reject configurations that already exist. The returned tokens are
+// raw slices including their braces.
+func promptTokens(prompt string) []string {
+	var tokens []string
 	for index := 0; index < len(prompt); {
 		open := strings.Index(prompt[index:], "{{")
 		if open < 0 {
-			return nil
+			return tokens
 		}
 		open += index
 		close := strings.Index(prompt[open:], "}}")
 		if close < 0 {
-			return nil
+			return tokens
 		}
 		close += open
-		if prompt[open:close+2] != ClassifierPromptLabelsPlaceholder {
-			return fmt.Errorf("only the %s placeholder is allowed", ClassifierPromptLabelsPlaceholder)
-		}
+		tokens = append(tokens, prompt[open:close+2])
+		// Continue after the closing braces. Text a token's own name cannot
+		// contain braces (see dimensionTokenName), so a second "}}" later in
+		// the prompt always starts an independent token rather than extending
+		// this one.
 		index = close + 2
+	}
+	return tokens
+}
+
+// dimensionTokenName reports whether token has the exact shape
+// "{{dim.<name>}}" and returns the trimmed name. It judges shape only: whether
+// the dimension exists is ClassifierSettings.validatePromptPlaceholders' job.
+// The name may contain any character except the two braces, which is a
+// structural requirement rather than a character-set rule: a name containing
+// "}}" would be truncated mid-name by the scan above and could never be
+// addressed.
+func dimensionTokenName(token string) (string, bool) {
+	name, ok := strings.CutPrefix(token, "{{dim.")
+	if !ok {
+		return "", false
+	}
+	name, ok = strings.CutSuffix(name, "}}")
+	if !ok {
+		return "", false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, "{}") {
+		return "", false
+	}
+	return name, true
+}
+
+// ValidateClassifierPrompt allows the {{labels}} placeholder and dimension
+// placeholders of the form {{dim.<name>}}. Any other mustache-style token is a
+// typo the caller cannot satisfy.
+func ValidateClassifierPrompt(prompt string) error {
+	for _, token := range promptTokens(prompt) {
+		if token == ClassifierPromptLabelsPlaceholder {
+			continue
+		}
+		if _, ok := dimensionTokenName(token); ok {
+			continue
+		}
+		return fmt.Errorf("unknown placeholder %q: only %s and {{dim.<name>}} are allowed", token, ClassifierPromptLabelsPlaceholder)
 	}
 	return nil
 }
@@ -401,10 +617,104 @@ type ClassifierCallPlan struct {
 	CredentialRef          string
 	Prompt                 string
 	Labels                 []string
+	Dimensions             []ClassifierDimension
 	TimeoutMS              int
 	LowConfidenceThreshold float64
 	Fallback               string
 }
+
+// RenderClassifierPrompt substitutes the prompt's placeholders: {{labels}}
+// becomes the label set joined with ", ", and {{dim.<name>}} becomes a block
+// describing that dimension. Unknown mustache text is left untouched, so the
+// function is safe on any prompt.
+//
+// The render deliberately returns no error and never fails: the strict
+// counterpart of "the prompt names a dimension that does not exist" is
+// enforced on the save path by ClassifierSettings.Validate, and re-checking it
+// on the request path could only block a request over a configuration that was
+// already accepted. Rendering is single-pass — substituted text is never
+// re-scanned — so a dimension or option description may contain "{{" or
+// "{{labels}}" as literal text.
+func RenderClassifierPrompt(prompt string, labels []string, dimensions []ClassifierDimension) string {
+	var builder strings.Builder
+	builder.Grow(len(prompt))
+	for index := 0; index < len(prompt); {
+		open := strings.Index(prompt[index:], "{{")
+		if open < 0 {
+			builder.WriteString(prompt[index:])
+			return builder.String()
+		}
+		open += index
+		close := strings.Index(prompt[open:], "}}")
+		if close < 0 {
+			builder.WriteString(prompt[index:])
+			return builder.String()
+		}
+		close += open
+		builder.WriteString(prompt[index:open])
+		token := prompt[open : close+2]
+		switch {
+		case token == ClassifierPromptLabelsPlaceholder:
+			builder.WriteString(strings.Join(labels, ", "))
+		default:
+			name, ok := dimensionTokenName(token)
+			if !ok {
+				builder.WriteString(token)
+				break
+			}
+			block, ok := dimensionBlock(name, dimensions)
+			if !ok {
+				// An unaddressable dimension keeps its token text, mirroring
+				// the silent behaviour of the previous strings.ReplaceAll.
+				builder.WriteString(token)
+				break
+			}
+			builder.WriteString(block)
+		}
+		index = close + 2
+	}
+	return builder.String()
+}
+
+// renderableDimensions is the dimension set the prompt renderer resolves
+// against: the built-in task_type first, whose option list is the group's
+// effective label domain, followed by the user-defined dimensions. task_type is
+// synthesized here rather than read from settings because its options are a
+// per-group value the settings document does not carry.
+func renderableDimensions(labels []string, dimensions []ClassifierDimension) []ClassifierDimension {
+	options := make([]ClassifierDimensionOption, 0, len(labels))
+	for _, label := range labels {
+		options = append(options, ClassifierDimensionOption{Name: label})
+	}
+	resolved := make([]ClassifierDimension, 0, len(dimensions)+1)
+	resolved = append(resolved, ClassifierDimension{Name: BuiltInTaskTypeDimension, Options: options})
+	return append(resolved, dimensions...)
+}
+
+// dimensionBlock renders one dimension as a three-line block. The line count is
+// part of the contract: an empty description or an empty option description
+// still emits its line and parentheses, so the model never has to interpret a
+// shifted layout.
+func dimensionBlock(name string, dimensions []ClassifierDimension) (string, bool) {
+	for _, dimension := range dimensions {
+		if dimension.Name != name {
+			continue
+		}
+		options := make([]string, 0, len(dimension.Options))
+		for _, option := range dimension.Options {
+			options = append(options, fmt.Sprintf("%s (%s)", option.Name, option.Description))
+		}
+		return fmt.Sprintf("Dimension: %s\nMeaning: %s\nOptions: %s",
+			dimension.Name, dimension.Description, strings.Join(options, " | ")), true
+	}
+	// task_type is built in and carries no user-authored description; its
+	// options are the effective label domain, which is a per-group value the
+	// render function cannot see. Rendering it here would use the wrong label
+	// set, so the caller supplies it as a synthesized dimension instead.
+	return "", false
+}
+
+// EffectivePrompt returns the configured prompt or the built-in default.
 
 // ResolveCallPlan resolves the global classifier settings against one group's
 // task_type label domain. Only the labels come from the group; the prompt,
@@ -421,7 +731,8 @@ func (settings ClassifierSettings) ResolveCallPlan(group *ModelRoutingGroup) Cla
 		labels = EffectiveModelRoutingTaskTypeLabels(group.TaskTypeLabels)
 	}
 	plan.Labels = append([]string(nil), labels...)
-	plan.Prompt = strings.ReplaceAll(plan.Prompt, ClassifierPromptLabelsPlaceholder, strings.Join(plan.Labels, ", "))
+	plan.Dimensions = append([]ClassifierDimension(nil), settings.Dimensions...)
+	plan.Prompt = RenderClassifierPrompt(plan.Prompt, plan.Labels, renderableDimensions(plan.Labels, settings.Dimensions))
 	// Connection fields belong to the inline source only; an existing_model
 	// plan resolves its own target from service_id + model and must not
 	// inherit a stale inline endpoint or credential.

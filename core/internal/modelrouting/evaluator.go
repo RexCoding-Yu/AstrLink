@@ -173,11 +173,36 @@ func evaluateCondition(condition contract.ModelRoutingCondition, facts contract.
 
 func evaluateLeaf(condition contract.ModelRoutingCondition, facts contract.ModelRoutingFacts) (triState, []contract.ModelRoutingFieldObservation) {
 	known, value := factValue(condition.Field, facts)
-	return evaluateLeafValue(condition, facts, known, value)
+	state, observations := evaluateLeafValue(condition, facts, known, value)
+	if !known && len(observations) == 1 && observations[0].SkipReason == "unknown" {
+		if reason, ok := dimensionSkipReason(condition.Field, facts); ok {
+			observations[0].SkipReason = reason
+		}
+	}
+	return state, observations
+}
+
+// dimensionSkipReason separates the two ways a custom dimension can be
+// unknown. Neither changes selection — an unknown fact never matches a rule —
+// but only the first is a provider-side gap, and the record is where an
+// operator finds out that the classifier stopped answering a dimension.
+func dimensionSkipReason(field string, facts contract.ModelRoutingFacts) (string, bool) {
+	fact, ok := facts.Dimensions[field]
+	if !ok {
+		return "", false
+	}
+	if !fact.Produced {
+		// Either the provider omitted the dimension entirely, or its answer was
+		// unusable (outside the declared options, malformed, or below the
+		// threshold). Both are "no value this call", which is what the
+		// provider-side gap report needs to say.
+		return "dimension_not_produced", true
+	}
+	return "", false
 }
 
 func evaluateLeafValue(condition contract.ModelRoutingCondition, facts contract.ModelRoutingFacts, known bool, value string) (triState, []contract.ModelRoutingFieldObservation) {
-	observation := contract.ModelRoutingFieldObservation{Field: condition.Field, Source: factSource(condition.Field), Known: known}
+	observation := contract.ModelRoutingFieldObservation{Field: condition.Field, Source: factSource(condition.Field, facts), Known: known}
 	if !known {
 		observation.SkipReason = "unknown"
 		return triUnknown, []contract.ModelRoutingFieldObservation{observation}
@@ -339,6 +364,15 @@ func factValue(field string, facts contract.ModelRoutingFacts) (bool, string) {
 		}
 		return true, facts.SystemTime.Format("15:04")
 	}
+	if fact, ok := facts.Dimensions[field]; ok {
+		// A dimension that is not Known reads as unknown for every operator,
+		// including != and not_in: "the provider did not answer this" is not
+		// the same as "the provider answered something else", and only the
+		// second can satisfy a negative test. Known is already false when the
+		// answer fell below the threshold, so the comparison lives entirely in
+		// the fact builder.
+		return fact.Known, fact.Value
+	}
 	boolValue := func(value *bool) (bool, string) {
 		if value == nil {
 			return false, ""
@@ -392,8 +426,15 @@ func factValue(field string, facts contract.ModelRoutingFacts) (bool, string) {
 	}
 }
 
-func factSource(field string) string {
+// factSource names where a field's value came from. A custom dimension is
+// classified, exactly like task_type: both are provider answers, and an
+// operator reading a record needs to tell "the classifier said this" apart
+// from "the request said this".
+func factSource(field string, facts contract.ModelRoutingFacts) string {
 	if field == "task_type" {
+		return "classifier"
+	}
+	if _, ok := facts.Dimensions[field]; ok {
 		return "classifier"
 	}
 	if field == "literal_keyword" {

@@ -50,6 +50,10 @@ type Input struct {
 	Labels    []string
 	Text      string
 	TimeoutMS int
+	// Dimensions are the custom dimensions this call asks about, in addition
+	// to the built-in task_type. Empty is the single-question request every
+	// existing deployment sends, and it produces byte-identical wire traffic.
+	Dimensions []contract.ClassifierDimension
 }
 
 // Client is the package-level HTTP client. It honors the environment proxy so
@@ -78,11 +82,14 @@ func Classify(ctx context.Context, client *http.Client, in Input) autoclassifier
 
 	var requestBuilder func(Input) (string, []byte, error)
 	var responseParser func([]byte, []string) (string, float64, []autoclassifier.Candidate, error)
+	var dimensionParser func([]byte, Input) (map[string]autoclassifier.DimensionAnswer, error)
 	switch protocol {
 	case ProtocolJev:
 		requestBuilder, responseParser = buildJevRequest, parseJevResponse
+		dimensionParser = parseJevDimensions
 	case ProtocolOpenAIDecisions:
 		requestBuilder, responseParser = buildOpenAIDecisionsRequest, parseOpenAIDecisionsResponse
+		dimensionParser = parseOpenAIDecisionsDimensions
 	default:
 		outcome.FallbackReason = autoclassifier.FallbackUnavailable
 		return outcome
@@ -147,6 +154,26 @@ func Classify(ctx context.Context, client *http.Client, in Input) autoclassifier
 			outcome.FallbackReason = autoclassifier.FallbackUnavailable
 		}
 		return outcome
+	}
+	// A multi-dimension reply is validated as one document: a malformed
+	// dimension fails the whole attempt through the same mapping a malformed
+	// task_type uses, rather than keeping the readable half. With no dimensions
+	// requested this stays out of the way entirely and the request is
+	// byte-identical to the single-dimension call.
+	if len(in.Dimensions) > 0 {
+		dimensions, err := dimensionParser(payload, in)
+		if err != nil {
+			switch {
+			case errors.Is(err, errRefusal):
+				outcome.FallbackReason = FallbackRefusal
+			case errors.Is(err, errInvalidOutput):
+				outcome.FallbackReason = FallbackInvalidOutput
+			default:
+				outcome.FallbackReason = autoclassifier.FallbackUnavailable
+			}
+			return outcome
+		}
+		outcome.Dimensions = dimensions
 	}
 	outcome.Category = category
 	outcome.Confidence = confidence

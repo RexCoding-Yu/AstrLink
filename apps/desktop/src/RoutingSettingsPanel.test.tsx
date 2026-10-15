@@ -6,6 +6,7 @@ const bridge = vi.hoisted(() => ({
   builtinToolAction: vi.fn().mockResolvedValue({ configured: false }),
   getClientIdentities: vi.fn(),
   getRoutingSettings: vi.fn(),
+  getClassifierSettings: vi.fn(),
   updateRoutingSettings: vi.fn(),
 }));
 vi.mock("./bridge", () => bridge);
@@ -37,6 +38,7 @@ describe("shared global recovery settings", () => {
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     bridge.getRoutingSettings.mockReset().mockResolvedValue(settings());
+    bridge.getClassifierSettings.mockReset().mockResolvedValue({ dimensions: [] });
     bridge.getClientIdentities
       .mockReset()
       .mockRejectedValue(new Error("unavailable"));

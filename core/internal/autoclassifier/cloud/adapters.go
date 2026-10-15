@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 
+	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/autoclassifier"
 )
 
@@ -35,21 +36,60 @@ type jevAnswer struct {
 
 func buildJevRequest(in Input) (string, []byte, error) {
 	request := jevRequest{
-		State: in.Text,
-		Model: in.Model,
-		Questions: map[string]jevQuestion{
-			"task_type": {
-				Type:         "choice",
-				Instructions: in.Prompt,
-				Criteria:     labelDescriptions(in.Labels),
-			},
-		},
+		State:     in.Text,
+		Model:     in.Model,
+		Questions: jevQuestions(in),
 	}
 	body, err := marshalRequestBody(request)
 	if err != nil {
 		return "", nil, err
 	}
 	return in.Endpoint, body, nil
+}
+
+// jevQuestions builds the request's question map: the built-in task_type plus
+// one question per custom dimension. Jev keys questions by name, so a
+// dimension's name is its question key and answers come back under the same
+// key — no ordering contract is needed on this provider.
+//
+// With no custom dimensions this returns exactly the one-entry map the
+// single-dimension request always sent.
+func jevQuestions(in Input) map[string]jevQuestion {
+	questions := make(map[string]jevQuestion, len(in.Dimensions)+1)
+	questions["task_type"] = jevQuestion{
+		Type:         "choice",
+		Instructions: in.Prompt,
+		Criteria:     labelDescriptions(in.Labels),
+	}
+	for _, dimension := range in.Dimensions {
+		if dimension.Name == "task_type" {
+			continue
+		}
+		criteria := make(map[string]string, len(dimension.Options))
+		for _, option := range dimension.Options {
+			criteria[option.Name] = option.Description
+		}
+		// An empty description still sends the option: the model must be able
+		// to choose it, and an empty description is a valid thing to send.
+		questions[dimension.Name] = jevQuestion{
+			Type:         "choice",
+			Instructions: dimensionQuestionInstructions(dimension),
+			Criteria:     criteria,
+		}
+	}
+	return questions
+}
+
+// dimensionQuestionInstructions is the instruction one custom dimension's
+// question carries. It is deliberately one sentence built from the user's own
+// dimension name and description, with no gateway identity and no splice of
+// the user text: the user text travels as the request's state, exactly as it
+// does for task_type.
+func dimensionQuestionInstructions(dimension contract.ClassifierDimension) string {
+	if dimension.Description == "" {
+		return fmt.Sprintf("Choose the %s that best applies to the state.", dimension.Name)
+	}
+	return fmt.Sprintf("Choose the %s that best applies to the state. %s", dimension.Name, dimension.Description)
 }
 
 func parseJevResponse(payload []byte, labels []string) (string, float64, []autoclassifier.Candidate, error) {
@@ -62,6 +102,51 @@ func parseJevResponse(payload []byte, labels []string) (string, float64, []autoc
 		return "", 0, nil, errInvalidOutput
 	}
 	return validatedChoiceWithRanked(answer.Choice, answer.Confidence, answer.Ranked, labels)
+}
+
+// parseJevDimensions reads the custom dimensions out of a reply that was asked
+// for them. task_type is deliberately absent from the result: it is validated
+// by parseJevResponse through the shared answer contract, and its value must
+// not appear twice.
+//
+// A dimension the provider did not answer is simply missing from the returned
+// map, which the caller turns into an unknown dimension. A dimension answered
+// with a choice outside its own option list is invalid output for the whole
+// reply — the answer is one document, and a partially readable answer is not a
+// safe basis for routing.
+func parseJevDimensions(payload []byte, in Input) (map[string]autoclassifier.DimensionAnswer, error) {
+	var response jevResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return nil, errInvalidOutput
+	}
+	answers := make(map[string]autoclassifier.DimensionAnswer, len(in.Dimensions))
+	for _, dimension := range in.Dimensions {
+		if dimension.Name == "task_type" {
+			continue
+		}
+		answer, ok := response.Answers[dimension.Name]
+		if !ok {
+			continue
+		}
+		if answer.Choice == nil || *answer.Choice == "" {
+			continue
+		}
+		option := dimensionOptionNames(dimension)
+		label, score, err := validatedChoice(answer.Choice, answer.Confidence, option)
+		if err != nil {
+			return nil, err
+		}
+		answers[dimension.Name] = autoclassifier.DimensionAnswer{Label: label, Score: score}
+	}
+	return answers, nil
+}
+
+func dimensionOptionNames(dimension contract.ClassifierDimension) []string {
+	options := make([]string, 0, len(dimension.Options))
+	for _, option := range dimension.Options {
+		options = append(options, option.Name)
+	}
+	return options
 }
 
 // openAIDecisionsRequest is the OpenAI Decisions call shape: questions are an
@@ -97,19 +182,10 @@ type openAIDecisionsAnswer struct {
 }
 
 func buildOpenAIDecisionsRequest(in Input) (string, []byte, error) {
-	choices := make([]openAIDecisionsChoice, 0, len(in.Labels))
-	for _, label := range in.Labels {
-		choices = append(choices, openAIDecisionsChoice{Value: label, Description: label})
-	}
 	request := openAIDecisionsRequest{
-		Model: in.Model,
-		Input: in.Text,
-		Questions: []openAIDecisionsQuestion{{
-			Type:         "choice",
-			Name:         "task_type",
-			Instructions: in.Prompt,
-			Choices:      choices,
-		}},
+		Model:     in.Model,
+		Input:     in.Text,
+		Questions: openAIDecisionsQuestions(in),
 	}
 	body, err := marshalRequestBody(request)
 	if err != nil {
@@ -118,20 +194,139 @@ func buildOpenAIDecisionsRequest(in Input) (string, []byte, error) {
 	return in.Endpoint, body, nil
 }
 
+// openAIDecisionsQuestions builds the questions array: task_type first, then
+// one question per custom dimension, in declaration order. Order is part of the
+// contract on this provider — the guide promises answers come back in the order
+// the questions were asked — and it is also the index-alignment fallback for a
+// reply that omits names. Keeping task_type at index 0 means the fallback
+// always resolves task_type to the same slot.
+//
+// With no custom dimensions this is the one-question array the
+// single-dimension request always sent.
+func openAIDecisionsQuestions(in Input) []openAIDecisionsQuestion {
+	questions := make([]openAIDecisionsQuestion, 0, len(in.Dimensions)+1)
+	questions = append(questions, openAIDecisionsQuestion{
+		Type:         "choice",
+		Name:         "task_type",
+		Instructions: in.Prompt,
+		Choices:      labelChoices(in.Labels),
+	})
+	for _, dimension := range in.Dimensions {
+		if dimension.Name == "task_type" {
+			continue
+		}
+		// Each option carries its own description, which is the only place the
+		// model learns what the option means; the name is the value it returns.
+		choices := make([]openAIDecisionsChoice, 0, len(dimension.Options))
+		for _, option := range dimension.Options {
+			choices = append(choices, openAIDecisionsChoice{Value: option.Name, Description: option.Description})
+		}
+		questions = append(questions, openAIDecisionsQuestion{
+			Type:         "choice",
+			Name:         dimension.Name,
+			Instructions: dimensionQuestionInstructions(dimension),
+			Choices:      choices,
+		})
+	}
+	return questions
+}
+
+// labelChoices renders the task_type label set as choices whose description is
+// the label itself — labels carry no per-label description in V1.
+func labelChoices(labels []string) []openAIDecisionsChoice {
+	choices := make([]openAIDecisionsChoice, 0, len(labels))
+	for _, label := range labels {
+		choices = append(choices, openAIDecisionsChoice{Value: label, Description: label})
+	}
+	return choices
+}
+
 func parseOpenAIDecisionsResponse(payload []byte, labels []string) (string, float64, []autoclassifier.Candidate, error) {
 	var response openAIDecisionsResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return "", 0, nil, errInvalidOutput
 	}
-	// Prefer the answer that names the question; index alignment is the
-	// fallback when the provider omits names.
-	for _, answer := range response.Answers {
-		if answer.Name != nil && *answer.Name != "task_type" {
+	answer, ok := findOpenAIDecisionsAnswer(response.Answers, "task_type", 0)
+	if !ok {
+		return "", 0, nil, errInvalidOutput
+	}
+	return answerToChoice(answer, labels)
+}
+
+// findOpenAIDecisionsAnswer locates one question's answer. Name matching comes
+// first and is strict: with several questions in flight, an answer that names a
+// different question must never be read as this one, and an answer that names
+// nothing at all is not evidence of anything either. Only when the reply names
+// no answers whatsoever does the documented ordering guarantee apply and the
+// position resolves the question — which is why the request always asks
+// task_type first.
+func findOpenAIDecisionsAnswer(answers []openAIDecisionsAnswer, name string, position int) (openAIDecisionsAnswer, bool) {
+	for _, answer := range answers {
+		if answer.Name != nil && *answer.Name == name {
+			return answer, true
+		}
+	}
+	named := false
+	for _, answer := range answers {
+		if answer.Name != nil && *answer.Name != "" {
+			named = true
+			break
+		}
+	}
+	if named {
+		// The provider named its answers but not this one, so this question went
+		// unanswered. Position is not a safe substitute here: the indexes of the
+		// answers that were named are unknown.
+		return openAIDecisionsAnswer{}, false
+	}
+	if position < 0 || position >= len(answers) {
+		return openAIDecisionsAnswer{}, false
+	}
+	return answers[position], true
+}
+
+// parseOpenAIDecisionsDimensions reads the custom dimensions out of a reply
+// that was asked for them. task_type is deliberately absent from the result: it
+// is validated by parseOpenAIDecisionsResponse through the shared answer
+// contract, and its value must not appear twice.
+//
+// An unanswered dimension is missing from the map, which the caller turns into
+// an unknown dimension. A dimension answered with a value outside its own option
+// list is invalid output for the whole reply — the answer is one document, and a
+// partially readable answer is not a safe basis for routing.
+func parseOpenAIDecisionsDimensions(payload []byte, in Input) (map[string]autoclassifier.DimensionAnswer, error) {
+	var response openAIDecisionsResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return nil, errInvalidOutput
+	}
+	answers := make(map[string]autoclassifier.DimensionAnswer, len(in.Dimensions))
+	position := 1 // task_type occupies index 0 and was asked first
+	for _, dimension := range in.Dimensions {
+		if dimension.Name == "task_type" {
 			continue
 		}
-		return answerToChoice(answer, labels)
+		answer, ok := findOpenAIDecisionsAnswer(response.Answers, dimension.Name, position)
+		position++
+		if !ok {
+			continue
+		}
+		if answer.Type == "refusal" {
+			// The guide is explicit that one question's refusal leaves the
+			// others answered, so this is not a failed reply: the dimension
+			// simply has no value, exactly like an unanswered one.
+			continue
+		}
+		if answer.Choice == nil || *answer.Choice == "" {
+			continue
+		}
+		option := dimensionOptionNames(dimension)
+		label, score, err := validatedChoice(answer.Choice, answer.Confidence, option)
+		if err != nil {
+			return nil, err
+		}
+		answers[dimension.Name] = autoclassifier.DimensionAnswer{Label: label, Score: score}
 	}
-	return "", 0, nil, errInvalidOutput
+	return answers, nil
 }
 
 func answerToChoice(answer openAIDecisionsAnswer, labels []string) (string, float64, []autoclassifier.Candidate, error) {

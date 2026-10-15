@@ -46,7 +46,7 @@ export function IntelligentRouting({
   const setTabDirtyChange = useMemo(
     () =>
       Object.fromEntries(
-        (["groups", "classifier", "dryRun"] as const).map((key) => [
+        (["groups", "fieldCatalog", "classifier", "dryRun"] as const).map((key) => [
           key,
           (next: boolean) =>
             setTabDirty((current) =>
@@ -55,7 +55,7 @@ export function IntelligentRouting({
         ]),
       ) as Pick<
         Record<IntelligentRoutingView, (next: boolean) => void>,
-        "groups" | "classifier" | "dryRun"
+        "groups" | "fieldCatalog" | "classifier" | "dryRun"
       >,
     [],
   );
@@ -115,8 +115,9 @@ export function IntelligentRouting({
             onDirtyChange={setTabDirtyChange.groups}
           />
         </TabsContent>
-        {/* Read-only, but force-mounted like the siblings so a tab switch keeps
-            the user's scroll position inside the field table. */}
+        {/* Editable since ASTR-18: the built-in table stays read-only, the
+            custom-dimension block below it holds a draft. Force-mounted like the
+            siblings so a tab switch keeps the scroll position. */}
         <TabsContent
           forceMount
           hidden={view !== "fieldCatalog"}
@@ -124,7 +125,10 @@ export function IntelligentRouting({
           className="gutter-scroller flex min-h-0 flex-1 flex-col overflow-y-auto pb-1"
           data-tab-scroller
         >
-          <ModelRoutingFieldCatalogPanel ready={ready} />
+          <ModelRoutingFieldCatalogPanel
+            ready={ready}
+            onDirtyChange={setTabDirtyChange.fieldCatalog}
+          />
         </TabsContent>
         {/* Every panel holds an unsaved draft, so all three outlive a switch. */}
         <TabsContent

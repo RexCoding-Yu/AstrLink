@@ -267,6 +267,60 @@ describe("classifier settings model", () => {
     });
   });
 
+  describe("dimension parsing", () => {
+    it("reads a saved dimension list including empty descriptions", () => {
+      const parsed = parseClassifierSettings({
+        dimensions: [
+          {
+            name: "topic",
+            description: "话题",
+            options: [{ name: "billing" }, { name: "support", description: "支持" }],
+          },
+        ],
+      });
+
+      expect(parsed.dimensions).toEqual([
+        {
+          name: "topic",
+          description: "话题",
+          options: [
+            { name: "billing", description: "" },
+            { name: "support", description: "支持" },
+          ],
+        },
+      ]);
+    });
+
+    it("reads a missing key as no dimensions configured", () => {
+      // `dimensions` is `omitempty` on the Go side, so a document that never had
+      // one — every document saved before ASTR-18 — arrives without the key.
+      expect(parseClassifierSettings({ enabled: false }).dimensions).toEqual([]);
+      expect(
+        parseClassifierSettings({ enabled: false, dimensions: null }).dimensions,
+      ).toEqual([]);
+    });
+
+    it("refuses a malformed dimension list rather than silently dropping it", () => {
+      // Dropping an entry would leave the UI showing fewer dimensions than the
+      // document holds, and the next save would delete the difference.
+      expect(() =>
+        parseClassifierSettings({ dimensions: { name: "topic" } }),
+      ).toThrow(/dimensions must be an array/);
+      expect(() => parseClassifierSettings({ dimensions: [{}] })).toThrow(
+        /dimensions\[0\].options must be an array/,
+      );
+      expect(() =>
+        parseClassifierSettings({
+          dimensions: [{ name: "topic", options: [{ name: 7 }] }],
+        }),
+      ).toThrow(/options\[0\].name must be a string/);
+    });
+
+    it("defaults to an empty list the panel can edit", () => {
+      expect(defaultClassifierSettings().dimensions).toEqual([]);
+    });
+  });
+
   it("keeps the confirmed timeout ceiling", () => {
     expect(classifierTimeoutMaxMS).toBe(5000);
     expect(defaultClassifierSettings().inline.timeout_ms).toBeLessThanOrEqual(

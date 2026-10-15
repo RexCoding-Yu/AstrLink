@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const bridge = vi.hoisted(() => ({
   getRoutingSettings: vi.fn(),
   updateRoutingSettings: vi.fn(),
+  getClassifierSettings: vi.fn(),
 }));
 vi.mock("./bridge", () => bridge);
 vi.mock("./notify", () => ({ notify: { success: vi.fn() } }));
@@ -44,6 +45,10 @@ describe("model routing groups panel", () => {
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     bridge.getRoutingSettings.mockReset().mockResolvedValue(settings());
+    bridge.getClassifierSettings.mockReset().mockResolvedValue({
+      kind: "cloud",
+      dimensions: [],
+    });
     bridge.updateRoutingSettings
       .mockReset()
       .mockImplementation(async (patch) => ({ ...settings(), ...patch }));

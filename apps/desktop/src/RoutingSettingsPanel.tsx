@@ -1,7 +1,11 @@
 import { BuiltinToolsEditor } from "./components/BuiltinToolsEditor";
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getRoutingSettings, updateRoutingSettings } from "./bridge";
+import {
+  getRoutingSettings,
+  updateRoutingSettings,
+  getClassifierSettings,
+} from "./bridge";
 import { ChannelStickinessEditor } from "./components/ChannelStickinessEditor";
 import { FailurePolicyEditor } from "./components/FailurePolicyEditor";
 import {
@@ -22,6 +26,7 @@ import {
   subscriptionProtectionKeys,
   type RoutingSettings,
 } from "./failure-policy-model";
+import type { ClassifierDimension } from "./classifier-settings-model";
 import { useT } from "./i18n";
 import { PageHeader } from "./PageHeader";
 import type { RoutableService } from "./service-model";
@@ -71,6 +76,7 @@ export function RoutingSettingsPanel({
     "routing-settings",
     null,
   );
+  const [dimensions, setDimensions] = useState<ClassifierDimension[]>([]);
   const [draft, setDraft] = useState<RoutingSettings | null>(() =>
     settings ? withRedirects(settings) : null,
   );
@@ -113,10 +119,11 @@ export function RoutingSettingsPanel({
     if (!ready) return;
     let active = true;
     const version = mutationVersion.current;
-    void getRoutingSettings()
-      .then((settings) => {
+    void Promise.all([getRoutingSettings(), getClassifierSettings()])
+      .then(([settings, classifierSettings]) => {
         if (!active || mutationVersion.current !== version) return;
         setSettings(settings);
+        setDimensions(classifierSettings.dimensions ?? []);
         // Reconnection and retry must never replace an unsaved draft.
         if (!dirtyRef.current) {
           setDraft(withRedirects(settings));
@@ -154,7 +161,7 @@ export function RoutingSettingsPanel({
     const submitted = draft;
     if (JSON.stringify(submitted) === baseline) return;
     try {
-      parseRoutingSettings(submitted);
+      parseRoutingSettings(submitted, dimensions);
     } catch {
       setValidationError(true);
       setShowRedirectIssues(true);

@@ -6,16 +6,19 @@ import {
   maxModelRoutingListItems,
   maxModelRoutingMembersPerGroup,
   maxModelRoutingPriority,
+  maxModelRoutingRulesPerGroup,
   modelRoutingConditionOperator,
   modelRoutingGroupSlug,
   modelRoutingPublicModelID,
   isModelRoutingRange,
   isModelRoutingTime,
+  modelRoutingFields,
   parseModelRoutingGroups,
   validateModelRoutingDraft,
   type ModelRoutingCondition,
   type ModelRoutingGroup,
 } from "./model-routing-group-model";
+import { modelRoutingFieldKind } from "./model-routing-catalog-model";
 
 /** A valid two-member group; each test perturbs one aspect of it. */
 function group(patch: Partial<ModelRoutingGroup> = {}): ModelRoutingGroup {
@@ -354,6 +357,33 @@ describe("model routing group grammar", () => {
     );
   });
 
+  // The rule cap is its own limit (128), not the member cap (32): a group with
+  // 33..128 rules is legal and must load.
+  it("bounds rules by the rule cap, not the member cap", () => {
+    const rules = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        id: `r${index}`,
+        priority: index + 1,
+        when: { field: "streaming", equals_bool: true },
+        target_member_id: "strong",
+      }));
+    expect(() =>
+      parseModelRoutingGroups([
+        group({ rules: rules(maxModelRoutingMembersPerGroup + 1) }),
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      parseModelRoutingGroups([
+        group({ rules: rules(maxModelRoutingRulesPerGroup) }),
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      parseModelRoutingGroups([
+        group({ rules: rules(maxModelRoutingRulesPerGroup + 1) }),
+      ]),
+    ).toThrow(/规则过多/);
+  });
+
   it("rejects excess priority and a malformed member model", () => {
     expect(() =>
       parseModelRoutingGroups([
@@ -531,4 +561,79 @@ it("treats an empty task_type_labels list as the legacy built-in domain", () => 
       }),
     ]),
   ).toThrow(/不在当前组标签集合中/);
+});
+
+/**
+ * 内建字段表的冻结断言。期望值**故意**是 Go 侧
+ * `core/contract/model_routing_test.go:TestModelRoutingFieldSetFrozen` 同一份
+ * 字面量文本的拷贝，Rust 侧 `failure_policy.rs` 的 `routing_field_kind_frozen`
+ * 也是同一份。三侧任一侧漏改 ⇒ 至少一侧变红。
+ *
+ * `modelRoutingFields` 的顺序即操作符矩阵的声明序，也就是 Go 表里逐行写下的
+ * 顺序，因此这里断言的是有序全表而不只是集合。
+ *
+ * 自定义维度**刻意不进这张表**：它以运行期维度名列表的形式传入
+ * `fieldOperators` / `parseModelRoutingGroups`，所以用户加维度不会让三份表漂移。
+ */
+describe("built-in routing field set is frozen", () => {
+  const frozenFields = [
+    "protocol",
+    "language",
+    "media_kind",
+    "task_type",
+    "streaming",
+    "continuation",
+    "has_tools",
+    "has_media",
+    "has_image",
+    "has_audio",
+    "has_video",
+    "turn_count",
+    "user_message_count",
+    "assistant_message_count",
+    "tool_message_count",
+    "tool_declaration_count",
+    "tool_call_count",
+    "input_bytes",
+    "input_text_runes",
+    "estimated_input_context_tokens",
+    "literal_keyword",
+    "system_time",
+  ] as const;
+
+  /** 与 Go 表逐项对应的 kind，词汇是 TS 侧自己的（label/boolean 对应 Go 的 string/bool）。 */
+  const frozenKinds: Record<string, string> = {
+    protocol: "label",
+    language: "label",
+    media_kind: "label",
+    task_type: "label",
+    streaming: "boolean",
+    continuation: "boolean",
+    has_tools: "boolean",
+    has_media: "boolean",
+    has_image: "boolean",
+    has_audio: "boolean",
+    has_video: "boolean",
+    turn_count: "number",
+    user_message_count: "number",
+    assistant_message_count: "number",
+    tool_message_count: "number",
+    tool_declaration_count: "number",
+    tool_call_count: "number",
+    input_bytes: "number",
+    input_text_runes: "number",
+    estimated_input_context_tokens: "number",
+    literal_keyword: "label",
+    system_time: "time",
+  };
+
+  it("has exactly the frozen field list, in order", () => {
+    expect(modelRoutingFields).toEqual([...frozenFields]);
+  });
+
+  it("resolves every frozen field to its frozen kind", () => {
+    for (const field of frozenFields) {
+      expect(modelRoutingFieldKind(field)).toBe(frozenKinds[field]);
+    }
+  });
 });

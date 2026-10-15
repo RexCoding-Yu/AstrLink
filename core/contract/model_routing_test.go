@@ -154,6 +154,74 @@ func routingConditionError(t *testing.T, when string) error {
 	return group.Validate()
 }
 
+// routingConditionErrorWithDimensions is routingConditionError for a group
+// validated against a caller-supplied dimension set.
+func routingConditionErrorWithDimensions(t *testing.T, when string, dimensions []ClassifierDimension) error {
+	t.Helper()
+	document := `{"id":"g","enabled":true,"members":[{"id":"a","service_id":"service_01","model":"m"}],"default_member_id":"a","rules":[{"id":"r","priority":1,"when":` + when + `,"target_member_id":"a"}]}`
+	var group ModelRoutingGroup
+	if err := json.Unmarshal([]byte(document), &group); err != nil {
+		return err
+	}
+	return group.ValidateWithDimensions(dimensions)
+}
+
+// A user-defined dimension becomes a routable string field once it is
+// declared, and stays unknown to a group validated without the list.
+func TestValidateConditionAcceptsCustomDimension(t *testing.T) {
+	dimensions := []ClassifierDimension{{
+		Name:        "brand",
+		Description: "品牌",
+		Options:     []ClassifierDimensionOption{{Name: "acme"}, {Name: "other"}},
+	}}
+	when := `{"field":"brand","equals":"acme"}`
+	if err := routingConditionErrorWithDimensions(t, when, dimensions); err != nil {
+		t.Fatalf("custom dimension rejected: %v", err)
+	}
+	if err := routingConditionErrorWithDimensions(t, when, nil); err == nil {
+		t.Fatal("custom dimension accepted without its declaration")
+	}
+	// String-kind operators apply to a custom dimension exactly as they do to
+	// a built-in string field.
+	for _, operator := range []string{
+		`{"field":"brand","in":["acme","other"]}`,
+		`{"field":"brand","not_equals":"acme"}`,
+		`{"field":"brand","not_in":["acme"]}`,
+	} {
+		if err := routingConditionErrorWithDimensions(t, operator, dimensions); err != nil {
+			t.Fatalf("operator %s rejected: %v", operator, err)
+		}
+	}
+	// Non-string operators must not become available to it.
+	for _, operator := range []string{
+		`{"field":"brand","equals_bool":true}`,
+		`{"field":"brand","min":1}`,
+		`{"field":"brand","within":["09:00","12:00"]}`,
+	} {
+		if err := routingConditionErrorWithDimensions(t, operator, dimensions); err == nil {
+			t.Fatalf("operator %s accepted for a custom dimension", operator)
+		}
+	}
+}
+
+// The registry still refuses a field nobody declared, custom dimensions or not.
+func TestValidateConditionRejectsUnknownFieldWithDimensions(t *testing.T) {
+	dimensions := []ClassifierDimension{{Name: "brand", Options: []ClassifierDimensionOption{{Name: "acme"}}}}
+	err := routingConditionErrorWithDimensions(t, `{"field":"domains","in":["x"]}`, dimensions)
+	if err == nil || !strings.Contains(err.Error(), "unsupported_routing_field") {
+		t.Fatalf("unknown field error = %v", err)
+	}
+}
+
+// Dimensions must thread through nested logical shapes, not just a bare leaf.
+func TestValidateConditionAcceptsCustomDimensionInNestedShape(t *testing.T) {
+	dimensions := []ClassifierDimension{{Name: "brand", Options: []ClassifierDimensionOption{{Name: "acme"}}}}
+	when := `{"any":[{"field":"protocol","equals":"openai_chat"},{"not":{"field":"brand","equals":"acme"}}]}`
+	if err := routingConditionErrorWithDimensions(t, when, dimensions); err != nil {
+		t.Fatalf("nested custom dimension rejected: %v", err)
+	}
+}
+
 func TestModelRoutingConditionAcceptsExtendedOperators(t *testing.T) {
 	for _, when := range []string{
 		// String kind: in / not_in / equals / not_equals.
@@ -622,5 +690,65 @@ func validTestModelRoutingGroup() ModelRoutingGroup {
 			When:           ModelRoutingCondition{Field: "task_type", In: []string{"coding"}},
 			TargetMemberID: "strong",
 		}},
+	}
+}
+
+// TestModelRoutingFieldSetFrozen pins the built-in routing field registry as a
+// literal copy of the same 22 entries the two desktop mirrors carry
+// (apps/desktop/src/model-routing-group-model.ts modelRoutingFieldOperators and
+// apps/desktop/src-tauri/src/failure_policy.rs routing_field_kind). The three
+// copies are intentionally identical text: a field added, removed or retyped on
+// one side alone turns that side's frozen test red, which is the strongest
+// guarantee available without build-time code generation.
+//
+// modelRoutingFields is a map, so the list below restates the declared order
+// rather than relying on iteration. Custom dimensions deliberately never enter
+// this table -- they arrive at runtime as []ClassifierDimension and resolve
+// through modelRoutingFieldKind's second branch -- so a user adding a dimension
+// cannot make the three copies drift.
+func TestModelRoutingFieldSetFrozen(t *testing.T) {
+	frozen := []struct {
+		field string
+		kind  string
+	}{
+		{"protocol", "string"},
+		{"language", "string"},
+		{"media_kind", "string"},
+		{"task_type", "string"},
+		{"streaming", "bool"},
+		{"continuation", "bool"},
+		{"has_tools", "bool"},
+		{"has_media", "bool"},
+		{"has_image", "bool"},
+		{"has_audio", "bool"},
+		{"has_video", "bool"},
+		{"turn_count", "number"},
+		{"user_message_count", "number"},
+		{"assistant_message_count", "number"},
+		{"tool_message_count", "number"},
+		{"tool_declaration_count", "number"},
+		{"tool_call_count", "number"},
+		{"input_bytes", "number"},
+		{"input_text_runes", "number"},
+		{"estimated_input_context_tokens", "number"},
+		{"literal_keyword", "keyword"},
+		{"system_time", "time"},
+	}
+	if len(modelRoutingFields) != len(frozen) {
+		t.Fatalf("built-in field count = %d, want %d; update the three mirrors and their frozen tests together", len(modelRoutingFields), len(frozen))
+	}
+	for _, want := range frozen {
+		registered, ok := modelRoutingFields[want.field]
+		if !ok {
+			t.Errorf("field %q is missing from modelRoutingFields", want.field)
+			continue
+		}
+		if registered.kind != want.kind {
+			t.Errorf("modelRoutingFields[%q].kind = %q, want %q", want.field, registered.kind, want.kind)
+		}
+		kind, ok := modelRoutingFieldKind(want.field, nil)
+		if !ok || kind != want.kind {
+			t.Errorf("modelRoutingFieldKind(%q, nil) = (%q, %v), want (%q, true)", want.field, kind, ok, want.kind)
+		}
 	}
 }

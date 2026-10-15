@@ -95,6 +95,20 @@ type Outcome struct {
 	// the single-value form. Scores here are diagnostics for the observation
 	// side only — the evaluator receives just the ordered labels.
 	Candidates []Candidate
+	// Dimensions carries the custom dimensions' answers, keyed by dimension
+	// name. It never contains task_type, whose answer stays in Category and
+	// Candidates. Sources that answer only task_type leave it nil, which is the
+	// single-dimension shape every existing caller already handles.
+	Dimensions map[string]DimensionAnswer
+}
+
+// DimensionAnswer is one custom dimension's answer from a classifier source:
+// the chosen option and the score reported for it. The score is passed through
+// verbatim; the low-confidence threshold is applied once, downstream, so every
+// dimension is measured against the same configured value.
+type DimensionAnswer struct {
+	Label string
+	Score float64
 }
 
 // Candidate is one ranked label from a classifier's output.

@@ -8,6 +8,28 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
+// routingSettingsDimensions reads the classifier-dimension singleton that a
+// routing-settings validation needs. A dimension-aware rule names a
+// user-defined classification dimension, and those live in the separate
+// classifier-settings document rather than on RoutingSettings, so every store
+// path that validates a group has to supply them.
+//
+// The read is deliberately best-effort and returns nil on any problem: absent
+// row, unreadable document, or malformed JSON. nil is the strict reading —
+// only built-in routing fields validate — so a failure here degrades to
+// refusing a custom-dimension rule, never to admitting an unvalidated one.
+func (store *Store) routingSettingsDimensions(ctx context.Context) []contract.ClassifierDimension {
+	var document string
+	if err := store.db.QueryRowContext(ctx, `SELECT document_json FROM classifier_settings WHERE id = 1`).Scan(&document); err != nil {
+		return nil
+	}
+	var settings contract.ClassifierSettings
+	if err := json.Unmarshal([]byte(document), &settings); err != nil {
+		return nil
+	}
+	return settings.Dimensions
+}
+
 func (store *Store) GetRoutingSettings(ctx context.Context) (contract.RoutingSettings, error) {
 	var document string
 	settings := contract.DefaultRoutingSettings()
@@ -25,7 +47,7 @@ func (store *Store) GetRoutingSettings(ctx context.Context) (contract.RoutingSet
 	if settings.ModelRoutingGroups == nil {
 		settings.ModelRoutingGroups = []contract.ModelRoutingGroup{}
 	}
-	if err := settings.Validate(); err != nil {
+	if err := settings.ValidateWithDimensions(store.routingSettingsDimensions(ctx)); err != nil {
 		return settings, fmt.Errorf("%w: routing settings: %v", storage.ErrInvalidRecord, err)
 	}
 	return settings, nil

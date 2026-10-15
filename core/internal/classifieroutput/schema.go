@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"sort"
+
+	"github.com/QuantumNous/astrlink/core/contract"
 )
 
 // ErrInvalidSchema marks output that decoded as strict JSON but does not
@@ -102,6 +104,123 @@ func ParseTaskType(text string, labels []string) (TaskType, error) {
 
 func validScore(score float64) bool {
 	return !math.IsNaN(score) && !math.IsInf(score, 0) && score >= 0 && score <= 1
+}
+
+// DimensionLabel is one dimension's parsed answer: the label the provider
+// chose, its reported confidence, and the ranked candidate sequence it sent.
+// ParseDimensions returns one of these per addressed dimension, keyed by
+// dimension name.
+//
+// Candidates matters for task_type and only for task_type: the evaluator's
+// scored-fallback substitution reads the task_type element's sequence, so a
+// multi-dimension reply that dropped it would silently disable substitution
+// for every group that added one custom dimension. Each dimension carries its
+// own sequence regardless, because that is the shape ParseTaskType validates
+// per dimension.
+type DimensionLabel struct {
+	Label      string
+	Score      float64
+	Candidates []Candidate
+}
+
+// DimensionKeys returns the JSON keys one classification reply is expected to
+// carry, in the order the dimensions were declared. A single-dimension
+// configuration (no custom dimensions) yields exactly {"task_type"}, which is
+// the shape every existing reply and every existing test already uses — the
+// multi-dimension branch is never taken, so behaviour there is unchanged.
+//
+// task_type is always first: it is built in and always addressed, so the
+// emitted schema keeps a stable opening key regardless of how many custom
+// dimensions follow.
+func DimensionKeys(dimensions []contract.ClassifierDimension) []string {
+	keys := make([]string, 0, len(dimensions)+1)
+	keys = append(keys, contract.BuiltInTaskTypeDimension)
+	for _, dimension := range dimensions {
+		if dimension.Name == contract.BuiltInTaskTypeDimension {
+			// Refused by ClassifierSettings.Validate on the save path; skipping
+			// it here keeps the key list unique for a document that reached the
+			// request path anyway.
+			continue
+		}
+		keys = append(keys, dimension.Name)
+	}
+	return keys
+}
+
+// ParseDimensions runs layers 2 and 3 over one multi-dimension reply. Each
+// addressed dimension carries the same {label, score, candidates} object
+// task_type does, so every dimension reuses ParseTaskType's validation
+// verbatim rather than re-implementing it.
+//
+// A dimension the provider omitted is simply absent from the result: that is
+// the "not produced" case the fact builder turns into an unknown dimension.
+// A dimension the provider answered badly — label outside its own option list,
+// non-finite score, unknown inner key — fails the whole reply with
+// ErrInvalidSchema, matching task_type's existing contract: the reply is one
+// document and a malformed member makes it unusable rather than partially
+// usable.
+//
+// labels is the effective task_type label domain for this call; dimensions
+// carries the custom dimensions only (never task_type).
+func ParseDimensions(text string, labels []string, dimensions []contract.ClassifierDimension) (map[string]DimensionLabel, error) {
+	object, err := ParseObject(text)
+	if err != nil {
+		return nil, err
+	}
+	keys := DimensionKeys(dimensions)
+	allowed := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		allowed[key] = struct{}{}
+	}
+	// Options per dimension, in declared order, used both to reject a label
+	// outside the dimension's own list and to break candidate ties. Order has
+	// to be the declared one and not map iteration order: ParseTaskType builds
+	// its tie-breaking catalog from this slice, so an unordered list would make
+	// equal-scored candidates sort differently from run to run.
+	optionLists := make(map[string][]string, len(keys))
+	optionSets := make(map[string]map[string]struct{}, len(keys))
+	optionLists[contract.BuiltInTaskTypeDimension] = labels
+	optionSets[contract.BuiltInTaskTypeDimension] = labelSet(labels)
+	for _, dimension := range dimensions {
+		if dimension.Name == contract.BuiltInTaskTypeDimension {
+			continue
+		}
+		names := make([]string, 0, len(dimension.Options))
+		for _, option := range dimension.Options {
+			names = append(names, option.Name)
+		}
+		optionLists[dimension.Name] = names
+		optionSets[dimension.Name] = labelSet(names)
+	}
+	for key := range object {
+		if _, ok := allowed[key]; !ok {
+			return nil, fmt.Errorf("%w: unknown key %q", ErrInvalidSchema, key)
+		}
+	}
+	result := make(map[string]DimensionLabel, len(keys))
+	for _, key := range keys {
+		raw, ok := object[key]
+		if !ok {
+			continue
+		}
+		parsed, err := ParseTaskType(string(raw), optionLists[key])
+		if err != nil {
+			return nil, fmt.Errorf("dimension %q: %w", key, err)
+		}
+		result[key] = DimensionLabel{Label: parsed.Label, Score: parsed.Score, Candidates: parsed.Candidates}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("%w: no addressed dimension present", ErrInvalidSchema)
+	}
+	return result, nil
+}
+
+func labelSet(labels []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		set[label] = struct{}{}
+	}
+	return set
 }
 
 // normalizeCandidates sorts by score descending with catalog order breaking

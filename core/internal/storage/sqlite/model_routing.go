@@ -51,7 +51,7 @@ func (store *Store) UpdateRoutingSettingsAtomic(ctx context.Context, settings co
 	if settings.ModelRedirects == nil {
 		settings.ModelRedirects = []contract.ModelRedirect{}
 	}
-	if err := settings.Validate(); err != nil {
+	if err := settings.ValidateWithDimensions(store.routingSettingsDimensions(ctx)); err != nil {
 		return fmt.Errorf("%w: %v", storagecontract.ErrInvalidArgument, err)
 	}
 	tx, err := store.db.BeginTx(ctx, nil)
@@ -110,7 +110,20 @@ func validateStoredRoutingReferencesTx(ctx context.Context, tx *sql.Tx) error {
 	if err := json.Unmarshal([]byte(document), &settings); err != nil {
 		return err
 	}
-	if err := settings.Validate(); err != nil {
+	// The dimensions live in their own singleton; read them inside the same
+	// transaction so a group naming a custom dimension still validates here.
+	// A missing or unreadable document leaves dimensions nil, which is the
+	// strict reading: the custom-dimension rule is then refused rather than
+	// admitted unvalidated.
+	var classifierDocument string
+	var dimensions []contract.ClassifierDimension
+	if err := tx.QueryRowContext(ctx, `SELECT document_json FROM classifier_settings WHERE id = 1`).Scan(&classifierDocument); err == nil {
+		var classifier contract.ClassifierSettings
+		if json.Unmarshal([]byte(classifierDocument), &classifier) == nil {
+			dimensions = classifier.Dimensions
+		}
+	}
+	if err := settings.ValidateWithDimensions(dimensions); err != nil {
 		return err
 	}
 	if settings.ModelRoutingGroups == nil {

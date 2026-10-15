@@ -59,6 +59,7 @@ import {
   parseClassifierCredentialStatus,
   parseClassifierDryRunResult,
   parseClassifierSettings,
+  type ClassifierDimension,
   type ClassifierDryRunResult,
   type ClassifierSettings,
 } from "./classifier-settings-model";
@@ -1148,17 +1149,44 @@ export async function saveTextFile(
   });
 }
 
+// A routing group's rules may name a user-defined classification dimension,
+// and those live in the classifier-settings singleton rather than on the
+// routing document. Every parse of routing settings therefore needs the
+// current dimension list: without it a rule naming a custom dimension fails
+// the field check and the whole routing tab refuses to load, even though Core
+// accepted and stored it.
+//
+// Best-effort by design. A classifier read that fails leaves the list empty,
+// which is the strict reading (built-in fields only) and never admits an
+// unvalidated rule.
+async function knownRoutingDimensions(): Promise<ClassifierDimension[]> {
+  try {
+    const settings = parseClassifierSettings(
+      await invoke<unknown>("get_classifier_settings"),
+    );
+    return settings.dimensions ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export async function getRoutingSettings(): Promise<RoutingSettings> {
   requireNativeBridge();
-  return parseRoutingSettings(await invoke<unknown>("get_routing_settings"));
+  const [settings, dimensions] = await Promise.all([
+    invoke<unknown>("get_routing_settings"),
+    knownRoutingDimensions(),
+  ]);
+  return parseRoutingSettings(settings, dimensions);
 }
 export async function updateRoutingSettings(
   patch: Partial<RoutingSettings>,
 ): Promise<RoutingSettings> {
   requireNativeBridge();
-  return parseRoutingSettings(
-    await invoke<unknown>("update_routing_settings", { patch }),
-  );
+  const [settings, dimensions] = await Promise.all([
+    invoke<unknown>("update_routing_settings", { patch }),
+    knownRoutingDimensions(),
+  ]);
+  return parseRoutingSettings(settings, dimensions);
 }
 export async function getClientIdentities(): Promise<ClientIdentities> {
   requireNativeBridge();

@@ -160,6 +160,7 @@ fn redirect_model(value: Option<&serde_json::Value>) -> Result<&str, String> {
 fn validate_model_routing_groups(
     value: &serde_json::Value,
     redirects: Option<&serde_json::Value>,
+    known_dimensions: &[String],
 ) -> Result<(), String> {
     let groups = value
         .as_array()
@@ -292,6 +293,7 @@ fn validate_model_routing_groups(
                 1,
                 &mut nodes,
                 &task_type_labels,
+                known_dimensions,
             )
             .map_err(|error| format!("rules[{index}].when: {error}"))?;
         }
@@ -445,7 +447,27 @@ fn valid_routing_language(value: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn routing_field_kind(field: &str) -> Option<&'static str> {
+/// routing_field_kind mirrors modelRoutingFieldKind: the field of a routing
+/// condition is resolved against two sources of very different standing.
+///
+/// The 22 built-in arms below are a closed, frozen vocabulary: they are the
+/// fields the request itself supplies, the Go registry
+/// (contract.modelRoutingFields) and the desktop field catalog both pin the
+/// same set of 22, and this function must never grow, reorder, or rename one.
+/// They answer "what does the request look like".
+///
+/// `known_dimensions` is the other source, and it is runtime context rather
+/// than a vocabulary: the names of the dimensions the classifier settings
+/// currently declare. A custom dimension always resolves to `"string"`, the
+/// same as in Go, because its options are free-form names rather than a fixed
+/// enum. That one kind is what lets a dimension accept exactly the operators
+/// of any other string field (`in`, `not_in`, `equals`, `not_equals`) and
+/// nothing else — a dimension is not a new field kind and gains no new
+/// operators by existing.
+///
+/// A name in neither source is unsupported, which is what keeps a typo or a
+/// retired field name out of a saved document.
+fn routing_field_kind(field: &str, known_dimensions: &[String]) -> Option<&'static str> {
     Some(match field {
         "protocol" | "language" | "media_kind" | "task_type" => "string",
         "streaming" | "continuation" | "has_tools" | "has_media" | "has_image" | "has_audio"
@@ -461,17 +483,28 @@ fn routing_field_kind(field: &str) -> Option<&'static str> {
         | "estimated_input_context_tokens" => "number",
         "literal_keyword" => "keyword",
         "system_time" => "time",
+        // Checked after the frozen table, never before: the built-in registry
+        // resolves first in Go too, and ClassifierSettings.validateDimensions
+        // refuses a dimension whose name shadows a built-in field, so the two
+        // sources cannot disagree in practice.
+        _ if known_dimensions.iter().any(|name| name == field) => "string",
         _ => return None,
     })
 }
 
 /// validate_routing_condition mirrors validateModelRoutingCondition: a bounded
 /// tree of exactly one logical shape, one leaf shape, and one operator per leaf.
+/// `known_dimensions` rides alongside `task_type_labels` for the same reason:
+/// both are values the condition cannot supply for itself. The labels come
+/// from the sibling group field, the dimensions from the classifier-settings
+/// singleton, which is a separate resource the routing-settings document
+/// deliberately does not carry.
 fn validate_routing_condition(
     value: &serde_json::Value,
     depth: usize,
     nodes: &mut usize,
     task_type_labels: &[String],
+    known_dimensions: &[String],
 ) -> Result<(), String> {
     if depth > MAX_MODEL_ROUTING_CONDITION_DEPTH {
         return Err(format!(
@@ -523,18 +556,24 @@ fn validate_routing_condition(
                 format!("{name} must contain 1 to {MAX_MODEL_ROUTING_LIST_ITEMS} conditions")
             })?;
         for (index, child) in children.iter().enumerate() {
-            validate_routing_condition(child, depth + 1, nodes, task_type_labels)
+            validate_routing_condition(child, depth + 1, nodes, task_type_labels, known_dimensions)
                 .map_err(|error| format!("{name}[{index}]: {error}"))?;
         }
         return Ok(());
     }
     if present(condition, "not") {
-        return validate_routing_condition(&condition["not"], depth + 1, nodes, task_type_labels);
+        return validate_routing_condition(
+            &condition["not"],
+            depth + 1,
+            nodes,
+            task_type_labels,
+            known_dimensions,
+        );
     }
 
     let field = field.ok_or("condition must name a routing field")?;
-    let kind =
-        routing_field_kind(field).ok_or_else(|| format!("unsupported_routing_field: {field}"))?;
+    let kind = routing_field_kind(field, known_dimensions)
+        .ok_or_else(|| format!("unsupported_routing_field: {field}"))?;
 
     let infix = present(condition, "in");
     let not_in_present = present(condition, "not_in");
@@ -789,9 +828,49 @@ fn valid_protocol_id(value: &str) -> bool {
     })
 }
 
+/// classifier_dimension_names reads the declared dimension names out of a
+/// classifier-settings document, so a caller that has already fetched that
+/// document can hand them to `validate_routing_settings`.
+///
+/// It is deliberately a pure, total extraction over untrusted shape: anything
+/// that is not a `dimensions` array of objects with a non-empty string `name`
+/// contributes nothing, and a malformed document yields a shorter list rather
+/// than an error. The alternative — refusing to read a document the host only
+/// half-validates — would let a classifier-settings problem reject a routing
+/// document, which is the one outcome this path must never produce.
+pub(crate) fn classifier_dimension_names(value: &serde_json::Value) -> Vec<String> {
+    value
+        .get("dimensions")
+        .and_then(serde_json::Value::as_array)
+        .map(|dimensions| {
+            dimensions
+                .iter()
+                .filter_map(|dimension| {
+                    let name = dimension.get("name")?.as_str()?;
+                    (!name.is_empty()).then(|| name.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// validate_routing_settings validates the routing-settings document.
+///
+/// `known_dimensions` is the one input this document cannot supply for itself:
+/// the user-defined classifier dimensions live in the classifier-settings
+/// singleton (see core/contract/classifier_settings.go), a deliberately
+/// separate resource, because the routing-settings document crosses a strict
+/// Go/Rust field whitelist that must not grow for this feature. The caller is
+/// therefore responsible for fetching that resource and passing the names in.
+///
+/// An empty slice is the correct and safe value whenever the names are
+/// unavailable: it restores exactly the built-in-only table this validator
+/// used before dimensions existed, so a missing dimension list can only make
+/// the validator behave as it always has, never stricter than Core.
 pub(crate) fn validate_routing_settings(
     value: &serde_json::Value,
     patch: bool,
+    known_dimensions: &[String],
 ) -> Result<(), String> {
     let object = value
         .as_object()
@@ -835,9 +914,11 @@ pub(crate) fn validate_routing_settings(
             }
             "builtin_tools" => validate_builtin_tools(value)?,
             "model_redirects" => validate_model_redirects(value)?,
-            "model_routing_groups" => {
-                validate_model_routing_groups(value, object.get("model_redirects"))?
-            }
+            "model_routing_groups" => validate_model_routing_groups(
+                value,
+                object.get("model_redirects"),
+                known_dimensions,
+            )?,
             "default_failure_policy" => validate_failure_policy(value)?,
             "allow_unmatched_failover"
             | "codex_identity_enforcement"
@@ -976,7 +1057,7 @@ mod tests {
     fn validates_builtin_tool_settings_without_credentials() {
         let disabled = json!({"enabled":false,"backend":"upstream"});
         let tools = json!({"web_search":{"enabled":true,"backend":"external","base_url":"https://search.example"},"image_generation":disabled});
-        assert!(validate_routing_settings(&json!({"builtin_tools":tools}), true).is_ok());
+        assert!(validate_routing_settings(&json!({"builtin_tools":tools}), true, &[]).is_ok());
         for tool in [
             json!({"enabled":false}),
             json!({"enabled":true,"backend":"external"}),
@@ -1006,9 +1087,10 @@ mod tests {
         assert!(validate_failure_policy(&value).is_ok());
         value["openai_function_output_recovery"] = json!(true);
         assert!(validate_failure_policy(&value).is_ok());
-        assert!(validate_routing_settings(&json!({"default_failure_policy":value,"allow_unmatched_failover":false,"strategy":"retry_first","max_attempts":6}),false).is_ok());
+        assert!(validate_routing_settings(&json!({"default_failure_policy":value,"allow_unmatched_failover":false,"strategy":"retry_first","max_attempts":6}),false, &[]).is_ok());
         assert!(
-            validate_routing_settings(&json!({"default_failure_policy":policy()}), true).is_ok()
+            validate_routing_settings(&json!({"default_failure_policy":policy()}), true, &[])
+                .is_ok()
         );
     }
     #[test]
@@ -1027,10 +1109,10 @@ mod tests {
             "grok_identity_auto_learn",
         ] {
             for enabled in [true, false] {
-                assert!(validate_routing_settings(&json!({key: enabled}), true).is_ok());
+                assert!(validate_routing_settings(&json!({key: enabled}), true, &[]).is_ok());
             }
             for invalid in [json!(null), json!("false"), json!(0)] {
-                assert!(validate_routing_settings(&json!({key: invalid}), true).is_err());
+                assert!(validate_routing_settings(&json!({key: invalid}), true, &[]).is_err());
             }
         }
         for key in [
@@ -1040,7 +1122,7 @@ mod tests {
         ] {
             for version in ["", "2.1.300", "0.160.0", "2.2.0-beta.1", "1.0.0+build.5"] {
                 assert_eq!(
-                    validate_routing_settings(&json!({key: version}), true),
+                    validate_routing_settings(&json!({key: version}), true, &[]),
                     Ok(()),
                     "{key} {version}"
                 );
@@ -1055,7 +1137,7 @@ mod tests {
                 json!(format!("1.0.0-{}", "a".repeat(64))),
             ] {
                 assert!(
-                    validate_routing_settings(&json!({key: invalid}), true).is_err(),
+                    validate_routing_settings(&json!({key: invalid}), true, &[]).is_err(),
                     "{key} {invalid}"
                 );
             }
@@ -1088,13 +1170,13 @@ mod tests {
                 "image_generation": {"enabled": false, "backend": "upstream"}
             }
         });
-        assert_eq!(validate_routing_settings(&settings, false), Ok(()));
+        assert_eq!(validate_routing_settings(&settings, false, &[]), Ok(()));
     }
     fn redirect(from: &str, to: &str) -> serde_json::Value {
         json!({"from":from,"to":to,"enabled":true})
     }
     fn redirects(rules: serde_json::Value) -> Result<(), String> {
-        validate_routing_settings(&json!({ "model_redirects": rules }), true)
+        validate_routing_settings(&json!({ "model_redirects": rules }), true, &[])
     }
     #[test]
     fn accepts_valid_model_redirects() {
@@ -1115,7 +1197,7 @@ mod tests {
         ] {
             assert!(redirects(rules.clone()).is_ok(), "{rules}");
         }
-        assert!(validate_routing_settings(&json!({"model_redirects":[redirect("a","b")],"default_failure_policy":policy(),"allow_unmatched_failover":false,"strategy":"retry_first","max_attempts":6}),false).is_ok());
+        assert!(validate_routing_settings(&json!({"model_redirects":[redirect("a","b")],"default_failure_policy":policy(),"allow_unmatched_failover":false,"strategy":"retry_first","max_attempts":6}),false, &[]).is_ok());
     }
     #[test]
     fn rejects_invalid_model_redirects() {
@@ -1187,12 +1269,26 @@ mod tests {
             value.as_object_mut().unwrap().remove(key);
             assert!(validate_failure_policy(&value).is_err(), "{key}");
         }
-        assert!(validate_routing_settings(&json!({"max_attempts":21}), true).is_err());
-        assert!(validate_routing_settings(&json!({"default_failure_policy":policy(),"allow_unmatched_failover":false,"strategy":"retry_first"}),false).is_err());
+        assert!(validate_routing_settings(&json!({"max_attempts":21}), true, &[]).is_err());
+        assert!(validate_routing_settings(&json!({"default_failure_policy":policy(),"allow_unmatched_failover":false,"strategy":"retry_first"}),false, &[]).is_err());
     }
 
     fn groups(value: serde_json::Value) -> Result<(), String> {
-        validate_routing_settings(&json!({ "model_routing_groups": value }), true)
+        groups_with_dimensions(value, &[])
+    }
+
+    /// groups_with_dimensions drives the same document through the same public
+    /// entry, with the classifier dimension list the validator cannot read out
+    /// of the routing-settings document itself.
+    fn groups_with_dimensions(
+        value: serde_json::Value,
+        known_dimensions: &[String],
+    ) -> Result<(), String> {
+        validate_routing_settings(
+            &json!({ "model_routing_groups": value }),
+            true,
+            known_dimensions,
+        )
     }
 
     fn group(members: serde_json::Value, default_member_id: &str) -> serde_json::Value {
@@ -1229,6 +1325,7 @@ mod tests {
                     ],
                 }),
                 true,
+                &[],
             ),
             Ok(())
         );
@@ -1319,6 +1416,15 @@ mod tests {
 
     fn condition(when: serde_json::Value) -> Result<(), String> {
         groups(json!([rules(when)]))
+    }
+
+    /// condition_with_dimensions is `condition` against a declared dimension
+    /// set, so a rule may name a custom dimension.
+    fn condition_with_dimensions(
+        when: serde_json::Value,
+        known_dimensions: &[String],
+    ) -> Result<(), String> {
+        groups_with_dimensions(json!([rules(when)]), known_dimensions)
     }
 
     #[test]
@@ -1537,14 +1643,250 @@ mod tests {
             })
         };
         assert_eq!(
-            validate_routing_settings(&settings("other-model"), true),
+            validate_routing_settings(&settings("other-model"), true, &[]),
             Ok(())
         );
         for colliding in ["gpt-5.6-luna", "astrlink/coding"] {
             assert!(
-                validate_routing_settings(&settings(colliding), true).is_err(),
+                validate_routing_settings(&settings(colliding), true, &[]).is_err(),
                 "{colliding}"
             );
         }
+    }
+
+    /// The 22 built-in field names are a closed frozen table, and every one of
+    /// them must keep resolving exactly as it did before dimensions existed:
+    /// with no dimensions declared, and with a dimension list that does not
+    /// mention them. This is the assertion that would fail if a custom
+    /// dimension were ever allowed to shadow, rename or displace a built-in.
+    #[test]
+    fn every_builtin_routing_field_still_resolves() {
+        for field in [
+            "protocol",
+            "language",
+            "media_kind",
+            "task_type",
+            "streaming",
+            "continuation",
+            "has_tools",
+            "has_media",
+            "has_image",
+            "has_audio",
+            "has_video",
+            "turn_count",
+            "user_message_count",
+            "assistant_message_count",
+            "tool_message_count",
+            "tool_declaration_count",
+            "tool_call_count",
+            "input_bytes",
+            "input_text_runes",
+            "estimated_input_context_tokens",
+            "literal_keyword",
+            "system_time",
+        ] {
+            let kind = routing_field_kind(field, &[]).unwrap_or_else(|| {
+                panic!("built-in field {field:?} no longer resolves");
+            });
+            // The table is frozen at 22 entries across 5 kinds.
+            assert!(
+                matches!(kind, "string" | "bool" | "number" | "keyword" | "time"),
+                "{field}: unexpected kind {kind}"
+            );
+            // An unrelated dimension list must not change any of them, and in
+            // particular must not turn one into a custom string field.
+            let dimensions = vec!["brand".to_string()];
+            assert_eq!(
+                routing_field_kind(field, &dimensions),
+                Some(kind),
+                "{field}"
+            );
+            // Every built-in is a real condition field: a leaf naming it is
+            // accepted whenever its operator matches its kind. The value is
+            // chosen per field because the string kind carries per-field value
+            // rules (protocol IDs, language tags, media kinds, the group's
+            // task_type label domain) that this test is not about.
+            let value = match field {
+                "protocol" => "openai_chat",
+                "language" => "en",
+                "media_kind" => "none",
+                "task_type" => "coding",
+                _ => "x",
+            };
+            let when = match kind {
+                "string" => json!({"field": field, "equals": value}),
+                "bool" => json!({"field": field, "equals_bool": true}),
+                "number" => json!({"field": field, "gte": 1}),
+                "keyword" => json!({"field": field, "contains_any": ["x"]}),
+                _ => json!({"field": field, "within": ["09:00", "12:00"]}),
+            };
+            assert!(condition(when.clone()).is_ok(), "{when}");
+            assert!(
+                condition_with_dimensions(when.clone(), &dimensions).is_ok(),
+                "{when}"
+            );
+        }
+        // The table is exactly the 22 names the whitelist above enumerates.
+        let names = [
+            "protocol",
+            "language",
+            "media_kind",
+            "task_type",
+            "streaming",
+            "continuation",
+            "has_tools",
+            "has_media",
+            "has_image",
+            "has_audio",
+            "has_video",
+            "turn_count",
+            "user_message_count",
+            "assistant_message_count",
+            "tool_message_count",
+            "tool_declaration_count",
+            "tool_call_count",
+            "input_bytes",
+            "input_text_runes",
+            "estimated_input_context_tokens",
+            "literal_keyword",
+            "system_time",
+        ];
+        assert_eq!(names.len(), 22);
+        for name in names {
+            assert!(routing_field_kind(name, &[]).is_some(), "{name}");
+        }
+    }
+
+    /// A declared custom dimension becomes a routable string field, and only
+    /// while it is declared: the same condition is refused when the dimension
+    /// list is empty. That asymmetry is the whole point — it pins dimensions
+    /// as runtime context read from the classifier-settings singleton, not as
+    /// new built-in names baked into the frozen table.
+    #[test]
+    fn accepts_a_routing_condition_on_a_declared_dimension() {
+        let dimensions = vec!["brand".to_string(), "品牌".to_string()];
+        for when in [
+            json!({"field": "brand", "equals": "acme"}),
+            json!({"field": "brand", "not_equals": "acme"}),
+            json!({"field": "brand", "in": ["acme", "other"]}),
+            json!({"field": "brand", "not_in": ["acme"]}),
+            // A dimension name is free-form: the contract deliberately imposes
+            // no character-set rule, so a Chinese name is addressable too.
+            json!({"field": "品牌", "equals": "acme"}),
+            // A dimension leaf composes inside a tree like any other field.
+            json!({"all": [
+                {"field": "brand", "equals": "acme"},
+                {"field": "task_type", "in": ["coding"]},
+            ]}),
+            json!({"not": {"field": "brand", "equals": "acme"}}),
+        ] {
+            assert!(
+                condition_with_dimensions(when.clone(), &dimensions).is_ok(),
+                "{when}"
+            );
+            // Without the declaration it is an unsupported field, exactly as
+            // it was before this feature existed.
+            let error = condition(when.clone()).expect_err("undeclared dimension must be refused");
+            assert!(error.contains("unsupported_routing_field"), "{error}");
+        }
+    }
+
+    /// A custom dimension is string kind and nothing more: it accepts the
+    /// string operators and refuses every other kind's operators. It is not a
+    /// new field kind that happens to be spelled like a built-in.
+    #[test]
+    fn a_dimension_takes_only_the_string_operators() {
+        let dimensions = vec!["brand".to_string()];
+        for when in [
+            json!({"field": "brand", "equals_bool": true}),
+            json!({"field": "brand", "gte": 1}),
+            json!({"field": "brand", "contains_any": ["a"]}),
+            json!({"field": "brand", "not_contains_any": ["a"]}),
+            json!({"field": "brand", "within": ["09:00", "12:00"]}),
+            // Two operators of the same kind, as for any string field.
+            json!({"field": "brand", "in": ["a"], "not_in": ["b"]}),
+            json!({"field": "brand"}),
+        ] {
+            assert!(
+                condition_with_dimensions(when.clone(), &dimensions).is_err(),
+                "{when}"
+            );
+        }
+    }
+
+    /// classifier_dimension_names reads only well-formed names, and treats a
+    /// malformed classifier document as "no dimensions" rather than an error:
+    /// the routing validator must never reject a valid routing document
+    /// because the sibling classifier resource was unreadable.
+    #[test]
+    fn reads_dimension_names_without_ever_failing() {
+        assert_eq!(
+            classifier_dimension_names(&json!({
+                "dimensions": [
+                    {"name": "brand", "options": [{"name": "acme"}]},
+                    {"name": "品牌"},
+                ],
+            })),
+            vec!["brand".to_string(), "品牌".to_string()]
+        );
+        for malformed in [
+            json!({}),
+            json!({"dimensions": null}),
+            json!({"dimensions": "brand"}),
+            json!({"dimensions": [{"name": ""}, {"name": 7}, null, "brand"]}),
+        ] {
+            assert!(
+                classifier_dimension_names(&malformed).is_empty(),
+                "{malformed}"
+            );
+        }
+    }
+    /// 内建字段表的冻结断言。期望值是 Go 侧
+    /// `core/contract/model_routing_test.go:TestModelRoutingFieldSetFrozen` 与 TS 侧
+    /// `model-routing-group-model.test.ts` 同一份字面量文本的拷贝：三侧任一侧漏改
+    /// ⇒ 至少一侧变红。`routing_field_kind` 在本次改动前从未被任何测试触碰过，
+    /// 这条测试是它在测试里的第一个调用点。
+    #[test]
+    fn routing_field_kind_frozen() {
+        let frozen: [(&str, &str); 22] = [
+            ("protocol", "string"),
+            ("language", "string"),
+            ("media_kind", "string"),
+            ("task_type", "string"),
+            ("streaming", "bool"),
+            ("continuation", "bool"),
+            ("has_tools", "bool"),
+            ("has_media", "bool"),
+            ("has_image", "bool"),
+            ("has_audio", "bool"),
+            ("has_video", "bool"),
+            ("turn_count", "number"),
+            ("user_message_count", "number"),
+            ("assistant_message_count", "number"),
+            ("tool_message_count", "number"),
+            ("tool_declaration_count", "number"),
+            ("tool_call_count", "number"),
+            ("input_bytes", "number"),
+            ("input_text_runes", "number"),
+            ("estimated_input_context_tokens", "number"),
+            ("literal_keyword", "keyword"),
+            ("system_time", "time"),
+        ];
+        let none: [String; 0] = [];
+        for (field, kind) in frozen {
+            assert_eq!(
+                routing_field_kind(field, &none),
+                Some(kind),
+                "built-in field {field} drifted; update all three mirrors together"
+            );
+        }
+        // Custom dimensions resolve after the frozen table and never enter it.
+        let dimensions = vec!["topic".to_string()];
+        assert_eq!(routing_field_kind("topic", &dimensions), Some("string"));
+        assert_eq!(routing_field_kind("topic", &none), None);
+        assert_eq!(routing_field_kind("ghost", &dimensions), None);
+        // A dimension cannot shadow a built-in: the table wins first.
+        let shadow = vec!["task_type".to_string()];
+        assert_eq!(routing_field_kind("task_type", &shadow), Some("string"));
     }
 }

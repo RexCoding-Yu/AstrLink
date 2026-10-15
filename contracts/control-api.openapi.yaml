@@ -4131,33 +4131,61 @@ components:
         not:
           $ref: "#/components/schemas/ModelRoutingCondition"
         field:
-          type: string
-          enum:
-            [
-              protocol,
-              language,
-              media_kind,
-              task_type,
-              streaming,
-              continuation,
-              has_tools,
-              has_media,
-              has_image,
-              has_audio,
-              has_video,
-              turn_count,
-              user_message_count,
-              assistant_message_count,
-              tool_message_count,
-              tool_declaration_count,
-              tool_call_count,
-              input_bytes,
-              input_text_runes,
-              estimated_input_context_tokens,
-              literal_keyword,
-              system_time,
-            ]
-          description: Fact the leaf reads. Streaming is always false in this release, so write a streaming rule as equals_bool false.
+          oneOf:
+            - type: string
+              enum:
+                [
+                  protocol,
+                  language,
+                  media_kind,
+                  task_type,
+                  streaming,
+                  continuation,
+                  has_tools,
+                  has_media,
+                  has_image,
+                  has_audio,
+                  has_video,
+                  turn_count,
+                  user_message_count,
+                  assistant_message_count,
+                  tool_message_count,
+                  tool_declaration_count,
+                  tool_call_count,
+                  input_bytes,
+                  input_text_runes,
+                  estimated_input_context_tokens,
+                  literal_keyword,
+                  system_time,
+                ]
+            - type: string
+              not:
+                enum:
+                  [
+                    protocol,
+                    language,
+                    media_kind,
+                    task_type,
+                    streaming,
+                    continuation,
+                    has_tools,
+                    has_media,
+                    has_image,
+                    has_audio,
+                    has_video,
+                    turn_count,
+                    user_message_count,
+                    assistant_message_count,
+                    tool_message_count,
+                    tool_declaration_count,
+                    tool_call_count,
+                    input_bytes,
+                    input_text_runes,
+                    estimated_input_context_tokens,
+                    literal_keyword,
+                    system_time,
+                  ]
+          description: Fact the leaf reads. The first branch is the closed built-in vocabulary; the second admits the name of a dimension the classifier settings declare, which cannot be enumerated here because dimensions live in a separate resource. A custom dimension is string kind and takes the string operators (in, not_in, equals, not_equals) and no others; a name repeating a built-in is refused when the dimension is saved. Streaming is always false in this release, so write a streaming rule as equals_bool false.
         in:
           type: array
           minItems: 1
@@ -4451,6 +4479,19 @@ components:
           $ref: "#/components/schemas/ClassifierProviderRef"
         existing_model:
           $ref: "#/components/schemas/ClassifierExistingModelSource"
+        dimensions:
+          type: array
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/ClassifierDimension"
+          description: >
+            User-defined classification dimensions. task_type is built in and
+            always occupies one of the six total slots, so at most five custom
+            dimensions are accepted. A name that repeats task_type or a built-in
+            routing field is refused, because the field registry resolves
+            built-ins first and such a rule would read the request instead of the
+            classifier's answer. Omitting the member is the single-dimension shape
+            and is byte-identical to the pre-dimensions classifier.
     ClassifierInlineSource:
       type: object
       additionalProperties: false
@@ -4535,6 +4576,53 @@ components:
             maximum: 60000,
             description: "Call timeout for this source alone. Default 15000.",
           }
+    ClassifierDimension:
+      type: object
+      additionalProperties: false
+      required: [name, options]
+      description: >
+        One user-defined classification dimension. The name is the fact a rule
+        reads and the token the prompt writes as {{dim.<name>}}. Names carry no
+        character-set rule, but the placeholder grammar bounds them: no braces,
+        no leading or trailing whitespace, and at most 64 runes.
+      properties:
+        name:
+          {
+            type: string,
+            minLength: 1,
+            maxLength: 64,
+            description: "Addressable from {{dim.<name>}}; must not be task_type and must not repeat a built-in routing field.",
+          }
+        description:
+          {
+            type: string,
+            description: "Rendered next to the name in the classifier prompt; never part of the {{dim.<name>}} token grammar.",
+          }
+        options:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/ClassifierDimensionOption"
+          description: "At least one option. An empty list would make every placeholder for this dimension unsatisfiable, so it is refused at save time."
+    ClassifierDimensionOption:
+      type: object
+      additionalProperties: false
+      required: [name]
+      description: One selectable value of a dimension.
+      properties:
+        name:
+          {
+            type: string,
+            minLength: 1,
+            maxLength: 64,
+            description: "Reported as this dimension's fact value and matched by a rule's in or equals operator.",
+          }
+        description:
+          {
+            type: string,
+            description: "Rendered next to the option name in the classifier prompt.",
+          }
     ClassifierSettingsResponse:
       type: object
       additionalProperties: false
@@ -4548,6 +4636,11 @@ components:
           $ref: "#/components/schemas/ClassifierProviderRef"
         existing_model:
           $ref: "#/components/schemas/ClassifierExistingModelSource"
+        dimensions:
+          type: array
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/ClassifierDimension"
         credential_configured:
           {
             type: boolean,

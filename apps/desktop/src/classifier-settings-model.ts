@@ -44,6 +44,16 @@ export const classifierTimeoutMaxMS = 5000;
 export const classifierLowConfidenceDefault = 0.5;
 
 /**
+ * Mirrors `contract.MaxClassifierDimensions - 1`: `task_type` is built in and
+ * always occupies one of the six slots, so at most five custom dimensions may be
+ * defined. The subtraction is structural, not an off-by-one.
+ */
+export const classifierMaxCustomDimensions = 5;
+
+/** Mirrors `contract.MaxClassifierDimensionNameRunes`, for names and options. */
+export const classifierDimensionNameMaxRunes = 64;
+
+/**
  * `existing_model` has its own budget: an ordinary model call is far slower than
  * the 1s inline default, so sharing it would fail open on every real request.
  * These mirror `core/contract/classifier_settings.go:34-36`.
@@ -89,12 +99,34 @@ export interface ClassifierExistingModelSettings {
   timeout_ms: number;
 }
 
+/**
+ * One selectable value of a classification dimension. Mirrors the OpenAPI
+ * `ClassifierDimensionOption` schema.
+ */
+export interface ClassifierDimensionOption {
+  name: string;
+  description?: string;
+}
+
+/**
+ * One user-defined classification dimension. The name is the fact a rule reads
+ * and the token the prompt writes as `{{dim.<name>}}`. Mirrors the OpenAPI
+ * `ClassifierDimension` schema.
+ */
+export interface ClassifierDimension {
+  name: string;
+  description?: string;
+  options: ClassifierDimensionOption[];
+}
+
 export interface ClassifierSettings {
   enabled: boolean;
   classifier_source: ClassifierSource;
   inline: ClassifierInlineSettings;
   provider_ref: ClassifierProviderRef;
   existing_model: ClassifierExistingModelSettings;
+  /** User-defined classification dimensions. task_type is built in; at most 5 custom. */
+  dimensions?: ClassifierDimension[];
 }
 
 /** `POST …/classifier/dry-run` result. Local only — never a real upstream call. */
@@ -182,6 +214,10 @@ export function defaultClassifierSettings(): ClassifierSettings {
       model: "",
       timeout_ms: classifierExistingModelTimeoutDefaultMS,
     },
+    // An empty array rather than `undefined`: `dimensions` is `omitempty` on
+    // the Go side, so both serialize to the same absent key, while the panel
+    // gets a list it can edit without a null check on every keystroke.
+    dimensions: [],
   };
 }
 
@@ -321,7 +357,60 @@ export function parseClassifierSettings(value: unknown): ClassifierSettings {
         base.existing_model.timeout_ms,
       ),
     },
+    dimensions: parseClassifierDimensions(root, base.dimensions ?? []),
   };
+}
+
+/**
+ * Reads the user-defined dimension list. Shape only: an entry must be an object
+ * with a name and an options array, and every option an object with a name.
+ * Whether a name is reserved, duplicated, over-long or placeholder-hostile is
+ * `calculateClassifierSettingsIssues`' call, not this parser's, exactly as the
+ * other fields split here.
+ *
+ * A missing key is "no dimensions configured" — the Go field is `omitempty`, so
+ * a document that never had one omits it entirely.
+ */
+function parseClassifierDimensions(
+  root: Record<string, unknown>,
+  fallback: readonly ClassifierDimension[],
+): ClassifierDimension[] {
+  const value = root.dimensions;
+  if (value === undefined || value === null) return [...fallback];
+  if (!Array.isArray(value)) {
+    throw new Error("classifier settings: dimensions must be an array");
+  }
+  return value.map((entry, index) => {
+    const dimension = asRecord(entry, `dimensions[${index}]`);
+    const options = dimension.options;
+    if (!Array.isArray(options)) {
+      throw new Error(
+        `classifier settings: dimensions[${index}].options must be an array`,
+      );
+    }
+    return {
+      name: asString(dimension.name, `dimensions[${index}].name`),
+      description: optional(
+        dimension,
+        "description",
+        asString,
+        "" as string,
+      ),
+      options: options.map((option, optionIndex) => {
+        const record = asRecord(
+          option,
+          `dimensions[${index}].options[${optionIndex}]`,
+        );
+        return {
+          name: asString(
+            record.name,
+            `dimensions[${index}].options[${optionIndex}].name`,
+          ),
+          description: optional(record, "description", asString, "" as string),
+        };
+      }),
+    };
+  });
 }
 
 export function parseClassifierCredentialStatus(value: unknown): {

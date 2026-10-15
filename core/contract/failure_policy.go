@@ -206,6 +206,18 @@ func (settings RoutingSettings) FailoverPolicy() FailoverPolicy {
 	return FailoverPolicy{Enabled: settings.AllowUnmatchedFailover, Strategy: settings.Strategy, MaxAttempts: settings.MaxAttempts}
 }
 func (settings RoutingSettings) Validate() error {
+	return settings.ValidateWithDimensions(nil)
+}
+
+// ValidateWithDimensions is Validate against a caller-supplied dimension set,
+// which lets a model routing group's rules name a user-defined classification
+// dimension. RoutingSettings deliberately does not carry the dimensions — they
+// live in the separate classifier-settings singleton, and this document
+// crosses a strict Go/Rust field whitelist that must not grow for them — so a
+// caller that holds them passes them in. With none this is identical to
+// Validate, which is what every reader that never sees classifier settings
+// (the store's own load-time check, the desktop host's precheck) still gets.
+func (settings RoutingSettings) ValidateWithDimensions(dimensions []ClassifierDimension) error {
 	if settings.GrokIdentityVersion != "" && !ValidClientVersion(settings.GrokIdentityVersion) {
 		return fmt.Errorf("grok_identity_version must be a version such as 1.0.45")
 	}
@@ -223,7 +235,7 @@ func (settings RoutingSettings) Validate() error {
 	if err := ValidateModelRedirects(settings.ModelRedirects); err != nil {
 		return err
 	}
-	if err := ValidateModelRoutingGroups(settings.ModelRoutingGroups, settings.ModelRedirects); err != nil {
+	if err := ValidateModelRoutingGroupsWithDimensions(settings.ModelRoutingGroups, settings.ModelRedirects, dimensions); err != nil {
 		return err
 	}
 	if settings.ChannelStickiness != nil {

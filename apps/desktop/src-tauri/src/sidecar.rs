@@ -1,4 +1,6 @@
-use crate::failure_policy::{validate_failure_policy, validate_routing_settings};
+use crate::failure_policy::{
+    classifier_dimension_names, validate_failure_policy, validate_routing_settings,
+};
 use std::{
     collections::HashSet,
     fmt::Write as _,
@@ -2501,13 +2503,40 @@ impl CoreManager {
         serde_json::from_slice(&body).map_err(|_| "invalid tool response".into())
     }
 
+    /// The declared classifier dimension names, for the routing-settings
+    /// validator.
+    ///
+    /// Routing conditions may name a user-defined classifier dimension, but
+    /// the dimensions do not live in the routing-settings document: they are
+    /// the classifier-settings singleton, a deliberately separate resource,
+    /// because the routing-settings document crosses a strict Go/Rust field
+    /// whitelist that must not grow for this feature. The validator therefore
+    /// cannot read them out of the document it is validating, and asks the
+    /// sibling resource instead — the same one `get_classifier_settings`
+    /// already exposes, through the same authenticated control channel.
+    ///
+    /// This lookup is deliberately best-effort, and that is the point. An
+    /// empty list means "no custom dimensions", which is exactly the
+    /// built-in-only table the validator applied before dimensions existed. A
+    /// classifier-settings read that fails, is malformed, or races Core's
+    /// readiness therefore degrades to the previous behaviour rather than
+    /// inventing a new way to reject a routing document. Being unable to
+    /// resolve dimensions must never be able to reject a document Core would
+    /// accept, so this function never returns an error.
+    async fn known_classifier_dimensions(&self) -> Vec<String> {
+        match self.get_classifier_settings().await {
+            Ok(settings) => classifier_dimension_names(&settings),
+            Err(_) => Vec::new(),
+        }
+    }
+
     pub async fn get_routing_settings(&self) -> Result<serde_json::Value, String> {
         let (_, body) = self
             .authenticated_control(Method::GET, "/control/v1/routing-settings", None, None)
             .await?;
         let value = serde_json::from_slice(&body)
             .map_err(|error| format!("invalid routing settings: {error}"))?;
-        validate_routing_settings(&value, false)?;
+        validate_routing_settings(&value, false, &self.known_classifier_dimensions().await)?;
         Ok(value)
     }
 
@@ -2515,7 +2544,11 @@ impl CoreManager {
         &self,
         patch: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        validate_routing_settings(&patch, true)?;
+        // Fetched once and reused: dimensions belong to the classifier
+        // settings, so this PATCH cannot change them between the precheck and
+        // the response validation below.
+        let known_dimensions = self.known_classifier_dimensions().await;
+        validate_routing_settings(&patch, true, &known_dimensions)?;
         let (_, body) = self
             .authenticated_control(
                 Method::PATCH,
@@ -2526,7 +2559,7 @@ impl CoreManager {
             .await?;
         let value = serde_json::from_slice(&body)
             .map_err(|error| format!("invalid routing settings: {error}"))?;
-        validate_routing_settings(&value, false)?;
+        validate_routing_settings(&value, false, &known_dimensions)?;
         Ok(value)
     }
 

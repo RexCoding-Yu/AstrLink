@@ -12,12 +12,13 @@
  */
 
 import {
+  fieldOperators,
   isModelRoutingRangeField,
   isModelRoutingTimeField,
-  modelRoutingFieldOperators,
   modelRoutingFieldSource,
   modelRoutingFieldValues,
   modelRoutingFields,
+  type ClassifierDimension,
   type ModelRoutingField,
   type ModelRoutingFieldSource,
 } from "./model-routing-group-model";
@@ -37,7 +38,7 @@ export function modelRoutingFieldKind(
 ): ModelRoutingFieldKind {
   if (isModelRoutingTimeField(field)) return "time";
   if (isModelRoutingRangeField(field)) return "number";
-  const operators: readonly string[] = modelRoutingFieldOperators[field];
+  const operators = fieldOperators(field);
   return operators.includes("equals_bool") ? "boolean" : "label";
 }
 
@@ -52,14 +53,25 @@ export interface ModelRoutingCatalogEntry {
 }
 
 /** 目录的全部内建字段，顺序稳定（矩阵声明序），不依赖对象遍历以外的因素。 */
-export function modelRoutingCatalog(): readonly ModelRoutingCatalogEntry[] {
-  return modelRoutingFields.map((field) => ({
+export function modelRoutingCatalog(
+  extraFields: readonly string[] = [],
+  dimensions?: readonly ClassifierDimension[],
+): readonly ModelRoutingCatalogEntry[] {
+  const builtin = modelRoutingFields.map((field) => ({
     field,
     kind: modelRoutingFieldKind(field),
     source: modelRoutingFieldSource(field),
-    operators: modelRoutingFieldOperators[field],
-    values: modelRoutingFieldValues(field),
+    operators: fieldOperators(field),
+    values: modelRoutingFieldValues(field, dimensions),
   }));
+  const extra = extraFields.map((field) => ({
+    field: field as ModelRoutingField,
+    kind: modelRoutingFieldKind(field as ModelRoutingField),
+    source: modelRoutingFieldSource(field as ModelRoutingField),
+    operators: fieldOperators(field as ModelRoutingField),
+    values: modelRoutingFieldValues(field as ModelRoutingField, dimensions),
+  }));
+  return [...builtin, ...extra];
 }
 
 /**

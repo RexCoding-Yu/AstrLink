@@ -49,7 +49,7 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	if group == nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_not_found", message: fmt.Sprintf("model routing group %q was not found", groupID)}
 	}
-	if err := group.Validate(); err != nil {
+	if err := handler.validateModelRoutingGroup(ctx, session, *group); err != nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_invalid", message: err.Error()}
 	}
 	version, err := contract.ModelRoutingSnapshotVersion(settings.ModelRoutingGroups)
@@ -114,11 +114,17 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	}
 	facts := modelRoutingFacts(classified, session)
 	var taskType modelrouting.TaskTypeOutcome
-	if modelRoutingNeedsTaskType(*group) {
-		taskType = handler.modelRoutingTaskType(ctx, classified, *group, handler.loadClassifierSettings(ctx, session))
+	classifierSettings := handler.loadClassifierSettings(ctx, session)
+	dimensions := classifierSettings.ResolveCallPlan(group).Dimensions
+	if modelRoutingNeedsClassification(*group, dimensions) {
+		taskType = handler.modelRoutingTaskType(ctx, classified, *group, classifierSettings)
 		facts.TaskType = taskType.Value
 		facts.TaskTypeCandidates = modelrouting.TaskTypeCandidateLabels(taskType, *group)
 	}
+	// Custom dimensions ride on the same attempt as task_type. An empty
+	// outcome leaves the map nil, which is the single-dimension configuration:
+	// every rule that tests a built-in field evaluates exactly as before.
+	facts.Dimensions = modelrouting.DimensionFacts(taskType)
 	selection := modelrouting.Evaluate(*group, facts)
 	candidateObservations := modelrouting.TaskTypeCandidateObservations(taskType, *group, selection.TaskTypeCandidateIndex)
 	if taskType.ClassifierID != "" || taskType.Confidence > 0 || candidateObservations != nil {
@@ -160,6 +166,32 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 		session.noteModelRouting(ctx, decision)
 	}
 	return classified, nil
+}
+
+// validateModelRoutingGroup validates a group against the dimension set the
+// classifier settings declare. A rule may only name a user-defined dimension
+// when that dimension is actually declared, and the group document itself
+// never carries the dimensions, so the check needs both halves.
+//
+// The cheap validation runs first and is the whole check for every group whose
+// rules name built-in fields only — which is every group that has ever been
+// stored. Only a group that fails without dimensions pays for the classifier
+// read, and the read is skipped entirely when classifier settings are not
+// wired (a build without the classifier sub-resource), where an undeclared
+// dimension correctly stays unsupported. Resolving the dimensions before the
+// sticky-session and affinity short-circuits would add a store read to the
+// hot path of every pinned request for the benefit of a document that was
+// already validated on save.
+func (handler *Handler) validateModelRoutingGroup(ctx context.Context, session *recordSession, group contract.ModelRoutingGroup) error {
+	err := group.Validate()
+	if err == nil || handler.classifierSettings == nil {
+		return err
+	}
+	dimensions := handler.loadClassifierSettings(ctx, session).Dimensions
+	if len(dimensions) == 0 {
+		return err
+	}
+	return group.ValidateWithDimensions(dimensions)
 }
 
 func (handler *Handler) resolveMemberCandidates(ctx context.Context, request endpoint.ResolveRequest, member contract.ModelRoutingMember) ([]endpoint.Resolved, error) {
@@ -414,11 +446,12 @@ func existingModelConfigured(settings contract.ClassifierSettings) bool {
 // can drop the shape requirement the strict parser depends on. There is
 // deliberately no fallback to the legacy bare-label DefaultClassifierPrompt —
 // an obedient answer to it can never parse.
-func classificationInstruction(labels []string) (string, error) {
+func classificationInstruction(labels []string, dimensions []contract.ClassifierDimension) (string, error) {
 	// The sub-call re-enters the pipeline as a native /v1/responses request;
 	// with no verified native capability recorded the plan is JSON-only, and
-	// SystemPrompt is identical in every constraint mode.
-	constraint, err := classifieroutput.Plan(contract.ProtocolOpenAIResponses, nil, labels)
+	// SystemPrompt is identical in every constraint mode. With no dimensions
+	// declared this is byte-identical to the single-dimension instruction.
+	constraint, err := classifieroutput.PlanWithDimensions(contract.ProtocolOpenAIResponses, nil, labels, dimensions)
 	if err != nil {
 		return "", err
 	}
@@ -435,7 +468,7 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 		ClassifierID:           "existing_model",
 		LowConfidenceThreshold: plan.LowConfidenceThreshold,
 	}
-	instruction, err := classificationInstruction(plan.Labels)
+	instruction, err := classificationInstruction(plan.Labels, plan.Dimensions)
 	if err != nil {
 		// Unreachable with a validated group (the label snapshot is never
 		// empty), but a broken catalog must still fail open, not block.
@@ -449,23 +482,59 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 		result.Code = existingModelFailureCode(ctx, err)
 		return result
 	}
-	parsed, err := classifieroutput.ParseTaskType(assistantText, plan.Labels)
-	if err != nil {
-		if errors.Is(err, classifieroutput.ErrRefusal) {
-			result.Code = "classifier_refusal"
+	var parsed classifieroutput.TaskType
+	if len(plan.Dimensions) == 0 {
+		// Single dimension: the reply is the flat {label, score, candidates}
+		// document it has always been, and this branch is the pre-dimensions
+		// path verbatim.
+		if parsed, err = classifieroutput.ParseTaskType(assistantText, plan.Labels); err != nil {
+			if errors.Is(err, classifieroutput.ErrRefusal) {
+				result.Code = "classifier_refusal"
+				return result
+			}
+			result.Code = "classifier_invalid_output"
 			return result
 		}
-		result.Code = "classifier_invalid_output"
-		return result
+	} else {
+		// Multi dimension: one envelope keyed by dimension name, task_type
+		// among them. A malformed dimension makes the reply unusable, exactly
+		// as a malformed task_type would — the answer is one document, and
+		// keeping the readable half would route on a partial reading.
+		dimensions, dimensionErr := classifieroutput.ParseDimensions(assistantText, plan.Labels, plan.Dimensions)
+		if dimensionErr != nil {
+			if errors.Is(dimensionErr, classifieroutput.ErrRefusal) {
+				result.Code = "classifier_refusal"
+				return result
+			}
+			result.Code = "classifier_invalid_output"
+			return result
+		}
+		taskType, ok := dimensions[contract.BuiltInTaskTypeDimension]
+		if !ok {
+			// Every custom dimension was answered but task_type was not. The
+			// routing decision still needs a task_type, so this is the same
+			// unusable reply as a malformed one.
+			result.Code = "classifier_invalid_output"
+			return result
+		}
+		result.Dimensions = dimensionScores(dimensions)
+		// Carry the ranked sequence through: the evaluator's scored-fallback
+		// substitution reads it, so dropping it here would disable substitution
+		// for every group as soon as one custom dimension was configured.
+		parsed = classifieroutput.TaskType{Label: taskType.Label, Score: taskType.Score, Candidates: taskType.Candidates}
 	}
 	if !group.ValidTaskTypeLabel(parsed.Label) {
 		result.Code = "classifier_invalid_output"
 		return result
 	}
 	if parsed.Score < plan.LowConfidenceThreshold {
-		// Low confidence is not a failure and never takes a fallback: the
-		// fact stays unknown and threshold filtering empties the candidates.
-		result.Code = "classifier_low_confidence"
+		// Low confidence is not a failure and never takes a fallback: this
+		// task_type stays unknown and threshold filtering empties its
+		// candidates. The custom dimensions parsed from the same reply are
+		// not affected — each is judged against the threshold on its own
+		// score (modelrouting.DimensionFacts), and the recorded code below
+		// tells that apart from a real fallback.
+		result.Code = modelrouting.CodeClassifierLowConfidence
 		result.Candidates = autoclassifierCandidates(parsed.Candidates)
 		return result
 	}
@@ -473,6 +542,48 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 	result.Confidence = parsed.Score
 	result.Candidates = autoclassifierCandidates(parsed.Candidates)
 	return result
+}
+
+// dimensionScores moves the strict extraction core's parsed dimensions onto
+// the shared Outcome carrier, dropping the built-in task_type: it already
+// travels in Value/Candidates and must never appear in the dimensions map,
+// whose entries the fact builder turns into Facts.Dimensions.
+func dimensionScores(dimensions map[string]classifieroutput.DimensionLabel) map[string]modelrouting.DimensionScore {
+	if len(dimensions) == 0 {
+		return nil
+	}
+	scores := make(map[string]modelrouting.DimensionScore, len(dimensions))
+	for name, dimension := range dimensions {
+		if name == contract.BuiltInTaskTypeDimension {
+			continue
+		}
+		scores[name] = modelrouting.DimensionScore{Label: dimension.Label, Score: dimension.Score}
+	}
+	if len(scores) == 0 {
+		return nil
+	}
+	return scores
+}
+
+// autoclassifierDimensionScores moves the cloud source's dimension answers onto
+// the shared Outcome carrier. Both classifier sources (the strict extraction
+// core and the cloud adapters) speak this one type downstream, so the fact
+// builder sees a single shape regardless of where the answer came from.
+func autoclassifierDimensionScores(dimensions map[string]autoclassifier.DimensionAnswer) map[string]modelrouting.DimensionScore {
+	if len(dimensions) == 0 {
+		return nil
+	}
+	scores := make(map[string]modelrouting.DimensionScore, len(dimensions))
+	for name, dimension := range dimensions {
+		if name == contract.BuiltInTaskTypeDimension {
+			continue
+		}
+		scores[name] = modelrouting.DimensionScore{Label: dimension.Label, Score: dimension.Score}
+	}
+	if len(scores) == 0 {
+		return nil
+	}
+	return scores
 }
 
 // autoclassifierCandidates moves the strict extraction core's ranked output
@@ -527,18 +638,20 @@ func (handler *Handler) modelRoutingTaskTypeCloud(ctx context.Context, text stri
 		return result
 	}
 	outcome := cloud.Classify(ctx, nil, cloud.Input{
-		Protocol:  cloud.Protocol(plan.Protocol),
-		Endpoint:  plan.Endpoint,
-		APIKey:    secret,
-		Model:     plan.Model,
-		Prompt:    plan.Prompt,
-		Labels:    plan.Labels,
-		Text:      text,
-		TimeoutMS: plan.TimeoutMS,
+		Protocol:   cloud.Protocol(plan.Protocol),
+		Endpoint:   plan.Endpoint,
+		APIKey:     secret,
+		Model:      plan.Model,
+		Prompt:     plan.Prompt,
+		Labels:     plan.Labels,
+		Text:       text,
+		TimeoutMS:  plan.TimeoutMS,
+		Dimensions: plan.Dimensions,
 	})
 	result.DurationMS = int(time.Since(start).Milliseconds())
 	result.ClassifierID = string(outcome.ClassifierID)
 	result.Candidates = outcome.Candidates
+	result.Dimensions = autoclassifierDimensionScores(outcome.Dimensions)
 	if outcome.OK() {
 		if !group.ValidTaskTypeLabel(outcome.Category) {
 			result.Code = "classifier_invalid_output"
@@ -546,9 +659,11 @@ func (handler *Handler) modelRoutingTaskTypeCloud(ctx context.Context, text stri
 		}
 		// A confident answer inside the label set is the only success path.
 		// Low confidence is never a failure and never takes a fallback: the
-		// fact becomes unknown and triUnknown rules skip.
+		// fact becomes unknown and triUnknown rules skip. As on the
+		// existing-model path, the dimensions measured by the same request
+		// are unaffected — only this task_type's score was weak.
 		if outcome.Confidence < plan.LowConfidenceThreshold {
-			result.Code = "classifier_low_confidence"
+			result.Code = modelrouting.CodeClassifierLowConfidence
 			return result
 		}
 		result.Value = outcome.Category
@@ -602,10 +717,24 @@ func pinModelRoutingWebSocket(ctx context.Context, model string) {
 	}
 }
 
-func modelRoutingNeedsTaskType(group contract.ModelRoutingGroup) bool {
+// modelRoutingNeedsClassification reports whether any rule reads a field the
+// classifier produces. task_type is always a classifier field; each declared
+// custom dimension is one too, so a group whose rules reference only a custom
+// dimension still classifies. Without this the dimension would never be asked
+// for, every rule testing it would stay unknown forever, and the configuration
+// would silently do nothing.
+//
+// With no custom dimensions declared this reduces to the task_type-only gate
+// the routing path has always used.
+func modelRoutingNeedsClassification(group contract.ModelRoutingGroup, dimensions []contract.ClassifierDimension) bool {
 	for _, rule := range group.Rules {
-		if conditionNeedsField(rule.When, "task_type") {
+		if conditionNeedsField(rule.When, contract.BuiltInTaskTypeDimension) {
 			return true
+		}
+		for _, dimension := range dimensions {
+			if conditionNeedsField(rule.When, dimension.Name) {
+				return true
+			}
 		}
 	}
 	return false
