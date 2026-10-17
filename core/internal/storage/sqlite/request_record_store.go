@@ -138,6 +138,7 @@ ON CONFLICT(id) DO UPDATE SET
     turn_user_fingerprint = excluded.turn_user_fingerprint,
     model_redirect_json = excluded.model_redirect_json,
     routing_decision_json = excluded.routing_decision_json,
+    model_routing_json = excluded.model_routing_json,
     client_type = excluded.client_type,
     privacy_decision = excluded.privacy_decision,
     privacy_findings_json = excluded.privacy_findings_json,

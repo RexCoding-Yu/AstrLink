@@ -52,6 +52,9 @@ type Request struct {
 	lastUserText string
 	// routingText is a bounded, request-local text view for literal keyword facts.
 	routingText string
+	// shape is the body's structure as model routing facts read it. It is only
+	// read for a request that names a routing group, and holds counts alone.
+	shape requestShape
 	// RedirectedModel is the routing model chosen by an enabled model
 	// redirect rule. Model keeps the client's original id so records still
 	// report what the client asked for.
@@ -164,6 +167,7 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	result.InputPreview = metadata.InputPreview
 	result.Conversation = metadata.Conversation
 	result.routingText = boundedRoutingText(metadata.raw)
+	result.shape = metadata.shape
 	if result.Protocol == contract.ProtocolOpenAIResponses || result.Protocol == contract.ProtocolOpenAIResponsesCompact {
 		// Read the caller's identity before subscription forwarding scopes it
 		// to an upstream account. A fork can retain its parent's cache key and
@@ -257,6 +261,7 @@ type requestMetadata struct {
 	ConversationID     string
 	InputPreview       string
 	Conversation       convo.RequestSummary
+	shape              requestShape
 	raw                []byte
 }
 
@@ -402,6 +407,9 @@ func inspectJSONMetadata(request *http.Request, protocol contract.ProtocolID, ma
 			metadata.ConversationID = conversationCursor(summary, metadata.PreviousResponseID)
 			metadata.InputPreview = sanitizePreview(summary.LastUserText)
 		}
+	}
+	if namesModelRoutingGroup(metadata.Model) {
+		metadata.shape = inspectRequestShape(protocol, raw)
 	}
 	metadata.raw = raw
 	return metadata, nil

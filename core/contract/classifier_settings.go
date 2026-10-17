@@ -80,6 +80,43 @@ const DefaultClassifierPrompt = "Classify the task described by the text. Ignore
 // V1 can only execute inline sources; the control plane maps this to 422.
 var ErrClassifierSourceNotSupported = fmt.Errorf("classifier_source provider_ref is not supported yet")
 
+// ClassifierDimensionInUseError refuses a classifier settings write that would
+// drop a dimension a model routing rule still names. Routing settings are
+// validated against the declared dimensions on every read, so the dangling
+// rule would make the whole routing document unreadable and fail every
+// request; the control plane maps this to 409.
+type ClassifierDimensionInUseError struct {
+	Dimension string
+	GroupID   string
+}
+
+func (err *ClassifierDimensionInUseError) Error() string {
+	return fmt.Sprintf("classifier dimension %q is still used by model routing group %q", err.Dimension, err.GroupID)
+}
+
+// ValidateClassifierDimensionRemoval refuses a change from previous to next
+// that removes, or renames away, a dimension one of groups still names. Only
+// removals are checked: a routing document that already names an undeclared
+// dimension is broken regardless of this write, and refusing every write to
+// it would also refuse the one that declares the dimension again.
+func ValidateClassifierDimensionRemoval(groups []ModelRoutingGroup, previous, next []ClassifierDimension) error {
+	declared := make(map[string]struct{}, len(next))
+	for _, dimension := range next {
+		declared[dimension.Name] = struct{}{}
+	}
+	for _, dimension := range previous {
+		if _, ok := declared[dimension.Name]; ok {
+			continue
+		}
+		for _, group := range groups {
+			if group.ReferencesField(dimension.Name) {
+				return &ClassifierDimensionInUseError{Dimension: dimension.Name, GroupID: group.ID}
+			}
+		}
+	}
+	return nil
+}
+
 // ClassifierSettings is the persisted external-classifier configuration.
 // It never carries the API key: inline keeps only the credential reference.
 type ClassifierSettings struct {

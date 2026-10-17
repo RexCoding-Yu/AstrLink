@@ -2299,7 +2299,11 @@ paths:
         drafts may omit protocol, endpoint, and model; an enabled document
         must be complete. `classifier_source=provider_ref` with
         `enabled=true` is stored as a future shape and answered with 422
-        `classifier_source_not_supported`.
+        `classifier_source_not_supported`. Removing or renaming a dimension
+        that a model routing rule still names is answered with 409
+        `classifier_dimension_in_use`: routing settings are validated
+        against the declared dimensions on every read, so the rule has to
+        go first.
       requestBody:
         required: true
         content:
@@ -2317,6 +2321,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
   /control/v1/routing/classifier/credential:

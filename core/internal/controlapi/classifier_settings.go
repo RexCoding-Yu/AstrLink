@@ -58,6 +58,11 @@ func (handler *Handler) classifierResource(writer http.ResponseWriter, request *
 			return
 		}
 		if err := handler.classifierSettings.UpdateClassifierSettings(request.Context(), settings); err != nil {
+			var inUse *contract.ClassifierDimensionInUseError
+			if errors.As(err, &inUse) {
+				writeError(writer, http.StatusConflict, "classifier_dimension_in_use", inUse.Error())
+				return
+			}
 			handler.writeStoreError(writer, err)
 			return
 		}

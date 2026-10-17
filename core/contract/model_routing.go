@@ -357,6 +357,16 @@ func (group ModelRoutingGroup) ValidTaskTypeLabel(value string) bool {
 	return containsModelRoutingTaskTypeLabel(EffectiveModelRoutingTaskTypeLabels(group.TaskTypeLabels), value)
 }
 
+// ReferencesField reports whether any rule of the group names field.
+func (group ModelRoutingGroup) ReferencesField(field string) bool {
+	for _, rule := range group.Rules {
+		if rule.When.ReferencesField(field) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateModelRoutingTaskTypeLabels(labels []string) error {
 	if len(labels) > MaxModelRoutingTaskTypeLabels {
 		return fmt.Errorf("task_type_labels must contain at most %d labels", MaxModelRoutingTaskTypeLabels)
@@ -416,6 +426,28 @@ func modelRoutingFieldKind(field string, dimensions []ClassifierDimension) (stri
 
 func (condition ModelRoutingCondition) Validate() error {
 	return condition.validateWithTaskTypeLabels(DefaultModelRoutingTaskTypeLabels, nil)
+}
+
+// ReferencesField reports whether field appears in any leaf of the tree,
+// including leaves under not.
+func (condition ModelRoutingCondition) ReferencesField(field string) bool {
+	if condition.Field == field {
+		return true
+	}
+	if condition.Not != nil && condition.Not.ReferencesField(field) {
+		return true
+	}
+	for _, child := range condition.All {
+		if child.ReferencesField(field) {
+			return true
+		}
+	}
+	for _, child := range condition.Any {
+		if child.ReferencesField(field) {
+			return true
+		}
+	}
+	return false
 }
 
 func (condition ModelRoutingCondition) validateWithTaskTypeLabels(taskTypeLabels []string, dimensions []ClassifierDimension) error {
@@ -1010,7 +1042,18 @@ func walkJSONForDuplicateKeys(decoder *json.Decoder) error {
 }
 
 func ModelRoutingSnapshotVersion(groups []ModelRoutingGroup) (string, error) {
-	if err := ValidateModelRoutingGroups(groups, nil); err != nil {
+	return ModelRoutingSnapshotVersionWithDimensions(groups, nil)
+}
+
+// ModelRoutingSnapshotVersionWithDimensions is ModelRoutingSnapshotVersion
+// against a caller-supplied dimension set. The version covers every group, so
+// one group whose rules name a user-defined dimension would fail the
+// built-in-only validation and take every other group's requests down with
+// it; the inference path therefore passes the dimensions it validated the
+// requested group against. The dimensions are not hashed: they are classifier
+// settings, and the version identifies the routing configuration alone.
+func ModelRoutingSnapshotVersionWithDimensions(groups []ModelRoutingGroup, dimensions []ClassifierDimension) (string, error) {
+	if err := ValidateModelRoutingGroupsWithDimensions(groups, nil, dimensions); err != nil {
 		return "", err
 	}
 	encodedGroups, err := json.Marshal(groups)
@@ -1022,7 +1065,7 @@ func ModelRoutingSnapshotVersion(groups []ModelRoutingGroup) (string, error) {
 		return "", err
 	}
 	for _, group := range copyGroups {
-		if err := group.Validate(); err != nil {
+		if err := group.ValidateWithDimensions(dimensions); err != nil {
 			return "", err
 		}
 	}

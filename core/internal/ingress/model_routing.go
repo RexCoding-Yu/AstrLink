@@ -49,10 +49,11 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	if group == nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_not_found", message: fmt.Sprintf("model routing group %q was not found", groupID)}
 	}
-	if err := handler.validateModelRoutingGroup(ctx, session, *group); err != nil {
-		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_invalid", message: err.Error()}
-	}
-	version, err := contract.ModelRoutingSnapshotVersion(settings.ModelRoutingGroups)
+	// One classifier read at most per request, shared by the version check
+	// below and the classification further down; a request that is pinned
+	// before classification and names no custom dimension makes none.
+	classifierSettings := handler.requestClassifierSettings(ctx, session)
+	version, err := handler.modelRoutingSnapshotVersion(settings.ModelRoutingGroups, classifierSettings)
 	if err != nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_invalid", message: err.Error()}
 	}
@@ -114,10 +115,10 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	}
 	facts := modelRoutingFacts(classified, session)
 	var taskType modelrouting.TaskTypeOutcome
-	classifierSettings := handler.loadClassifierSettings(ctx, session)
-	dimensions := classifierSettings.ResolveCallPlan(group).Dimensions
+	classifier := classifierSettings()
+	dimensions := classifier.ResolveCallPlan(group).Dimensions
 	if modelRoutingNeedsClassification(*group, dimensions) {
-		taskType = handler.modelRoutingTaskType(ctx, classified, *group, classifierSettings)
+		taskType = handler.modelRoutingTaskType(ctx, classified, *group, classifier)
 		facts.TaskType = taskType.Value
 		facts.TaskTypeCandidates = modelrouting.TaskTypeCandidateLabels(taskType, *group)
 	}
@@ -161,30 +162,45 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	return classified, nil
 }
 
-// validateModelRoutingGroup validates a group against the dimension set the
-// classifier settings declare. A rule may only name a user-defined dimension
-// when that dimension is actually declared, and the group document itself
-// never carries the dimensions, so the check needs both halves.
+// modelRoutingSnapshotVersion validates and versions the whole routing
+// configuration against the dimension set the classifier settings declare. A
+// rule may only name a user-defined dimension when that dimension is actually
+// declared, and the group documents never carry the dimensions, so the check
+// needs the classifier settings as soon as any group, not only the requested
+// one, has a dimension rule. The requested group is one of the groups, so its
+// own validation is part of this.
 //
-// The cheap validation runs first and is the whole check for every group whose
-// rules name built-in fields only — which is every group that has ever been
-// stored. Only a group that fails without dimensions pays for the classifier
-// read, and the read is skipped entirely when classifier settings are not
-// wired (a build without the classifier sub-resource), where an undeclared
-// dimension correctly stays unsupported. Resolving the dimensions before the
-// sticky-session and affinity short-circuits would add a store read to the
-// hot path of every pinned request for the benefit of a document that was
-// already validated on save.
-func (handler *Handler) validateModelRoutingGroup(ctx context.Context, session *recordSession, group contract.ModelRoutingGroup) error {
-	err := group.Validate()
+// The cheap built-in-only pass runs first and is the whole check while no rule
+// names a custom dimension. Only a configuration that fails it pays for the
+// classifier read, and the read is skipped entirely when classifier settings
+// are not wired (a build without the classifier sub-resource), where an
+// undeclared dimension correctly stays unsupported. Resolving the dimensions
+// unconditionally would add a store read to the hot path of every pinned
+// request for the benefit of a document that was already validated on save.
+func (handler *Handler) modelRoutingSnapshotVersion(groups []contract.ModelRoutingGroup, classifierSettings func() contract.ClassifierSettings) (string, error) {
+	version, err := contract.ModelRoutingSnapshotVersion(groups)
 	if err == nil || handler.classifierSettings == nil {
-		return err
+		return version, err
 	}
-	dimensions := handler.loadClassifierSettings(ctx, session).Dimensions
+	dimensions := classifierSettings().Dimensions
 	if len(dimensions) == 0 {
-		return err
+		return "", err
 	}
-	return group.ValidateWithDimensions(dimensions)
+	return contract.ModelRoutingSnapshotVersionWithDimensions(groups, dimensions)
+}
+
+// requestClassifierSettings returns a reader that loads the classifier
+// settings on first use and hands every later caller in the same request the
+// same document.
+func (handler *Handler) requestClassifierSettings(ctx context.Context, session *recordSession) func() contract.ClassifierSettings {
+	var loaded *contract.ClassifierSettings
+	return func() contract.ClassifierSettings {
+		if loaded == nil {
+			settings := handler.loadClassifierSettings(ctx, session)
+			loaded = &settings
+		}
+		return *loaded
+	}
 }
 
 func (handler *Handler) resolveMemberCandidates(ctx context.Context, request endpoint.ResolveRequest, member contract.ModelRoutingMember) ([]endpoint.Resolved, error) {
@@ -318,10 +334,25 @@ func modelRoutingDecisionFromBinding(binding contract.ModelRoutingBinding, virtu
 func modelRoutingFacts(classified Request, session *recordSession) contract.ModelRoutingFacts {
 	facts := contract.ModelRoutingFacts{
 		Protocol:       string(classified.Protocol),
-		MediaKind:      "none",
 		Streaming:      routingBoolPtr(classified.Streaming),
 		Continuation:   routingBoolPtr(classified.PreviousResponseID != ""),
 		InputTextRunes: routingIntPtr(utf8.RuneCountInString(classified.Conversation.LastUserText)),
+	}
+	// Facts read from the body's structure stay unknown when the body could
+	// not be read, so a rule on them neither matches nor misfires on zeros.
+	if shape := classified.shape; shape.known {
+		facts.MediaKind = shape.mediaKind()
+		facts.HasTools = routingBoolPtr(shape.toolDeclarations > 0)
+		facts.HasMedia = routingBoolPtr(shape.image || shape.audio || shape.video)
+		facts.HasImage = routingBoolPtr(shape.image)
+		facts.HasAudio = routingBoolPtr(shape.audio)
+		facts.HasVideo = routingBoolPtr(shape.video)
+		facts.AssistantMessageCount = routingIntPtr(shape.assistantMessages)
+		facts.ToolMessageCount = routingIntPtr(shape.toolMessages)
+		facts.ToolDeclarationCount = routingIntPtr(shape.toolDeclarations)
+		facts.ToolCallCount = routingIntPtr(shape.toolCalls)
+		facts.InputBytes = routingIntPtr(shape.inputBytes)
+		facts.EstimatedInputContextTokens = routingIntPtr(shape.estimatedTokens)
 	}
 	// One clock sample per request: system_time leaves read this instant, in
 	// the OS local timezone, so all rows in one evaluation see the same time.
@@ -691,33 +722,11 @@ func pinModelRoutingWebSocket(ctx context.Context, model string) {
 // With no custom dimensions declared this reduces to the task_type-only gate
 // the routing path has always used.
 func modelRoutingNeedsClassification(group contract.ModelRoutingGroup, dimensions []contract.ClassifierDimension) bool {
-	for _, rule := range group.Rules {
-		if conditionNeedsField(rule.When, contract.BuiltInTaskTypeDimension) {
-			return true
-		}
-		for _, dimension := range dimensions {
-			if conditionNeedsField(rule.When, dimension.Name) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func conditionNeedsField(condition contract.ModelRoutingCondition, field string) bool {
-	if condition.Field == field {
+	if group.ReferencesField(contract.BuiltInTaskTypeDimension) {
 		return true
 	}
-	if condition.Not != nil && conditionNeedsField(*condition.Not, field) {
-		return true
-	}
-	for _, child := range condition.All {
-		if conditionNeedsField(child, field) {
-			return true
-		}
-	}
-	for _, child := range condition.Any {
-		if conditionNeedsField(child, field) {
+	for _, dimension := range dimensions {
+		if group.ReferencesField(dimension.Name) {
 			return true
 		}
 	}

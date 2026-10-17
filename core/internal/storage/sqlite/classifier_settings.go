@@ -50,6 +50,9 @@ func (store *Store) UpdateClassifierSettings(ctx context.Context, settings contr
 		return fmt.Errorf("begin classifier settings write: %w", err)
 	}
 	defer rollbackOnError(transaction, &err)
+	if err = validateClassifierDimensionRemovalTx(ctx, transaction, settings.Dimensions); err != nil {
+		return err
+	}
 	if _, err = transaction.ExecContext(ctx, `INSERT INTO classifier_settings (id, document_json, updated_at) VALUES (1, ?, ?)
 ON CONFLICT(id) DO UPDATE SET document_json = excluded.document_json, updated_at = excluded.updated_at`,
 		string(document), store.now().UTC().Format(time.RFC3339Nano)); err != nil {
@@ -57,6 +60,42 @@ ON CONFLICT(id) DO UPDATE SET document_json = excluded.document_json, updated_at
 	}
 	if err = transaction.Commit(); err != nil {
 		return fmt.Errorf("commit classifier settings write: %w", err)
+	}
+	return nil
+}
+
+// validateClassifierDimensionRemovalTx refuses a write that drops a dimension
+// a stored routing rule still names, reading both singletons inside the write
+// transaction. A document that is absent or does not decode has nothing to
+// compare against: a fresh database has neither row, and a broken routing
+// document is reported by its own reader.
+func validateClassifierDimensionRemovalTx(ctx context.Context, tx *sql.Tx, next []contract.ClassifierDimension) error {
+	var classifierDocument string
+	err := tx.QueryRowContext(ctx, `SELECT document_json FROM classifier_settings WHERE id = 1`).Scan(&classifierDocument)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read classifier settings: %w", err)
+	}
+	var previous contract.ClassifierSettings
+	if json.Unmarshal([]byte(classifierDocument), &previous) != nil || len(previous.Dimensions) == 0 {
+		return nil
+	}
+	var routingDocument string
+	err = tx.QueryRowContext(ctx, `SELECT document_json FROM routing_settings WHERE id = 1`).Scan(&routingDocument)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read routing settings: %w", err)
+	}
+	routing := contract.DefaultRoutingSettings()
+	if json.Unmarshal([]byte(routingDocument), &routing) != nil {
+		return nil
+	}
+	if err := contract.ValidateClassifierDimensionRemoval(routing.ModelRoutingGroups, previous.Dimensions, next); err != nil {
+		return fmt.Errorf("%w: %w", storagecontract.ErrInvalidArgument, err)
 	}
 	return nil
 }

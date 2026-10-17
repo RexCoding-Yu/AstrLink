@@ -59,4 +59,56 @@ func TestModelRoutingRecordAndBindingRoundTrip(t *testing.T) {
 	}
 }
 
+// The live path writes a pending row before routing runs, then upserts the
+// same row once the decision exists and again when execution ends. Each
+// upsert must carry the decision; the first insert alone never has one.
+func TestModelRoutingDecisionSurvivesLiveUpserts(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "routing-live.db"))
+	defer store.Close()
+	ctx := context.Background()
+	pending := contract.RequestRecord{ID: "request_routing_live", StartedAt: time.Now().UTC(), Status: contract.RequestStatusPending, InputProtocol: contract.ProtocolOpenAIChat, RequestedModel: stringPtr("astrlink/superclaude"), Audit: contract.NotCapturedAuditSummary()}
+	if err := store.UpsertRequestRecord(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	decision := &contract.ModelRoutingDecision{
+		SchemaVersion: 1, VirtualModelID: "astrlink/superclaude", GroupID: "superclaude",
+		ConfigSnapshotVersion: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		SelectionSource:       contract.ModelRoutingSelectionDefaultMember, UsedDefault: true,
+		Fields:   []contract.ModelRoutingFieldObservation{{Field: "has_image", Source: "request", Known: true}},
+		MemberID: "fast", MemberServiceID: "service_01", MemberModel: "model-fast",
+		Execution:       contract.ModelRoutingExecution{Status: contract.ModelRoutingExecutionPending},
+		PrivacyAttempts: []contract.ModelRoutingPrivacyAttempt{},
+	}
+	routed := pending
+	routed.ModelRouting = decision
+	if err := store.UpsertRequestRecord(ctx, routed); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.GetRequestRecord(ctx, pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ModelRouting == nil || loaded.ModelRouting.MemberModel != "model-fast" || loaded.ModelRouting.Execution.Status != contract.ModelRoutingExecutionPending {
+		t.Fatalf("pending row model routing = %+v", loaded.ModelRouting)
+	}
+
+	completed := time.Now().UTC()
+	terminal := routed
+	terminal.Status = contract.RequestStatusSucceeded
+	terminal.CompletedAt = &completed
+	finished := *decision
+	finished.Execution = contract.ModelRoutingExecution{Status: contract.ModelRoutingExecutionSucceeded, AttemptCount: 1}
+	terminal.ModelRouting = &finished
+	if err := store.UpsertRequestRecord(ctx, terminal); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = store.GetRequestRecord(ctx, pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ModelRouting == nil || loaded.ModelRouting.Execution.Status != contract.ModelRoutingExecutionSucceeded || loaded.ModelRouting.Execution.AttemptCount != 1 {
+		t.Fatalf("terminal row model routing = %+v", loaded.ModelRouting)
+	}
+}
+
 func stringPtr(value string) *string { return &value }

@@ -72,3 +72,55 @@ func TestRoutingSettingsWithCustomDimensionRoundTrip(t *testing.T) {
 		t.Fatalf("service write after dimension rule: %v", err)
 	}
 }
+
+// Dropping a dimension a stored rule still names would make the routing
+// document fail its own load validation, and every request reads that
+// document. The classifier write is refused instead, inside its transaction.
+func TestClassifierSettingsRefusesRemovingDimensionInUse(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "dimension-in-use.db"))
+	defer store.Close()
+	if _, err := store.CreateService(ctx, pathTestService("service_a"), storage.CredentialMutation{}); err != nil {
+		t.Fatal(err)
+	}
+	topic := contract.ClassifierDimension{Name: "topic", Options: []contract.ClassifierDimensionOption{{Name: "billing"}, {Name: "support"}}}
+	tone := contract.ClassifierDimension{Name: "tone", Options: []contract.ClassifierDimensionOption{{Name: "formal"}}}
+	classifier := contract.ClassifierSettings{ClassifierSource: contract.ClassifierSourceInline, Dimensions: []contract.ClassifierDimension{topic, tone}}
+	if err := store.UpdateClassifierSettings(ctx, classifier); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateRoutingSettings(ctx, dimensionRoutingSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, dimensions := range map[string][]contract.ClassifierDimension{
+		"removed": {tone},
+		"renamed": {{Name: "subject", Options: topic.Options}, tone},
+	} {
+		classifier.Dimensions = dimensions
+		err := store.UpdateClassifierSettings(ctx, classifier)
+		var inUse *contract.ClassifierDimensionInUseError
+		if !errors.As(err, &inUse) || inUse.Dimension != "topic" || inUse.GroupID != "superclaude" || !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Fatalf("%s: err = %v, want topic in use by superclaude", name, err)
+		}
+	}
+	if _, err := store.GetRoutingSettings(ctx); err != nil {
+		t.Fatalf("routing settings after refused writes: %v", err)
+	}
+
+	// A dimension no rule names can go, and so can the used one once the rule
+	// that names it is gone.
+	classifier.Dimensions = []contract.ClassifierDimension{topic}
+	if err := store.UpdateClassifierSettings(ctx, classifier); err != nil {
+		t.Fatalf("removing an unused dimension: %v", err)
+	}
+	settings := dimensionRoutingSettings()
+	settings.ModelRoutingGroups[0].Rules = []contract.ModelRoutingRule{}
+	if err := store.UpdateRoutingSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	classifier.Dimensions = nil
+	if err := store.UpdateClassifierSettings(ctx, classifier); err != nil {
+		t.Fatalf("removing a dimension no rule names any more: %v", err)
+	}
+}

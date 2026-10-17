@@ -31,6 +31,7 @@ export const routingErrorCodes = {
   // Classifier settings.
   classifier_settings_unavailable: "classifierUnavailable",
   classifier_source_not_supported: "sourceNotSupported",
+  classifier_dimension_in_use: "dimensionInUse",
   invalid_classifier_settings: "invalidSettings",
   invalid_credential: "invalidCredential",
   credential_unavailable: "credentialUnavailable",

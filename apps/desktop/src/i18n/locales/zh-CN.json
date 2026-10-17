@@ -3299,7 +3299,8 @@
       "connection": "无法连接本地 Core。请确认它正在运行，然后重试。",
       "status": "本地 Core 返回了 {{status}}。请重试；若仍失败，请查看日志。",
       "codeUnknown": "本地 Core 返回了错误 {{code}}。请重试；若仍失败，请查看日志。",
-      "unknownDryRunProtocol": "该协议 AstrLink 目前不支持，请从列表中选择一个已支持的协议。"
+      "unknownDryRunProtocol": "该协议 AstrLink 目前不支持，请从列表中选择一个已支持的协议。",
+      "dimensionInUse": "删除或改名的维度还在被路由规则使用。请先在路由组里删掉用到它的条件，再保存。"
     }
   },
   "classifier": {

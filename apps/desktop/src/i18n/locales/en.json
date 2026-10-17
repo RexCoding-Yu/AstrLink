@@ -3299,7 +3299,8 @@
       "connection": "Cannot connect to the local Core. Confirm it is running, then try again.",
       "status": "The local Core answered {{status}}. Try again; if it keeps failing, check the logs.",
       "codeUnknown": "The local Core reported the error {{code}}. Try again; if it keeps failing, check the logs.",
-      "unknownDryRunProtocol": "AstrLink does not serve that protocol yet; pick one from the list."
+      "unknownDryRunProtocol": "AstrLink does not serve that protocol yet; pick one from the list.",
+      "dimensionInUse": "A dimension you removed or renamed is still used by a routing rule. Remove the conditions that use it from the routing groups first, then save."
     }
   },
   "classifier": {

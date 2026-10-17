@@ -439,3 +439,54 @@ func TestClassifierDryRunTimeoutUsesStableCode(t *testing.T) {
 		t.Fatalf("unexpected cloud capture: %v", cloudBodies)
 	}
 }
+
+// Removing a dimension a routing rule still names is refused with its own
+// code, so the routing document (which every request reads) stays loadable.
+func TestClassifierSettingsRefusesRemovingDimensionInUse(t *testing.T) {
+	store, handler := newRouteHandler(t)
+	service := contract.Service{
+		ID: "service_01", Name: "Dimension service", Kind: contract.ServiceKindOpenAI, Enabled: true,
+		Models: []string{"fast-model", "strong-model"},
+		HTTP:   &contract.HTTPConnection{BaseURL: "https://example.test", Auth: contract.ServiceAuth{Scheme: contract.AuthSchemeNone}},
+		Capabilities: []contract.Capability{{
+			Protocol: contract.ProtocolOpenAIChat, Mode: contract.CapabilityModeNative, Streaming: true,
+		}},
+	}
+	if _, err := store.CreateService(context.Background(), service, storage.CredentialMutation{}); err != nil {
+		t.Fatal(err)
+	}
+	withTopic := `{"enabled":false,"classifier_source":"inline","dimensions":[{"name":"topic","options":[{"name":"legal"},{"name":"other"}]}]}`
+	response := controlRequest(t, handler, http.MethodPut, ClassifierSettingsPath, "application/json", withTopic, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("put with dimension = %d %s", response.Code, response.Body.String())
+	}
+	group := contract.ModelRoutingGroup{
+		ID: "topical", Enabled: true,
+		Members: []contract.ModelRoutingMember{
+			{ID: "fast", ServiceID: "service_01", Model: "fast-model"},
+			{ID: "strong", ServiceID: "service_01", Model: "strong-model"},
+		},
+		DefaultMemberID: "fast",
+		Rules: []contract.ModelRoutingRule{{
+			ID: "legal", Priority: 1,
+			When:           contract.ModelRoutingCondition{Field: "topic", In: []string{"legal"}},
+			TargetMemberID: "strong",
+		}},
+	}
+	if err := store.UpdateRoutingSettings(context.Background(), contractRoutingSettingsWithGroup(group)); err != nil {
+		t.Fatal(err)
+	}
+
+	response = controlRequest(t, handler, http.MethodPut, ClassifierSettingsPath, "application/json", `{"enabled":false,"classifier_source":"inline"}`, "")
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"classifier_dimension_in_use"`) ||
+		!strings.Contains(response.Body.String(), "topical") {
+		t.Fatalf("removing a used dimension = %d %s", response.Code, response.Body.String())
+	}
+	if stored, err := store.GetClassifierSettings(context.Background()); err != nil || len(stored.Dimensions) != 1 {
+		t.Fatalf("stored settings after refusal = %+v %v", stored, err)
+	}
+	response = controlRequest(t, handler, http.MethodGet, RoutingSettingsPath, "", "", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("routing settings after refusal = %d %s", response.Code, response.Body.String())
+	}
+}

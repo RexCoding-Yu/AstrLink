@@ -3,6 +3,7 @@ package contract
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -50,6 +51,82 @@ func TestModelRoutingSnapshotVersionIsOrderIndependent(t *testing.T) {
 	}
 	if first != second {
 		t.Fatalf("versions differ: %s != %s", first, second)
+	}
+}
+
+// The version covers every group, so a rule naming a declared dimension in any
+// group must not make it fail; without the dimensions the same document is
+// refused, and a built-in-only document versions identically either way.
+func TestModelRoutingSnapshotVersionWithDimensions(t *testing.T) {
+	dimensions := []ClassifierDimension{{Name: "topic", Options: []ClassifierDimensionOption{{Name: "legal"}}}}
+	plain := ModelRoutingGroup{ID: "plain", Enabled: true, Members: []ModelRoutingMember{{ID: "a", ServiceID: "service_01", Model: "a"}}, DefaultMemberID: "a", Rules: []ModelRoutingRule{}}
+	topical := ModelRoutingGroup{ID: "topical", Enabled: true, Members: []ModelRoutingMember{{ID: "a", ServiceID: "service_01", Model: "a"}}, DefaultMemberID: "a", Rules: []ModelRoutingRule{{ID: "legal", Priority: 1, When: ModelRoutingCondition{Not: &ModelRoutingCondition{Field: "topic", In: []string{"legal"}}}, TargetMemberID: "a"}}}
+	groups := []ModelRoutingGroup{plain, topical}
+	if _, err := ModelRoutingSnapshotVersion(groups); err == nil || !strings.Contains(err.Error(), "unsupported_routing_field") {
+		t.Fatalf("built-in-only version err = %v", err)
+	}
+	version, err := ModelRoutingSnapshotVersionWithDimensions(groups, dimensions)
+	if err != nil || len(version) != 64 {
+		t.Fatalf("version = %q err = %v", version, err)
+	}
+	withDimensions, err := ModelRoutingSnapshotVersionWithDimensions([]ModelRoutingGroup{plain}, dimensions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutDimensions, err := ModelRoutingSnapshotVersion([]ModelRoutingGroup{plain})
+	if err != nil || withDimensions != withoutDimensions {
+		t.Fatalf("built-in-only versions differ: %q != %q (err %v)", withDimensions, withoutDimensions, err)
+	}
+}
+
+func TestModelRoutingReferencesFieldWalksNestedConditions(t *testing.T) {
+	when := ModelRoutingCondition{Any: []ModelRoutingCondition{
+		{Field: "protocol", Equals: "openai_chat"},
+		{All: []ModelRoutingCondition{{Field: "streaming", EqualsBool: boolPointer(true)}, {Not: &ModelRoutingCondition{Field: "topic", In: []string{"legal"}}}}},
+	}}
+	group := ModelRoutingGroup{Rules: []ModelRoutingRule{{When: ModelRoutingCondition{Field: "has_image", EqualsBool: boolPointer(true)}}, {When: when}}}
+	for field, want := range map[string]bool{"topic": true, "streaming": true, "protocol": true, "has_image": true, "task_type": false} {
+		if got := group.ReferencesField(field); got != want {
+			t.Fatalf("ReferencesField(%q) = %v, want %v", field, got, want)
+		}
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func TestValidateClassifierDimensionRemoval(t *testing.T) {
+	topic := ClassifierDimension{Name: "topic", Options: []ClassifierDimensionOption{{Name: "legal"}}}
+	tone := ClassifierDimension{Name: "tone", Options: []ClassifierDimensionOption{{Name: "formal"}}}
+	groups := []ModelRoutingGroup{
+		{ID: "plain", Rules: []ModelRoutingRule{{When: ModelRoutingCondition{Field: "protocol", Equals: "openai_chat"}}}},
+		{ID: "topical", Rules: []ModelRoutingRule{{When: ModelRoutingCondition{All: []ModelRoutingCondition{{Field: "topic", In: []string{"legal"}}}}}}},
+	}
+	tests := []struct {
+		name           string
+		previous, next []ClassifierDimension
+		wantInUse      string
+	}{
+		{name: "unchanged", previous: []ClassifierDimension{topic, tone}, next: []ClassifierDimension{topic, tone}},
+		{name: "unused removed", previous: []ClassifierDimension{topic, tone}, next: []ClassifierDimension{topic}},
+		{name: "used removed", previous: []ClassifierDimension{topic, tone}, next: []ClassifierDimension{tone}, wantInUse: "topic"},
+		{name: "used renamed", previous: []ClassifierDimension{topic}, next: []ClassifierDimension{{Name: "subject", Options: topic.Options}}, wantInUse: "topic"},
+		// The routing document already names an undeclared dimension; the
+		// write that declares it again must not be refused.
+		{name: "already dangling", previous: nil, next: []ClassifierDimension{topic}},
+		{name: "dangling stays dangling", previous: []ClassifierDimension{tone}, next: nil},
+	}
+	for _, test := range tests {
+		err := ValidateClassifierDimensionRemoval(groups, test.previous, test.next)
+		if test.wantInUse == "" {
+			if err != nil {
+				t.Fatalf("%s: err = %v", test.name, err)
+			}
+			continue
+		}
+		var inUse *ClassifierDimensionInUseError
+		if !errors.As(err, &inUse) || inUse.Dimension != test.wantInUse || inUse.GroupID != "topical" {
+			t.Fatalf("%s: err = %v, want %s in use by topical", test.name, err, test.wantInUse)
+		}
 	}
 }
 
