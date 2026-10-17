@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 
 /**
- * §10.2 item 3 / §8.3: the nine required explanations must exist and their `?`
- * triggers must be keyboard reachable. `HelpPopover` renders a real
- * `<button>`, so focusability is a property of the shared control rather than
- * of each call site — this suite pins that, and pins that all nine strings are
- * actually mounted, so a dropped tooltip fails here instead of in review.
+ * §8.3: the required explanations must stay on screen where they are needed.
+ * After the redesign most of them are visible text next to the control they
+ * explain (the time window's rules sit in its editor, the label scope and the
+ * reuse of an existing model in the classifier tab); the rest live behind a
+ * `?` that must be a real, keyboard-focusable button. This suite pins both, so
+ * a dropped explanation fails here instead of in review.
  */
 
 import { act, type ReactNode } from "react";
@@ -22,11 +23,10 @@ const bridge = vi.hoisted(() => ({
   updateRoutingSettings: vi.fn(),
 }));
 vi.mock("./bridge", () => bridge);
-vi.mock("./notify", () => ({ notify: { success: vi.fn() } }));
+vi.mock("./notify", () => ({ notify: { success: vi.fn(), error: vi.fn() } }));
 
 import { ClassifierDryRunPanel } from "./ClassifierDryRunPanel";
 import { ClassifierSettingsPanel } from "./ClassifierSettingsPanel";
-import { ModelRoutingFieldCatalogPanel } from "./ModelRoutingFieldCatalogPanel";
 import { ModelRoutingGroupsPanel } from "./ModelRoutingGroupsPanel";
 import { defaultClassifierSettings } from "./classifier-settings-model";
 import { defaultFailurePolicy } from "./failure-policy-model";
@@ -35,12 +35,12 @@ import { applyLocale, i18n } from "./i18n";
 function tooltipTriggers(): HTMLButtonElement[] {
   return [
     ...document.querySelectorAll<HTMLButtonElement>(
-      'button[data-slot="popover-trigger"]',
+      'button[data-slot="popover-trigger"][aria-label]',
     ),
-  ];
+  ].filter((trigger) => trigger.querySelector("svg") !== null);
 }
 
-describe("model routing tooltip coverage", () => {
+describe("model routing explanations", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -48,10 +48,8 @@ describe("model routing tooltip coverage", () => {
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
-    // The rules header, the time window and the fallback tooltip only exist
-    // inside a rendered group, so the fixture carries one real group with a
-    // rule: an empty store would mount the page's empty state and the suite
-    // would "pass" without ever reaching the anchors it claims to cover.
+    // One real group with a time rule, so the editor and the time window's
+    // editor actually render.
     bridge.getRoutingSettings.mockReset().mockResolvedValue({
       default_failure_policy: defaultFailurePolicy(),
       allow_unmatched_failover: false,
@@ -68,18 +66,16 @@ describe("model routing tooltip coverage", () => {
               id: "r",
               priority: 10,
               target_member_id: "a",
-              when: {
-                field: "system_time",
-                within: ["09:00", "12:00"],
-              },
+              when: { field: "system_time", within: ["22:00", "08:00"] },
             },
           ],
         },
       ],
     });
-    bridge.getClassifierSettings
-      .mockReset()
-      .mockResolvedValue(defaultClassifierSettings());
+    bridge.getClassifierSettings.mockReset().mockResolvedValue({
+      ...defaultClassifierSettings(),
+      classifier_source: "existing_model",
+    });
     bridge.classifierCredentialAction
       .mockReset()
       .mockResolvedValue({ configured: false });
@@ -92,76 +88,37 @@ describe("model routing tooltip coverage", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    document.body.innerHTML = "";
   });
 
   async function mount(node: ReactNode): Promise<void> {
     await act(async () => {
       root.render(node);
-      await Promise.resolve();
+    });
+    await act(async () => {
+      for (let index = 0; index < 5; index += 1) await Promise.resolve();
+    });
+  }
+
+  async function click(element: Element | null) {
+    if (!element) throw new Error("Missing element");
+    await act(async () => {
+      (element as HTMLElement).click();
       await Promise.resolve();
     });
   }
 
-  // Every item in §8.3 that is anchored in the desktop today, with the
-  // accessible name its trigger actually carries. The body key and the label
-  // key are separate strings in this repo (`rulesHint` heads the popover,
-  // `rulesHintLabel` names the button), so both halves are pinned by name
-  // rather than derived from a naming convention that does not hold.
-  const required = [
-    // 1 first-match / row order.
-    {
-      body: "modelRoutingGroup.rulesOrderHint",
-      label: "modelRoutingGroup.rulesHintLabel",
-    },
-    // 2 + 3 + 4 time zone, half-open window, cross-midnight.
-    {
-      body: "modelRoutingGroup.timeWindowTooltipTimezone",
-      label: "modelRoutingGroup.timeWindowHintLabel",
-    },
-    {
-      body: "modelRoutingGroup.timeWindowTooltipHalfOpen",
-      label: "modelRoutingGroup.timeWindowHintLabel",
-    },
-    {
-      body: "modelRoutingGroup.timeWindowTooltipCrossMidnight",
-      label: "modelRoutingGroup.timeWindowHintLabel",
-    },
-    // 5 unknown is not false.
-    {
-      body: "modelRoutingGroup.unknownHint",
-      label: "modelRoutingGroup.unknownHintLabel",
-    },
-    // 6 the dry run calls the classifier for real.
-    {
-      body: "classifier.dryRun.runHint",
-      label: "classifier.dryRun.runHintLabel",
-    },
-    // 7 global label changes affect every group.
-    {
-      body: "modelRoutingGroup.catalogGlobalLabelHint",
-      label: "modelRoutingGroup.catalogGlobalLabelHintLabel",
-    },
-    // 8 the "no" branch reuses existing credentials, not a provider list.
-    {
-      body: "classifier.standaloneModelHint",
-      label: "classifier.standaloneModelHintLabel",
-    },
-  ] as const;
-
-  it("marks every §8.3 item with a mounted, keyboard-focusable trigger", async () => {
+  it("keeps every `?` a focusable button with a name", async () => {
     await mount(
       <>
         <ModelRoutingGroupsPanel ready services={[]} onDirtyChange={() => {}} />
-        <ModelRoutingFieldCatalogPanel ready />
         <ClassifierSettingsPanel ready services={[]} onDirtyChange={() => {}} />
         <ClassifierDryRunPanel ready />
       </>,
     );
-
+    await click(container.querySelector('[aria-label="编辑 astrlink/g"]'));
     const triggers = tooltipTriggers();
-    // A `role="button"` span or a div with onClick would be reachable by mouse
-    // but skipped by Tab, which is exactly what this assertion blocks.
-    expect(triggers.length).toBeGreaterThanOrEqual(required.length);
+    expect(triggers.length).toBeGreaterThan(0);
     for (const trigger of triggers) {
       expect(trigger.tagName).toBe("BUTTON");
       expect(trigger.disabled).toBe(false);
@@ -169,13 +126,65 @@ describe("model routing tooltip coverage", () => {
       trigger.focus();
       expect(document.activeElement).toBe(trigger);
     }
-
     const labels = triggers.map((item) => item.getAttribute("aria-label"));
-    for (const { body, label } of required) {
-      // Both halves must be real copy: a missing key echoes itself back.
-      expect(i18n.t(body)).not.toBe(body);
-      expect(i18n.t(label)).not.toBe(label);
-      expect(labels).toContain(i18n.t(label));
-    }
+    // 1 first match wins and 5 an unknown fact does not match: the rules help.
+    expect(labels).toContain(i18n.t("routingGroups.editor.rulesHelpLabel"));
+    // 6 the dry run calls the classifier for real.
+    expect(labels).toContain(i18n.t("classifier.dryRun.runHintLabel"));
+  });
+
+  it("says first match wins and unknown does not match in the rules help", () => {
+    const help = i18n.t("routingGroups.editor.rulesHelp");
+    expect(help).toContain("第一条满足的规则决定用哪个模型");
+    expect(help).toContain("取不到时");
+  });
+
+  it("explains the time window where it is edited", async () => {
+    await mount(
+      <ModelRoutingGroupsPanel ready services={[]} onDirtyChange={() => {}} />,
+    );
+    await click(container.querySelector('[aria-label="编辑 astrlink/g"]'));
+    await click(
+      container.querySelector(
+        '[data-routing-rule="0"] [data-slot="condition-chip"]',
+      ),
+    );
+    const editor = document.querySelector('[data-slot="popover-content"]')!;
+    // 2 time zone, 3 half-open window, 4 cross-midnight.
+    expect(editor.textContent).toContain(
+      i18n.t("routingConditions.editor.timeNote"),
+    );
+    expect(editor.textContent).toContain("本地时间");
+    expect(editor.textContent).toContain("不包含结束时刻");
+    expect(editor.textContent).toContain(
+      i18n.t("routingConditions.editor.crossesMidnight", {
+        start: "22:00",
+        end: "08:00",
+      }),
+    );
+  });
+
+  it("states the classifier's scope and credentials in its tab", async () => {
+    await mount(
+      <ClassifierSettingsPanel ready services={[]} onDirtyChange={() => {}} />,
+    );
+    // 7 the dimensions and their options apply to every routing group.
+    expect(container.textContent).toContain(
+      i18n.t("classifierTab.dimensionsDescription"),
+    );
+    // 8 reusing an existing model needs no separate key.
+    expect(container.textContent).toContain(
+      i18n.t("classifierTab.sourceExistingHint"),
+    );
+  });
+
+  it("marks that a dry run calls the classifier once", async () => {
+    await mount(<ClassifierDryRunPanel ready />);
+    expect(container.textContent).toContain(
+      i18n.t("dryRunTab.callsClassifier"),
+    );
+    expect(i18n.t("classifier.dryRun.runHint")).not.toBe(
+      "classifier.dryRun.runHint",
+    );
   });
 });

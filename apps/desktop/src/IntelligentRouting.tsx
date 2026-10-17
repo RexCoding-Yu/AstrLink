@@ -1,20 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Brain, Boxes, Flask, SlidersHorizontal } from "@/components/icons";
+import { Brain, Boxes, Flask } from "@/components/icons";
+import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ClassifierDryRunPanel } from "./ClassifierDryRunPanel";
 import { ClassifierSettingsPanel } from "./ClassifierSettingsPanel";
-import { ModelRoutingFieldCatalogPanel } from "./ModelRoutingFieldCatalogPanel";
+import type { RoutingSettings } from "./failure-policy-model";
 import { useT } from "./i18n";
 import { ModelRoutingGroupsPanel } from "./ModelRoutingGroupsPanel";
 import { PageHeader } from "./PageHeader";
 import type { RoutableService } from "./service-model";
+import { useWorkspaceSnapshot } from "./workspace-snapshots";
 
-export type IntelligentRoutingView =
-  | "groups"
-  | "fieldCatalog"
-  | "classifier"
-  | "dryRun";
+export type IntelligentRoutingView = "groups" | "classifier" | "dryRun";
+
+/** Tabs that hold a draft; the dry run keeps no unsaved state. */
+type DraftTab = "groups" | "classifier";
 
 export function IntelligentRouting({
   initialView = "groups",
@@ -32,36 +33,40 @@ export function IntelligentRouting({
 }) {
   const t = useT();
   const [view, setView] = useState<IntelligentRoutingView>(initialView);
-  // One dirty slot per tab. The three panels share the navigation guard, but
-  // not the same source of truth: a single slot let whichever panel unmounted
-  // last write `false` over a sibling's unsaved edit, so leaving the page no
-  // longer warned and the edit was lost silently.
-  const [tabDirty, setTabDirty] = useState<
-    Record<IntelligentRoutingView, boolean>
-  >({ groups: false, fieldCatalog: false, classifier: false, dryRun: false });
-  const dirty = useMemo(
-    () => Object.values(tabDirty).some(Boolean),
-    [tabDirty],
+  // The tabs row's right side; the active tab renders its own actions there so
+  // navigation and the tab's toolbar share one row.
+  const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [dryRunGroup, setDryRunGroup] = useState("");
+  const [unsavedGroup, setUnsavedGroup] = useState<string | null>(null);
+  const [editRequest, setEditRequest] = useState<{
+    id: string;
+    seq: number;
+  } | null>(null);
+  const [settings] = useWorkspaceSnapshot<RoutingSettings | null>(
+    "routing-settings",
+    null,
   );
+  const groupCount = settings?.model_routing_groups?.length;
 
-  // The dirty map covers every tab so a future panel cannot silently lose its
-  // slot; only the three draft-holding panels consume theirs today.
+  // One dirty slot per draft-holding tab, so one tab unmounting or saving can
+  // never clear another tab's unsaved edit.
+  const [tabDirty, setTabDirty] = useState<Record<DraftTab, boolean>>({
+    groups: false,
+    classifier: false,
+  });
+  const dirty = tabDirty.groups || tabDirty.classifier;
   const setTabDirtyChange = useMemo(
     () =>
       Object.fromEntries(
-        (["groups", "fieldCatalog", "classifier", "dryRun"] as const).map(
-          (key) => [
-            key,
-            (next: boolean) =>
-              setTabDirty((current) =>
-                current[key] === next ? current : { ...current, [key]: next },
-              ),
-          ],
-        ),
-      ) as Pick<
-        Record<IntelligentRoutingView, (next: boolean) => void>,
-        "groups" | "fieldCatalog" | "classifier" | "dryRun"
-      >,
+        (["groups", "classifier"] as const).map((key) => [
+          key,
+          (next: boolean) =>
+            setTabDirty((current) =>
+              current[key] === next ? current : { ...current, [key]: next },
+            ),
+        ]),
+      ) as Record<DraftTab, (next: boolean) => void>,
     [],
   );
 
@@ -73,92 +78,120 @@ export function IntelligentRouting({
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
 
+  // The group editor is a page of its own: it brings its own header with a
+  // way back, so the tab row steps aside while it is showing.
+  const showEditor = editing && view === "groups";
+
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-clip"
       data-testid="intelligent-routing-panel"
     >
-      <PageHeader className="mb-0" title={t("intelligentRouting.title")} />
+      {showEditor ? null : (
+        <PageHeader className="mb-0" title={t("intelligentRouting.title")} />
+      )}
       <Tabs
         className="min-h-0 min-w-0 flex-1 gap-3 overflow-y-clip"
         onValueChange={(value) => setView(value as IntelligentRoutingView)}
         value={view}
       >
-        <TabsList
-          scrollable
-          aria-label={t("intelligentRouting.workspace")}
-          className="min-w-0 shrink-0"
+        <div
+          className="flex min-w-0 shrink-0 items-center justify-between gap-3"
+          hidden={showEditor}
         >
-          <TabsTrigger value="groups">
-            <Boxes aria-hidden="true" />
-            {t("intelligentRouting.tabs.groups")}
-          </TabsTrigger>
-          <TabsTrigger value="fieldCatalog">
-            <SlidersHorizontal aria-hidden="true" />
-            {t("intelligentRouting.tabs.fieldCatalog")}
-          </TabsTrigger>
-          <TabsTrigger value="classifier">
-            <Brain aria-hidden="true" />
-            {t("intelligentRouting.tabs.classifier")}
-          </TabsTrigger>
-          <TabsTrigger value="dryRun">
-            <Flask aria-hidden="true" />
-            {t("intelligentRouting.tabs.dryRun")}
-          </TabsTrigger>
-        </TabsList>
-        {/* The group editor keeps its draft, so it must outlive a tab switch. */}
+          <TabsList
+            scrollable
+            aria-label={t("intelligentRouting.workspace")}
+            className="min-w-0 shrink-0"
+          >
+            <TabsTrigger value="groups">
+              <Boxes aria-hidden="true" />
+              {t("intelligentRouting.tabs.groups")}
+              {groupCount ? (
+                <Badge className="tabular-nums" variant="secondary">
+                  {groupCount}
+                </Badge>
+              ) : null}
+            </TabsTrigger>
+            <TabsTrigger value="classifier">
+              <Brain aria-hidden="true" />
+              {t("intelligentRouting.tabs.classifier")}
+            </TabsTrigger>
+            <TabsTrigger value="dryRun">
+              <Flask aria-hidden="true" />
+              {t("intelligentRouting.tabs.dryRun")}
+            </TabsTrigger>
+          </TabsList>
+          <div
+            ref={setActionsSlot}
+            className="flex min-w-0 items-center justify-end gap-2"
+            data-intelligent-routing-actions
+          />
+        </div>
+        {/* Every tab outlives a switch: the editor and the classifier hold
+            drafts, and the dry run keeps its last result. Each one scrolls
+            inside itself, so the tab bodies do not. */}
         <TabsContent
           forceMount
           hidden={view !== "groups"}
           value="groups"
-          className="gutter-scroller flex min-h-0 flex-1 flex-col overflow-y-auto pb-1"
-          data-tab-scroller
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-clip"
         >
           <ModelRoutingGroupsPanel
             ready={ready}
             services={services}
             protocols={protocols}
             onDirtyChange={setTabDirtyChange.groups}
+            active={view === "groups"}
+            actionsSlot={actionsSlot}
+            editRequest={editRequest}
+            onEditingChange={setEditing}
+            onUnsavedChange={setUnsavedGroup}
+            onGroupIDChange={(from, to) =>
+              // The dry run keeps naming the group it was opened on.
+              setDryRunGroup((current) =>
+                current === from ? (to ?? "") : current,
+              )
+            }
+            onDryRun={(id) => {
+              setDryRunGroup(id);
+              setView("dryRun");
+            }}
+            onOpenClassifier={() => setView("classifier")}
           />
         </TabsContent>
-        {/* Editable since ASTR-18: the built-in table stays read-only, the
-            custom-dimension block below it holds a draft. Force-mounted like the
-            siblings so a tab switch keeps the scroll position. */}
-        <TabsContent
-          forceMount
-          hidden={view !== "fieldCatalog"}
-          value="fieldCatalog"
-          className="gutter-scroller flex min-h-0 flex-1 flex-col overflow-y-auto pb-1"
-          data-tab-scroller
-        >
-          <ModelRoutingFieldCatalogPanel
-            ready={ready}
-            protocols={protocols}
-            onDirtyChange={setTabDirtyChange.fieldCatalog}
-          />
-        </TabsContent>
-        {/* Every panel holds an unsaved draft, so all three outlive a switch. */}
         <TabsContent
           forceMount
           hidden={view !== "classifier"}
           value="classifier"
-          className="gutter-scroller flex min-h-0 flex-1 flex-col overflow-y-auto pb-1"
-          data-tab-scroller
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-clip"
         >
           <ClassifierSettingsPanel
             ready={ready}
             services={services}
             onDirtyChange={setTabDirtyChange.classifier}
+            active={view === "classifier"}
+            actionsSlot={actionsSlot}
           />
         </TabsContent>
         <TabsContent
           forceMount
           hidden={view !== "dryRun"}
           value="dryRun"
-          className="gutter-scroller flex min-h-0 flex-1 flex-col overflow-y-auto pb-1"
-          data-tab-scroller
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-clip"
         >
-          <ClassifierDryRunPanel ready={ready} protocols={protocols} />
+          <ClassifierDryRunPanel
+            ready={ready}
+            protocols={protocols}
+            services={services}
+            group={dryRunGroup}
+            onGroupChange={setDryRunGroup}
+            onEditGroup={(id) => {
+              setEditRequest({ id, seq: Date.now() });
+              setView("groups");
+            }}
+            unsavedGroups={unsavedGroup ? [unsavedGroup] : []}
+          />
         </TabsContent>
       </Tabs>
     </div>

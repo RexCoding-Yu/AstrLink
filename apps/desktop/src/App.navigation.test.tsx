@@ -1457,12 +1457,13 @@ describe("App workspace navigation", () => {
     expect(
       container.querySelector('[data-testid="intelligent-routing-panel"]'),
     ).not.toBeNull();
-    // The four tabs live inside the page, never as sidebar sub-items.
+    // The three tabs live inside the page, never as sidebar sub-items. The
+    // groups tab may carry a count badge, which is not part of its name.
     expect(
       [
         ...container.querySelectorAll('[data-slot="tabs-list"] [role="tab"]'),
-      ].map((tab) => tab.textContent?.trim()),
-    ).toEqual(["模型路由组", "字段类型", "分类器配置", "试运行"]);
+      ].map((tab) => tab.textContent?.replace(/\d+$/, "").trim()),
+    ).toEqual(["路由组", "分类器", "试运行"]);
     expect(
       container
         .querySelector('[data-slot="sidebar-navigation"]')

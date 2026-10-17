@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { Check, ChevronDown, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
@@ -35,8 +42,57 @@ function listSide(anchor: HTMLElement, count: number): "top" | "bottom" {
  * One row of the list. `value` is what the caller persists and `label` is what
  * the reader sees; they differ when two values share one display name, so rows
  * are keyed and matched by value rather than by their text.
+ *
+ * `group` puts the row under a heading; consecutive rows with the same group
+ * share one heading, so callers pass options already in group order.
+ * `description` is muted text on the right of the row. Typing matches the
+ * label, the description and the group.
  */
-export type ComboboxOption = { value: string; label: string };
+export type ComboboxOption = {
+  value: string;
+  label: string;
+  group?: string;
+  description?: string;
+};
+
+function optionMatches(option: ComboboxOption, text: string): boolean {
+  const query = text.trim().toLowerCase();
+  return [option.label, option.description, option.group].some(
+    (part) => part?.toLowerCase().includes(query) ?? false,
+  );
+}
+
+/** A heading row before the first option of each group. */
+function GroupHeading({ children }: { children: ReactNode }) {
+  return (
+    <div
+      role="presentation"
+      className="flex items-center gap-1.5 px-2 pt-2 pb-1 text-micro font-medium text-muted-foreground first:pt-1"
+    >
+      {children}
+    </div>
+  );
+}
+
+/** An option's body: its label, then the muted description on the right. */
+function OptionText({
+  label,
+  description,
+}: {
+  label: ReactNode;
+  description?: string;
+}) {
+  if (!description)
+    return <span className="min-w-0 flex-1 break-all">{label}</span>;
+  return (
+    <>
+      <span className="min-w-0 flex-1 break-all">{label}</span>
+      <span className="max-w-[45%] shrink-0 truncate text-xs text-muted-foreground">
+        {description}
+      </span>
+    </>
+  );
+}
 
 /** Editable selection: opening shows every option; only typing filters the list. */
 export function Combobox({
@@ -53,7 +109,9 @@ export function Combobox({
   clearLabel,
   className,
   leadingIcon,
+  hint,
   renderOption,
+  renderGroup,
   allowCustomValue = true,
   "aria-label": ariaLabel,
 }: {
@@ -77,7 +135,14 @@ export function Combobox({
   clearLabel?: string;
   className?: string;
   leadingIcon?: ReactNode;
+  /**
+   * Muted text on the right while the list is closed, such as the API
+   * provider of the chosen model. It gives way to the value when space runs out.
+   */
+  hint?: string;
   renderOption?: (label: string, option?: ComboboxOption) => ReactNode;
+  /** Content of a group heading; defaults to the group name. */
+  renderGroup?: (group: string) => ReactNode;
   allowCustomValue?: boolean;
   "aria-label": string;
 }) {
@@ -91,12 +156,11 @@ export function Combobox({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const matches = (text: string) =>
-    options.filter((option) =>
-      option.label.toLowerCase().includes(text.trim().toLowerCase()),
-    );
+    options.filter((option) => optionMatches(option, text));
   const filtered = matches(query);
   const expanded = open && !disabled;
   const clearable = !!clearLabel && !!value && !disabled;
+  const showHint = !!hint && !expanded;
 
   /** The row the current value owns, if the list still offers it. */
   const selectedIndex = options.findIndex((option) => option.value === value);
@@ -171,7 +235,11 @@ export function Combobox({
                 : undefined
             }
             autoComplete="off"
-            className={cn(clearable ? "pr-14" : "pr-9", leadingIcon && "pl-8")}
+            className={cn(
+              clearable ? "pr-14" : "pr-9",
+              leadingIcon && "pl-8",
+              showHint && "pr-[calc(35%+2.25rem)] text-ellipsis",
+            )}
             value={
               !allowCustomValue && expanded ? query : (displayValue ?? value)
             }
@@ -230,6 +298,17 @@ export function Combobox({
               }
             }}
           />
+          {showHint ? (
+            <span
+              aria-hidden="true"
+              className={cn(
+                "pointer-events-none absolute top-1/2 max-w-[35%] -translate-y-1/2 truncate text-xs text-muted-foreground",
+                clearable ? "right-14" : "right-9",
+              )}
+            >
+              {hint}
+            </span>
+          ) : null}
           {clearable ? (
             <Button
               type="button"
@@ -295,32 +374,49 @@ export function Combobox({
       >
         {filtered.length ? (
           filtered.map((option, index) => (
-            <div
-              key={option.value}
-              id={`${listId}-${index}`}
-              role="option"
-              aria-label={option.label}
-              aria-selected={value === option.value}
-              data-option-index={index}
-              data-option-value={option.value}
-              title={option.label}
-              className={cn(
-                "flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none",
-                index === activeIndex && "bg-accent text-accent-foreground",
-              )}
-              onPointerMove={() => setActiveIndex(index)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => choose(option)}
-            >
-              <span className="min-w-0 flex-1 break-all">
-                {renderOption
-                  ? renderOption(option.label, option)
-                  : option.label}
-              </span>
-              {value === option.value ? (
-                <Check aria-hidden="true" className="size-3.5 shrink-0" />
+            <Fragment key={option.value}>
+              {option.group !== undefined &&
+              option.group !== filtered[index - 1]?.group ? (
+                <GroupHeading>
+                  {renderGroup ? renderGroup(option.group) : option.group}
+                </GroupHeading>
               ) : null}
-            </div>
+              <div
+                id={`${listId}-${index}`}
+                role="option"
+                aria-label={
+                  option.description
+                    ? `${option.label} ${option.description}`
+                    : option.label
+                }
+                aria-selected={value === option.value}
+                data-option-index={index}
+                data-option-value={option.value}
+                title={option.label}
+                className={cn(
+                  "flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none",
+                  index === activeIndex && "bg-accent text-accent-foreground",
+                )}
+                onPointerMove={() => setActiveIndex(index)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => choose(option)}
+              >
+                <OptionText
+                  label={
+                    renderOption
+                      ? renderOption(option.label, option)
+                      : option.label
+                  }
+                  description={option.description}
+                />
+                {value === option.value ? (
+                  <Check aria-hidden="true" className="size-3.5 shrink-0" />
+                ) : option.description ? (
+                  // Keeps descriptions aligned with the checked row's.
+                  <span aria-hidden="true" className="size-3.5 shrink-0" />
+                ) : null}
+              </div>
+            </Fragment>
           ))
         ) : (
           <div

@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MultiCombobox } from "./combobox";
+import { Combobox, MultiCombobox } from "./combobox";
 
 const options = [
   { value: "general", label: "General" },
@@ -188,5 +188,121 @@ describe("MultiCombobox", () => {
         .querySelector("[data-multi-combobox-remove]")
         ?.getAttribute("aria-label"),
     ).toBe("Remove 常规");
+  });
+});
+
+describe("Combobox groups, descriptions and hint", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    document.body.innerHTML = "";
+  });
+
+  const grouped = [
+    { value: "a/chat", label: "deepseek-chat", group: "DeepSeek" },
+    { value: "a/reasoner", label: "deepseek-reasoner", group: "DeepSeek" },
+    { value: "b/gpt", label: "gpt-4o", group: "OpenAI", description: "fast" },
+  ];
+
+  const render = async (
+    props: Partial<Parameters<typeof Combobox>[0]> = {},
+  ) => {
+    const onValueChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <Combobox
+          value=""
+          options={grouped}
+          onValueChange={onValueChange}
+          emptyMessage="None"
+          allowCustomValue={false}
+          aria-label="Model"
+          {...props}
+        />,
+      ),
+    );
+    return { onValueChange };
+  };
+
+  const input = () =>
+    container.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+
+  const openList = async () => {
+    await act(async () => {
+      input().click();
+      await Promise.resolve();
+    });
+  };
+
+  const type = async (text: string) => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input(), text);
+      input().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  it("puts one heading before each run of a group", async () => {
+    await render({ renderGroup: (group) => `[${group}]` });
+    await openList();
+    const listbox = document.querySelector("[role='listbox']")!;
+    const lines = [...listbox.children].map((child) =>
+      child.getAttribute("role") === "option"
+        ? child.getAttribute("data-option-value")
+        : child.textContent,
+    );
+    expect(lines).toEqual([
+      "[DeepSeek]",
+      "a/chat",
+      "a/reasoner",
+      "[OpenAI]",
+      "b/gpt",
+    ]);
+  });
+
+  it("shows the description and matches it, the label and the group", async () => {
+    await render();
+    await openList();
+    const gpt = document.querySelector("[data-option-value='b/gpt']")!;
+    expect(gpt.textContent).toContain("fast");
+    expect(gpt.getAttribute("aria-label")).toBe("gpt-4o fast");
+    await type("openai");
+    expect(
+      [...document.querySelectorAll("[role='option']")].map((row) =>
+        row.getAttribute("data-option-value"),
+      ),
+    ).toEqual(["b/gpt"]);
+    await type("FAST");
+    expect(document.querySelectorAll("[role='option']")).toHaveLength(1);
+  });
+
+  it("selects by value even when the list is grouped", async () => {
+    const { onValueChange } = await render();
+    await openList();
+    await act(async () => {
+      document
+        .querySelector<HTMLElement>("[data-option-value='a/reasoner']")!
+        .click();
+    });
+    expect(onValueChange).toHaveBeenCalledWith("a/reasoner");
+  });
+
+  it("shows the hint only while the list is closed", async () => {
+    await render({ value: "b/gpt", displayValue: "gpt-4o", hint: "OpenAI" });
+    expect(container.textContent).toContain("OpenAI");
+    await openList();
+    expect(container.textContent).not.toContain("OpenAI");
   });
 });

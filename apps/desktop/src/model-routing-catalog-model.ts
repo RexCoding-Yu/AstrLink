@@ -1,36 +1,27 @@
 /**
- * 「字段类型」页签（第四页签）的只读视图模型。
+ * 规则字段的形状，以及「分类器」页签上任务类型选项的视图模型。
  *
  * 与 `./model-groups.ts` 无关：那个文件是把模型名按厂商分桶的列表浏览助手。
- * 这里描述的是**规则条件可用的元信息字段目录** —— 内建字段 ID、类型、来源与
- * 各字段的合法取值域，供用户在写规则前查。
- *
  * 权威定义在 `./model-routing-group-model.ts` 的操作符矩阵里（它镜像 Go）。
- * 本文件**不新增第三份枚举**：所有字段、来源、取值域都从那里派生，避免目录与
- * 编辑器校验漂移。目录本身是只读的：全局标签的权威编辑资源在后端尚未落地
- * （见交付说明），因此这里只呈现当前生效的值。
+ * 本文件**不新增第三份枚举**：字段形状与取值域都从那里派生。
+ *
+ * 任务类型的选项存在每个路由组的 `task_type_labels` 上，「分类器」页签把它们
+ * 当作一份共享列表编辑，保存时写进每个组；这里提供读出这份列表与保存前预检。
  */
 
 import {
   fieldOperators,
   isModelRoutingRangeField,
   isModelRoutingTimeField,
-  modelRoutingFieldSource,
   modelRoutingFieldValues,
-  modelRoutingFields,
   maxModelRoutingTaskTypeLabels,
-  type ClassifierDimension,
   type ModelRoutingCondition,
   type ModelRoutingField,
-  type ModelRoutingFieldSource,
   type ModelRoutingGroup,
   type ModelRoutingValueCondition,
 } from "./model-routing-group-model";
 
-/**
- * 字段的值形状。它决定编辑器给哪种控件，也是「字段类型」页签真正要展示的
- * 那一列 —— 用户看 §8.3 的说明前，先要知道这个字段是标签、数值还是时间。
- */
+/** 字段的值形状：标签、数值、是否或时间，决定规则编辑器给哪种控件。 */
 export type ModelRoutingFieldKind = "label" | "number" | "boolean" | "time";
 
 /**
@@ -46,50 +37,9 @@ export function modelRoutingFieldKind(
   return operators.includes("equals_bool") ? "boolean" : "label";
 }
 
-export interface ModelRoutingCatalogEntry {
-  field: ModelRoutingField;
-  kind: ModelRoutingFieldKind;
-  source: ModelRoutingFieldSource;
-  /** 该字段允许的操作符，顺序取自操作符矩阵。 */
-  operators: readonly string[];
-  /** 固定取值域；开放词汇字段为 `undefined`。 */
-  values: readonly string[] | undefined;
-}
-
-/** 目录的全部内建字段，顺序稳定（矩阵声明序），不依赖对象遍历以外的因素。 */
-export function modelRoutingCatalog(
-  extraFields: readonly string[] = [],
-  dimensions?: readonly ClassifierDimension[],
-  /**
-   * `protocol` 的取值域来自 core capabilities，与规则编辑器拿到的是同一份。
-   * 省略时该字段列不出候选值——目录只呈现已经知道的东西，不猜一个协议列表。
-   */
-  protocols?: readonly string[],
-): readonly ModelRoutingCatalogEntry[] {
-  const builtin = modelRoutingFields.map((field) => ({
-    field,
-    kind: modelRoutingFieldKind(field),
-    source: modelRoutingFieldSource(field),
-    operators: fieldOperators(field),
-    values: modelRoutingFieldValues(field, dimensions, protocols),
-  }));
-  const extra = extraFields.map((field) => ({
-    field: field as ModelRoutingField,
-    kind: modelRoutingFieldKind(field as ModelRoutingField),
-    source: modelRoutingFieldSource(field as ModelRoutingField),
-    operators: fieldOperators(field as ModelRoutingField),
-    values: modelRoutingFieldValues(
-      field as ModelRoutingField,
-      dimensions,
-      protocols,
-    ),
-  }));
-  return [...builtin, ...extra];
-}
-
 /**
- * `task_type` 的**当前生效**标签域：组级 `task_type_labels` 覆盖内建默认。
- * 全局标签资源落地前，这里呈现的是默认域，页签据此标注「全局」尚未生效。
+ * `task_type` 的**当前生效**选项：第一个设置了 `task_type_labels` 的组为准，
+ * 都没设置时是内建默认。各组不一致时由 `modelRoutingTaskTypeLabelsDiverge` 指出。
  */
 export function modelRoutingCatalogLabelDomain(
   overrides: readonly (readonly string[] | undefined)[],
@@ -128,11 +78,11 @@ function referencedTaskTypeLabels(condition: ModelRoutingCondition): string[] {
 }
 
 /**
- * 「字段类型」页签上编辑的 task_type 标签集合的预检，镜像 Go 的
+ * 「分类器」页签上编辑的 task_type 选项列表的预检，镜像 Go 的
  * `validateModelRoutingTaskTypeLabels` 与「规则取值必须在组标签集合里」两条。
  *
- * 第二条是这里特有的：页签把同一份标签写进每个组，删掉某个组的规则仍在用的
- * 标签会让整份路由设置被后端拒收，所以在本地就指出是哪个组在用。
+ * 第二条是这里特有的：页签把同一份列表写进每个组，删掉某个组的规则仍在用的
+ * 选项会让整份路由设置被后端拒收，所以在本地就指出是哪个组在用。
  */
 export function calculateTaskTypeLabelIssues(
   labels: readonly string[],
@@ -157,6 +107,92 @@ export function calculateTaskTypeLabelIssues(
     for (const label of used)
       if (!seen.has(label))
         issues.push({ problem: "inUse", label, group: group.id });
+  }
+  return issues;
+}
+
+/**
+ * 维度编辑的一个问题：草稿删掉或改名了已保存的维度或它的某个选项，`group` 的
+ * 规则却还在用。`option` 缺省时说的是整个维度。
+ */
+export interface DimensionUseIssue {
+  dimension: string;
+  option?: string;
+  group: string;
+}
+
+interface DimensionShape {
+  name: string;
+  options: readonly { name: string }[];
+}
+
+/** 规则里每个字段用到的取值，用来判断维度和它的选项是否还被引用。 */
+function collectValues(
+  condition: ModelRoutingCondition,
+  into: Map<string, Set<string>>,
+): void {
+  if ("field" in condition) {
+    const leaf = condition as ModelRoutingValueCondition;
+    const values = into.get(condition.field) ?? new Set<string>();
+    for (const value of [
+      ...(leaf.in ?? []),
+      ...(leaf.not_in ?? []),
+      ...(leaf.equals ? [leaf.equals] : []),
+      ...(leaf.not_equals ? [leaf.not_equals] : []),
+    ])
+      values.add(value);
+    into.set(condition.field, values);
+    return;
+  }
+  if ("not" in condition) {
+    collectValues(condition.not, into);
+    return;
+  }
+  const children =
+    "all" in condition ? (condition.all ?? []) : (condition.any ?? []);
+  for (const child of children) collectValues(child, into);
+}
+
+/**
+ * 「分类器」页签保存维度前的预检。和 Go 的 `ValidateClassifierDimensionRemoval`
+ * 一样只看这次相对已保存版本删掉或改名的部分，不为早已存在的引用拦下与之无关
+ * 的保存（比如只改了密钥）。
+ *
+ * 删掉仍被引用的维度会被后端拒收（`classifier_dimension_in_use`）：路由设置每
+ * 次读取都按已声明的维度校验，悬空的规则会让所有请求失败。删掉仍被引用的选项
+ * 后端不拦，但那条规则从此再也不会命中。两种都在本地指出是哪个组在用。
+ */
+export function calculateDimensionUseIssues(
+  saved: readonly DimensionShape[],
+  draft: readonly DimensionShape[],
+  groups: readonly ModelRoutingGroup[],
+): DimensionUseIssue[] {
+  const drafted = new Map(
+    draft.map((dimension) => [
+      dimension.name,
+      new Set(dimension.options.map((option) => option.name)),
+    ]),
+  );
+  const issues: DimensionUseIssue[] = [];
+  for (const group of groups) {
+    const used = new Map<string, Set<string>>();
+    for (const rule of group.rules) collectValues(rule.when, used);
+    for (const dimension of saved) {
+      const values = used.get(dimension.name);
+      if (values === undefined) continue;
+      const options = drafted.get(dimension.name);
+      if (options === undefined) {
+        issues.push({ dimension: dimension.name, group: group.id });
+        continue;
+      }
+      for (const option of dimension.options)
+        if (values.has(option.name) && !options.has(option.name))
+          issues.push({
+            dimension: dimension.name,
+            option: option.name,
+            group: group.id,
+          });
+    }
   }
   return issues;
 }

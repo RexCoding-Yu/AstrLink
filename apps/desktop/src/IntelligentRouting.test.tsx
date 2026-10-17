@@ -14,14 +14,53 @@ const bridge = vi.hoisted(() => ({
   updateRoutingSettings: vi.fn(),
 }));
 vi.mock("./bridge", () => bridge);
-vi.mock("./notify", () => ({ notify: { success: vi.fn() } }));
+vi.mock("./notify", () => ({ notify: { success: vi.fn(), error: vi.fn() } }));
 
 import { IntelligentRouting } from "./IntelligentRouting";
 import { defaultClassifierSettings } from "./classifier-settings-model";
-import { applyLocale, i18n } from "./i18n";
+import { applyLocale } from "./i18n";
 import { defaultFailurePolicy } from "./failure-policy-model";
+import type { RoutableService } from "./service-model";
 
-// The group editor renders its own role="tab" chips, so scope to the page bar.
+const services: RoutableService[] = [
+  {
+    id: "svc",
+    name: "DeepSeek",
+    kind: "deepseek",
+    enabled: true,
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    capabilities: [],
+  },
+];
+
+function routingSettings() {
+  return {
+    default_failure_policy: defaultFailurePolicy(),
+    allow_unmatched_failover: false,
+    strategy: "retry_first" as const,
+    max_attempts: 6,
+    model_routing_groups: [
+      {
+        id: "g",
+        enabled: true,
+        members: [
+          { id: "a", service_id: "svc", model: "deepseek-chat" },
+          { id: "b", service_id: "svc", model: "deepseek-reasoner" },
+        ],
+        default_member_id: "a",
+        rules: [
+          {
+            id: "r",
+            priority: 10,
+            when: { field: "task_type", in: ["coding"] },
+            target_member_id: "b",
+          },
+        ],
+      },
+    ],
+  };
+}
+
 function tabs(): HTMLElement[] {
   return [
     ...document.querySelectorAll<HTMLElement>(
@@ -31,7 +70,9 @@ function tabs(): HTMLElement[] {
 }
 
 function tab(label: string): HTMLButtonElement {
-  const match = tabs().find((item) => item.textContent?.trim() === label);
+  const match = tabs().find((item) =>
+    item.textContent?.trim().startsWith(label),
+  );
   if (!(match instanceof HTMLButtonElement)) {
     throw new Error(`Missing tab: ${label}`);
   }
@@ -56,16 +97,13 @@ describe("intelligent routing workspaces", () => {
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
-    bridge.getRoutingSettings.mockReset().mockResolvedValue({
-      default_failure_policy: defaultFailurePolicy(),
-      allow_unmatched_failover: false,
-      strategy: "retry_first",
-      max_attempts: 6,
-    });
+    bridge.getRoutingSettings
+      .mockReset()
+      .mockImplementation(async () => routingSettings());
     bridge.updateRoutingSettings.mockReset();
     bridge.getClassifierSettings
       .mockReset()
-      .mockResolvedValue(defaultClassifierSettings());
+      .mockResolvedValue({ ...defaultClassifierSettings(), enabled: true });
     bridge.classifierCredentialAction
       .mockReset()
       .mockResolvedValue({ configured: false });
@@ -80,232 +118,230 @@ describe("intelligent routing workspaces", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    document.body.innerHTML = "";
   });
 
+  async function flush() {
+    await act(async () => {
+      for (let index = 0; index < 5; index += 1) await Promise.resolve();
+    });
+  }
+
   async function render(
-    view?: "groups" | "fieldCatalog" | "classifier" | "dryRun",
+    view?: "groups" | "classifier" | "dryRun",
     onDirtyChange: (dirty: boolean) => void = vi.fn(),
   ) {
     await act(async () => {
       root.render(
         <IntelligentRouting
           initialView={view}
-          services={[]}
+          services={services}
           ready
           onDirtyChange={onDirtyChange}
         />,
       );
-      await Promise.resolve();
-      await Promise.resolve();
     });
+    await flush();
   }
 
-  it("shows the four in-page tabs and nothing else", async () => {
-    await render();
-    expect(tabs().map((item) => item.textContent?.trim())).toEqual([
-      "模型路由组",
-      "字段类型",
-      "分类器配置",
-      "试运行",
-    ]);
-  });
+  async function click(element: Element | null | undefined) {
+    if (!element) throw new Error("Missing element to click");
+    await act(async () => {
+      (element as HTMLElement).click();
+      await Promise.resolve();
+    });
+    await flush();
+  }
 
-  it("opens the groups tab by default and switches without a request", async () => {
-    await render();
-    expect(tab("模型路由组").getAttribute("data-state")).toBe("active");
+  function button(text: string): HTMLButtonElement | undefined {
+    return [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === text,
+    );
+  }
 
-    await selectTab("分类器配置");
-    expect(tab("分类器配置").getAttribute("data-state")).toBe("active");
-    expect(container.textContent).toContain("分类器配置");
+  const actions = () =>
+    container.querySelector("[data-intelligent-routing-actions]")!;
+
+  async function openEditor() {
+    await click(container.querySelector('[aria-label="编辑 astrlink/g"]'));
+    expect(
+      container.querySelector('[data-testid="routing-group-editor"]'),
+    ).not.toBeNull();
+  }
+
+  it("shows three tabs: routing groups, classifier and dry run", async () => {
+    await render();
+    expect(
+      tabs().map((item) => item.textContent?.replace(/\d+$/, "").trim()),
+    ).toEqual(["路由组", "分类器", "试运行"]);
+    expect(tab("路由组").getAttribute("data-state")).toBe("active");
   });
 
   it("honours an explicit view so a tray jump can land on a tab", async () => {
     await render("dryRun");
     expect(tab("试运行").getAttribute("data-state")).toBe("active");
-  });
-
-  it("hosts the migrated group editor on the first tab", async () => {
-    await render();
-    // B3 moved the editor here; it must render, not a placeholder.
-    expect(
-      container.querySelector('[data-testid="model-routing-groups-panel"]'),
-    ).not.toBeNull();
-    expect(container.textContent).toContain(i18n.t("modelRoutingGroup.title"));
-    expect(bridge.getRoutingSettings).toHaveBeenCalled();
-    // Nothing is written until the user saves.
-    expect(bridge.updateRoutingSettings).not.toHaveBeenCalled();
-  });
-
-  it("keeps an unsaved group draft alive across a tab switch", async () => {
-    bridge.getRoutingSettings.mockResolvedValue({
-      default_failure_policy: defaultFailurePolicy(),
-      allow_unmatched_failover: false,
-      strategy: "retry_first",
-      max_attempts: 6,
-      model_routing_groups: [
-        {
-          id: "g",
-          enabled: true,
-          members: [{ id: "a", service_id: "service_a", model: "gpt-5" }],
-          default_member_id: "a",
-          rules: [],
-        },
-      ],
-    });
-    await render();
-    const panel = container.querySelector(
-      '[data-testid="model-routing-groups-panel"]',
-    );
-    expect(panel?.textContent).toContain("g");
-
-    await selectTab("试运行");
-    await selectTab("模型路由组");
-    // forceMount keeps the editor mounted, so its state survives the switch.
-    expect(
-      container.querySelector('[data-testid="model-routing-groups-panel"]'),
-    ).toBe(panel);
-  });
-
-  it("keeps an unsaved classifier draft alive across a tab switch", async () => {
-    await render("classifier");
-    const apiKey = container.querySelector<HTMLInputElement>(
-      'input[aria-label="API Key"]',
-    );
-    expect(apiKey).not.toBeNull();
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(apiKey, "sk-typed-once");
-      apiKey?.dispatchEvent(new Event("input", { bubbles: true }));
-      await Promise.resolve();
-    });
-    const panel = container.querySelector(
-      '[data-testid="classifier-settings-panel"]',
-    );
-
-    await selectTab("试运行");
-    await selectTab("分类器配置");
-
-    // forceMount keeps the classifier mounted, so a typed key is not lost when
-    // the user steps over to another tab to check something.
-    expect(
-      container.querySelector('[data-testid="classifier-settings-panel"]'),
-    ).toBe(panel);
-    expect(
-      container.querySelector<HTMLInputElement>('input[aria-label="API Key"]')
-        ?.value,
-    ).toBe("sk-typed-once");
-  });
-
-  it("keeps a groups dirty flag when switching to the classifier tab", async () => {
-    const dirty = vi.fn();
-    bridge.getRoutingSettings.mockResolvedValue({
-      default_failure_policy: defaultFailurePolicy(),
-      allow_unmatched_failover: false,
-      strategy: "retry_first",
-      max_attempts: 6,
-      model_routing_groups: [
-        {
-          id: "g",
-          enabled: true,
-          members: [{ id: "a", service_id: "service_a", model: "gpt-5" }],
-          default_member_id: "a",
-          rules: [],
-        },
-      ],
-    });
-    await render("groups", dirty);
-
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((item) => item.textContent?.trim() === "新增规则")
-        ?.click();
-      await Promise.resolve();
-    });
-    expect(dirty.mock.calls.at(-1)).toEqual([true]);
-
-    // The classifier panel must not reset the groups dirty state when it is
-    // entered. This is the exact groups -> classifier regression scenario.
-    await selectTab("分类器配置");
-    expect(dirty.mock.calls.at(-1)).toEqual([true]);
-  });
-
-  it("keeps groups dirty when the classifier tab becomes clean", async () => {
-    const dirty = vi.fn();
-    bridge.getRoutingSettings.mockResolvedValue({
-      default_failure_policy: defaultFailurePolicy(),
-      allow_unmatched_failover: false,
-      strategy: "retry_first",
-      max_attempts: 6,
-      model_routing_groups: [
-        {
-          id: "g",
-          enabled: true,
-          members: [{ id: "a", service_id: "service_a", model: "gpt-5" }],
-          default_member_id: "a",
-          rules: [],
-        },
-      ],
-    });
-    await render("groups", dirty);
-
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((item) => item.textContent?.trim() === "新增规则")
-        ?.click();
-      await Promise.resolve();
-    });
-    await selectTab("分类器配置");
-    const apiKey = container.querySelector<HTMLInputElement>(
-      'input[aria-label="API Key"]',
-    );
-    expect(apiKey).not.toBeNull();
-
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(apiKey, "sk-temporary");
-      apiKey?.dispatchEvent(new Event("input", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(dirty.mock.calls.at(-1)).toEqual([true]);
-
-    // A shared slot would let the classifier's clean transition clear the
-    // still-dirty groups draft. Per-tab aggregation must remain true.
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(apiKey, "");
-      apiKey?.dispatchEvent(new Event("input", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(dirty.mock.calls.at(-1)).toEqual([true]);
-  });
-
-  it("hosts the classifier settings on the second tab without an upstream call", async () => {
-    await render("classifier");
-    // B4 replaced the placeholder; the real panel must render, and the tab must
-    // never reach a gateway: the classifier is a local singleton resource.
-    expect(
-      container.querySelector('[data-testid="classifier-settings-panel"]'),
-    ).not.toBeNull();
-    expect(bridge.getClassifierSettings).toHaveBeenCalled();
-    expect(bridge.updateClassifierSettings).not.toHaveBeenCalled();
-    expect(bridge.classifierDryRun).not.toHaveBeenCalled();
-  });
-
-  it("hosts the dry run on the third tab without an upstream call", async () => {
-    await render("dryRun");
     expect(
       container.querySelector('[data-testid="classifier-dry-run-panel"]'),
     ).not.toBeNull();
-    // Nothing runs until the user presses the button.
+    // Nothing runs until the user asks.
     expect(bridge.classifierDryRun).not.toHaveBeenCalled();
+  });
+
+  it("gives the active tab's actions the row beside the tabs", async () => {
+    await render();
+    expect(actions().textContent).toContain("新建路由组");
+    await selectTab("分类器");
+    expect(actions().textContent).not.toContain("新建路由组");
+    expect(actions().textContent).toContain("保存");
+    await selectTab("试运行");
+    expect(actions().textContent).toBe("");
+  });
+
+  it("opens a group as its own page and comes back to the tabs", async () => {
+    await render();
+    await openEditor();
+    // The editor brings its own header with a way back; the tab row steps aside.
+    expect(
+      container.querySelector('[data-slot="tabs-list"]')?.closest("[hidden]"),
+    ).not.toBeNull();
+    expect(container.querySelector("h1")?.textContent).toBe("astrlink/g");
+    await click(button("智能路由"));
+    expect(
+      container.querySelector('[data-slot="tabs-list"]')?.closest("[hidden]"),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="routing-group-list"]'),
+    ).not.toBeNull();
+  });
+
+  it("jumps from the editor to the dry run with the group chosen", async () => {
+    await render();
+    await openEditor();
+    // An unsaved edit makes the dry run say it uses the saved version.
+    await click(container.querySelector('[data-routing-remove-rule="0"]'));
+    await click(container.querySelector("[data-routing-dry-run]"));
+    expect(tab("试运行").getAttribute("data-state")).toBe("active");
+    expect(
+      container.querySelector("[data-dry-run-group]")?.textContent,
+    ).toContain("astrlink/g");
+    expect(
+      container.querySelector("[data-classifier-dry-run-unsaved]")?.textContent,
+    ).toContain("astrlink/g");
+    // Back on the groups tab the draft is still there.
+    await selectTab("路由组");
+    expect(container.querySelectorAll("[data-routing-rule]")).toHaveLength(0);
+    expect(button("保存")?.disabled).toBe(false);
+  });
+
+  it("keeps the dry run on a group renamed or deleted in the editor", async () => {
+    bridge.updateRoutingSettings.mockImplementation(
+      async (patch: Record<string, unknown>) => ({
+        ...routingSettings(),
+        ...patch,
+      }),
+    );
+    await render();
+    await openEditor();
+    await click(container.querySelector("[data-routing-dry-run]"));
+    await selectTab("路由组");
+    await click(container.querySelector("[data-routing-rename]"));
+    const input = document.querySelector<HTMLInputElement>(
+      '[data-slot="popover-content"] input',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "g2");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await click(button("保存"));
+    await selectTab("试运行");
+    expect(
+      container.querySelector("[data-dry-run-group]")?.textContent,
+    ).toContain("astrlink/g2");
+
+    await selectTab("路由组");
+    await click(button("删除路由组"));
+    const confirm = document.querySelector('[role="alertdialog"]')!;
+    await click(
+      [...confirm.querySelectorAll("button")].find(
+        (item) => item.textContent?.trim() === "删除",
+      ),
+    );
+    await selectTab("试运行");
+    expect(
+      container.querySelector("[data-dry-run-group]")?.textContent,
+    ).not.toContain("astrlink/g2");
+  });
+
+  it("opens the editor from a dry run's rule verdicts", async () => {
+    bridge.classifierDryRun.mockResolvedValue({
+      configured: true,
+      category: "coding",
+      confidence: 0.9,
+      fallback_reason: null,
+      duration_ms: 12,
+      sanitized_preview: "写一个排序函数",
+      decision: {
+        member_id: "b",
+        service_id: "svc",
+        model: "deepseek-reasoner",
+        rule_id: "r",
+      },
+      fields: [],
+      dimensions: [],
+      rules: [
+        {
+          rule_id: "r",
+          priority: 10,
+          target_member_id: "b",
+          target_model: "deepseek-reasoner",
+          state: "true",
+          selected: true,
+          target_missing: false,
+          fields: [],
+        },
+      ],
+    });
+    await render("dryRun");
+    await click(container.querySelector("[data-dry-run-start]"));
+    expect(bridge.classifierDryRun).toHaveBeenCalledWith(
+      expect.objectContaining({ group_id: "g" }),
+    );
+    await click(button("编辑规则"));
+    expect(tab("路由组").getAttribute("data-state")).toBe("active");
+    expect(
+      container.querySelector('[data-testid="routing-group-editor"]'),
+    ).not.toBeNull();
+  });
+
+  it("keeps the groups dirty flag while another tab changes", async () => {
+    const dirty = vi.fn();
+    await render("groups", dirty);
+    await openEditor();
+    await click(container.querySelector('[data-routing-remove-rule="0"]'));
+    expect(dirty.mock.calls.at(-1)).toEqual([true]);
+    await selectTab("分类器");
+    await selectTab("试运行");
+    expect(dirty.mock.calls.at(-1)).toEqual([true]);
+  });
+
+  it("keeps an unsaved classifier draft alive across a tab switch", async () => {
+    const dirty = vi.fn();
+    await render("classifier", dirty);
+    const panel = container.querySelector(
+      '[data-testid="classifier-settings-panel"]',
+    );
+    const toggle = panel?.querySelector<HTMLButtonElement>('[role="switch"]');
+    await click(toggle);
+    expect(dirty.mock.calls.at(-1)).toEqual([true]);
+    await selectTab("试运行");
+    await selectTab("分类器");
+    expect(
+      container.querySelector('[data-testid="classifier-settings-panel"]'),
+    ).toBe(panel);
+    expect(toggle?.getAttribute("data-state")).toBe("unchecked");
+    expect(dirty.mock.calls.at(-1)).toEqual([true]);
   });
 });
