@@ -58,6 +58,7 @@ describe("classifier dry run panel", () => {
       // 桥接层用 parseClassifierDryRunResult 解析响应，所以 `fields` 在这里
       // 永远是数组；夹具直接喂原始对象，必须自己补上这个已解析的键。
       fields: [],
+      dimensions: [],
     });
     bridge.getRoutingSettings.mockReset().mockResolvedValue({
       default_failure_policy: defaultFailurePolicy(),
@@ -156,6 +157,7 @@ describe("classifier dry run panel", () => {
         used_default: false,
       },
       fields: [],
+      dimensions: [],
     });
     await render();
     const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
@@ -187,6 +189,7 @@ describe("classifier dry run panel", () => {
       sanitized_preview: "",
       decision: null,
       fields: [],
+      dimensions: [],
     });
     await render();
     const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
@@ -213,6 +216,7 @@ describe("classifier dry run panel", () => {
       sanitized_preview: "write a parser",
       decision: null,
       fields,
+      dimensions: [],
     });
   }
 
@@ -300,6 +304,7 @@ describe("classifier dry run panel", () => {
       sanitized_preview: "write a parser",
       decision: null,
       fields: [],
+      dimensions: [],
     });
     await runOnce();
 
@@ -355,5 +360,96 @@ describe("classifier dry run panel", () => {
     });
 
     expect(container.textContent).toContain("core unreachable");
+  });
+
+  /**
+   * The regression this table exists for: a group whose rules all test a
+   * custom dimension used to show only `task_type`'s verdict, so the operator
+   * could not tell what their own dimension had been classified as.
+   */
+  it("reports the classifier's verdict for each configured custom dimension", async () => {
+    bridge.classifierDryRun.mockResolvedValue({
+      configured: true,
+      category: "coding",
+      confidence: 0.97,
+      fallback_reason: null,
+      duration_ms: 42,
+      sanitized_preview: "write a parser",
+      decision: null,
+      fields: [],
+      dimensions: [
+        {
+          name: "branch",
+          label: "后端",
+          score: 0.93,
+          known: true,
+          produced: true,
+        },
+      ],
+    });
+    await runOnce();
+
+    const branch = container.querySelector<HTMLElement>(
+      '[data-classifier-dry-run-dimension="branch"]',
+    );
+    if (branch === null) throw new Error("Missing the branch dimension row");
+    expect(branch.dataset.dimensionKnown).toBe("true");
+    expect(branch.textContent).toContain("后端");
+    expect(branch.textContent).toContain("0.93");
+    // A known dimension is usable by a rule, so no caveat badge is rendered.
+    expect(branch.textContent).not.toContain("低于阈值");
+    expect(branch.textContent).not.toContain("未作答");
+  });
+
+  it("names why an unusable dimension had no verdict", async () => {
+    bridge.classifierDryRun.mockResolvedValue({
+      configured: true,
+      category: "coding",
+      confidence: 0.9,
+      fallback_reason: null,
+      duration_ms: 42,
+      sanitized_preview: "write a parser",
+      decision: null,
+      fields: [],
+      dimensions: [
+        {
+          name: "branch",
+          label: "后端",
+          score: 0.2,
+          known: false,
+          produced: true,
+        },
+        { name: "region", label: "", score: 0, known: false, produced: false },
+      ],
+    });
+    await runOnce();
+
+    // Skipped and below-threshold are different problems, so they read
+    // differently: one needs the prompt fixed, the other the threshold.
+    const weak = container.querySelector<HTMLElement>(
+      '[data-classifier-dry-run-dimension="branch"]',
+    );
+    expect(weak?.textContent).toContain("低于阈值");
+    const skipped = container.querySelector<HTMLElement>(
+      '[data-classifier-dry-run-dimension="region"]',
+    );
+    expect(skipped?.textContent).toContain("未作答");
+  });
+
+  it("renders no dimension table when only the built-in dimension is configured", async () => {
+    withFields([
+      {
+        field: "task_type",
+        source: "classifier",
+        known: true,
+        match_count: 0,
+        candidates: [{ value: "coding", score: 0.9, rank: 0, chosen: true }],
+      },
+    ]);
+    await runOnce();
+
+    expect(
+      container.querySelector("[data-classifier-dry-run-dimensions]"),
+    ).toBeNull();
   });
 });

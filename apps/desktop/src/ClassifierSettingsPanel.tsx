@@ -14,11 +14,13 @@ import {
   updateClassifierSettings,
 } from "./bridge";
 import {
-  classifierFallbacks,
+  classifierExistingModelTimeoutMaxMS,
+  classifierExistingModelTimeoutMinMS,
   classifierProtocols,
   classifierTimeoutMaxMS,
+  classifierTimeoutMinMS,
+  defaultClassifierPrompt,
   linkClassifierProtocol,
-  type ClassifierFallback,
   type ClassifierProtocol,
   type ClassifierSettings,
 } from "./classifier-settings-model";
@@ -27,7 +29,7 @@ import {
   type ClassifierSettingsIssue,
 } from "./classifier-settings-validation";
 import { useT } from "./i18n";
-import { modelRoutingTaskTypes } from "./model-routing-group-model";
+import { intelligentRoutingErrorText } from "./intelligent-routing-errors";
 import type { RoutableService } from "./service-model";
 
 function issueFor(
@@ -51,6 +53,20 @@ function FieldIssue({
       {t(`${namespace}.${issue.problem}`)}
     </span>
   );
+}
+
+/**
+ * An empty stored prompt means "use the built-in one". Show that text instead
+ * of a blank box so the user edits a working instruction, `{{labels}}`
+ * placeholder included. Both draft and baseline get it, so loading alone never
+ * marks the tab dirty; saving it unchanged behaves exactly like the empty value.
+ */
+function withDefaultPrompt(settings: ClassifierSettings): ClassifierSettings {
+  if (settings.inline.prompt.trim() !== "") return settings;
+  return {
+    ...settings,
+    inline: { ...settings.inline, prompt: defaultClassifierPrompt },
+  };
 }
 
 /**
@@ -107,17 +123,16 @@ export function ClassifierSettingsPanel({
         setCredentialConfigured(credential.configured);
         // A reconnection must never replace an unsaved draft.
         if (!dirtyRef.current) {
-          setDraft(loaded);
-          setBaseline(JSON.stringify(loaded));
+          const shown = withDefaultPrompt(loaded);
+          setDraft(shown);
+          setBaseline(JSON.stringify(shown));
         }
         setLoadError(null);
       })
       .catch((caught) => {
         if (active && mutationVersion.current === version)
           setLoadError(
-            caught instanceof Error
-              ? caught.message
-              : t("classifier.loadFailed"),
+            intelligentRoutingErrorText(caught, t("classifier.loadFailed")),
           );
       });
     return () => {
@@ -133,6 +148,7 @@ export function ClassifierSettingsPanel({
           credentialDraft,
         });
   const blocking = showIssues ? issues : [];
+  const usesExistingModel = draft?.classifier_source === "existing_model";
 
   const patch = (next: Partial<ClassifierSettings>): void => {
     setShowIssues(false);
@@ -168,7 +184,9 @@ export function ClassifierSettingsPanel({
         setCredentialConfigured(credential.configured);
         if (credentialDraftRef.current === submittedKey) setCredentialDraft("");
       }
-      const result = await updateClassifierSettings(submitted);
+      const result = withDefaultPrompt(
+        await updateClassifierSettings(submitted),
+      );
       const status = await classifierCredentialAction("status");
       setBaseline(JSON.stringify(result));
       setDraft((current) => (current === submitted ? result : current));
@@ -179,9 +197,7 @@ export function ClassifierSettingsPanel({
       .catch((caught: unknown) => {
         if (draftRef.current === submitted)
           setError(
-            caught instanceof Error
-              ? caught.message
-              : t("classifier.saveFailed"),
+            intelligentRoutingErrorText(caught, t("classifier.saveFailed")),
           );
       })
       .finally(() => setSaving(false));
@@ -198,7 +214,7 @@ export function ClassifierSettingsPanel({
       })
       .catch((caught: unknown) =>
         setError(
-          caught instanceof Error ? caught.message : t("classifier.saveFailed"),
+          intelligentRoutingErrorText(caught, t("classifier.saveFailed")),
         ),
       );
   };
@@ -495,47 +511,65 @@ export function ClassifierSettingsPanel({
               />
               <FieldIssue issue={issueFor(blocking, "prompt")} />
             </Field>
-            <Field
-              group
-              label={t("classifier.labels")}
-              tooltip={t("classifier.labelsHint")}
-            >
-              <div className="flex min-w-0 flex-wrap gap-1">
-                {modelRoutingTaskTypes.map((label) => (
-                  <span
-                    key={label}
-                    className="rounded-sm border border-border bg-muted px-1.5 py-0.5 font-mono text-xs"
-                  >
-                    {label}
-                  </span>
-                ))}
-              </div>
-            </Field>
           </Panel>
           <Panel className="flex shrink-0 flex-col gap-3 p-3">
             <h3 className="text-xs font-medium text-text-secondary">
               {t("classifier.advanced")}
             </h3>
+            {/*
+              The budget belongs to the source that spends it: `inline` reads
+              its own 1–5000 envelope and `existing_model` its independent
+              1–60000 budget, because a real model call takes far longer than
+              the inline one. Editing `inline.timeout_ms` while the reuse
+              branch is selected would change a value nothing reads.
+            */}
             <Field
               label={t("classifier.timeout")}
-              tooltip={t("classifier.timeoutHint", {
-                max: classifierTimeoutMaxMS,
-              })}
+              tooltip={
+                usesExistingModel
+                  ? t("classifier.timeoutHintExistingModel", {
+                      max: classifierExistingModelTimeoutMaxMS,
+                    })
+                  : t("classifier.timeoutHint", {
+                      max: classifierTimeoutMaxMS,
+                    })
+              }
             >
               <Input
                 type="number"
-                min={1}
-                max={classifierTimeoutMaxMS}
-                value={String(draft.inline.timeout_ms)}
+                min={
+                  usesExistingModel
+                    ? classifierExistingModelTimeoutMinMS
+                    : classifierTimeoutMinMS
+                }
+                max={
+                  usesExistingModel
+                    ? classifierExistingModelTimeoutMaxMS
+                    : classifierTimeoutMaxMS
+                }
+                value={String(
+                  usesExistingModel
+                    ? draft.existing_model.timeout_ms
+                    : draft.inline.timeout_ms,
+                )}
                 aria-label={t("classifier.timeout")}
                 aria-invalid={issueFor(blocking, "timeout_ms") !== undefined}
                 onChange={(event) =>
-                  patch({
-                    inline: {
-                      ...draft.inline,
-                      timeout_ms: event.target.valueAsNumber,
-                    },
-                  })
+                  patch(
+                    usesExistingModel
+                      ? {
+                          existing_model: {
+                            ...draft.existing_model,
+                            timeout_ms: event.target.valueAsNumber,
+                          },
+                        }
+                      : {
+                          inline: {
+                            ...draft.inline,
+                            timeout_ms: event.target.valueAsNumber,
+                          },
+                        },
+                  )
                 }
               />
               <FieldIssue issue={issueFor(blocking, "timeout_ms")} />
@@ -566,35 +600,6 @@ export function ClassifierSettingsPanel({
               <FieldIssue
                 issue={issueFor(blocking, "low_confidence_threshold")}
               />
-            </Field>
-            <Field
-              group
-              label={t("classifier.fallback")}
-              tooltip={t("classifier.fallbackHint")}
-            >
-              <div className="flex min-w-0 flex-wrap gap-1.5">
-                {classifierFallbacks.map((value) => (
-                  <Button
-                    key={value}
-                    type="button"
-                    size="sm"
-                    variant={
-                      draft.inline.fallback === value ? "default" : "outline"
-                    }
-                    aria-pressed={draft.inline.fallback === value}
-                    onClick={() =>
-                      patch({
-                        inline: {
-                          ...draft.inline,
-                          fallback: value as ClassifierFallback,
-                        },
-                      })
-                    }
-                  >
-                    {t(`classifier.fallbacks.${value}`)}
-                  </Button>
-                ))}
-              </div>
             </Field>
           </Panel>
         </fieldset>

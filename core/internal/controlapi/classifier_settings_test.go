@@ -363,31 +363,34 @@ func TestClassifierDryRunRejectsConcurrentSecondCall(t *testing.T) {
 // The dry-run failure mapping mirrors production routing through the shared
 // FailureTaskType: stable record codes, never raw provider reasons, and the
 // configured fallback (skip/error/general) applies identically.
+// The dry-run reports a failure through the same stable record code the
+// inference path writes, and never substitutes a label — there is no fallback
+// to configure, so the same sample always produces the same reason. A stored
+// legacy `fallback` member must not change any of that.
 func TestClassifierDryRunFailureMappingMirrorsProduction(t *testing.T) {
 	var cloudBodies []string
 	cloudServer := newClassifierCloudServer(t, "not-a-jev-answer", &cloudBodies)
 	handler := newClassifierDryRunHandler(t, cloudServer.URL, privacy.Policy{})
 	putClassifierCredential(t, handler)
-	settingsDocument := func(fallback string) string {
+	settingsDocument := func(legacyFallback string) string {
 		document := `{"enabled":true,"classifier_source":"inline","inline":{"protocol":"jev","endpoint":"` + cloudServer.URL +
 			`","credential_ref":"local://classifier/default","model":"jev-latest","timeout_ms":1500`
-		if fallback != "" {
-			document += `,"fallback":"` + fallback + `"`
+		if legacyFallback != "" {
+			document += `,"fallback":"` + legacyFallback + `"`
 		}
 		return document + `}}`
 	}
 	for _, testCase := range []struct {
-		name         string
-		fallback     string
-		wantReason   string
-		wantCategory string
+		name           string
+		legacyFallback string
 	}{
-		{name: "default skip keeps the stable code", fallback: "", wantReason: "classifier_invalid_output"},
-		{name: "error records classifier_error", fallback: "error", wantReason: "classifier_error"},
-		{name: "general fills the accepted label", fallback: "general", wantReason: "classifier_invalid_output", wantCategory: "general"},
+		{name: "no stored fallback"},
+		{name: "stored skip"},
+		{name: "stored error is ignored"},
+		{name: "stored general is ignored"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			response := controlRequest(t, handler, http.MethodPut, ClassifierSettingsPath, "application/json", settingsDocument(testCase.fallback), "")
+			response := controlRequest(t, handler, http.MethodPut, ClassifierSettingsPath, "application/json", settingsDocument(testCase.legacyFallback), "")
 			if response.Code != http.StatusOK {
 				t.Fatalf("settings put = %d %s", response.Code, response.Body.String())
 			}
@@ -397,15 +400,11 @@ func TestClassifierDryRunFailureMappingMirrorsProduction(t *testing.T) {
 				t.Fatalf("dry-run = %d %s", response.Code, response.Body.String())
 			}
 			body := response.Body.String()
-			if !strings.Contains(body, `"fallback_reason":"`+testCase.wantReason+`"`) {
-				t.Fatalf("fallback reason = %s", body)
+			if !strings.Contains(body, `"fallback_reason":"classifier_invalid_output"`) {
+				t.Fatalf("stable failure code missing: %s", body)
 			}
-			if testCase.wantCategory == "" {
-				if strings.Contains(body, `"category":"`) {
-					t.Fatalf("unexpected category in %s", body)
-				}
-			} else if !strings.Contains(body, `"category":"`+testCase.wantCategory+`"`) {
-				t.Fatalf("category missing in %s", body)
+			if strings.Contains(body, `"category":"`) {
+				t.Fatalf("a failure must not fill a category: %s", body)
 			}
 			if len(cloudBodies) != 1 {
 				t.Fatalf("cloud calls = %d", len(cloudBodies))

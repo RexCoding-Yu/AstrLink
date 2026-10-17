@@ -335,7 +335,7 @@ func TestResolveCallPlanMixesLabelsAndDimensions(t *testing.T) {
 // registry resolves built-ins first, so the classifier's answer for that name
 // would be shadowed by a value derived from the request instead.
 func TestDimensionsRejectBuiltInFieldNames(t *testing.T) {
-	for _, name := range []string{"protocol", "language", "media_kind", "streaming", "turn_count", "literal_keyword", "system_time"} {
+	for _, name := range []string{"protocol", "media_kind", "streaming", "turn_count", "literal_keyword", "system_time"} {
 		settings := enabledInlineSettings()
 		settings.Dimensions = []ClassifierDimension{customDimension(name)}
 		err := settings.Validate()
@@ -349,8 +349,8 @@ func TestDimensionsRejectBuiltInFieldNames(t *testing.T) {
 	if _, ok := modelRoutingFields["protocol"]; !ok {
 		t.Fatal("fixture assumption broken: protocol is no longer a built-in field")
 	}
-	if len(modelRoutingFields) != 22 {
-		t.Fatalf("built-in field count = %d, want 22", len(modelRoutingFields))
+	if len(modelRoutingFields) != 21 {
+		t.Fatalf("built-in field count = %d, want 21", len(modelRoutingFields))
 	}
 }
 
@@ -382,11 +382,10 @@ func TestClassifierResolveCallPlanPrecedence(t *testing.T) {
 	threshold := 0.8
 	settings.Inline.TimeoutMS = &timeout
 	settings.Inline.LowConfidenceThreshold = &threshold
-	settings.Inline.Fallback = ClassifierFallbackGeneral
 	settings.Inline.Prompt = "pick {{labels}}"
 
 	plan := settings.ResolveCallPlan(nil)
-	if plan.TimeoutMS != 1500 || plan.LowConfidenceThreshold != 0.8 || plan.Fallback != ClassifierFallbackGeneral {
+	if plan.TimeoutMS != 1500 || plan.LowConfidenceThreshold != 0.8 {
 		t.Fatalf("global plan = %+v", plan)
 	}
 	if !strings.Contains(plan.Prompt, "general, research, coding, architect") {
@@ -398,8 +397,8 @@ func TestClassifierResolveCallPlanPrecedence(t *testing.T) {
 	if !strings.Contains(groupPlan.Prompt, "alpha, beta") {
 		t.Fatalf("custom labels missing: %q", groupPlan.Prompt)
 	}
-	if groupPlan.TimeoutMS != plan.TimeoutMS || groupPlan.Fallback != plan.Fallback {
-		t.Fatalf("group must not alter the global timeout or fallback: %+v", groupPlan)
+	if groupPlan.TimeoutMS != plan.TimeoutMS {
+		t.Fatalf("group must not alter the global timeout: %+v", groupPlan)
 	}
 
 	// The inline budget stays exactly 1000/5000 even as other sources gain

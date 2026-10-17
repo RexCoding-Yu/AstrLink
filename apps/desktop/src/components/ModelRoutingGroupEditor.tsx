@@ -100,7 +100,15 @@ const TaskTypeLabelsContext = createContext<{
   atCapacity: boolean;
 }>({ labels: modelRoutingTaskTypes, atCapacity: false });
 
-const CustomDimensionsContext = createContext<readonly ClassifierDimension[]>([]);
+const CustomDimensionsContext = createContext<readonly ClassifierDimension[]>(
+  [],
+);
+/**
+ * 协议取值域是运行期数据（core capabilities），不是本文件的常量：静态 import
+ * `service-presets` 会形成 `service-presets → service-model →
+ * failure-policy-model → 本模块` 的环。空数组表示「未提供」，取值列回退为自由输入。
+ */
+const RoutingProtocolsContext = createContext<readonly string[]>([]);
 
 /**
  * 候选列表 = 内置目录 + 用户自建值。自建值排在后面，且不重复已经存在的项；
@@ -133,6 +141,7 @@ export function ModelRoutingGroupEditor({
   onChange,
   services,
   dimensions = [],
+  protocols = [],
   disabled = false,
   onEditingChange,
   validationIssues = [],
@@ -146,6 +155,11 @@ export function ModelRoutingGroupEditor({
    * 一条永不命中的规则。
    */
   dimensions?: readonly ClassifierDimension[];
+  /**
+   * `protocol` 字段的取值域：core capabilities 报出的协议 id。为空时该字段
+   * 回退为自由输入（测试与旧调用点即此路径）。
+   */
+  protocols?: readonly string[];
   disabled?: boolean;
   /** 通知父级当前是否处于未提交的文本编辑中。 */
   onEditingChange?: (editing: boolean) => void;
@@ -389,33 +403,35 @@ export function ModelRoutingGroupEditor({
 
         {active ? (
           <CustomDimensionsContext.Provider value={dimensions}>
-            <RoutingCustomValuesContext.Provider value={routingCustom}>
-              <GroupEditor
-                group={active}
-                index={activeIndex}
-                publicModelID={modelRoutingPublicModelID(active.id)}
-                enabledServices={enabledServices}
-                disabled={disabled}
-                validationIssues={activeValidationIssues}
-                onChange={(patch) => updateGroup(activeIndex, patch)}
-                onEditingChange={onEditingChange}
-                onRemoveGroup={() => {
-                  const next = value.filter(
-                    (_, current) => current !== activeIndex,
-                  );
-                  onChange(next);
-                  setSelectedID(
-                    next[Math.min(activeIndex, next.length - 1)]?.id ?? "",
-                  );
-                }}
-                onRequestRemoveMember={(member) =>
-                  setRemoveMember({ group: activeIndex, member })
-                }
-                onRequestRemoveRule={(rule) =>
-                  setRemoveRule({ group: activeIndex, rule })
-                }
-              />
-            </RoutingCustomValuesContext.Provider>
+            <RoutingProtocolsContext.Provider value={protocols}>
+              <RoutingCustomValuesContext.Provider value={routingCustom}>
+                <GroupEditor
+                  group={active}
+                  index={activeIndex}
+                  publicModelID={modelRoutingPublicModelID(active.id)}
+                  enabledServices={enabledServices}
+                  disabled={disabled}
+                  validationIssues={activeValidationIssues}
+                  onChange={(patch) => updateGroup(activeIndex, patch)}
+                  onEditingChange={onEditingChange}
+                  onRemoveGroup={() => {
+                    const next = value.filter(
+                      (_, current) => current !== activeIndex,
+                    );
+                    onChange(next);
+                    setSelectedID(
+                      next[Math.min(activeIndex, next.length - 1)]?.id ?? "",
+                    );
+                  }}
+                  onRequestRemoveMember={(member) =>
+                    setRemoveMember({ group: activeIndex, member })
+                  }
+                  onRequestRemoveRule={(rule) =>
+                    setRemoveRule({ group: activeIndex, rule })
+                  }
+                />
+              </RoutingCustomValuesContext.Provider>
+            </RoutingProtocolsContext.Provider>
           </CustomDimensionsContext.Provider>
         ) : null}
       </div>
@@ -809,11 +825,7 @@ function GroupEditor({
                 size="sm"
                 disabled={disabled || rulesFull || group.members.length === 0}
                 onClick={() =>
-                  commitRules([
-                    ...group.rules,
-                    // 新建规则给 3 条预设起始行，不空白起步（任务正文 §六）。
-                    ...newRuleDrafts(group),
-                  ])
+                  commitRules([...group.rules, newRuleDraft(group)])
                 }
               >
                 <Plus aria-hidden="true" />
@@ -1008,32 +1020,23 @@ function moveRule(
 }
 
 /**
- * 新建规则的 3 条预设起始行（任务正文 §六）。
+ * 「新增规则」插入的一条草稿。
  *
- * 用支持的字段起步，且只是草稿：取值留空，保存前必须填齐，不自动启用、
- * 不自动发推理。目标成员留空由下方校验拦截，不猜一个默认值。
+ * 一次点击只加一行：原先一次插入 task_type / turn_count / has_tools 三条预设
+ * （ASTR-15 §六），实机反馈是用户点一次得到三条、还得逐条删掉不要的。保留
+ * 「不空白起步」的意图：新行预选 task_type 字段，取值留空，保存前必须填齐；
+ * 目标成员沿用默认成员，不自动启用、不自动发推理。
  */
-function newRuleDrafts(group: ModelRoutingGroup): ModelRoutingRule[] {
-  const taken = group.rules.map((rule) => rule.id);
-  const target = group.default_member_id || group.members[0]?.id || "";
-  const presets: readonly ModelRoutingField[] = [
-    "task_type",
-    "turn_count",
-    "has_tools",
-  ];
-  const base = group.rules.length;
-  const drafts: ModelRoutingRule[] = [];
-  for (const [offset, field] of presets.entries()) {
-    // 同一批里三个 ID 也要互不重复，所以边生成边登记。
-    const id = nextID([...taken, ...drafts.map((rule) => rule.id)], "rule");
-    drafts.push({
-      id,
-      priority: (base + offset + 1) * modelRoutingPriorityStep,
-      when: defaultConditionFor(field),
-      target_member_id: target,
-    });
-  }
-  return drafts;
+function newRuleDraft(group: ModelRoutingGroup): ModelRoutingRule {
+  return {
+    id: nextID(
+      group.rules.map((rule) => rule.id),
+      "rule",
+    ),
+    priority: (group.rules.length + 1) * modelRoutingPriorityStep,
+    when: defaultConditionFor("task_type"),
+    target_member_id: group.default_member_id || group.members[0]?.id || "",
+  };
 }
 
 function collectTaskTypeValues(condition: ModelRoutingCondition): string[] {
@@ -1168,8 +1171,8 @@ function DecisionRow({
       }}
       onDragEnd={() => setDragging(false)}
     >
-      <TableCell className="w-0 align-top">
-        <div className="flex items-center gap-0.5">
+      <TableCell className="w-0 align-top pt-[calc(0.5rem+2.375rem)]">
+        <div className="flex h-8 items-center gap-0.5">
           {/* 句柄可聚焦：键盘重排是拖拽的等价路径（验收项 7），不是附加项。 */}
           <span
             role="button"
@@ -1228,38 +1231,31 @@ function DecisionRow({
           </div>
         </div>
       </TableCell>
-      <TableCell className="align-top">
-        <Field
-          label={t("modelRoutingGroup.priority")}
-          tooltipLabel={t("modelRoutingGroup.priorityDerivedHintLabel")}
-          tooltip={t("modelRoutingGroup.priorityDerivedHint", {
-            step: modelRoutingPriorityStep,
-          })}
+      {/* 列名已在表头（带 `?` 说明），单元格不再重复一遍标签。窄列的
+          顶部留白等于条件框的内边距 + 标签行高度，使优先级、规则 ID、目标
+          成员与第一条条件的控件落在同一水平线上。 */}
+      <TableCell className="w-16 align-top pt-[calc(0.5rem+2.375rem)]">
+        {/* 优先级由行序生成，只读展示；数值框会让 tooltip 食言。 */}
+        <span
+          className="flex h-8 items-center text-sm tabular-nums text-text-secondary"
+          data-model-routing-priority-value={rule.priority}
         >
-          {/* 优先级由行序生成，只读展示；数值框会让 tooltip 食言。 */}
-          <span
-            className="flex h-8 items-center text-sm tabular-nums text-text-secondary"
-            data-model-routing-priority-value={rule.priority}
-          >
-            {rule.priority}
-          </span>
-        </Field>
+          {rule.priority}
+        </span>
       </TableCell>
-      <TableCell className="align-top">
-        <Field label={t("modelRoutingGroup.ruleID")}>
-          <Input
-            className="h-8 font-mono"
-            value={rule.id}
-            disabled={disabled}
-            maxLength={64}
-            aria-label={t("modelRoutingGroup.ruleID")}
-            onChange={(event) => {
-              onEditingChange?.(true);
-              onChange({ id: event.target.value.toLowerCase() });
-            }}
-            onBlur={() => onEditingChange?.(false)}
-          />
-        </Field>
+      <TableCell className="w-36 align-top pt-[calc(0.5rem+2.375rem)]">
+        <Input
+          className="h-8 font-mono"
+          value={rule.id}
+          disabled={disabled}
+          maxLength={64}
+          aria-label={t("modelRoutingGroup.ruleID")}
+          onChange={(event) => {
+            onEditingChange?.(true);
+            onChange({ id: event.target.value.toLowerCase() });
+          }}
+          onBlur={() => onEditingChange?.(false)}
+        />
       </TableCell>
       <TableCell className="whitespace-normal align-top">
         {pills === null ? (
@@ -1342,18 +1338,16 @@ function DecisionRow({
           </div>
         )}
       </TableCell>
-      <TableCell className="align-top">
-        <Field label={t("modelRoutingGroup.targetMember")}>
-          <ModelSelect
-            options={members.map((member) => member.id)}
-            value={rule.target_member_id}
-            disabled={disabled}
-            aria-label={t("modelRoutingGroup.targetMember")}
-            onValueChange={(target_member_id) => onChange({ target_member_id })}
-          />
-        </Field>
+      <TableCell className="w-48 align-top pt-[calc(0.5rem+2.375rem)]">
+        <ModelSelect
+          options={members.map((member) => member.id)}
+          value={rule.target_member_id}
+          disabled={disabled}
+          aria-label={t("modelRoutingGroup.targetMember")}
+          onValueChange={(target_member_id) => onChange({ target_member_id })}
+        />
       </TableCell>
-      <TableCell className="align-top">
+      <TableCell className="w-0 align-top pt-[calc(0.5rem+2.375rem)]">
         <IconButton
           type="button"
           className="text-muted-foreground hover:text-destructive"
@@ -1416,8 +1410,12 @@ function ConditionPill({
       data-model-routing-condition-node="leaf"
       data-model-routing-condition-path="pill"
     >
-      <div className="grid min-w-0 gap-3 @[720px]:grid-cols-[minmax(0,12rem)_minmax(0,1fr)_auto] @[720px]:items-start">
-        <div data-model-routing-field-control>
+      {/* 字段 | 取值 | 操作 三列，flex-wrap 在窄宽度下自然折行。
+          标签行统一 `min-h-5.5`（与带 `?` 的标签同高）：有的字段带说明按钮、
+          有的不带，原来两列控件因此上下错开几像素。操作列用同高占位对齐到
+          控件行，而不是悬在标签旁边。 */}
+      <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2 [&>div>*>span:first-child]:min-h-5.5">
+        <div className="w-44 shrink-0" data-model-routing-field-control>
           <Field
             group={field === "task_type"}
             label={t("modelRoutingGroup.field")}
@@ -1450,7 +1448,7 @@ function ConditionPill({
             />
           </Field>
         </div>
-        <div data-model-routing-value-control>
+        <div className="min-w-[16rem] flex-1" data-model-routing-value-control>
           {isTime ? (
             <TimeBounds
               condition={condition as ModelRoutingTimeCondition}
@@ -1486,34 +1484,38 @@ function ConditionPill({
             />
           )}
         </div>
-        <div className="flex min-w-0 items-center gap-1">
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className={
-              pill.negated ? "border-destructive text-destructive" : ""
-            }
-            aria-pressed={pill.negated}
-            disabled={disabled}
-            data-model-routing-pill-negate
-            onClick={() => onChange({ ...pill, negated: !pill.negated })}
-          >
-            {t("modelRoutingGroup.conditionNot")}
-          </Button>
-          <HelpPopover label={t("modelRoutingGroup.unknownHintLabel")}>
-            {t("modelRoutingGroup.unknownHint")}
-          </HelpPopover>
-          <IconButton
-            type="button"
-            size="icon-xs"
-            className="text-muted-foreground hover:text-destructive"
-            label={t("modelRoutingGroup.removeCondition")}
-            disabled={disabled || !removable}
-            onClick={onRemove}
-          >
-            <X aria-hidden="true" />
-          </IconButton>
+        <div className="flex shrink-0 flex-col gap-1.5">
+          <span aria-hidden="true" className="min-h-5.5" />
+          <div className="flex min-w-0 items-center gap-1">
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              className={cn(
+                "h-8",
+                pill.negated && "border-destructive text-destructive",
+              )}
+              aria-pressed={pill.negated}
+              disabled={disabled}
+              data-model-routing-pill-negate
+              onClick={() => onChange({ ...pill, negated: !pill.negated })}
+            >
+              {t("modelRoutingGroup.conditionNot")}
+            </Button>
+            <HelpPopover label={t("modelRoutingGroup.unknownHintLabel")}>
+              {t("modelRoutingGroup.unknownHint")}
+            </HelpPopover>
+            <IconButton
+              type="button"
+              size="icon-xs"
+              className="text-muted-foreground hover:text-destructive"
+              label={t("modelRoutingGroup.removeCondition")}
+              disabled={disabled || !removable}
+              onClick={onRemove}
+            >
+              <X aria-hidden="true" />
+            </IconButton>
+          </div>
         </div>
       </div>
       {invalid ? (
@@ -1891,6 +1893,7 @@ function ValueBounds({
   const t = useT();
   const custom = useContext(RoutingCustomValuesContext);
   const customDimensions = useContext(CustomDimensionsContext);
+  const protocols = useContext(RoutingProtocolsContext);
   const { labels: taskTypes, atCapacity: taskTypeLabelsAtCapacity } =
     useContext(TaskTypeLabelsContext);
   const operators = fieldOperators(
@@ -1899,7 +1902,7 @@ function ValueBounds({
   const catalog =
     condition.field === "task_type"
       ? taskTypes
-      : modelRoutingFieldValues(condition.field, customDimensions);
+      : modelRoutingFieldValues(condition.field, customDimensions, protocols);
   const operator =
     modelRoutingConditionOperator(condition) ?? operators[0] ?? "in";
   // task_type is a group-scoped vocabulary: existing labels are suggestions,
@@ -1996,7 +1999,20 @@ function ValueBounds({
       group
       label={fieldLabel}
       tooltipLabel={t("modelRoutingGroup.fieldValueListHintLabel")}
-      tooltip={t("modelRoutingGroup.listHint", { max })}
+      tooltip={
+        // 自定义 task_type 标签的说明收进 `?`：它是一段长文本，放在控件下面会
+        // 把取值列挤成一条窄竖栏、整行被拉高（验收截图 2）。
+        creatable && condition.field === "task_type" ? (
+          <>
+            <p>{t("modelRoutingGroup.listHint", { max })}</p>
+            <p className="mt-1.5" data-model-routing-custom-hint>
+              {t("modelRoutingGroup.customTaskTypeHint")}
+            </p>
+          </>
+        ) : (
+          t("modelRoutingGroup.listHint", { max })
+        )
+      }
     >
       <div className="grid min-w-0 gap-1.5">
         <div
@@ -2057,14 +2073,7 @@ function ValueBounds({
             </div>
           )}
         </div>
-        {creatable && condition.field === "task_type" ? (
-          <p
-            className="text-xs text-muted-foreground"
-            data-model-routing-custom-hint
-          >
-            {t("modelRoutingGroup.customTaskTypeHint")}
-          </p>
-        ) : null}
+
         {condition.field === "task_type" && taskTypeLabelsAtCapacity ? (
           <FormMessage
             tone="notice"
@@ -2098,8 +2107,7 @@ export function defaultConditionFor(
   if (isModelRoutingTimeField(field)) return { field, within: [] };
   if (isModelRoutingRangeField(field)) return { field, gte: 0 };
   const operators = fieldOperators(field);
-  if (operators.includes("equals_bool"))
-    return { field, equals_bool: true };
+  if (operators.includes("equals_bool")) return { field, equals_bool: true };
   if ((operators as readonly string[]).includes("contains_any"))
     return { field, contains_any: [] };
   // New enum/open-vocabulary conditions start as an intentionally incomplete

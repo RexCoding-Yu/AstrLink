@@ -4136,7 +4136,6 @@ components:
               enum:
                 [
                   protocol,
-                  language,
                   media_kind,
                   task_type,
                   streaming,
@@ -4163,7 +4162,6 @@ components:
                 enum:
                   [
                     protocol,
-                    language,
                     media_kind,
                     task_type,
                     streaming,
@@ -4661,7 +4659,33 @@ components:
         group_id:
           {
             type: string,
-            description: "Optional routing group; the dry-run then also reports the rule decision.",
+            description: "Optional routing group; the dry-run then also reports every rule's verdict.",
+          }
+        protocol:
+          {
+            type: string,
+            description: "Request-side fact: the protocol the sample stands in for. Must name a known AstrLink protocol; omit to leave the fact unknown.",
+          }
+        media_kind:
+          {
+            type: string,
+            description: "Request-side fact: the media kind of the sample. Omit to leave the fact unknown.",
+          }
+        streaming:
+          {
+            type: boolean,
+            description: "Request-side fact: whether the sample stands in for a streaming request. Omit to leave the fact unknown.",
+          }
+        continuation:
+          {
+            type: boolean,
+            description: "Request-side fact: whether the sample continues an earlier response. Omit to leave the fact unknown.",
+          }
+        system_time:
+          {
+            type: string,
+            pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            description: "Request-side fact: the clock the sample is evaluated at, as HH:MM. Defaults to now.",
           }
     ClassifierDryRunResponse:
       type: object
@@ -4707,6 +4731,44 @@ components:
             model: { type: string }
             rule_id: { type: string }
             used_default: { type: boolean }
+        rules:
+          type: array
+          description: "Every rule in the group, in evaluation order, with its own verdict. The selected rule is the one a live request would use; the rest are reported so a rule that never fired can be told apart from one that fired and failed."
+          items:
+            type: object
+            additionalProperties: false
+            required: [rule_id, priority, target_member_id, state, selected]
+            properties:
+              rule_id: { type: string }
+              priority: { type: integer }
+              target_member_id: { type: string }
+              target_model: { type: string }
+              state:
+                {
+                  type: string,
+                  enum: [true, false, unknown, not_evaluated],
+                  description: "true/false: evaluated. unknown: evaluated, but a field it reads had no fact. not_evaluated: an earlier rule already won.",
+                }
+              selected: { type: boolean }
+              target_missing:
+                {
+                  type: boolean,
+                  description: "The rule came out true but names a member the group does not define; the walk stops and falls through to the default member.",
+                }
+              fields:
+                type: array
+                description: "Field observations for this rule's own condition, without classifier provenance."
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [field, source, known, match_count]
+                  properties:
+                    field: { type: string }
+                    source: { type: string }
+                    known: { type: boolean }
+                    match_count: { type: integer }
+                    skip_reason: { type: string }
+                    error_code: { type: string }
         fields:
           type: array
           description: Field observations from the production evaluator when a group was given.

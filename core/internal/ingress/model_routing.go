@@ -126,16 +126,9 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	// every rule that tests a built-in field evaluates exactly as before.
 	facts.Dimensions = modelrouting.DimensionFacts(taskType)
 	selection := modelrouting.Evaluate(*group, facts)
-	candidateObservations := modelrouting.TaskTypeCandidateObservations(taskType, *group, selection.TaskTypeCandidateIndex)
-	if taskType.ClassifierID != "" || taskType.Confidence > 0 || candidateObservations != nil {
-		for index := range selection.Fields {
-			if selection.Fields[index].Source == "classifier" {
-				selection.Fields[index].ClassifierID = taskType.ClassifierID
-				selection.Fields[index].ClassifierConfidence = taskType.Confidence
-				selection.Fields[index].Candidates = candidateObservations
-			}
-		}
-	}
+	// One conversion owns the provenance stamping, so the dry-run preview and
+	// this record cannot describe the same attempt differently.
+	modelrouting.StampClassifierProvenance(selection.Fields, taskType, *group, selection.TaskTypeCandidateIndex)
 	if selection.Member.ID == "" {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_invalid", message: "model routing group default member is invalid"}
 	}
@@ -670,44 +663,15 @@ func (handler *Handler) modelRoutingTaskTypeCloud(ctx context.Context, text stri
 		result.Confidence = outcome.Confidence
 		return result
 	}
-	failed := classifierFailureTaskType(plan.Fallback, group, outcome, result.DurationMS)
+	// A failure records its reason and leaves task_type unknown: the shared
+	// mapping owns the code domain, and nothing here substitutes a label. The
+	// request falls through to the group's default member.
+	failed := autoclassifier.FailureTaskType(outcome, result.DurationMS)
 	return modelrouting.TaskTypeOutcome{
-		Value:                  failed.Value,
 		Code:                   failed.Code,
 		DurationMS:             failed.DurationMS,
-		ClassifierID:           failed.ClassifierID,
+		ClassifierID:           string(failed.ClassifierID),
 		LowConfidenceThreshold: plan.LowConfidenceThreshold,
-	}
-}
-
-// classifierFailureTaskType maps a failed cloud classification onto the
-// configured fallback. fail-open is not negotiable: even fallback=error only
-// records a code and returns the deterministic skip result.
-func classifierFailureTaskType(fallback string, group contract.ModelRoutingGroup, outcome autoclassifier.Outcome, duration int) modelrouting.TaskTypeOutcome {
-	var code string
-	switch outcome.FallbackReason {
-	case autoclassifier.FallbackBusy:
-		code = "classifier_busy"
-	case autoclassifier.FallbackTimeout:
-		code = "classifier_timeout"
-	case cloud.FallbackRefusal:
-		code = "classifier_refusal"
-	case cloud.FallbackInvalidOutput:
-		code = "classifier_invalid_output"
-	default:
-		code = autoclassifier.FallbackUnavailable
-	}
-	identifier := string(outcome.ClassifierID)
-	switch fallback {
-	case contract.ClassifierFallbackError:
-		return modelrouting.TaskTypeOutcome{Code: "classifier_error", DurationMS: duration, ClassifierID: identifier}
-	case contract.ClassifierFallbackGeneral:
-		if group.ValidTaskTypeLabel("general") {
-			return modelrouting.TaskTypeOutcome{Value: "general", Code: code, DurationMS: duration, ClassifierID: identifier}
-		}
-		return modelrouting.TaskTypeOutcome{Code: "classifier_fallback_invalid", DurationMS: duration, ClassifierID: identifier}
-	default:
-		return modelrouting.TaskTypeOutcome{Code: code, DurationMS: duration, ClassifierID: identifier}
 	}
 }
 

@@ -108,7 +108,12 @@ export function calculateClassifierSettingsIssues(
 export interface ClassifierDimensionIssue {
   index: number;
   optionIndex?: number;
-  target: "name" | "description" | "options" | "optionName" | "optionDescription";
+  target:
+    | "name"
+    | "description"
+    | "options"
+    | "optionName"
+    | "optionDescription";
   problem: string;
 }
 
@@ -161,14 +166,29 @@ export function calculateClassifierDimensionIssues(
     const seenOptions = new Set<string>();
     dimension.options.forEach((option, optionIndex) => {
       if (option.name.trim().length === 0) {
-        issues.push({ index, optionIndex, target: "optionName", problem: "optionNameEmpty" });
+        issues.push({
+          index,
+          optionIndex,
+          target: "optionName",
+          problem: "optionNameEmpty",
+        });
         return;
       }
       if (runes(option.name) > classifierDimensionNameMaxRunes) {
-        issues.push({ index, optionIndex, target: "optionName", problem: "optionNameTooLong" });
+        issues.push({
+          index,
+          optionIndex,
+          target: "optionName",
+          problem: "optionNameTooLong",
+        });
       }
       if (seenOptions.has(option.name)) {
-        issues.push({ index, optionIndex, target: "optionName", problem: "optionNameDuplicate" });
+        issues.push({
+          index,
+          optionIndex,
+          target: "optionName",
+          problem: "optionNameDuplicate",
+        });
       }
       seenOptions.add(option.name);
     });

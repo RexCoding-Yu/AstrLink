@@ -147,9 +147,26 @@ func (handler *Handler) classifierCredentialResource(writer http.ResponseWriter,
 	}
 }
 
+// classifierDryRunRequest carries both the text and the request-side facts the
+// rules are judged against.
+//
+// The dry-run evaluates the whole rule table, not just the classifier, so it
+// needs the facts a live request would supply. Everything here is optional:
+// an omitted fact stays unknown, which is a first-class outcome — an unknown
+// fact never matches a rule, and the preview says so per field. Omitting is
+// therefore honest rather than a silent default, which is why the booleans are
+// pointers and not plain bools.
 type classifierDryRunRequest struct {
 	Text    string `json:"text"`
 	GroupID string `json:"group_id,omitempty"`
+	// Protocol must name a protocol AstrLink actually serves when set.
+	Protocol     string `json:"protocol,omitempty"`
+	MediaKind    string `json:"media_kind,omitempty"`
+	Streaming    *bool  `json:"streaming,omitempty"`
+	Continuation *bool  `json:"continuation,omitempty"`
+	// SystemTime overrides the wall clock as "HH:MM" so a time-window rule can
+	// be previewed without waiting for that window to come around.
+	SystemTime string `json:"system_time,omitempty"`
 }
 
 type classifierDryRunDecision struct {
@@ -171,11 +188,42 @@ type classifierDryRunResponse struct {
 	SanitizedPreview string                                  `json:"sanitized_preview,omitempty"`
 	Decision         *classifierDryRunDecision               `json:"decision,omitempty"`
 	Fields           []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
+	// Rules is every rule in the group with its own verdict, in evaluation
+	// order. The selection above reports only the winner, which cannot answer
+	// "why did the rule I wrote not fire?" — this is the rest of the table.
+	Rules []classifierDryRunRuleVerdict `json:"rules,omitempty"`
+}
+
+// classifierDryRunRuleVerdict is one rule's own outcome. State is one of
+// "true", "false", "unknown" or "not_evaluated":
+//
+//   - true/false      the row was tested and came out that way
+//   - unknown         the row was tested, but a field it reads had no fact
+//   - not_evaluated   an earlier row already won, so this one never ran
+//
+// The last three all end up not selecting the member, and only the first of
+// them is a fact the operator can act on by writing a better rule; collapsing
+// them into one "no match" is what makes a rule set hard to debug.
+type classifierDryRunRuleVerdict struct {
+	RuleID         string                                  `json:"rule_id"`
+	Priority       int                                     `json:"priority"`
+	TargetMemberID string                                  `json:"target_member_id"`
+	TargetModel    string                                  `json:"target_model,omitempty"`
+	State          string                                  `json:"state"`
+	Selected       bool                                    `json:"selected"`
+	TargetMissing  bool                                    `json:"target_missing,omitempty"`
+	Fields         []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
 }
 
 type dryRunDimensionScore struct {
 	Label string  `json:"label"`
 	Score float64 `json:"score"`
+	// Known and Produced separate the two ways a dimension can fail to decide
+	// anything: the classifier never answered it, or it answered below the
+	// threshold. Neither matches a rule, but they need different fixes —
+	// reword the prompt, or lower the threshold.
+	Known    bool `json:"known"`
+	Produced bool `json:"produced"`
 }
 
 // classifierDryRun previews one classification locally: the text passes the
@@ -204,6 +252,22 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 	}
 	if strings.TrimSpace(input.Text) == "" || utf8.RuneCountInString(input.Text) > 64*1024 {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_dry_run", "text must contain 1 to 65536 runes")
+		return
+	}
+	// An unset protocol is "unknown", which is a legitimate preview input. A set
+	// one must be a protocol the gateway actually serves: previewing a rule
+	// against a name no request can carry would report a selection that can
+	// never happen, which is the same trap an open vocabulary creates.
+	if input.Protocol != "" {
+		protocol := contract.ProtocolID(input.Protocol)
+		if !protocol.Valid() || !protocol.Known() {
+			writeError(writer, http.StatusUnprocessableEntity, "unknown_dry_run_protocol", "protocol must name a known AstrLink protocol")
+			return
+		}
+	}
+	systemTime, timeErr := dryRunSystemTime(input.SystemTime)
+	if timeErr != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_dry_run", "system_time must be HH:MM")
 		return
 	}
 	settings, err := handler.classifierSettings.GetClassifierSettings(request.Context())
@@ -276,48 +340,47 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		}
 	} else {
 		// The dry-run preview reports failures through the same shared
-		// mapping as production routing: stable record codes instead of raw
-		// provider reasons, and the configured fallback (error records
-		// classifier_error, general fills the label when the group accepts
-		// it) applies identically in both consumers.
-		var groupValue contract.ModelRoutingGroup
-		if group != nil {
-			groupValue = *group
-		}
-		failure := autoclassifier.FailureTaskType(plan.Fallback, groupValue, outcome, response.DurationMS)
-		taskType.Value = failure.Value
+		// mapping as production routing: a stable record code instead of the
+		// raw provider reason, and no substituted label — the preview shows
+		// the default member a live request would fall through to.
+		failure := autoclassifier.FailureTaskType(outcome, response.DurationMS)
 		taskType.Code = failure.Code
 	}
 	response.Category = taskType.Value
 	response.FallbackReason = taskType.Code
-	response.Dimensions = dryRunDimensions(taskType.Dimensions)
+	// The dimensions the evaluator sees are the dimensions the preview reports,
+	// one entry per configured dimension rather than per answered one: a
+	// dimension the classifier skipped is the case an operator most needs to
+	// see, and a report built from the answers alone would silently omit it.
+	dimensionFacts := modelrouting.DimensionFacts(taskType)
+	response.Dimensions = dryRunDimensions(plan.Dimensions, dimensionFacts)
 	if group != nil {
-		now := time.Now()
+		// The facts come from the request, not from constants. The preview used
+		// to pin protocol/media_kind/streaming, so every request-derived rule
+		// was judged against a request nobody made — the classifier was
+		// previewed, but the rule table was not. What the operator omits is
+		// left unknown, which the rule walk reports per field.
 		facts := contract.ModelRoutingFacts{
-			Protocol:    string(contract.ProtocolOpenAIChat),
-			MediaKind:   "none",
-			Streaming:   boolPtrDryRun(false),
-			LiteralText: sanitized,
-			TaskType:    taskType.Value,
-			SystemTime:  &now,
+			Protocol:     input.Protocol,
+			MediaKind:    input.MediaKind,
+			Streaming:    input.Streaming,
+			Continuation: input.Continuation,
+			LiteralText:  sanitized,
+			TaskType:     taskType.Value,
+			SystemTime:   &systemTime,
 		}
 		facts.TaskTypeCandidates = modelrouting.TaskTypeCandidateLabels(taskType, *group)
 		// The dry-run preview must evaluate the same dimensions production
 		// routing does, or a saved-then-previewed configuration would report a
 		// different outcome than the live path.
-		facts.Dimensions = modelrouting.DimensionFacts(taskType)
-		selection := modelrouting.Evaluate(*group, facts)
-		candidateObservations := modelrouting.TaskTypeCandidateObservations(taskType, *group, selection.TaskTypeCandidateIndex)
-		if taskType.ClassifierID != "" || taskType.Confidence > 0 || candidateObservations != nil {
-			for index := range selection.Fields {
-				if selection.Fields[index].Source == "classifier" {
-					selection.Fields[index].ClassifierID = taskType.ClassifierID
-					selection.Fields[index].ClassifierConfidence = taskType.Confidence
-					selection.Fields[index].Candidates = candidateObservations
-				}
-			}
-		}
+		facts.Dimensions = dimensionFacts
+		selection, verdicts := modelrouting.Explain(*group, facts)
+		// Provenance is stamped by the same conversion the inference path uses,
+		// so the preview cannot describe this attempt differently from the
+		// record a live request would write.
+		modelrouting.StampClassifierProvenance(selection.Fields, taskType, *group, selection.TaskTypeCandidateIndex)
 		response.Fields = selection.Fields
+		response.Rules = dryRunRuleVerdicts(verdicts, *group)
 		response.Decision = &classifierDryRunDecision{
 			MemberID:    selection.Member.ID,
 			ServiceID:   string(selection.Member.ServiceID),
@@ -329,7 +392,84 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 	writeJSON(writer, http.StatusOK, response)
 }
 
+// dryRunRuleVerdicts renders the per-rule walk for the wire. The member model
+// is resolved here rather than in the evaluator: naming a member's model is a
+// property of the group document, not of the evaluation.
+func dryRunRuleVerdicts(verdicts []modelrouting.RuleVerdict, group contract.ModelRoutingGroup) []classifierDryRunRuleVerdict {
+	if len(verdicts) == 0 {
+		return nil
+	}
+	models := make(map[string]string, len(group.Members))
+	for _, member := range group.Members {
+		models[member.ID] = member.Model
+	}
+	rendered := make([]classifierDryRunRuleVerdict, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		priority := 0
+		if verdict.RulePriority != nil {
+			priority = *verdict.RulePriority
+		}
+		state := verdict.State.String()
+		if !verdict.Decided {
+			// "never ran" and "ran but a field was unknown" both carry triUnknown.
+			// Reaching the second requires the facts to have been read, so only
+			// the first is reported as unevaluated — a row that was skipped
+			// because an earlier one won cannot be improved by editing it.
+			state = "not_evaluated"
+		}
+		rendered = append(rendered, classifierDryRunRuleVerdict{
+			RuleID:         verdict.RuleID,
+			Priority:       priority,
+			TargetMemberID: verdict.TargetMemberID,
+			TargetModel:    models[verdict.TargetMemberID],
+			State:          state,
+			Selected:       verdict.Selected,
+			TargetMissing:  verdict.TargetMissing,
+			Fields:         verdict.Fields,
+		})
+	}
+	return rendered
+}
+
 func boolPtrDryRun(value bool) *bool { return &value }
+
+// dryRunSystemTime resolves the preview's clock. An empty value means "now",
+// sampled once here so every rule in one preview reads the same instant — the
+// production fact builder makes the same guarantee. A supplied "HH:MM" keeps
+// today's date: `system_time` is a time-of-day window, and the evaluator only
+// ever reads the clock portion.
+func dryRunSystemTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Now(), nil
+	}
+	hour, minute, ok := minutesOfClock(value)
+	if !ok {
+		return time.Time{}, errInvalidDryRunClock
+	}
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()), nil
+}
+
+var errInvalidDryRunClock = errors.New("system_time must be HH:MM")
+
+// minutesOfClock mirrors the evaluator's window parser: five characters, a
+// colon in the middle, two digits either side, and a real time of day.
+func minutesOfClock(value string) (int, int, bool) {
+	if len(value) != 5 || value[2] != ':' {
+		return 0, 0, false
+	}
+	for _, position := range []int{0, 1, 3, 4} {
+		if digit := value[position]; digit < '0' || digit > '9' {
+			return 0, 0, false
+		}
+	}
+	hour := int(value[0]-'0')*10 + int(value[1]-'0')
+	minute := int(value[3]-'0')*10 + int(value[4]-'0')
+	if hour > 23 || minute > 59 {
+		return 0, 0, false
+	}
+	return hour, minute, true
+}
 
 // dryRunDimensionScores moves the cloud source's dimension answers onto the
 // shared carrier the dry-run evaluates. task_type is dropped: it already
@@ -351,15 +491,35 @@ func dryRunDimensionScores(dimensions map[string]autoclassifier.DimensionAnswer)
 	return scores
 }
 
-// dryRunDimensions converts the internal DimensionScore map to the HTTP
-// response shape, keeping the zero value nil for backward compatibility.
-func dryRunDimensions(dimensions map[string]modelrouting.DimensionScore) map[string]dryRunDimensionScore {
-	if len(dimensions) == 0 {
+// dryRunDimensions renders the configured dimensions against the facts the
+// evaluator used. It walks `configured` rather than the facts map so a
+// dimension the classifier never answered still appears — with Produced
+// false — instead of vanishing from the report, which would read as "this
+// dimension is not configured" rather than "the classifier skipped it".
+//
+// Known is the fact builder's own threshold verdict, so a dimension the
+// preview marks Known is exactly a dimension a rule could match on.
+func dryRunDimensions(configured []contract.ClassifierDimension, facts map[string]contract.DimensionFact) map[string]dryRunDimensionScore {
+	if len(configured) == 0 {
 		return nil
 	}
-	converted := make(map[string]dryRunDimensionScore, len(dimensions))
-	for name, score := range dimensions {
-		converted[name] = dryRunDimensionScore{Label: score.Label, Score: score.Score}
+	converted := make(map[string]dryRunDimensionScore, len(configured))
+	for _, dimension := range configured {
+		if dimension.Name == contract.BuiltInTaskTypeDimension {
+			// task_type already travels as category/confidence; repeating it
+			// here would let the two disagree.
+			continue
+		}
+		fact := facts[dimension.Name]
+		converted[dimension.Name] = dryRunDimensionScore{
+			Label:    fact.Value,
+			Score:    fact.Score,
+			Known:    fact.Known,
+			Produced: fact.Produced,
+		}
+	}
+	if len(converted) == 0 {
+		return nil
 	}
 	return converted
 }

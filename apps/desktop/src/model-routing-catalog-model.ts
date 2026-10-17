@@ -18,9 +18,13 @@ import {
   modelRoutingFieldSource,
   modelRoutingFieldValues,
   modelRoutingFields,
+  maxModelRoutingTaskTypeLabels,
   type ClassifierDimension,
+  type ModelRoutingCondition,
   type ModelRoutingField,
   type ModelRoutingFieldSource,
+  type ModelRoutingGroup,
+  type ModelRoutingValueCondition,
 } from "./model-routing-group-model";
 
 /**
@@ -56,20 +60,29 @@ export interface ModelRoutingCatalogEntry {
 export function modelRoutingCatalog(
   extraFields: readonly string[] = [],
   dimensions?: readonly ClassifierDimension[],
+  /**
+   * `protocol` 的取值域来自 core capabilities，与规则编辑器拿到的是同一份。
+   * 省略时该字段列不出候选值——目录只呈现已经知道的东西，不猜一个协议列表。
+   */
+  protocols?: readonly string[],
 ): readonly ModelRoutingCatalogEntry[] {
   const builtin = modelRoutingFields.map((field) => ({
     field,
     kind: modelRoutingFieldKind(field),
     source: modelRoutingFieldSource(field),
     operators: fieldOperators(field),
-    values: modelRoutingFieldValues(field, dimensions),
+    values: modelRoutingFieldValues(field, dimensions, protocols),
   }));
   const extra = extraFields.map((field) => ({
     field: field as ModelRoutingField,
     kind: modelRoutingFieldKind(field as ModelRoutingField),
     source: modelRoutingFieldSource(field as ModelRoutingField),
     operators: fieldOperators(field as ModelRoutingField),
-    values: modelRoutingFieldValues(field as ModelRoutingField, dimensions),
+    values: modelRoutingFieldValues(
+      field as ModelRoutingField,
+      dimensions,
+      protocols,
+    ),
   }));
   return [...builtin, ...extra];
 }
@@ -85,4 +98,78 @@ export function modelRoutingCatalogLabelDomain(
     if (labels && labels.length > 0) return labels;
   }
   return modelRoutingFieldValues("task_type") ?? [];
+}
+
+/** 标签编辑的一个问题；`label` 为出问题的标签，`group` 为引用它的组。 */
+export interface TaskTypeLabelIssue {
+  problem: "empty" | "tooLong" | "duplicate" | "tooMany" | "none" | "inUse";
+  label?: string;
+  group?: string;
+}
+
+/** 与 Go `MaxModelRoutingValueRunes` 一致：标签也是一个规则取值。 */
+export const maxModelRoutingTaskTypeLabelRunes = 128;
+
+function referencedTaskTypeLabels(condition: ModelRoutingCondition): string[] {
+  if ("field" in condition) {
+    if (condition.field !== "task_type") return [];
+    const value = condition as ModelRoutingValueCondition;
+    return [
+      ...(value.in ?? []),
+      ...(value.not_in ?? []),
+      ...(value.equals ? [value.equals] : []),
+      ...(value.not_equals ? [value.not_equals] : []),
+    ];
+  }
+  if ("not" in condition) return referencedTaskTypeLabels(condition.not);
+  const children =
+    "all" in condition ? (condition.all ?? []) : (condition.any ?? []);
+  return children.flatMap(referencedTaskTypeLabels);
+}
+
+/**
+ * 「字段类型」页签上编辑的 task_type 标签集合的预检，镜像 Go 的
+ * `validateModelRoutingTaskTypeLabels` 与「规则取值必须在组标签集合里」两条。
+ *
+ * 第二条是这里特有的：页签把同一份标签写进每个组，删掉某个组的规则仍在用的
+ * 标签会让整份路由设置被后端拒收，所以在本地就指出是哪个组在用。
+ */
+export function calculateTaskTypeLabelIssues(
+  labels: readonly string[],
+  groups: readonly ModelRoutingGroup[],
+): TaskTypeLabelIssue[] {
+  const issues: TaskTypeLabelIssue[] = [];
+  if (labels.length === 0) issues.push({ problem: "none" });
+  if (labels.length > maxModelRoutingTaskTypeLabels)
+    issues.push({ problem: "tooMany" });
+  const seen = new Set<string>();
+  for (const label of labels) {
+    if (label.trim() === "") issues.push({ problem: "empty" });
+    else if ([...label].length > maxModelRoutingTaskTypeLabelRunes)
+      issues.push({ problem: "tooLong", label });
+    else if (seen.has(label)) issues.push({ problem: "duplicate", label });
+    seen.add(label);
+  }
+  for (const group of groups) {
+    const used = new Set(
+      group.rules.flatMap((rule) => referencedTaskTypeLabels(rule.when)),
+    );
+    for (const label of used)
+      if (!seen.has(label))
+        issues.push({ problem: "inUse", label, group: group.id });
+  }
+  return issues;
+}
+
+/** 各组是否已经共用同一份标签（未覆盖的组按内建默认域计）。 */
+export function modelRoutingTaskTypeLabelsDiverge(
+  overrides: readonly (readonly string[] | undefined)[],
+): boolean {
+  const fallback = modelRoutingFieldValues("task_type") ?? [];
+  const keys = new Set(
+    overrides.map((labels) =>
+      JSON.stringify(labels && labels.length > 0 ? labels : fallback),
+    ),
+  );
+  return keys.size > 1;
 }

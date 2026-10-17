@@ -59,6 +59,7 @@ describe("model routing field catalog panel", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     dirty = [];
     bridge.getRoutingSettings.mockReset().mockResolvedValue(routingSettings());
+    bridge.updateRoutingSettings.mockReset();
     bridge.getClassifierSettings
       .mockReset()
       .mockResolvedValue(classifierSettings());
@@ -105,9 +106,7 @@ describe("model routing field catalog panel", () => {
    * row. Select by the accessible name instead.
    */
   const removeButton = (label: string) =>
-    container.querySelector<HTMLButtonElement>(
-      `button[aria-label="${label}"]`,
-    );
+    container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 
   const input = (label: string): HTMLInputElement => {
     const match = container.querySelector<HTMLInputElement>(
@@ -140,12 +139,12 @@ describe("model routing field catalog panel", () => {
     await type(input("取值 1.1"), "billing");
   }
 
-  it("keeps the built-in table read-only and lists the 22 frozen fields", async () => {
+  it("keeps the built-in table read-only and lists the 21 frozen fields", async () => {
     await render();
     const rows = container.querySelectorAll(
       "[data-model-routing-catalog-field]",
     );
-    expect(rows.length).toBe(22);
+    expect(rows.length).toBe(21);
     // The built-in block offers no controls of its own.
     expect(
       container.querySelector("[data-model-routing-catalog-field] input"),
@@ -165,7 +164,11 @@ describe("model routing field catalog panel", () => {
     const submitted = bridge.updateClassifierSettings.mock
       .calls[0][0] as ClassifierSettings;
     expect(submitted.dimensions).toEqual([
-      { name: "topic", description: "", options: [{ name: "billing", description: "" }] },
+      {
+        name: "topic",
+        description: "",
+        options: [{ name: "billing", description: "" }],
+      },
     ]);
     // The rest of the singleton travels with the save untouched: the panel
     // edits one field of a whole-document resource, so dropping the other keys
@@ -180,9 +183,7 @@ describe("model routing field catalog panel", () => {
     bridge.getClassifierSettings
       .mockReset()
       .mockResolvedValue(
-        classifierSettings([
-          { name: "topic", options: [{ name: "billing" }] },
-        ]),
+        classifierSettings([{ name: "topic", options: [{ name: "billing" }] }]),
       );
     await render();
 
@@ -285,6 +286,141 @@ describe("model routing field catalog panel", () => {
     await fillFirstDimension();
     expect(dirty.at(-1)).toBe(true);
     expect(saveButton()?.disabled).toBe(false);
+  });
+
+  it("shows a custom dimension by its name, never a raw i18n key", async () => {
+    bridge.getClassifierSettings
+      .mockReset()
+      .mockResolvedValue(
+        classifierSettings([
+          { name: "s_task_type", options: [{ name: "前端" }] },
+        ]),
+      );
+    await render();
+    const row = container.querySelector(
+      '[data-model-routing-catalog-field="s_task_type"]',
+    );
+    expect(row?.textContent).toContain("s_task_type");
+    expect(row?.textContent).toContain("前端");
+    expect(row?.textContent).not.toContain("modelRouting.");
+  });
+
+  it("labels each option input so the user knows what to type", async () => {
+    await render();
+    await act(async () => {
+      button("添加维度")?.click();
+      await Promise.resolve();
+    });
+    // A new dimension starts with exactly one option row, under a header.
+    expect(
+      container.querySelectorAll("[data-model-routing-dimension-option]"),
+    ).toHaveLength(1);
+    expect(input("取值 1.1").placeholder).not.toBe("");
+    expect(input("取值说明 1.1").placeholder).not.toBe("");
+  });
+
+  describe("task_type labels", () => {
+    const groupWith = (id: string, when?: unknown) => ({
+      id,
+      enabled: true,
+      members: [{ id: "a", service_id: "s", model: "m" }],
+      default_member_id: "a",
+      rules: when
+        ? [{ id: "r", priority: 10, target_member_id: "a", when }]
+        : [],
+    });
+    const settingsWith = (groups: unknown[]) => ({
+      ...routingSettings(),
+      model_routing_groups: groups,
+    });
+    // task_type is the first row of the dimension list now, so it shares the
+    // panel's one Save: labels and dimensions are written under one action.
+    const labelSave = () =>
+      container.querySelector<HTMLButtonElement>(
+        "[data-model-routing-catalog-save]",
+      );
+
+    it("adds a label and writes the set into every group", async () => {
+      const stored = settingsWith([
+        groupWith("g1", { field: "task_type", in: ["coding"] }),
+        groupWith("g2"),
+      ]);
+      bridge.getRoutingSettings.mockReset().mockResolvedValue(stored);
+      bridge.updateRoutingSettings
+        .mockReset()
+        .mockImplementation(async (patch) => ({ ...stored, ...patch }));
+      await render();
+
+      // One Save for the whole tab, so the button is present but disabled until
+      // an edit actually happens.
+      expect(labelSave()!.disabled).toBe(true);
+      await type(input("添加标签"), "writing");
+      await act(async () => {
+        input("添加标签").dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+        );
+      });
+      expect(
+        container.querySelector('[data-task-type-label="writing"]'),
+      ).not.toBeNull();
+      expect(dirty.at(-1)).toBe(true);
+      await act(async () => {
+        labelSave()!.click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(bridge.updateRoutingSettings).toHaveBeenCalledTimes(1);
+      const [patch] = bridge.updateRoutingSettings.mock.calls[0] as [
+        {
+          model_routing_groups: {
+            id: string;
+            task_type_labels: string[];
+            rules: unknown[];
+          }[];
+        },
+      ];
+      const expected = [
+        "general",
+        "research",
+        "coding",
+        "architect",
+        "writing",
+      ];
+      expect(patch.model_routing_groups.map((g) => g.task_type_labels)).toEqual(
+        [expected, expected],
+      );
+      // Rules travel back untouched.
+      expect(patch.model_routing_groups[0].rules).toHaveLength(1);
+    });
+
+    it("refuses to drop a label a rule still uses", async () => {
+      bridge.getRoutingSettings
+        .mockReset()
+        .mockResolvedValue(
+          settingsWith([
+            groupWith("g1", { field: "task_type", in: ["coding"] }),
+          ]),
+        );
+      await render();
+      await act(async () => {
+        removeButton("移除标签 coding")!.click();
+      });
+      await act(async () => {
+        labelSave()!.click();
+        await Promise.resolve();
+      });
+      expect(bridge.updateRoutingSettings).not.toHaveBeenCalled();
+      expect(container.textContent).toContain(
+        "组 g1 的规则仍在使用标签 coding",
+      );
+    });
+
+    it("cannot edit labels before a group exists", async () => {
+      await render();
+      expect(input("添加标签").disabled).toBe(true);
+      expect(container.textContent).toContain("请先创建一个模型路由组");
+    });
   });
 
   it("shows the {{dim.X}} placeholder a prompt has to use", async () => {

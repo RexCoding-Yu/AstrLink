@@ -19,11 +19,14 @@ export type IntelligentRoutingView =
 export function IntelligentRouting({
   initialView = "groups",
   services,
+  protocols = [],
   ready,
   onDirtyChange,
 }: {
   initialView?: IntelligentRoutingView;
   services: readonly RoutableService[];
+  /** core capabilities' protocol IDs — the value domain of the `protocol` rule field. */
+  protocols?: readonly string[];
   ready: boolean;
   onDirtyChange: (dirty: boolean) => void;
 }) {
@@ -46,13 +49,15 @@ export function IntelligentRouting({
   const setTabDirtyChange = useMemo(
     () =>
       Object.fromEntries(
-        (["groups", "fieldCatalog", "classifier", "dryRun"] as const).map((key) => [
-          key,
-          (next: boolean) =>
-            setTabDirty((current) =>
-              current[key] === next ? current : { ...current, [key]: next },
-            ),
-        ]),
+        (["groups", "fieldCatalog", "classifier", "dryRun"] as const).map(
+          (key) => [
+            key,
+            (next: boolean) =>
+              setTabDirty((current) =>
+                current[key] === next ? current : { ...current, [key]: next },
+              ),
+          ],
+        ),
       ) as Pick<
         Record<IntelligentRoutingView, (next: boolean) => void>,
         "groups" | "fieldCatalog" | "classifier" | "dryRun"
@@ -112,6 +117,7 @@ export function IntelligentRouting({
           <ModelRoutingGroupsPanel
             ready={ready}
             services={services}
+            protocols={protocols}
             onDirtyChange={setTabDirtyChange.groups}
           />
         </TabsContent>
@@ -127,6 +133,7 @@ export function IntelligentRouting({
         >
           <ModelRoutingFieldCatalogPanel
             ready={ready}
+            protocols={protocols}
             onDirtyChange={setTabDirtyChange.fieldCatalog}
           />
         </TabsContent>
@@ -151,7 +158,7 @@ export function IntelligentRouting({
           className="gutter-scroller flex min-h-0 flex-1 flex-col overflow-y-auto pb-1"
           data-tab-scroller
         >
-          <ClassifierDryRunPanel ready={ready} />
+          <ClassifierDryRunPanel ready={ready} protocols={protocols} />
         </TabsContent>
       </Tabs>
     </div>

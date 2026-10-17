@@ -38,7 +38,9 @@ describe("shared global recovery settings", () => {
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     bridge.getRoutingSettings.mockReset().mockResolvedValue(settings());
-    bridge.getClassifierSettings.mockReset().mockResolvedValue({ dimensions: [] });
+    bridge.getClassifierSettings
+      .mockReset()
+      .mockResolvedValue({ dimensions: [] });
     bridge.getClientIdentities
       .mockReset()
       .mockRejectedValue(new Error("unavailable"));

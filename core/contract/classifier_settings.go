@@ -54,6 +54,11 @@ const (
 	// stay addressable from {{dim.<name>}} and bounded in length.
 	MaxClassifierDimensionNameRunes = 64
 
+	// Legacy wire values for inline.fallback. The setting is gone: a failed
+	// classification always leaves its fact unknown, so every rule testing it
+	// skips and the group's default member serves the request. These names
+	// stay only so a document written before the removal still decodes —
+	// decodePolicy rejects unknown fields — and the stored value is never read.
 	ClassifierFallbackSkip    = "skip"
 	ClassifierFallbackGeneral = "general"
 	ClassifierFallbackError   = "error"
@@ -116,7 +121,10 @@ type ClassifierInlineSource struct {
 	Prompt                 string   `json:"prompt,omitempty"`
 	TimeoutMS              *int     `json:"timeout_ms,omitempty"`
 	LowConfidenceThreshold *float64 `json:"low_confidence_threshold,omitempty"`
-	Fallback               string   `json:"fallback,omitempty"`
+	// Deprecated and ignored. Failure behaviour is fixed rather than
+	// configured, but the member stays decodable so a document stored by an
+	// earlier build does not become unreadable. The panel never writes it.
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // ClassifierProviderRef is the reserved shape for a future classifier
@@ -577,23 +585,6 @@ func (settings ClassifierSettings) EffectiveLowConfidenceThreshold() float64 {
 	return DefaultClassifierLowConfidence
 }
 
-// EffectiveFallback returns the global fallback behavior.
-func (settings ClassifierSettings) EffectiveFallback() string {
-	if settings.Inline != nil && validClassifierFallback(settings.Inline.Fallback) {
-		return settings.Inline.Fallback
-	}
-	return ClassifierFallbackSkip
-}
-
-func validClassifierFallback(value string) bool {
-	switch value {
-	case ClassifierFallbackSkip, ClassifierFallbackGeneral, ClassifierFallbackError:
-		return true
-	default:
-		return false
-	}
-}
-
 // CloudConfigured reports whether the inline cloud classifier is enabled and
 // complete enough to call. Anything short of this stays on deterministic
 // fallback; the classifier seam must fail open.
@@ -620,7 +611,6 @@ type ClassifierCallPlan struct {
 	Dimensions             []ClassifierDimension
 	TimeoutMS              int
 	LowConfidenceThreshold float64
-	Fallback               string
 }
 
 // RenderClassifierPrompt substitutes the prompt's placeholders: {{labels}}
@@ -724,7 +714,6 @@ func (settings ClassifierSettings) ResolveCallPlan(group *ModelRoutingGroup) Cla
 		Prompt:                 settings.EffectivePrompt(),
 		TimeoutMS:              settings.EffectiveTimeoutMS(),
 		LowConfidenceThreshold: settings.EffectiveLowConfidenceThreshold(),
-		Fallback:               settings.EffectiveFallback(),
 	}
 	labels := DefaultModelRoutingTaskTypeLabels
 	if group != nil {

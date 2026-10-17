@@ -75,7 +75,6 @@ export type ModelRoutingFieldSource = "local" | "classifier";
  */
 export const modelRoutingFieldOperators = {
   protocol: ["in", "not_in", "equals", "not_equals"],
-  language: ["in", "not_in", "equals", "not_equals"],
   media_kind: ["in", "not_in", "equals", "not_equals"],
   task_type: ["in", "not_in", "equals", "not_equals"],
   streaming: ["equals_bool"],
@@ -149,9 +148,7 @@ export const modelRoutingCustomDimensionOperators = [
 ] as const;
 
 /** 内建字段的操作符；未注册字段（自定义分类维度）一律视为 string 类。 */
-export function fieldOperators(
-  field: ModelRoutingField,
-): readonly string[] {
+export function fieldOperators(field: ModelRoutingField): readonly string[] {
   if (Object.hasOwn(modelRoutingFieldOperators, field)) {
     return modelRoutingFieldOperators[field as BuiltinModelRoutingField];
   }
@@ -233,13 +230,29 @@ import type { ClassifierDimension } from "./classifier-settings-model";
 
 export type { ClassifierDimension };
 
-/** 值的取值域仅用于编辑器候选与提示；后端权威校验接受任意合法字符串。 */
+/**
+ * 值的取值域仅用于编辑器候选与提示；后端权威校验接受任意合法字符串。
+ *
+ * `protocol` 的取值域是**运行期传入**的 `protocols`（core 的 capabilities），
+ * 而不是这里再写一份 id 列表。原因有两条：
+ *
+ *  1. 这里不能静态 import `./service-presets.ts` —— 那条链是
+ *     `service-presets → service-model → failure-policy-model → 本文件`，
+ *     静态引入会形成环，模块初始化时拿到的是未初始化的数组。
+ *  2. capabilities 里就是「AstrLink 当前实际支持的协议」，正是用户写规则时
+ *     要选的集合。post-alpha 的保留 id 不在其中：它们此刻不可执行，列出来会
+ *     诱导用户写出永远不会命中的规则 —— 与 `language` 被删掉是同一个问题。
+ *
+ * 未传入时 `protocol` 没有候选集，编辑器回退为自由输入（测试与旧调用点即此路径）。
+ */
 export function modelRoutingFieldValues(
   field: ModelRoutingField,
   dimensions?: readonly ClassifierDimension[],
+  protocols?: readonly string[],
 ): readonly string[] | undefined {
   if (field === "task_type") return modelRoutingTaskTypes;
   if (field === "media_kind") return modelRoutingMediaKinds;
+  if (field === "protocol") return protocols;
   if (dimensions) {
     const dim = dimensions.find((d) => d.name === field);
     if (dim) return dim.options.map((opt) => opt.name);
@@ -593,7 +606,12 @@ function conditionAt(
 
   if (present[0] === "not") {
     keysAt(node, ["not"], [], path);
-    const child = conditionAt(node.not, `${path}.not`, depth + 1, knownDimensions);
+    const child = conditionAt(
+      node.not,
+      `${path}.not`,
+      depth + 1,
+      knownDimensions,
+    );
     return { condition: { not: child.condition }, nodes: 1 + child.nodes };
   }
 
@@ -608,8 +626,7 @@ function leafConditionAt(
   const field = textAt(node.field, `${path}.field`);
   const isBuiltin = (modelRoutingFields as readonly string[]).includes(field);
   const isKnownDimension = knownDimensions.includes(field);
-  if (!isBuiltin && !isKnownDimension)
-    fail(`${path}.field`, "字段不属于 V1");
+  if (!isBuiltin && !isKnownDimension) fail(`${path}.field`, "字段不属于 V1");
   const typed = field as ModelRoutingField;
 
   // 时间字段只有一个 `within` 形状，既不是比较边界也不是列表型叶子。

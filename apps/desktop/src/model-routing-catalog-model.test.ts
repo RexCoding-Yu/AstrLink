@@ -44,6 +44,9 @@ describe("model routing field catalog", () => {
       "coding",
       "architect",
     ]);
+    // `protocol` is no longer an open vocabulary: its domain is supplied at
+    // runtime from core's capabilities, so it has no fixed list of its own and
+    // the catalog reports whatever that call passed in.
     expect(byField.get("protocol")?.values).toBeUndefined();
     expect(byField.get("system_time")?.operators).toEqual(["within"]);
   });

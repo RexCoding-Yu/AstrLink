@@ -27,22 +27,17 @@ type Selection struct {
 // Evaluate performs only deterministic, bounded local evaluation. Unknown
 // facts never block a request; only a true rule is eligible to select a member.
 func Evaluate(group contract.ModelRoutingGroup, facts contract.ModelRoutingFacts) Selection {
-	members := make(map[string]contract.ModelRoutingMember, len(group.Members))
-	for _, member := range group.Members {
-		members[member.ID] = member
-	}
+	selection, _ := selectRule(group, facts)
+	return selection
+}
 
-	// The wire contract requires unique priorities, but keeping the ID tie-break
-	// here makes runtime behavior deterministic for an unvalidated document too.
-	// Copy before sorting: callers may reuse the settings snapshot and the
-	// evaluator must not rewrite its rule order.
-	rules := append([]contract.ModelRoutingRule(nil), group.Rules...)
-	sort.SliceStable(rules, func(i, j int) bool {
-		if rules[i].Priority != rules[j].Priority {
-			return rules[i].Priority < rules[j].Priority
-		}
-		return rules[i].ID < rules[j].ID
-	})
+// selectRule is the one selection pass: it returns the winning selection and the
+// winning rule's index in orderedRules, or -1 when no rule selected a member.
+// Evaluate and Explain both derive from it so the preview cannot disagree with
+// the live path about which row won.
+func selectRule(group contract.ModelRoutingGroup, facts contract.ModelRoutingFacts) (Selection, int) {
+	members := memberIndex(group)
+	rules := orderedRules(group)
 	for index := range rules {
 		rule := &rules[index]
 		result, observations, adoptedCandidate := evaluateRow(rule.When, facts)
@@ -58,10 +53,40 @@ func Evaluate(group contract.ModelRoutingGroup, facts contract.ModelRoutingFacts
 		if adoptedCandidate != nil {
 			selection.TaskTypeCandidateIndex = adoptedCandidate
 		}
-		return selection
+		return selection, index
 	}
 	member := members[group.DefaultMemberID]
-	return Selection{Member: member, SelectionSource: contract.ModelRoutingSelectionDefaultMember, UsedDefault: true, Fields: []contract.ModelRoutingFieldObservation{}}
+	return Selection{Member: member, SelectionSource: contract.ModelRoutingSelectionDefaultMember, UsedDefault: true, Fields: []contract.ModelRoutingFieldObservation{}}, -1
+}
+
+// orderedRules is the one rule order every evaluation path uses: ascending
+// priority, ID as the tie-break. The wire contract requires unique priorities,
+// but keeping the tie-break here makes runtime behavior deterministic for an
+// unvalidated document too.
+//
+// The slice is copied before sorting: callers may reuse the settings snapshot
+// and the evaluator must not rewrite its rule order.
+func orderedRules(group contract.ModelRoutingGroup) []contract.ModelRoutingRule {
+	rules := append([]contract.ModelRoutingRule(nil), group.Rules...)
+	sort.SliceStable(rules, func(i, j int) bool {
+		if rules[i].Priority != rules[j].Priority {
+			return rules[i].Priority < rules[j].Priority
+		}
+		return rules[i].ID < rules[j].ID
+	})
+	return rules
+}
+
+// memberIndex maps a group-local member ID to its definition. A rule naming a
+// member that is not in the group cannot select anything, which is why the
+// caller has to distinguish "no rule matched" from "a rule matched but pointed
+// at nothing" — the two need different fixes.
+func memberIndex(group contract.ModelRoutingGroup) map[string]contract.ModelRoutingMember {
+	members := make(map[string]contract.ModelRoutingMember, len(group.Members))
+	for _, member := range group.Members {
+		members[member.ID] = member
+	}
+	return members
 }
 
 // evaluateRow applies the scored-fallback substitution: when the classifier
@@ -125,6 +150,21 @@ const (
 	triFalse
 	triTrue
 )
+
+// String is the wire spelling. It exists so the control API never has to know
+// the internal numbering: a preview that reported "1" instead of "false" would
+// be a mapping the UI has to reverse, and reversing it is where the two sides
+// drift apart.
+func (state triState) String() string {
+	switch state {
+	case triTrue:
+		return "true"
+	case triFalse:
+		return "false"
+	default:
+		return "unknown"
+	}
+}
 
 func evaluateCondition(condition contract.ModelRoutingCondition, facts contract.ModelRoutingFacts) (triState, []contract.ModelRoutingFieldObservation) {
 	if condition.All != nil {
@@ -350,8 +390,6 @@ func factValue(field string, facts contract.ModelRoutingFacts) (bool, string) {
 	switch field {
 	case "protocol":
 		return facts.Protocol != "", facts.Protocol
-	case "language":
-		return facts.Language != "", facts.Language
 	case "media_kind":
 		return facts.MediaKind != "", facts.MediaKind
 	case "task_type":

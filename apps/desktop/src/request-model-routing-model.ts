@@ -1,4 +1,5 @@
 import { i18n } from "./i18n";
+import { protocolLabel } from "./service-presets";
 import {
   isModelRoutingLeaf,
   isModelRoutingRange,
@@ -55,13 +56,17 @@ export function modelRoutingFieldLabel(field: string): string {
 }
 
 /**
- * 候选取值的中文/英文名，例如 `coding` → 编码。取值域是开放词汇的字段
- * （protocol、language）没有词条，回退为 code 本身。
+ * 候选取值的中文/英文名，例如 `coding` → 编码。没有词条的取值回退为 code 本身。
+ *
+ * `protocol` 走 `protocolLabel`：协议 id 带点（`openai.responses`），写成
+ * i18n key 会被当成嵌套路径而不是一个词条，所以它的显示名只能从
+ * `./service-presets.ts` 那份注册表取 —— 也是服务编辑器与客户端接入用的同一份。
  */
 export function modelRoutingFieldValueLabel(
   field: string,
   value: string,
 ): string {
+  if (field === "protocol") return protocolLabel(value);
   return text(`modelRouting.values.${field}.${value}`, value);
 }
 

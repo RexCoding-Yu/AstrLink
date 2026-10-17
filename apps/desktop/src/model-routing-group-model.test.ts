@@ -578,7 +578,6 @@ it("treats an empty task_type_labels list as the legacy built-in domain", () => 
 describe("built-in routing field set is frozen", () => {
   const frozenFields = [
     "protocol",
-    "language",
     "media_kind",
     "task_type",
     "streaming",
@@ -604,7 +603,6 @@ describe("built-in routing field set is frozen", () => {
   /** 与 Go 表逐项对应的 kind，词汇是 TS 侧自己的（label/boolean 对应 Go 的 string/bool）。 */
   const frozenKinds: Record<string, string> = {
     protocol: "label",
-    language: "label",
     media_kind: "label",
     task_type: "label",
     streaming: "boolean",

@@ -11,6 +11,7 @@ import {
 import type { RoutingSettings } from "./failure-policy-model";
 import type { ClassifierDimension } from "./classifier-settings-model";
 import { useT } from "./i18n";
+import { intelligentRoutingErrorText } from "./intelligent-routing-errors";
 import {
   validateModelRoutingDraft,
   type ModelRoutingDraftIssue,
@@ -31,10 +32,17 @@ function groupsOf(settings: RoutingSettings | null): ModelRoutingGroup[] {
 export function ModelRoutingGroupsPanel({
   ready,
   services,
+  protocols = [],
   onDirtyChange,
 }: {
   ready: boolean;
   services: readonly RoutableService[];
+  /**
+   * The protocols core reports in its capabilities, verbatim. Passed down
+   * rather than imported: see `RoutingProtocolsContext` in the editor for why a
+   * static import of the service registry would form an import cycle.
+   */
+  protocols?: readonly string[];
   onDirtyChange: (dirty: boolean) => void;
 }) {
   const t = useT();
@@ -44,10 +52,9 @@ export function ModelRoutingGroupsPanel({
   );
   // Shared with the field-catalog tab: a dimension saved there must reach this
   // panel's field selector without a reload, because both tabs stay mounted.
-  const [dimensions, setDimensions] = useWorkspaceSnapshot<ClassifierDimension[]>(
-    "classifier-dimensions",
-    [],
-  );
+  const [dimensions, setDimensions] = useWorkspaceSnapshot<
+    ClassifierDimension[]
+  >("classifier-dimensions", []);
   const [draft, setDraft] = useState<ModelRoutingGroup[] | null>(() =>
     settings ? groupsOf(settings) : null,
   );
@@ -91,7 +98,7 @@ export function ModelRoutingGroupsPanel({
       .catch((caught) => {
         if (active && mutationVersion.current === version)
           setLoadError(
-            caught instanceof Error ? caught.message : t("failure.loadFailed"),
+            intelligentRoutingErrorText(caught, t("failure.loadFailed")),
           );
       });
     return () => {
@@ -123,7 +130,7 @@ export function ModelRoutingGroupsPanel({
       .catch((caught: unknown) => {
         if (draftRef.current === submitted)
           setError(
-            caught instanceof Error ? caught.message : t("routing.saveFailed"),
+            intelligentRoutingErrorText(caught, t("routing.saveFailed")),
           );
       })
       .finally(() => setSaving(false));
@@ -194,6 +201,7 @@ export function ModelRoutingGroupsPanel({
             value={draft}
             services={services}
             dimensions={dimensions}
+            protocols={protocols}
             disabled={!ready}
             validationIssues={issues}
             onChange={(next) => {

@@ -77,12 +77,10 @@ func enabledClassifierSettings(serverURL, protocol string) contract.ClassifierSe
 }
 
 // cloudRoutingHandler wires a handler whose classification goes to the given
-// cloud server through the settings store and the fixed credential. The
-// fallback is the global inline fallback setting.
-func cloudRoutingHandler(t *testing.T, cloudServer *httptest.Server, protocol string, group contract.ModelRoutingGroup, records *redirectSettingsStore, forwarder Forwarder, fallback string) *Handler {
+// cloud server through the settings store and the fixed credential.
+func cloudRoutingHandler(t *testing.T, cloudServer *httptest.Server, protocol string, group contract.ModelRoutingGroup, records *redirectSettingsStore, forwarder Forwarder) *Handler {
 	t.Helper()
 	settings := enabledClassifierSettings(cloudServer.URL, protocol)
-	settings.Inline.Fallback = fallback
 	handler := NewWithDependencies(Dependencies{
 		Resolver: resolverFunc(func(_ context.Context, request endpoint.ResolveRequest) (endpoint.Resolved, error) {
 			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false), UpstreamModel: request.Model}, nil
@@ -145,7 +143,7 @@ func TestModelRoutingLowConfidenceBecomesUnknownNotUnavailable(t *testing.T) {
 		defer cloudServer.Close()
 		store := newRedirectSettingsStore()
 		forwarder, bodies := cloudTestForwarder(t)
-		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(labels), store, forwarder, "")
+		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(labels), store, forwarder)
 		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 		if response.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -172,7 +170,7 @@ func TestModelRoutingCloudHighConfidenceSelectsRule(t *testing.T) {
 	}))
 	defer cloudServer.Close()
 	store := newRedirectSettingsStore()
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil, "")
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -216,7 +214,7 @@ func TestModelRoutingCloudFailureMatrixFailsOpen(t *testing.T) {
 			}))
 			defer cloudServer.Close()
 			store := newRedirectSettingsStore()
-			handler := cloudRoutingHandler(t, cloudServer, test.protocol, cloudTestGroup(nil), store, nil, "")
+			handler := cloudRoutingHandler(t, cloudServer, test.protocol, cloudTestGroup(nil), store, nil)
 			response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 			if response.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -238,7 +236,7 @@ func TestModelRoutingCloudTimeoutFailsOpen(t *testing.T) {
 	}))
 	defer cloudServer.Close()
 	store := newRedirectSettingsStore()
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil, "")
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -249,74 +247,73 @@ func TestModelRoutingCloudTimeoutFailsOpen(t *testing.T) {
 	}
 }
 
-// fallback=error keeps fail-open: it only records a code and still routes to
-// the deterministic default instead of failing the request.
-func TestModelRoutingCloudFallbackErrorNeverBlocks(t *testing.T) {
+// A failed classification never blocks the request: it records its reason and
+// routes to the group's default member. Nothing is substituted for the missing
+// label, so a rule that would have matched the substituted value stays
+// skipped — the reason code is the whole record of what happened.
+func TestModelRoutingCloudFailureNeverBlocks(t *testing.T) {
 	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer cloudServer.Close()
 	store := newRedirectSettingsStore()
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil, contract.ClassifierFallbackError)
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, cloudTestGroup(nil), store, nil)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
 	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s — fallback=error must never block", response.Code, response.Body.String())
+		t.Fatalf("status=%d body=%s — a classifier failure must never block", response.Code, response.Body.String())
 	}
 	record := store.root(t)
-	if record.ModelRouting.FallbackReason != "classifier_error" {
-		t.Fatalf("fallback reason = %q, want classifier_error", record.ModelRouting.FallbackReason)
+	if record.ModelRouting.FallbackReason != "classifier_busy" {
+		t.Fatalf("fallback reason = %q, want classifier_busy", record.ModelRouting.FallbackReason)
 	}
-	if !record.ModelRouting.UsedDefault {
-		t.Fatalf("decision = %+v, want deterministic default", record.ModelRouting)
+	if !record.ModelRouting.UsedDefault || record.ModelRouting.MemberModel != "fast-model" {
+		t.Fatalf("decision = %+v, want the deterministic default member", record.ModelRouting)
 	}
 }
 
-// fallback=general engages only when the group's label set contains general.
-func TestModelRoutingCloudFallbackGeneral(t *testing.T) {
-	t.Run("general selects the rule", func(t *testing.T) {
-		cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			writer.WriteHeader(http.StatusTooManyRequests)
-		}))
-		defer cloudServer.Close()
-		store := newRedirectSettingsStore()
-		group := cloudTestGroup(nil)
-		group.Rules = []contract.ModelRoutingRule{{
-			ID: "general", Priority: 1,
-			When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"general"}},
-			TargetMemberID: "strong",
-		}}
-		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil, contract.ClassifierFallbackGeneral)
-		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
-		if response.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
-		record := store.root(t)
-		if record.ModelRouting.MemberModel != "strong-model" || record.ModelRouting.FallbackReason != "classifier_busy" {
-			t.Fatalf("decision = %+v", record.ModelRouting)
-		}
-	})
-	t.Run("custom labels degrade to skip", func(t *testing.T) {
-		cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			writer.WriteHeader(http.StatusTooManyRequests)
-		}))
-		defer cloudServer.Close()
-		store := newRedirectSettingsStore()
-		group := cloudTestGroup([]string{"alpha", "beta"})
-		group.Rules = []contract.ModelRoutingRule{{
-			ID: "alpha-rule", Priority: 1,
-			When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"alpha"}},
-			TargetMemberID: "strong",
-		}}
-		handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil, contract.ClassifierFallbackGeneral)
-		response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
-		if response.Code != http.StatusOK {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
-		record := store.root(t)
-		if record.ModelRouting.FallbackReason != "classifier_fallback_invalid" || !record.ModelRouting.UsedDefault {
-			t.Fatalf("decision = %+v, want degraded skip", record.ModelRouting)
-		}
-	})
+// No label is substituted on failure, whatever the group's label set happens to
+// contain. A group that could accept a synthetic label and one with a custom
+// vocabulary must behave identically: the fact stays unknown, so every rule
+// testing it skips and the default member serves the request.
+func TestModelRoutingCloudFailureSubstitutesNoLabel(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		labels []string
+		ruleIn string
+	}{
+		// "general" is the label the removed fallback filled when the group
+		// accepted it, so it is the one a regression would produce here.
+		{name: "default labels", ruleIn: "general"},
+		{name: "custom labels", labels: []string{"alpha", "beta"}, ruleIn: "alpha"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.WriteHeader(http.StatusTooManyRequests)
+			}))
+			defer cloudServer.Close()
+			store := newRedirectSettingsStore()
+			group := cloudTestGroup(testCase.labels)
+			// A rule on a label a substitution would have produced: if the
+			// failure still filled one, this rule would match and pick "strong".
+			group.Rules = []contract.ModelRoutingRule{{
+				ID: "substitutable", Priority: 1,
+				When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{testCase.ruleIn}},
+				TargetMemberID: "strong",
+			}}
+			handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
+			response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"hello"}`)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			record := store.root(t)
+			if record.ModelRouting.FallbackReason != "classifier_busy" {
+				t.Fatalf("fallback reason = %q, want classifier_busy", record.ModelRouting.FallbackReason)
+			}
+			if !record.ModelRouting.UsedDefault || record.ModelRouting.MemberModel != "fast-model" {
+				t.Fatalf("decision = %+v, want the default member and no substituted label", record.ModelRouting)
+			}
+		})
+	}
 }
 
 // The cloud classifier must receive the group's custom label set, and a
@@ -344,7 +341,7 @@ func TestModelRoutingCloudCustomLabelsRoundTrip(t *testing.T) {
 		When:           contract.ModelRoutingCondition{Field: "task_type", In: []string{"storyboard"}},
 		TargetMemberID: "strong",
 	}}
-	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil, "")
+	handler := cloudRoutingHandler(t, cloudServer, contract.ClassifierProtocolJev, group, store, nil)
 	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"draw a storyboard"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())

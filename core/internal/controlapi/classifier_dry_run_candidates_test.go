@@ -210,9 +210,11 @@ func TestClassifierDryRunLowConfidenceOmitsCandidates(t *testing.T) {
 	}
 }
 
-// A fallback is not a measurement: even fallback=general, which fills the
-// category, never contributes a candidate row.
-func TestClassifierDryRunFallbackGeneralOmitsCandidates(t *testing.T) {
+// A failure is not a measurement: it records its reason and contributes no
+// category and no candidate row. The stored `fallback` member is legacy and
+// must be ignored rather than honoured — a document written before the setting
+// was removed still decodes, and the run behaves as if it were absent.
+func TestClassifierDryRunFailureOmitsCategoryAndCandidates(t *testing.T) {
 	var cloudBodies []string
 	cloudServer := newClassifierCloudServer(t, "not-a-jev-answer", &cloudBodies)
 	handler := newClassifierDryRunHandler(t, cloudServer.URL, privacy.Policy{})
@@ -236,13 +238,127 @@ func TestClassifierDryRunFallbackGeneralOmitsCandidates(t *testing.T) {
 	}
 	t.Logf("raw dry-run response: %s", response.Body.String())
 	body := response.Body.String()
-	if !strings.Contains(body, `"category":"general"`) {
-		t.Fatalf("general fallback must fill the category: %s", body)
+	if !strings.Contains(body, `"fallback_reason":"classifier_invalid_output"`) {
+		t.Fatalf("stable failure code missing: %s", body)
+	}
+	if strings.Contains(body, `"category":"`) {
+		t.Fatalf("a failure must not fill a category: %s", body)
 	}
 	if strings.Contains(body, "candidates") {
-		t.Fatalf("fallback must not contribute candidates: %s", body)
+		t.Fatalf("a failure must not contribute candidates: %s", body)
 	}
 	if len(cloudBodies) != 1 {
 		t.Fatalf("cloud calls = %d", len(cloudBodies))
+	}
+}
+
+// A group whose rules all test a custom dimension must preview that
+// dimension's own answer. The classifier answers every question in one call, so
+// the ranked candidate sequence belongs to task_type alone; stamping it onto
+// the custom dimension reported task_type's labels under the dimension's name,
+// and the preview said nothing about what the rule actually tested.
+func TestClassifierDryRunReportsCustomDimensionAnswer(t *testing.T) {
+	var cloudBodies []string
+	cloudServer := newClassifierCloudServer(t,
+		`{"answers":{`+
+			`"task_type":{"choice":"coding","confidence":0.97,"ranked":[{"choice":"coding","confidence":0.97}]},`+
+			`"branch":{"choice":"后端","confidence":0.93}}}`, &cloudBodies)
+	handler := newClassifierDryRunHandler(t, cloudServer.URL, privacy.Policy{})
+	putClassifierCredential(t, handler)
+	// The dimension lives in the classifier-settings singleton, not in the
+	// routing document, so it has to be stored before a rule may name it.
+	settingsDocument := `{"enabled":true,"classifier_source":"inline","dimensions":[` +
+		`{"name":"branch","options":[{"name":"前端"},{"name":"后端"}]}],` +
+		`"inline":{"protocol":"jev","endpoint":"` + cloudServer.URL +
+		`","credential_ref":"local://classifier/default","model":"jev-latest","timeout_ms":1500}}`
+	response := controlRequest(t, handler, http.MethodPut, ClassifierSettingsPath, "application/json", settingsDocument, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("settings put = %d %s", response.Code, response.Body.String())
+	}
+	putClassifierDryRunGroup(t, handler, contract.ModelRoutingRule{
+		ID: "backend", Priority: 1,
+		When:           contract.ModelRoutingCondition{Field: "branch", In: []string{"后端"}},
+		TargetMemberID: "strong",
+	})
+	response = controlRequest(t, handler, http.MethodPost, ClassifierSettingsPath+"/dry-run", "application/json",
+		`{"text":"改一下后端接口","group_id":"superclaude"}`, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("dry-run = %d %s", response.Code, response.Body.String())
+	}
+	t.Logf("raw dry-run response: %s", response.Body.String())
+	var result struct {
+		Dimensions map[string]struct {
+			Label    string  `json:"label"`
+			Score    float64 `json:"score"`
+			Known    bool    `json:"known"`
+			Produced bool    `json:"produced"`
+		} `json:"dimensions"`
+		Fields []struct {
+			Field                string            `json:"field"`
+			Source               string            `json:"source"`
+			ClassifierID         string            `json:"classifier_id"`
+			ClassifierConfidence float64           `json:"classifier_confidence"`
+			Candidates           []dryRunCandidate `json:"candidates"`
+		} `json:"fields"`
+		Decision struct {
+			MemberID string `json:"member_id"`
+			RuleID   string `json:"rule_id"`
+		} `json:"decision"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	// The custom dimension is reported with its own answer, so an operator can
+	// read what the rule matched on.
+	branch, ok := result.Dimensions["branch"]
+	if !ok {
+		t.Fatalf("the configured dimension is missing from the preview: %+v", result.Dimensions)
+	}
+	if branch.Label != "后端" || branch.Score != 0.93 || !branch.Known || !branch.Produced {
+		t.Fatalf("branch dimension = %+v, want the classifier's own answer", branch)
+	}
+	// task_type is not repeated in the map: it is category/confidence, and a
+	// second copy could disagree with the first.
+	if _, ok := result.Dimensions["task_type"]; ok {
+		t.Fatalf("task_type must not appear twice: %+v", result.Dimensions)
+	}
+	// The core assertion: the dimension's observation carries no ranked
+	// sequence. task_type's candidates were rendered under `branch` before,
+	// which is what made a custom-dimension group look like it was judged on
+	// task_type.
+	for _, field := range result.Fields {
+		if field.Field != "branch" {
+			continue
+		}
+		if field.Source != "classifier" {
+			t.Fatalf("branch source = %q, want classifier", field.Source)
+		}
+		if len(field.Candidates) != 0 {
+			t.Fatalf("branch carries task_type's candidates = %+v, want none", field.Candidates)
+		}
+		if field.ClassifierConfidence != 0.93 {
+			t.Fatalf("branch confidence = %v, want its own 0.93", field.ClassifierConfidence)
+		}
+	}
+	// The group's only rule tests `branch`, so `branch` is the only observation
+	// the evaluator produces. Its confidence is the dimension's own score: the
+	// conversion reads it per field rather than copying task_type's 0.97 across.
+	observed := 0
+	for _, field := range result.Fields {
+		if field.ClassifierConfidence == 0.97 && field.Field != "task_type" {
+			t.Fatalf("task_type confidence leaked onto %q: %+v", field.Field, field)
+		}
+		if field.Field == "branch" {
+			observed++
+		}
+	}
+	if observed == 0 {
+		t.Fatalf("no branch observation in %+v", result.Fields)
+	}
+	if result.Decision.MemberID != "strong" || result.Decision.RuleID != "backend" {
+		t.Fatalf("decision = %+v, want the branch rule on the strong member", result.Decision)
+	}
+	if len(cloudBodies) != 1 {
+		t.Fatalf("cloud calls = %d, want exactly one classification", len(cloudBodies))
 	}
 }

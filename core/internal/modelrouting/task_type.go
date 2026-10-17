@@ -241,3 +241,42 @@ func TaskTypeCandidateObservations(outcome TaskTypeOutcome, group contract.Model
 	}
 	return observations
 }
+
+// StampClassifierProvenance writes one classification attempt's provenance
+// onto the field observations the evaluator produced. The inference path and
+// the control-plane dry-run both call it, so a record and a preview cannot
+// describe the same attempt differently.
+//
+// One call answers every question it was asked, so the attempt's classifier id
+// belongs on each classifier-sourced observation. The ranked candidate
+// sequence does not. It is task_type's own output: copying it onto a custom
+// dimension reports the task_type ranking as that dimension's answer, which is
+// exactly how a group configured only on a custom field came to render
+// task_type labels under the dimension's name. A dimension carries its own
+// score instead — a single-choice answer has no ranked sequence to report, and
+// Candidates stays nil so the observation reads as "no candidate detail"
+// rather than as a list this dimension never produced.
+//
+// An attempt that measured nothing stamps nothing beyond the reason it already
+// carries: a fallback leaves every classifier field unknown, and inventing a
+// classifier id for it would claim a measurement that never happened.
+func StampClassifierProvenance(fields []contract.ModelRoutingFieldObservation, outcome TaskTypeOutcome, group contract.ModelRoutingGroup, adopted *int) {
+	candidates := TaskTypeCandidateObservations(outcome, group, adopted)
+	if outcome.ClassifierID == "" && outcome.Confidence == 0 && candidates == nil && len(outcome.Dimensions) == 0 {
+		return
+	}
+	for index := range fields {
+		if fields[index].Source != "classifier" {
+			continue
+		}
+		fields[index].ClassifierID = outcome.ClassifierID
+		if fields[index].Field == contract.BuiltInTaskTypeDimension {
+			fields[index].ClassifierConfidence = outcome.Confidence
+			fields[index].Candidates = candidates
+			continue
+		}
+		if dimension, ok := outcome.Dimensions[fields[index].Field]; ok {
+			fields[index].ClassifierConfidence = dimension.Score
+		}
+	}
+}

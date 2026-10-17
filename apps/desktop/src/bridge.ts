@@ -1244,6 +1244,18 @@ export async function classifierCredentialAction(
 export async function classifierDryRun(input: {
   text: string;
   group_id?: string;
+  /**
+   * Request-side facts. The dry-run judges the whole rule table, not just the
+   * classifier, so a request-derived rule needs a request to judge against.
+   * Omitted facts stay unknown — which never matches a rule, and is reported as
+   * such per field rather than silently defaulting to a value nobody sent.
+   */
+  protocol?: string;
+  media_kind?: string;
+  streaming?: boolean;
+  continuation?: boolean;
+  /** "HH:MM"; defaults to now. Pins a time-window rule without waiting. */
+  system_time?: string;
 }): Promise<ClassifierDryRunResult> {
   requireNativeBridge();
   return parseClassifierDryRunResult(

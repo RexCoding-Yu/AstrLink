@@ -11,7 +11,9 @@ const bridge = vi.hoisted(() => ({
 vi.mock("./bridge", () => bridge);
 
 import {
+  classifierPromptProblem,
   classifierProtocolPresets,
+  defaultClassifierPrompt,
   defaultClassifierSettings,
   type ClassifierSettings,
 } from "./classifier-settings-model";
@@ -98,6 +100,39 @@ describe("classifier settings panel", () => {
     expect(bridge.classifierCredentialAction).toHaveBeenCalledWith("status");
     expect(field(container, "模型名").value).toBe(
       classifierProtocolPresets.jev.model,
+    );
+  });
+
+  it("pre-fills the built-in prompt and drops the read-only label list", async () => {
+    const dirty: boolean[] = [];
+    await act(async () => {
+      root.render(
+        <ClassifierSettingsPanel
+          ready
+          services={[]}
+          onDirtyChange={(next) => dirty.push(next)}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const prompt = container.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="分类器提示词"]',
+    );
+    expect(prompt?.value).toBe(defaultClassifierPrompt);
+    expect(prompt?.value).toContain("{{labels}}");
+    // Showing the default is not an edit.
+    expect(dirty.at(-1)).toBe(false);
+    // The label chips duplicated the 字段类型 tab and are gone.
+    expect(container.textContent).not.toContain("标签集合");
+  });
+
+  it("accepts a {{dim.<name>}} placeholder in the prompt", () => {
+    expect(classifierPromptProblem("Pick {{dim.topic}} and {{labels}}")).toBe(
+      null,
+    );
+    expect(classifierPromptProblem("Pick {{bogus}}")).toBe(
+      "unknownPlaceholder",
     );
   });
 

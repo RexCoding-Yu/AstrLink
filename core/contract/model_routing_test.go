@@ -230,8 +230,6 @@ func TestModelRoutingConditionAcceptsExtendedOperators(t *testing.T) {
 		`{"field":"task_type","not_in":["research","architect"]}`,
 		`{"field":"task_type","not_equals":"general"}`,
 		`{"field":"media_kind","not_equals":"none"}`,
-		`{"field":"language","not_in":["en","zh-cn"]}`,
-		`{"field":"language","not_equals":"en"}`,
 		// Number kind: the new bounded operators, single and paired.
 		`{"field":"turn_count","gt":3}`,
 		`{"field":"turn_count","gte":3}`,
@@ -364,8 +362,6 @@ func TestModelRoutingConditionBoundsKeywordAndStringLists(t *testing.T) {
 		`{"field":"task_type","not_equals":"storyboard"}`,
 		`{"field":"media_kind","not_in":["hologram"]}`,
 		`{"field":"media_kind","not_equals":"hologram"}`,
-		`{"field":"language","not_in":["EN"]}`,
-		`{"field":"language","not_equals":"en_US"}`,
 	} {
 		if err := routingConditionError(t, when); err == nil {
 			t.Fatalf("%s accepted", when)
@@ -712,7 +708,6 @@ func TestModelRoutingFieldSetFrozen(t *testing.T) {
 		kind  string
 	}{
 		{"protocol", "string"},
-		{"language", "string"},
 		{"media_kind", "string"},
 		{"task_type", "string"},
 		{"streaming", "bool"},

@@ -30,7 +30,10 @@ describe("classifier dimension validation", () => {
     expect(
       calculateClassifierDimensionIssues([
         dimension({ name: "topic" }),
-        dimension({ name: "urgency", options: [{ name: "high" }, { name: "low" }] }),
+        dimension({
+          name: "urgency",
+          options: [{ name: "high" }, { name: "low" }],
+        }),
       ]),
     ).toEqual([]);
   });
@@ -38,13 +41,14 @@ describe("classifier dimension validation", () => {
   it("mirrors the 5-custom-dimension ceiling", () => {
     // 5 custom + the built-in task_type is the confirmed 6-dimension total, so
     // the sixth custom entry is the first rejected one.
-    const accepted = Array.from({ length: classifierMaxCustomDimensions }, (_, index) =>
-      dimension({ name: `dim_${index}` }),
+    const accepted = Array.from(
+      { length: classifierMaxCustomDimensions },
+      (_, index) => dimension({ name: `dim_${index}` }),
     );
     expect(problems(accepted)).toEqual([]);
-    expect(problems([...accepted, dimension({ name: "one_too_many" })])).toEqual([
-      "dimensionLimitReached",
-    ]);
+    expect(
+      problems([...accepted, dimension({ name: "one_too_many" })]),
+    ).toEqual(["dimensionLimitReached"]);
   });
 
   it("rejects an empty name", () => {
@@ -54,7 +58,9 @@ describe("classifier dimension validation", () => {
 
   it("rejects a name over the rune budget, counting code points", () => {
     expect(
-      problems([dimension({ name: "x".repeat(classifierDimensionNameMaxRunes) })]),
+      problems([
+        dimension({ name: "x".repeat(classifierDimensionNameMaxRunes) }),
+      ]),
     ).toEqual([]);
     expect(
       problems([
@@ -72,7 +78,9 @@ describe("classifier dimension validation", () => {
     expect(problems([dimension({ name: "topic}" })])).toEqual(["nameBraces"]);
     // The token grammar trims the name it reads, so the padded name would be
     // stored but never match a placeholder. Interior spaces are fine.
-    expect(problems([dimension({ name: " topic" })])).toEqual(["nameWhitespace"]);
+    expect(problems([dimension({ name: " topic" })])).toEqual([
+      "nameWhitespace",
+    ]);
     expect(problems([dimension({ name: "my topic" })])).toEqual([]);
   });
 
@@ -124,9 +132,19 @@ describe("classifier dimension validation", () => {
       dimension({ name: "protocol", options: [{ name: "" }] }),
     ]);
     expect(issues).toEqual([
-      { index: 0, optionIndex: 1, target: "optionName", problem: "optionNameDuplicate" },
+      {
+        index: 0,
+        optionIndex: 1,
+        target: "optionName",
+        problem: "optionNameDuplicate",
+      },
       { index: 1, target: "name", problem: "nameReservedBuiltin" },
-      { index: 1, optionIndex: 0, target: "optionName", problem: "optionNameEmpty" },
+      {
+        index: 1,
+        optionIndex: 0,
+        target: "optionName",
+        problem: "optionNameEmpty",
+      },
     ]);
   });
 

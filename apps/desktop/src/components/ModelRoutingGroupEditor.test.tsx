@@ -227,7 +227,7 @@ describe("ModelRoutingGroupEditor", () => {
                   id: "r2",
                   priority: 10,
                   target_member_id: "b",
-                  when: { field: "language", in: ["zh"] },
+                  when: { field: "protocol", in: ["openai.chat"] },
                 },
               ],
             },
@@ -365,7 +365,7 @@ describe("ModelRoutingGroupEditor", () => {
                   id: "r2",
                   priority: 20,
                   target_member_id: "b",
-                  when: { field: "language", in: ["zh"] },
+                  when: { field: "protocol", in: ["openai.chat"] },
                 },
               ],
             },
@@ -1084,7 +1084,19 @@ describe("ModelRoutingGroupEditor", () => {
     };
     await act(async () => root.render(<Harness initial={[group]} />));
 
-    const hint = container.querySelector<HTMLElement>(
+    // The warning lives behind the value list's `?`, not as a paragraph that
+    // squeezes the value column into a narrow, tall strip.
+    expect(
+      container.querySelector("[data-model-routing-custom-hint]"),
+    ).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          `button[aria-label="${t("modelRoutingGroup.fieldValueListHintLabel")}"]`,
+        )!
+        .click(),
+    );
+    const hint = document.querySelector<HTMLElement>(
       "[data-model-routing-custom-hint]",
     );
     expect(hint?.textContent).toContain("内置离线分类器不会产出");
@@ -1101,10 +1113,6 @@ describe("ModelRoutingGroupEditor", () => {
         />,
       ),
     );
-    expect(
-      container.querySelector("[data-model-routing-custom-hint]"),
-    ).toBeTruthy();
-
     const target = await typeContinuously(
       t("modelRoutingGroup.valueList"),
       "custom-review",
@@ -1264,12 +1272,7 @@ describe("ModelRoutingGroupEditor", () => {
       contains_any: [],
     });
     // Enum and open-vocabulary conditions start as incomplete drafts.
-    for (const field of [
-      "task_type",
-      "media_kind",
-      "protocol",
-      "language",
-    ] as const) {
+    for (const field of ["task_type", "media_kind", "protocol"] as const) {
       expect(defaultConditionFor(field)).toEqual({ field, in: [] });
     }
   });
@@ -1412,7 +1415,7 @@ describe("ModelRoutingGroupEditor 决策表", () => {
           initial={[
             groupWith([
               rule("r1", 10, { field: "streaming", equals_bool: true }),
-              rule("r2", 20, { field: "language", in: ["zh"] }, "b"),
+              rule("r2", 20, { field: "protocol", in: ["openai.chat"] }, "b"),
             ]),
           ]}
         />,
@@ -1433,7 +1436,10 @@ describe("ModelRoutingGroupEditor 决策表", () => {
       modelRoutingPriorityStep * 2,
     ]);
     // 重排只改顺序与派生优先级，条件本体原样跟着走。
-    expect(next[0].rules[0].when).toEqual({ field: "language", in: ["zh"] });
+    expect(next[0].rules[0].when).toEqual({
+      field: "protocol",
+      in: ["openai.chat"],
+    });
     expect(next[0].rules[0].target_member_id).toBe("b");
     expect(parseModelRoutingGroups(next)).toEqual(next);
   });
@@ -1447,7 +1453,7 @@ describe("ModelRoutingGroupEditor 决策表", () => {
           initial={[
             groupWith([
               rule("r1", 10, { field: "streaming", equals_bool: true }),
-              rule("r2", 20, { field: "language", in: ["zh"] }, "b"),
+              rule("r2", 20, { field: "protocol", in: ["openai.chat"] }, "b"),
             ]),
           ]}
         />,
@@ -1483,7 +1489,7 @@ describe("ModelRoutingGroupEditor 决策表", () => {
           initial={[
             groupWith([
               rule("r1", 10, { field: "streaming", equals_bool: true }),
-              rule("r2", 20, { field: "language", in: ["zh"] }, "b"),
+              rule("r2", 20, { field: "protocol", in: ["openai.chat"] }, "b"),
               rule("r3", 30, { field: "has_tools", equals_bool: true }),
             ]),
           ]}
@@ -1551,18 +1557,14 @@ describe("ModelRoutingGroupEditor 决策表", () => {
         .click(),
     );
     const [next] = change.mock.calls.at(-1) as [ModelRoutingGroup[]];
-    expect(next[0].rules).toHaveLength(4);
-    // 三条草稿用支持的字段起步，且 priority 继续按行序排。
-    expect(
-      next[0].rules
-        .slice(1)
-        .map((item) => (item.when as { field: string }).field),
-    ).toEqual(["task_type", "turn_count", "has_tools"]);
-    expect(next[0].rules.map((item) => item.priority)).toEqual([
-      10, 20, 30, 40,
-    ]);
-    // 草稿 ID 互不重复，否则 wire 上就是两条同名规则。
-    expect(new Set(next[0].rules.map((item) => item.id)).size).toBe(4);
+    // 一次点击只加一行，预选 task_type，priority 继续按行序排。
+    expect(next[0].rules).toHaveLength(2);
+    expect((next[0].rules[1].when as { field: string }).field).toBe(
+      "task_type",
+    );
+    expect(next[0].rules.map((item) => item.priority)).toEqual([10, 20]);
+    // 新草稿 ID 不与既有规则重复，否则 wire 上就是两条同名规则。
+    expect(new Set(next[0].rules.map((item) => item.id)).size).toBe(2);
   });
 
   it("moves a row's winner by changing its order (H3 row-order baseline)", async () => {
@@ -1730,9 +1732,6 @@ describe("ModelRoutingGroupEditor 第二轮控件", () => {
     const [next] = change.mock.calls.at(-1) as [ModelRoutingGroup[]];
     return next[0].rules[0].when;
   };
-
-  const input = (label: string) =>
-    container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
 
   /** 点击某个 `aria-label` 的下拉触发器后选中列表里的候选项。 */
   async function pick(controlLabel: string, optionValue: string) {
@@ -1957,13 +1956,15 @@ describe("ModelRoutingGroupEditor 第二轮控件", () => {
     ).toBeNull();
   });
 
+  // `protocol` 现在是封闭取值域，所以这条测试改用仍然开放词汇的
+  // `literal_keyword`：被测的是「新建值」这条路径，而不是某个字段名。
   it("开放词汇字段的新建值会写进条件取值", async () => {
     const change = vi.fn();
     await act(async () =>
       root.render(
         <Harness
           change={change}
-          initial={[groupWithWhen({ field: "language", in: ["*"] })]}
+          initial={[groupWithWhen({ field: "literal_keyword", in: ["*"] })]}
         />,
       ),
     );
@@ -1986,6 +1987,9 @@ describe("ModelRoutingGroupEditor 第二轮控件", () => {
         new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
       );
     });
-    expect(lastWhen(change)).toEqual({ field: "language", in: ["*", "ja"] });
+    expect(lastWhen(change)).toEqual({
+      field: "literal_keyword",
+      in: ["*", "ja"],
+    });
   });
 });

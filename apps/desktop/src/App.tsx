@@ -782,6 +782,17 @@ export default function App() {
     () => snapshot?.capabilities?.protocols ?? [],
     [snapshot?.capabilities?.protocols],
   );
+  // The routing rule editor offers the protocols core says it serves. Only the
+  // alpha phase is included: a post-alpha ID is a reserved identifier the
+  // gateway cannot execute today, and offering it would let the user write a
+  // rule that can never match.
+  const protocolIDs = useMemo(
+    () =>
+      protocols
+        .filter((entry) => entry.phase === "alpha")
+        .map((entry) => entry.id),
+    [protocols],
+  );
   const providerImport = useProviderImport({
     enabled: isReady && rawSealing.status !== null && !rawSetupNeeded,
     protocols,
@@ -1072,6 +1083,7 @@ export default function App() {
                 initialView={page.view}
                 ready={isReady}
                 services={catalog.items}
+                protocols={protocolIDs}
                 onDirtyChange={handleEditorDirtyChange}
               />
             ) : page.kind === "agentTools" ? (

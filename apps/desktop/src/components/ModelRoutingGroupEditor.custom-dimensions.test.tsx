@@ -115,9 +115,9 @@ describe("ModelRoutingGroupEditor custom dimensions", () => {
       '[data-model-routing-field-control] input[role="combobox"]',
     );
     await act(async () => fields[index].click());
-    return [
-      ...document.querySelectorAll<HTMLElement>("[role='option']"),
-    ].map((option) => option.getAttribute("data-option-value") ?? "");
+    return [...document.querySelectorAll<HTMLElement>("[role='option']")].map(
+      (option) => option.getAttribute("data-option-value") ?? "",
+    );
   }
 
   it("lists a declared custom dimension alongside the built-in fields", async () => {
@@ -138,7 +138,9 @@ describe("ModelRoutingGroupEditor custom dimensions", () => {
   it("lists no custom dimension when none is declared", async () => {
     await act(async () =>
       root.render(
-        <Harness initial={[groupWithWhen({ field: "task_type", in: ["coding"] })]} />,
+        <Harness
+          initial={[groupWithWhen({ field: "task_type", in: ["coding"] })]}
+        />,
       ),
     );
     const options = await fieldOptions(0);

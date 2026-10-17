@@ -134,13 +134,20 @@ describe("classifier settings model", () => {
       expect(parsed.provider_ref).toEqual({ ref: "profile_a" });
     });
 
-    it("refuses an unknown protocol and an unknown fallback", () => {
+    it("refuses an unknown protocol", () => {
       expect(() =>
         parseClassifierSettings({ inline: { protocol: "anthropic" } }),
       ).toThrow();
-      expect(() =>
-        parseClassifierSettings({ inline: { fallback: "explode" } }),
-      ).toThrow();
+    });
+
+    // The member is ignored on purpose: a document stored by an earlier build
+    // still decodes, and its value never reaches the panel or a save.
+    it("ignores a stored legacy fallback member", () => {
+      const parsed = parseClassifierSettings({
+        inline: { fallback: "explode" },
+      });
+      expect(Object.keys(parsed.inline)).not.toContain("fallback");
+      expect(JSON.stringify(parsed)).not.toContain("explode");
     });
 
     it("never surfaces a credential field from the settings document", () => {
@@ -170,6 +177,8 @@ describe("classifier settings model", () => {
         sanitized_preview: "write a [EMAIL_1] parser",
         decision: null,
         fields: [],
+        rules: [],
+        dimensions: [],
       });
     });
 
@@ -219,9 +228,13 @@ describe("classifier settings model", () => {
       expect(parsed.fields[0].candidates).toEqual([]);
       expect(parsed.fields[0].match_count).toBe(0);
       expect(parsed.fields[0].skip_reason).toBeNull();
-      expect(parseClassifierDryRunResult({ duration_ms: 0 }).fields).toEqual(
-        [],
-      );
+      // `rules` is also `omitempty`: a run that named no group arrives without
+      // it, and "no rules to report" must read as an empty list rather than
+      // undefined reaching the verdict table.
+      expect(parsed.rules).toEqual([]);
+      const minimal = parseClassifierDryRunResult({ duration_ms: 0 });
+      expect(minimal.fields).toEqual([]);
+      expect(minimal.rules).toEqual([]);
     });
 
     it("reads a decision under the names the Go handler emits", () => {
@@ -274,7 +287,10 @@ describe("classifier settings model", () => {
           {
             name: "topic",
             description: "话题",
-            options: [{ name: "billing" }, { name: "support", description: "支持" }],
+            options: [
+              { name: "billing" },
+              { name: "support", description: "支持" },
+            ],
           },
         ],
       });
@@ -294,9 +310,12 @@ describe("classifier settings model", () => {
     it("reads a missing key as no dimensions configured", () => {
       // `dimensions` is `omitempty` on the Go side, so a document that never had
       // one — every document saved before ASTR-18 — arrives without the key.
-      expect(parseClassifierSettings({ enabled: false }).dimensions).toEqual([]);
+      expect(parseClassifierSettings({ enabled: false }).dimensions).toEqual(
+        [],
+      );
       expect(
-        parseClassifierSettings({ enabled: false, dimensions: null }).dimensions,
+        parseClassifierSettings({ enabled: false, dimensions: null })
+          .dimensions,
       ).toEqual([]);
     });
 

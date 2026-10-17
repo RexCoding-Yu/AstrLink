@@ -390,7 +390,7 @@ func containsString(values []string, want string) bool {
 var modelRoutingFields = map[string]struct {
 	kind string
 }{
-	"protocol": {kind: "string"}, "language": {kind: "string"}, "media_kind": {kind: "string"}, "task_type": {kind: "string"},
+	"protocol": {kind: "string"}, "media_kind": {kind: "string"}, "task_type": {kind: "string"},
 	"streaming": {kind: "bool"}, "continuation": {kind: "bool"}, "has_tools": {kind: "bool"}, "has_media": {kind: "bool"}, "has_image": {kind: "bool"}, "has_audio": {kind: "bool"}, "has_video": {kind: "bool"},
 	"turn_count": {kind: "number"}, "user_message_count": {kind: "number"}, "assistant_message_count": {kind: "number"}, "tool_message_count": {kind: "number"}, "tool_declaration_count": {kind: "number"}, "tool_call_count": {kind: "number"}, "input_bytes": {kind: "number"}, "input_text_runes": {kind: "number"}, "estimated_input_context_tokens": {kind: "number"},
 	"literal_keyword": {kind: "keyword"},
@@ -573,10 +573,6 @@ func validateModelRoutingCondition(condition ModelRoutingCondition, depth int, n
 				if value != "none" && value != "image" && value != "audio" && value != "video" && value != "mixed" && value != "unknown" {
 					return fmt.Errorf("media_kind %q is invalid", value)
 				}
-			case "language":
-				if !validRoutingLanguage(value) {
-					return fmt.Errorf("language %q is invalid", value)
-				}
 			}
 		}
 	case "bool":
@@ -684,18 +680,6 @@ func validRoutingTimeOfDay(value string) bool {
 	hour := int(value[0]-'0')*10 + int(value[1]-'0')
 	minute := int(value[3]-'0')*10 + int(value[4]-'0')
 	return hour <= 23 && minute <= 59
-}
-
-func validRoutingLanguage(value string) bool {
-	if value == "" || len(value) > 32 || value[0] == '-' || value[len(value)-1] == '-' {
-		return false
-	}
-	for _, r := range value {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
-			return false
-		}
-	}
-	return true
 }
 
 func validateModelRoutingValue(field, value string) error {
@@ -926,7 +910,6 @@ func (decision *ModelRoutingDecision) UnmarshalJSON(data []byte) error {
 // ModelRoutingFacts contains only bounded, typed inputs to the evaluator.
 type ModelRoutingFacts struct {
 	Protocol  string
-	Language  string
 	MediaKind string
 	TaskType  string
 	// TaskTypeCandidates is the classifier's ordered label sequence: ranked,

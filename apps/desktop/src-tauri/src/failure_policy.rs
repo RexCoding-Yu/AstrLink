@@ -435,25 +435,13 @@ fn valid_service_id(value: &str) -> bool {
         })
 }
 
-/// valid_routing_language mirrors validRoutingLanguage: a BCP 47-shaped tag of
-/// lowercase letters, digits and single hyphens.
-fn valid_routing_language(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 32
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && value
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
 /// routing_field_kind mirrors modelRoutingFieldKind: the field of a routing
 /// condition is resolved against two sources of very different standing.
 ///
-/// The 22 built-in arms below are a closed, frozen vocabulary: they are the
+/// The 21 built-in arms below are a closed, frozen vocabulary: they are the
 /// fields the request itself supplies, the Go registry
 /// (contract.modelRoutingFields) and the desktop field catalog both pin the
-/// same set of 22, and this function must never grow, reorder, or rename one.
+/// same set of 21, and this function must never grow, reorder, or rename one.
 /// They answer "what does the request look like".
 ///
 /// `known_dimensions` is the other source, and it is runtime context rather
@@ -469,7 +457,7 @@ fn valid_routing_language(value: &str) -> bool {
 /// retired field name out of a saved document.
 fn routing_field_kind(field: &str, known_dimensions: &[String]) -> Option<&'static str> {
     Some(match field {
-        "protocol" | "language" | "media_kind" | "task_type" => "string",
+        "protocol" | "media_kind" | "task_type" => "string",
         "streaming" | "continuation" | "has_tools" | "has_media" | "has_image" | "has_audio"
         | "has_video" => "bool",
         "turn_count"
@@ -663,9 +651,6 @@ fn validate_routing_condition(
                         ) =>
                     {
                         return Err(format!("media_kind {value:?} is invalid"));
-                    }
-                    "language" if !valid_routing_language(value) => {
-                        return Err(format!("language {value:?} is invalid"));
                     }
                     _ => {}
                 }
@@ -1436,7 +1421,6 @@ mod tests {
             json!({"field": "task_type", "not_in": ["research", "architect"]}),
             json!({"field": "task_type", "not_equals": "general"}),
             json!({"field": "media_kind", "not_equals": "none"}),
-            json!({"field": "language", "not_equals": "en"}),
             // Number kind: single bounds, paired bounds, and cross-family pairs.
             json!({"field": "turn_count", "gt": 3}),
             json!({"field": "turn_count", "gte": 3}),
@@ -1583,7 +1567,6 @@ mod tests {
             json!({"field": "protocol", "not_in": []}),
             json!({"field": "task_type", "not_equals": "storyboard"}),
             json!({"field": "media_kind", "not_in": ["hologram"]}),
-            json!({"field": "language", "not_equals": "en_US"}),
         ] {
             assert!(condition(when.clone()).is_err(), "{when}");
         }
@@ -1654,7 +1637,7 @@ mod tests {
         }
     }
 
-    /// The 22 built-in field names are a closed frozen table, and every one of
+    /// The 21 built-in field names are a closed frozen table, and every one of
     /// them must keep resolving exactly as it did before dimensions existed:
     /// with no dimensions declared, and with a dimension list that does not
     /// mention them. This is the assertion that would fail if a custom
@@ -1663,7 +1646,6 @@ mod tests {
     fn every_builtin_routing_field_still_resolves() {
         for field in [
             "protocol",
-            "language",
             "media_kind",
             "task_type",
             "streaming",
@@ -1688,7 +1670,7 @@ mod tests {
             let kind = routing_field_kind(field, &[]).unwrap_or_else(|| {
                 panic!("built-in field {field:?} no longer resolves");
             });
-            // The table is frozen at 22 entries across 5 kinds.
+            // The table is frozen at 21 entries across 5 kinds.
             assert!(
                 matches!(kind, "string" | "bool" | "number" | "keyword" | "time"),
                 "{field}: unexpected kind {kind}"
@@ -1704,11 +1686,10 @@ mod tests {
             // Every built-in is a real condition field: a leaf naming it is
             // accepted whenever its operator matches its kind. The value is
             // chosen per field because the string kind carries per-field value
-            // rules (protocol IDs, language tags, media kinds, the group's
-            // task_type label domain) that this test is not about.
+            // rules (protocol IDs, media kinds, the group's task_type label
+            // domain) that this test is not about.
             let value = match field {
                 "protocol" => "openai_chat",
-                "language" => "en",
                 "media_kind" => "none",
                 "task_type" => "coding",
                 _ => "x",
@@ -1726,10 +1707,9 @@ mod tests {
                 "{when}"
             );
         }
-        // The table is exactly the 22 names the whitelist above enumerates.
+        // The table is exactly the 21 names the whitelist above enumerates.
         let names = [
             "protocol",
-            "language",
             "media_kind",
             "task_type",
             "streaming",
@@ -1751,7 +1731,7 @@ mod tests {
             "literal_keyword",
             "system_time",
         ];
-        assert_eq!(names.len(), 22);
+        assert_eq!(names.len(), 21);
         for name in names {
             assert!(routing_field_kind(name, &[]).is_some(), "{name}");
         }
@@ -1848,9 +1828,8 @@ mod tests {
     /// 这条测试是它在测试里的第一个调用点。
     #[test]
     fn routing_field_kind_frozen() {
-        let frozen: [(&str, &str); 22] = [
+        let frozen: [(&str, &str); 21] = [
             ("protocol", "string"),
-            ("language", "string"),
             ("media_kind", "string"),
             ("task_type", "string"),
             ("streaming", "bool"),
