@@ -1,5 +1,6 @@
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { SessionChannelBindings } from "./SessionChannelBindings";
+import { SessionMetadataChips } from "./SessionMetadata";
 import { RecoveryChain, RecoveryDetails } from "./components/RecoveryDetails";
 import {
   memo,
@@ -2875,6 +2876,12 @@ function RecordDetail({
                   redirectedTo={session.model_redirect?.to}
                 />
               </>
+            ) : null}
+            {!discovery ? (
+              <SessionMetadataChips
+                refreshKey={`${session.call_count}:${session.status}`}
+                sessionId={session.id}
+              />
             ) : null}
           </>
         }

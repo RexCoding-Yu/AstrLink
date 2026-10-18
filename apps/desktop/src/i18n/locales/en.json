@@ -4774,5 +4774,24 @@
     "emptyHint": "Add attributes in Settings → Metadata first.",
     "unset": "Not set",
     "invalidValue": "The value of {{label}} does not match its pattern."
+  },
+  "sessionMetadata": {
+    "title": "Session metadata",
+    "helpLabel": "About session metadata",
+    "help": "A value you enter is checked against the attribute's pattern; none leaves this session out.",
+    "unbindHelp": "Unbinding stores none: the session is no longer recalled, captured or asked about, and older marker lines in its history do not bind it again. Set a value here, or send a marker line on its own, to bind it again.",
+    "none": "left out",
+    "notBound": "not bound",
+    "unboundValue": "Not bound",
+    "unbind": "Unbind",
+    "unboundNotice": "Unbound {{label}}",
+    "invalidValue": "The value of {{label}} does not match its pattern.",
+    "saveFailed": "Couldn't save the session metadata.",
+    "turn": "{{source}} · turn {{turn}}",
+    "setBy": {
+      "model_marker": "Model reply",
+      "user_marker": "User message",
+      "manual": "Set by hand"
+    }
   }
 }

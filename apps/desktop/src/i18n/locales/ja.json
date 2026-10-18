@@ -4774,5 +4774,24 @@
     "emptyHint": "先に「設定 → メタデータ」で属性を追加してください。",
     "unset": "未設定",
     "invalidValue": "「{{label}}」の値が検証ルールに合いません。"
+  },
+  "sessionMetadata": {
+    "title": "セッションのメタデータ",
+    "helpLabel": "セッションのメタデータについて",
+    "help": "入力した値は属性の検証ルールで確認されます。none はこのセッションを対象外にします。",
+    "unbindHelp": "解除すると none が保存されます。このセッションは想起・記録・確認の対象外になり、履歴の古いマーカー行で再び紐付くこともありません。ここで値を入れるか、マーカー行だけを送ると再び紐付きます。",
+    "none": "対象外",
+    "notBound": "未設定",
+    "unboundValue": "未設定",
+    "unbind": "解除",
+    "unboundNotice": "{{label}} を解除しました",
+    "invalidValue": "{{label}} の値が検証ルールに合いません。",
+    "saveFailed": "セッションのメタデータを保存できませんでした。",
+    "turn": "{{source}} · {{turn}} ターン目",
+    "setBy": {
+      "model_marker": "モデルの返答",
+      "user_marker": "ユーザーのメッセージ",
+      "manual": "手動で設定"
+    }
   }
 }

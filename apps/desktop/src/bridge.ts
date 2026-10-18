@@ -174,6 +174,7 @@ import {
   parsePluginList,
   parsePluginStatus,
   parsePluginTestResult,
+  parseSessionMetadata,
   type MetadataAttribute,
   type MetadataAttributeInput,
   type PluginDetail,
@@ -181,6 +182,7 @@ import {
   type PluginSettingsUpdate,
   type PluginStatus,
   type PluginTestResult,
+  type SessionMetadata,
 } from "./plugin-model";
 import {
   parseClientConfigApplyOutcome,
@@ -1438,6 +1440,46 @@ export async function saveAccessTokenMetadata(
       tokenId,
       input: { values },
     }),
+  );
+}
+
+/** A session's bindings, by attribute key. */
+export async function getSessionMetadata(
+  sessionId: string,
+): Promise<SessionMetadata> {
+  requireNativeBridge();
+  return parseSessionMetadata(
+    await invoke<unknown>("session_metadata", { sessionId }),
+  );
+}
+
+/** Binds a session by hand; the value none leaves it out. */
+export async function setSessionMetadata(
+  sessionId: string,
+  key: string,
+  value: string,
+): Promise<SessionMetadata> {
+  requireNativeBridge();
+  return parseSessionMetadata(
+    await invoke<unknown>("session_metadata", {
+      sessionId,
+      key,
+      input: { value },
+    }),
+  );
+}
+
+/**
+ * Unbinds a session: Core stores none, so the markers in the history the
+ * client replays do not bind it again.
+ */
+export async function unbindSessionMetadata(
+  sessionId: string,
+  key: string,
+): Promise<SessionMetadata> {
+  requireNativeBridge();
+  return parseSessionMetadata(
+    await invoke<unknown>("session_metadata", { sessionId, key, unbind: true }),
   );
 }
 

@@ -2248,6 +2248,23 @@ impl CoreManager {
         serde_json::from_slice(&body).map_err(|_| "token metadata returned invalid JSON".into())
     }
 
+    /// A session's bindings: read them, set one by hand, or unbind one,
+    /// which Core stores as none.
+    pub async fn session_metadata(
+        &self,
+        session_id: &str,
+        key: Option<&str>,
+        input: Option<serde_json::Value>,
+        unbind: bool,
+    ) -> Result<serde_json::Value, String> {
+        validate_resource_id(session_id)?;
+        let (method, path, body) = session_metadata_request(session_id, key, input, unbind)?;
+        let (_, body) = self
+            .authenticated_control(method, &path, body, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "session metadata returned invalid JSON".into())
+    }
+
     /// `fresh` asks Core to drop its 30s quota snapshot and query the
     /// provider now. Only operator-initiated refreshes set it.
     pub async fn get_service_usage_with(
@@ -3365,6 +3382,30 @@ fn metadata_request(
         "delete" => (Method::DELETE, format!("{base}/{key}"), None),
         _ => return Err("unsupported metadata operation".into()),
     })
+}
+
+/// Translates a session metadata operation into the control request it makes.
+fn session_metadata_request(
+    session_id: &str,
+    key: Option<&str>,
+    input: Option<serde_json::Value>,
+    unbind: bool,
+) -> Result<(Method, String, Option<serde_json::Value>), String> {
+    let base = format!("/control/v1/request-sessions/{session_id}/metadata");
+    let Some(key) = key else {
+        return Ok((Method::GET, base, None));
+    };
+    if !valid_plugin_name(key, '_') {
+        return Err("invalid metadata attribute".into());
+    }
+    if unbind {
+        return Ok((Method::DELETE, format!("{base}/{key}"), None));
+    }
+    Ok((
+        Method::PUT,
+        format!("{base}/{key}"),
+        Some(input.ok_or("the value is required")?),
+    ))
 }
 
 /// Translates a sync operation into the control request it makes. Kept apart
@@ -6630,6 +6671,27 @@ mod tests {
                 "{action} {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn session_metadata_actions_map_to_their_control_requests() {
+        let base = "/control/v1/request-sessions/session_1/metadata";
+        assert_eq!(
+            session_metadata_request("session_1", None, None, false).unwrap(),
+            (Method::GET, base.into(), None)
+        );
+        let value = serde_json::json!({ "value": "astrlink" });
+        assert_eq!(
+            session_metadata_request("session_1", Some("project"), Some(value.clone()), false)
+                .unwrap(),
+            (Method::PUT, format!("{base}/project"), Some(value))
+        );
+        assert_eq!(
+            session_metadata_request("session_1", Some("project"), None, true).unwrap(),
+            (Method::DELETE, format!("{base}/project"), None)
+        );
+        assert!(session_metadata_request("session_1", Some("project"), None, false).is_err());
+        assert!(session_metadata_request("session_1", Some("../x"), None, true).is_err());
     }
 
     #[test]

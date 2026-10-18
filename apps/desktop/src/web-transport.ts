@@ -280,6 +280,13 @@ const commands: Record<string, Command> = {
     (a) => `${session(a)}/channel-bindings`,
     "DELETE",
   ),
+  session_metadata: (a) => {
+    if (a.key === undefined) return route((b) => `${session(b)}/metadata`)(a);
+    const path = (b: Args) =>
+      `${session(b)}/metadata/${segment(b.key, /^[a-z][a-z0-9_]{0,31}$/)}`;
+    if (a.unbind === true) return route(path, "DELETE")(a);
+    return route(path, "PUT", input)(a);
+  },
   get_request_record: route(request),
   list_request_record_children: route((a) => `${request(a)}/children`),
   delete_request_record: route(request, "DELETE"),

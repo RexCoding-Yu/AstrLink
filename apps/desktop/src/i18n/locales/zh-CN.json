@@ -4774,5 +4774,24 @@
     "emptyHint": "请先在「设置 → 元信息」里新增属性。",
     "unset": "未设置",
     "invalidValue": "「{{label}}」的值不符合校验规则。"
+  },
+  "sessionMetadata": {
+    "title": "会话元信息",
+    "helpLabel": "关于会话元信息",
+    "help": "填写的值按属性的校验规则检查；填 none 表示本会话不纳入。",
+    "unbindHelp": "解除即改存 none：本会话不召回、不捕获、不再询问，历史里的旧标记也不会把它认回来。需要时在这里填值，或在对话里单独发一行标记。",
+    "none": "不纳入",
+    "notBound": "未绑定",
+    "unboundValue": "未绑定",
+    "unbind": "解除",
+    "unboundNotice": "已解除「{{label}}」",
+    "invalidValue": "「{{label}}」的值不符合校验规则。",
+    "saveFailed": "无法保存会话元信息。",
+    "turn": "{{source}} · 第 {{turn}} 轮",
+    "setBy": {
+      "model_marker": "模型回复",
+      "user_marker": "用户消息",
+      "manual": "手动设置"
+    }
   }
 }

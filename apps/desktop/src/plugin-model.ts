@@ -192,6 +192,20 @@ export interface MetadataEvent {
   reason?: string;
 }
 
+/** One binding of a session: its value, how it was set and in which turn. */
+export interface SessionMetadataValue {
+  value: string;
+  /** model_marker, user_marker or manual. */
+  set_by: string;
+  turn?: number;
+  updated_at: string;
+}
+
+/** What a session is bound to, by attribute key. */
+export interface SessionMetadata {
+  values: Record<string, SessionMetadataValue>;
+}
+
 /** The metadata of one request, kept with its record. */
 export interface RequestMetadata {
   values: Record<string, MetadataValue>;
@@ -627,6 +641,29 @@ export function parseAccessTokenMetadata(
       metadata.string(entry, `$.values.${key}`),
     ]),
   );
+}
+
+/** Reads a session's bindings. */
+export function parseSessionMetadata(value: unknown): SessionMetadata {
+  const raw = metadata.object(value, "$");
+  const values = metadata.object(raw.values, "$.values");
+  return {
+    values: Object.fromEntries(
+      Object.entries(values).map(([key, entry]) => {
+        const path = `$.values.${key}`;
+        const item = metadata.object(entry, path);
+        return [
+          key,
+          defined({
+            value: metadata.string(item.value, `${path}.value`),
+            set_by: metadata.string(item.set_by, `${path}.set_by`),
+            turn: metadata.optionalInteger(item.turn, `${path}.turn`),
+            updated_at: metadata.string(item.updated_at, `${path}.updated_at`),
+          }),
+        ];
+      }),
+    ),
+  };
 }
 
 const sources = ["header", "session", "token"] as const;
