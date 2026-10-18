@@ -1334,6 +1334,40 @@ async fn sync_config(
 }
 
 #[tauri::command]
+async fn plugin_action(
+    action: String,
+    key: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager
+        .plugin_action(&action, key.as_deref(), name.as_deref(), input)
+        .await
+}
+
+#[tauri::command]
+async fn metadata_action(
+    action: String,
+    key: Option<String>,
+    input: Option<serde_json::Value>,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager
+        .metadata_action(&action, key.as_deref(), input)
+        .await
+}
+
+#[tauri::command]
+async fn access_token_metadata(
+    token_id: String,
+    input: Option<serde_json::Value>,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.access_token_metadata(&token_id, input).await
+}
+
+#[tauri::command]
 async fn get_service_usage(
     service_id: String,
     fresh: Option<bool>,
@@ -2385,6 +2419,9 @@ pub fn run() {
             acknowledge_raw_key,
             set_raw_password,
             builtin_tool_action,
+            plugin_action,
+            metadata_action,
+            access_token_metadata,
             get_routing_settings,
             update_routing_settings,
             get_client_identities,

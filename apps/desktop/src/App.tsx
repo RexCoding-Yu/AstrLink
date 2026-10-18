@@ -1,11 +1,13 @@
 import { isWebEdition } from "./edition";
 import { ConsoleLogout } from "./ConsoleEntry";
 import { WebSettings } from "./WebSettings";
+import { PluginManager } from "./PluginManager";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Activity,
+  Blocks,
   CircleHelp,
   Bot,
   Home as House,
@@ -101,6 +103,7 @@ type WorkspacePage =
     }
   | { kind: "routing" }
   | { kind: "agentTools"; preselectSkill?: AgentSkillId }
+  | { kind: "plugins" }
   | { kind: "settings" }
   | { kind: "about" }
   | ServiceManagerView;
@@ -108,6 +111,7 @@ type WorkspacePage =
 type IconName =
   | "about"
   | "activity"
+  | "blocks"
   | "bot"
   | "home"
   | "key"
@@ -188,6 +192,7 @@ export function trayNavigationTarget(
 const icons: Record<IconName, AnimatedIcon> = {
   about: CircleHelp,
   activity: Activity,
+  blocks: Blocks,
   bot: Bot,
   home: House,
   key: KeyRound,
@@ -891,6 +896,12 @@ export default function App() {
                 />
               )}
               <NavButton
+                active={page.kind === "plugins"}
+                icon="blocks"
+                label={t("nav.plugins")}
+                onClick={() => navigate({ kind: "plugins" })}
+              />
+              <NavButton
                 active={page.kind === "settings"}
                 icon="settings"
                 label={t("nav.settings")}
@@ -972,6 +983,7 @@ export default function App() {
                 "safety",
                 "routing",
                 "agentTools",
+                "plugins",
                 "settings",
               ].includes(page.kind)
                 ? "overflow-hidden"
@@ -1105,6 +1117,11 @@ export default function App() {
               />
             ) : page.kind === "agentTools" ? (
               <AgentDebugSettings preselectSkill={page.preselectSkill} />
+            ) : page.kind === "plugins" ? (
+              <PluginManager
+                coreSessionKey={coreSessionKey}
+                isReady={isReady}
+              />
             ) : page.kind === "about" ? (
               <About
                 snapshot={updates.snapshot}

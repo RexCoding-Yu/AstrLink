@@ -155,6 +155,22 @@ import {
 import { parseTrayState, type TrayAction, type TrayState } from "./tray-model";
 import { downloadTextFile } from "./download-text-file";
 import {
+  parseAccessTokenMetadata,
+  parseMetadataAttribute,
+  parseMetadataAttributes,
+  parsePluginDetail,
+  parsePluginList,
+  parsePluginStatus,
+  parsePluginTestResult,
+  type MetadataAttribute,
+  type MetadataAttributeInput,
+  type PluginDetail,
+  type PluginList,
+  type PluginSettingsUpdate,
+  type PluginStatus,
+  type PluginTestResult,
+} from "./plugin-model";
+import {
   parseClientConfigApplyOutcome,
   parseClientConfigCopied,
   parseClientConfigSnippet,
@@ -1234,6 +1250,143 @@ export async function builtinToolAction(
     action,
     input,
   });
+}
+
+/** The plugin page, over the host's `plugin_action` command. */
+export async function listPlugins(): Promise<PluginList> {
+  requireNativeBridge();
+  return parsePluginList(
+    await invoke<unknown>("plugin_action", { action: "list" }),
+  );
+}
+
+/** Rescans the plugin directory and compiles what changed. */
+export async function reloadPlugins(): Promise<PluginList> {
+  requireNativeBridge();
+  return parsePluginList(
+    await invoke<unknown>("plugin_action", { action: "reload" }),
+  );
+}
+
+export async function getPlugin(key: string): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", { action: "get", key }),
+  );
+}
+
+export async function updatePlugin(
+  key: string,
+  update: PluginSettingsUpdate,
+): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", {
+      action: "update",
+      key,
+      input: update,
+    }),
+  );
+}
+
+export async function testPlugin(key: string): Promise<PluginTestResult> {
+  requireNativeBridge();
+  return parsePluginTestResult(
+    await invoke<unknown>("plugin_action", { action: "test", key }),
+  );
+}
+
+export async function getPluginStatus(key: string): Promise<PluginStatus> {
+  requireNativeBridge();
+  return parsePluginStatus(
+    await invoke<unknown>("plugin_action", { action: "status", key }),
+  );
+}
+
+/** Stores a credential for the one origin Core injects it for. */
+export async function savePluginCredential(
+  key: string,
+  name: string,
+  input: { secret: string; origin: string },
+): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", {
+      action: "save_credential",
+      key,
+      name,
+      input,
+    }),
+  );
+}
+
+export async function deletePluginCredential(
+  key: string,
+  name: string,
+): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", {
+      action: "delete_credential",
+      key,
+      name,
+    }),
+  );
+}
+
+/** The request attributes, over the host's `metadata_action` command. */
+export async function listMetadataAttributes(): Promise<MetadataAttribute[]> {
+  requireNativeBridge();
+  return parseMetadataAttributes(
+    await invoke<unknown>("metadata_action", { action: "list" }),
+  );
+}
+
+export async function createMetadataAttribute(
+  input: MetadataAttributeInput,
+): Promise<MetadataAttribute> {
+  requireNativeBridge();
+  return parseMetadataAttribute(
+    await invoke<unknown>("metadata_action", { action: "create", input }),
+  );
+}
+
+export async function updateMetadataAttribute(
+  key: string,
+  input: MetadataAttributeInput,
+): Promise<MetadataAttribute> {
+  requireNativeBridge();
+  return parseMetadataAttribute(
+    await invoke<unknown>("metadata_action", { action: "update", key, input }),
+  );
+}
+
+export async function deleteMetadataAttribute(key: string): Promise<void> {
+  requireNativeBridge();
+  await invoke<unknown>("metadata_action", { action: "delete", key });
+}
+
+/** An access token's default metadata by attribute key. */
+export async function getAccessTokenMetadata(
+  tokenId: string,
+): Promise<Record<string, string>> {
+  requireNativeBridge();
+  return parseAccessTokenMetadata(
+    await invoke<unknown>("access_token_metadata", { tokenId }),
+  );
+}
+
+export async function saveAccessTokenMetadata(
+  tokenId: string,
+  values: Record<string, string>,
+): Promise<Record<string, string>> {
+  requireNativeBridge();
+  return parseAccessTokenMetadata(
+    await invoke<unknown>("access_token_metadata", {
+      tokenId,
+      input: { values },
+    }),
+  );
 }
 
 /** The configuration-sync surface, over the host's `sync_config` command. */

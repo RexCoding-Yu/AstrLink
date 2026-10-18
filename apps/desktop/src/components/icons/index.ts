@@ -7,6 +7,7 @@ export { ArrowUp } from "./arrow-up";
 export { ArrowUpRight } from "./arrow-up-right";
 export { BadgeAlert } from "./badge-alert";
 export { Ban } from "./ban";
+export { Blocks } from "./blocks";
 export { Bot } from "./bot";
 export { Boxes } from "./boxes";
 export { Brain } from "./brain";

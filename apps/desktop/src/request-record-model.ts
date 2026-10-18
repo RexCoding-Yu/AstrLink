@@ -1,5 +1,11 @@
 import { i18n } from "./i18n";
 import { invalidData, type DataProblem } from "./ipc-data-error";
+import {
+  parseRequestMetadata,
+  parseRequestPluginRecords,
+  type RequestMetadata,
+  type RequestPluginRecord,
+} from "./plugin-model";
 
 export const CLIENT_TYPES = [
   "unknown",
@@ -155,7 +161,8 @@ export type RequestEventKind =
   | "routed"
   | "upstream"
   | "restore"
-  | "completed";
+  | "completed"
+  | "plugin";
 
 /** The routing-settings redirect applied to a call: client model → routed model. */
 export interface RequestModelRedirect {
@@ -222,6 +229,9 @@ export interface RequestEvent {
   status: RequestStatus;
   summary: string;
   attempt_index: number;
+  /** Set on plugin events: the plugin's key and its name for the event. */
+  plugin?: string;
+  title?: string;
 }
 
 /**
@@ -296,6 +306,10 @@ export interface RequestRecord {
   privacy_findings?: PrivacyFinding[];
   /** Absent when nothing was left in place and on older records. */
   privacy_ignored?: PrivacyIgnored[];
+  /** The request's metadata values and changes; absent when it had none. */
+  metadata?: RequestMetadata;
+  /** The plugins' parts in the request, in the order they ran. */
+  plugin_records?: RequestPluginRecord[];
   session_id: string | null;
   previous_response_id: string | null;
   output_response_id: string | null;
@@ -1115,6 +1129,7 @@ function parseRequestRecordAt(value: unknown, path: string): RequestRecord {
     ...optionalPrivacyDecision(record.privacy_decision, path),
     ...optionalPrivacyFindings(record.privacy_findings, path),
     ...optionalPrivacyIgnored(record.privacy_ignored, path),
+    ...optionalPluginFields(record, path),
     session_id: Object.hasOwn(record, "session_id")
       ? nullableStringAt(record.session_id, `${path}.session_id`)
       : null,
@@ -1200,6 +1215,7 @@ const eventKinds = new Set<RequestEventKind>([
   "upstream",
   "restore",
   "completed",
+  "plugin",
 ]);
 
 function parseRequestEvents(value: unknown, path: string): RequestEvent[] {
@@ -1231,8 +1247,35 @@ function parseRequestEvents(value: unknown, path: string): RequestEvent[] {
         event.attempt_index,
         `${path}[${index}].attempt_index`,
       ),
+      ...(event.plugin === undefined
+        ? {}
+        : { plugin: stringAt(event.plugin, `${path}[${index}].plugin`) }),
+      ...(event.title === undefined
+        ? {}
+        : { title: stringAt(event.title, `${path}[${index}].title`) }),
     };
   });
+}
+
+function optionalPluginFields(
+  record: JsonObject,
+  path: string,
+): Pick<RequestRecord, "metadata" | "plugin_records"> {
+  return {
+    ...(record.metadata === undefined || record.metadata === null
+      ? {}
+      : {
+          metadata: parseRequestMetadata(record.metadata, `${path}.metadata`),
+        }),
+    ...(record.plugin_records === undefined || record.plugin_records === null
+      ? {}
+      : {
+          plugin_records: parseRequestPluginRecords(
+            record.plugin_records,
+            `${path}.plugin_records`,
+          ),
+        }),
+  };
 }
 
 export function parseRequestSession(value: unknown): RequestSession {

@@ -156,7 +156,8 @@
     "settings": "设置",
     "gateway": "网关",
     "gatewayStatus": "网关 {{status}}",
-    "about": "关于"
+    "about": "关于",
+    "plugins": "插件"
   },
   "chrome": {
     "bar": "窗口控制栏",
@@ -358,7 +359,8 @@
     "tabs": {
       "general": "常规",
       "tray": "托盘面板",
-      "sync": "同步与备份"
+      "sync": "同步与备份",
+      "metadata": "元信息"
     },
     "sync": {
       "title": "同步与备份",
@@ -2469,7 +2471,8 @@
       "UPSTREAM": "上游",
       "RETRY": "重试",
       "RESTORE": "还原",
-      "RESULT": "结果"
+      "RESULT": "结果",
+      "PLUGIN": "插件"
     },
     "lanes": {
       "client": "客户端",
@@ -2579,7 +2582,8 @@
       "find": "搜键名或值，回车跳到下一处，折叠的部分会自动展开。随时按 {{shortcut}} 回到这里。",
       "pinTitle": "置顶窗口",
       "pin": "保持在最前，并固定显示这次调用；之后点别的调用会另开窗口。"
-    }
+    },
+    "plugin": "插件"
   },
   "find": {
     "label": "查找内容",
@@ -3738,13 +3742,25 @@
       "missing": "缺少字段",
       "unknownReason": "未知原因",
       "unexpectedValue": "取值无效"
-    }
+    },
+    "plugin": "插件数据无效（{{path}}）：{{detail}}",
+    "metadata": "元信息数据无效（{{path}}）：{{detail}}"
   },
   "controlErrors": {
     "image_provider_not_found": "图片生成选用的 API 提供商已不存在。请换一个提供商，或关闭图片生成。",
     "image_provider_unsupported": "图片生成选用的 API 提供商没有 Images API。「提供商的 Images API」可以选用 OpenAI、OpenAI 兼容、New API 和 MiniMax 提供商。Codex 订阅请改选「Responses · image_generation」。",
     "search_provider_not_found": "网页搜索选用的 API 提供商已不存在。请换一个提供商，或关闭网页搜索。",
-    "search_provider_unsupported": "网页搜索选用的 API 提供商没有搜索 API。「提供商的搜索 API」可以选用 Codex 订阅和 New API 提供商。其他提供商请改选「Responses · web_search」。"
+    "search_provider_unsupported": "网页搜索选用的 API 提供商没有搜索 API。「提供商的搜索 API」可以选用 Codex 订阅和 New API 提供商。其他提供商请改选「Responses · web_search」。",
+    "invalid_plugin_settings": "插件设置无效，请检查能力、地址和配置。",
+    "metadata_attribute_conflict": "已有其他属性使用这个键或会话标记。",
+    "metadata_attribute_owned": "这个属性由插件登记，只能设值。",
+    "invalid_metadata_attribute": "属性无效，请检查键、校验规则和会话标记。",
+    "invalid_metadata_value": "有值不符合属性的校验规则。",
+    "invalid_credential": "凭据须为 1 至 16384 字节、不含换行，并绑定插件可访问的地址。",
+    "plugin_reload_failed": "无法扫描插件目录。",
+    "plugin_unavailable": "无法读取或保存插件设置。",
+    "metadata_unavailable": "无法读取或保存元信息。",
+    "credential_unavailable": "无法保存凭据。"
   },
   "webConsole": {
     "title": "AstrLink 控制台",
@@ -3773,5 +3789,263 @@
     "configHint": "将配置复制到客户端。将 YOUR_ACCESS_TOKEN 替换为控制台中的访问令牌。将 YOUR_MODEL 替换为提供商的模型。",
     "copy": "复制配置",
     "clipboard": "剪贴板不可用，请选中下方文本复制。"
+  },
+  "plugins": {
+    "title": "插件",
+    "listLabel": "插件列表",
+    "loading": "正在加载插件…",
+    "loadFailed": "无法加载插件。",
+    "detailFailed": "无法加载这个插件。",
+    "statusFailed": "无法加载插件的运行状态。",
+    "saveFailed": "无法保存修改。",
+    "testFailed": "测试连接没有运行。",
+    "empty": "还没有插件",
+    "emptyHint": "把插件放进插件目录，再重新扫描。",
+    "select": "选择一个插件",
+    "rescan": "重新扫描",
+    "rescanning": "正在扫描…",
+    "directoryHelpLabel": "插件目录",
+    "directoryHelp": "每个插件在这里有自己的文件夹，内含 plugin.ts 或 plugin.js；文件夹名就是插件的 key。",
+    "rescanHelp": "添加或修改插件后点重新扫描即可，不用重启。正在处理的请求用旧版本跑完。",
+    "errorAt": "{{file}} 第 {{line}} 行",
+    "source": {
+      "builtin": "内置",
+      "directory": "目录",
+      "override": "替换内置"
+    },
+    "state": {
+      "running": "运行中",
+      "disabled": "已停用",
+      "failed": "加载失败"
+    },
+    "needsNetwork": "需要网络",
+    "enable": "启用",
+    "disable": "停用",
+    "test": "测试连接",
+    "testing": "测试中…",
+    "tabsLabel": "插件详情",
+    "tabs": {
+      "overview": "概览",
+      "network": "网络与凭据",
+      "config": "配置",
+      "status": "运行状态"
+    },
+    "testStatus": {
+      "ok": "连接正常",
+      "error": "出错",
+      "failed": "测试失败"
+    },
+    "truncated": "超出上限，已截断",
+    "overviewTitle": "插件提供的概览",
+    "noOverview": "插件这里暂时没有内容。",
+    "overviewNeedsViews": "启用时授予「界面视图」，这里才会显示插件提供的概览。",
+    "grantedTitle": "能力",
+    "noCapabilities": "没有申请能力",
+    "capabilities": {
+      "contextInject": "注入上下文",
+      "requestRead": "读取本轮文本",
+      "network": "网络",
+      "storage": "插件存储",
+      "uiViews": "界面视图"
+    },
+    "loadErrors": {
+      "not_found": "没有 plugin.ts 或 plugin.js",
+      "ambiguous": "同时有 plugin.ts 和 plugin.js",
+      "too_large": "超过 8 MiB",
+      "encoding": "不是 UTF-8",
+      "syntax": "语法错误",
+      "async": "不支持 async",
+      "await": "不支持 await",
+      "import": "不支持 import",
+      "reexport": "不支持 export … from",
+      "missing_meta": "没有导出 meta",
+      "invalid_meta": "meta 无效",
+      "unknown_export": "导出了 meta 和钩子以外的内容",
+      "not_function": "有钩子不是函数",
+      "load_failed": "顶层代码执行失败"
+    },
+    "network": {
+      "origins": "允许访问的地址",
+      "originsHelpLabel": "关于允许访问的地址",
+      "originsHelp": "插件只能访问这些地址。协议、主机和端口必须一致，路径不限；不跟随重定向。",
+      "noOrigins": "还没有地址",
+      "originLabel": "要允许的地址",
+      "invalidOrigin": "请输入带主机的 http 或 https 地址，例如 https://memory.example.com:8443。",
+      "add": "添加",
+      "save": "保存地址",
+      "remove": "移除 {{origin}}",
+      "plaintext": "明文 HTTP",
+      "allowPlaintext": "允许明文 HTTP",
+      "plaintextHelpLabel": "关于明文 HTTP",
+      "plaintextHelp": "发往这个地址的请求（包括凭据）以明文传输，途中可能被窃听。建议给服务器加 TLS，或经 SSH 隧道访问。",
+      "trusted": "受信任",
+      "trustedHelpLabel": "关于受信任",
+      "trustedHelp": "关闭时，插件拿到的检索词和捕获文本先经过隐私策略检查，和不受信任的提供商一样；打开后直接拿到原文。"
+    },
+    "credentials": {
+      "title": "凭据",
+      "helpLabel": "关于凭据",
+      "help": "凭据保存在 AstrLink 的本机密钥库里。只有请求发往凭据绑定的地址时，Core 才把它加进请求；插件读不到凭据的值。",
+      "configured": "已配置 ···· {{hint}}",
+      "configuredNoHint": "已配置",
+      "unset": "未配置",
+      "boundTo": "绑定 {{origin}}",
+      "origin": "绑定的地址",
+      "needOrigin": "先添加允许访问的地址",
+      "secret": "凭据值",
+      "save": "保存凭据",
+      "clear": "清除"
+    },
+    "config": {
+      "title": "插件配置（JSON）",
+      "helpLabel": "关于插件配置",
+      "help": "一整段 JSON 对象，最多 64 KiB。插件只读，改不了它。凭据不要写在这里，请用凭据位。",
+      "size": "{{size}} KiB / 64 KiB",
+      "format": "格式化",
+      "save": "保存配置",
+      "invalid": "配置必须是一个 JSON 对象。",
+      "tooLarge": "配置超过了 64 KiB。"
+    },
+    "status": {
+      "calls": "调用",
+      "timeouts": "超时",
+      "memoryLimits": "内存超限",
+      "network": "网络",
+      "networkValue": "{{requests}} 个请求 · 拒绝 {{denied}} · 失败 {{errors}}",
+      "failures": "失败的调用",
+      "reasons": {
+        "timeout": "超时",
+        "memory_limit": "内存超限",
+        "plugin_error": "插件出错",
+        "invalid_result": "结果无效",
+        "canceled": "已取消",
+        "unavailable": "不可用"
+      }
+    },
+    "enableDialog": {
+      "title": "启用「{{name}}」",
+      "capabilities": "插件申请以下能力，取消勾选的不会授予：",
+      "purpose": "网络用途：{{purpose}}",
+      "notice": "插件的提醒",
+      "metadata": "登记的元信息属性",
+      "marker": "会话标记 {{marker}}",
+      "confirm": "启用"
+    }
+  },
+  "pluginRecords": {
+    "none": "这个请求没有插件记录。",
+    "status": {
+      "ok": "完成",
+      "skipped": "已跳过",
+      "failed": "失败"
+    },
+    "elapsed": "耗时",
+    "skipped": "跳过原因",
+    "skipReasons": {
+      "no_project": "本会话没有项目",
+      "short_query": "问题太短",
+      "no_hits": "没有命中",
+      "server_unavailable": "服务器不可用",
+      "timeout": "超时",
+      "plugin_error": "插件出错",
+      "privacy_blocked": "被隐私策略拦截",
+      "privacy_unavailable": "隐私检查不可用"
+    },
+    "injection": "注入",
+    "placement": {
+      "system_append": "系统提示词",
+      "turn_message_prefix": "本轮用户开口消息开头"
+    },
+    "replayed_one": "重放 {{count}} 段",
+    "replayed_other": "重放 {{count}} 段",
+    "dropped_one": "超预算丢弃 {{count}} 条",
+    "dropped_other": "超预算丢弃 {{count}} 条",
+    "network": "网络",
+    "networkCount": "{{requests}} 个请求 · 拒绝 {{denied}} · 失败 {{errors}} · 等待 {{wait}} ms",
+    "observe": "捕获",
+    "observeStates": {
+      "queued": "已排队",
+      "skipped_privacy": "被隐私策略跳过",
+      "skipped_binding_turn": "跳过：本轮在绑定项目",
+      "skipped_continuation": "跳过：不是本轮首个调用",
+      "queue_full": "丢弃：队列已满",
+      "disabled": "未开启"
+    },
+    "truncated": "超出上限，已截断",
+    "metadata": "元信息",
+    "metadataSources": {
+      "header": "请求头",
+      "session": "会话绑定",
+      "token": "令牌默认值"
+    },
+    "metadataTurn": "{{source}} · 第 {{turn}} 轮",
+    "metadataIgnored": "已忽略 {{key}}={{value}}：{{reason}}",
+    "ignoredReasons": {
+      "invalid_value": "值不符合校验规则",
+      "already_bound": "会话已绑定",
+      "in_code_block": "在代码块里"
+    },
+    "metadataEvents": {
+      "bound": "绑定为",
+      "rebound": "改绑为",
+      "cleared": "已解除"
+    }
+  },
+  "metadata": {
+    "title": "元信息",
+    "add": "新增属性",
+    "loading": "正在加载属性…",
+    "loadFailed": "无法加载属性。",
+    "saveFailed": "无法保存属性。",
+    "deleteFailed": "无法删除属性。",
+    "empty": "还没有属性",
+    "emptyHint": "新增一个属性给请求打标签，例如请求来自哪个环境。",
+    "helpLabel": "关于元信息",
+    "help": {
+      "what": "属性是请求带上的标签，例如项目或环境。插件可以登记自己的属性，这类属性只能设值。",
+      "order": "每个请求按「请求头 → 会话绑定 → 令牌默认值」取值。",
+      "none": "none 是所有属性的保留值，表示这个请求或会话不纳入。",
+      "headers": "属性的请求头是 X-AstrLink-Meta- 加上键，例如 X-AstrLink-Meta-Env。AstrLink 转发前会去掉它，但不要写进提交到共享仓库的客户端配置：不经过 AstrLink 时，它会原样发给提供商。"
+    },
+    "columns": {
+      "label": "名称",
+      "key": "键",
+      "pattern": "校验规则",
+      "marker": "会话标记",
+      "owner": "定义来自"
+    },
+    "ownerUser": "用户",
+    "ownerPlugin": "插件 {{plugin}}",
+    "ownerMissing": "插件 {{plugin}}（已移除）",
+    "edit": "编辑{{label}}",
+    "delete": "删除{{label}}",
+    "addTitle": "新增属性",
+    "editTitle": "编辑属性",
+    "labelPlaceholder": "环境",
+    "description": "说明",
+    "optional": "选填",
+    "deleteTitle": "删除这个属性？",
+    "deleteDescription": "「{{label}}」和它的所有取值（令牌默认值和会话绑定）都会被删除。",
+    "deleteConfirm": "删除",
+    "problems": {
+      "key": "键须以小写字母开头，后面最多 31 个小写字母、数字或下划线。",
+      "label": "名称为 1 至 32 个字符。",
+      "anchored": "校验规则须以 ^ 开头、$ 结尾，校验整个值。",
+      "pattern": "校验规则不是有效的正则表达式。",
+      "marker": "会话标记须以小写字母开头，后面最多 31 个小写字母、数字或短横线，且不能包含 astrlink。"
+    }
+  },
+  "tokenMetadata": {
+    "open": "{{name}} 的默认元信息",
+    "title": "默认元信息 · {{name}}",
+    "helpLabel": "关于默认元信息",
+    "help": "请求头和会话都没有设值时，用这个令牌的请求取这里的值。适合专给一个项目用的令牌。",
+    "loading": "加载中…",
+    "loadFailed": "无法加载默认元信息。",
+    "saveFailed": "无法保存默认元信息。",
+    "empty": "还没有元信息属性",
+    "emptyHint": "请先在「设置 → 元信息」里新增属性。",
+    "unset": "未设置",
+    "invalidValue": "「{{label}}」的值不符合校验规则。"
   }
 }

@@ -63,6 +63,7 @@ import {
   type TrajectoryTimelineCall,
   type TrajectoryTimelineItem,
   type TrajectoryTimelinePhase,
+  trajectoryChipLabel,
 } from "./request-trajectory-model";
 import { chipToneClass } from "./trajectory-chip";
 import { TrajectoryInspector } from "./TrajectoryInspector";
@@ -1162,7 +1163,8 @@ const TimelinePhaseSlot = memo(function TimelinePhaseSlot({
   selected: boolean;
   onSelectRow: (row: TrajectoryRow) => void;
 }) {
-  const t = useT();
+  // The phase's title is worded in the current language: re-render with it.
+  useT();
   const span = Math.max(1, callDurationMs);
   const leftPercent = Math.min(100, (phase.startMs / span) * 100);
   const tick = phase.lane !== "upstream";
@@ -1191,7 +1193,7 @@ const TimelinePhaseSlot = memo(function TimelinePhaseSlot({
         if (row) onSelectRow(row);
       }}
       style={style}
-      title={`${t(`trajectory.chips.${phase.chip}`)} · ${phase.summary}${row?.result ? ` · ${row.result}` : ""} · ${formatDuration(phase.durationMs)}`}
+      title={`${trajectoryChipLabel(phase.chip, row?.title)} · ${phase.summary}${row?.result ? ` · ${row.result}` : ""} · ${formatDuration(phase.durationMs)}`}
       type="button"
       variant="ghost"
     />
@@ -1349,7 +1351,7 @@ const TrajectoryRowView = memo(function TrajectoryRowView({
             )}
             variant="secondary"
           >
-            {t(`trajectory.chips.${row.chip}`)}
+            {trajectoryChipLabel(row.chip, row.title)}
           </Badge>
         )}
         <time

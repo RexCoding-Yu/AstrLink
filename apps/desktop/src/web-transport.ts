@@ -86,6 +86,12 @@ function id(args: Args, key: string): string {
     throw new Error("Invalid resource ID");
   return value;
 }
+/** A plugin key, credential name or attribute key, checked before it is a path. */
+function segment(value: unknown, pattern: RegExp): string {
+  if (typeof value !== "string" || !pattern.test(value))
+    throw new Error("Invalid resource name");
+  return value;
+}
 const service = (a: Args) => `/services/${id(a, "serviceId")}`;
 const request = (a: Args) => `/requests/${id(a, "requestId")}`;
 const session = (a: Args) => `/request-sessions/${id(a, "sessionId")}`;
@@ -392,6 +398,62 @@ const commands: Record<string, Command> = {
         throw new Error("Unsupported pricing operation");
     }
   },
+  plugin_action: (a) => {
+    if (a.action === "list") return route("/plugins")(a);
+    if (a.action === "reload") return route("/plugins/reload", "POST")(a);
+    const plugin = `/plugins/${segment(a.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
+    switch (a.action) {
+      case "get":
+        return route(plugin)(a);
+      case "update":
+        return route(plugin, "PATCH", input)(a);
+      case "test":
+        return route(`${plugin}/test`, "POST")(a);
+      case "status":
+        return route(`${plugin}/status`)(a);
+      case "save_credential":
+        return route(
+          `${plugin}/credentials/${segment(a.name, /^[a-z][a-z0-9_]{0,31}$/)}`,
+          "PUT",
+          input,
+        )(a);
+      case "delete_credential":
+        return route(
+          `${plugin}/credentials/${segment(a.name, /^[a-z][a-z0-9_]{0,31}$/)}`,
+          "DELETE",
+        )(a);
+      default:
+        throw new Error("Unsupported plugin operation");
+    }
+  },
+  metadata_action: (a) => {
+    const base = "/metadata/attributes";
+    switch (a.action) {
+      case "list":
+        return route(base)(a);
+      case "create":
+        return route(base, "POST", input)(a);
+      case "update":
+        return route(
+          `${base}/${segment(a.key, /^[a-z][a-z0-9_]{0,31}$/)}`,
+          "PATCH",
+          input,
+        )(a);
+      case "delete":
+        return route(
+          `${base}/${segment(a.key, /^[a-z][a-z0-9_]{0,31}$/)}`,
+          "DELETE",
+        )(a);
+      default:
+        throw new Error("Unsupported metadata operation");
+    }
+  },
+  access_token_metadata: (a) =>
+    route(
+      `/access-tokens/${id(a, "tokenId")}/metadata`,
+      a.input === undefined ? "GET" : "PUT",
+      a.input === undefined ? undefined : input,
+    )(a),
   builtin_tool_action: (a) => {
     if (a.kind !== "web_search" && a.kind !== "image_generation")
       throw new Error("Invalid builtin tool");

@@ -156,7 +156,8 @@
     "settings": "Settings",
     "gateway": "Gateway",
     "gatewayStatus": "Gateway {{status}}",
-    "about": "About"
+    "about": "About",
+    "plugins": "Plugins"
   },
   "chrome": {
     "bar": "Window controls",
@@ -358,7 +359,8 @@
     "tabs": {
       "general": "General",
       "tray": "Tray panel",
-      "sync": "Sync and backup"
+      "sync": "Sync and backup",
+      "metadata": "Metadata"
     },
     "sync": {
       "title": "Sync and backup",
@@ -2469,7 +2471,8 @@
       "UPSTREAM": "UPSTREAM",
       "RETRY": "RETRY",
       "RESTORE": "RESTORE",
-      "RESULT": "RESULT"
+      "RESULT": "RESULT",
+      "PLUGIN": "PLUGIN"
     },
     "lanes": {
       "client": "Client",
@@ -2579,7 +2582,8 @@
       "find": "Search keys or values; Enter jumps to the next hit and folded parts open on their own. Press {{shortcut}} to come back here any time.",
       "pinTitle": "Keep on top",
       "pin": "Float above other windows and hold this call. The next call you pick opens its own window."
-    }
+    },
+    "plugin": "Plugins"
   },
   "find": {
     "label": "Find in content",
@@ -3738,13 +3742,25 @@
       "missing": "missing",
       "unknownReason": "unknown reason",
       "unexpectedValue": "unexpected value"
-    }
+    },
+    "plugin": "Invalid plugin data ({{path}}): {{detail}}",
+    "metadata": "Invalid metadata ({{path}}): {{detail}}"
   },
   "controlErrors": {
     "image_provider_not_found": "The API provider chosen for image generation no longer exists. Choose another provider or turn image generation off.",
     "image_provider_unsupported": "The API provider chosen for image generation has no Images API. Provider’s Images API works with OpenAI, OpenAI-compatible, New API, and MiniMax providers. For a Codex subscription, choose Responses · image_generation instead.",
     "search_provider_not_found": "The API provider chosen for web search no longer exists. Choose another provider or turn web search off.",
-    "search_provider_unsupported": "The API provider chosen for web search has no search API. Provider’s search API works with Codex subscription and New API providers. For other providers, choose Responses · web_search instead."
+    "search_provider_unsupported": "The API provider chosen for web search has no search API. Provider’s search API works with Codex subscription and New API providers. For other providers, choose Responses · web_search instead.",
+    "invalid_plugin_settings": "These plugin settings are not valid. Check the capabilities, addresses and configuration.",
+    "metadata_attribute_conflict": "Another attribute already uses this key or session marker.",
+    "metadata_attribute_owned": "A plugin registered this attribute. Only its values can be set.",
+    "invalid_metadata_attribute": "This attribute is not valid. Check its key, pattern and session marker.",
+    "invalid_metadata_value": "A value does not match its attribute's pattern.",
+    "invalid_credential": "The credential must be 1 to 16384 bytes on one line, bound to an address the plugin may reach.",
+    "plugin_reload_failed": "The plugin directory could not be scanned.",
+    "plugin_unavailable": "The plugin settings could not be read or saved.",
+    "metadata_unavailable": "The metadata could not be read or saved.",
+    "credential_unavailable": "The credential could not be saved."
   },
   "webConsole": {
     "title": "AstrLink console",
@@ -3773,5 +3789,263 @@
     "configHint": "Copy this configuration to your client. Replace YOUR_ACCESS_TOKEN with an access token from this console. Replace YOUR_MODEL with a model from your provider.",
     "copy": "Copy configuration",
     "clipboard": "Clipboard is unavailable. Select and copy the text below."
+  },
+  "plugins": {
+    "title": "Plugins",
+    "listLabel": "Plugins",
+    "loading": "Loading plugins…",
+    "loadFailed": "Couldn't load the plugins.",
+    "detailFailed": "Couldn't load this plugin.",
+    "statusFailed": "Couldn't load this plugin's status.",
+    "saveFailed": "Couldn't save the change.",
+    "testFailed": "The connection test did not run.",
+    "empty": "No plugins yet",
+    "emptyHint": "Put a plugin in the plugin directory, then scan again.",
+    "select": "Choose a plugin",
+    "rescan": "Scan again",
+    "rescanning": "Scanning…",
+    "directoryHelpLabel": "Plugin directory",
+    "directoryHelp": "Each plugin lives in its own folder here, as plugin.ts or plugin.js; the folder's name is the plugin's key.",
+    "rescanHelp": "After you add or change a plugin, scan again; nothing needs a restart. Requests already running finish with the old version.",
+    "errorAt": "{{file}} line {{line}}",
+    "source": {
+      "builtin": "Built in",
+      "directory": "Directory",
+      "override": "Replaces built-in"
+    },
+    "state": {
+      "running": "Running",
+      "disabled": "Off",
+      "failed": "Failed to load"
+    },
+    "needsNetwork": "Needs network",
+    "enable": "Enable",
+    "disable": "Turn off",
+    "test": "Test connection",
+    "testing": "Testing…",
+    "tabsLabel": "Plugin details",
+    "tabs": {
+      "overview": "Overview",
+      "network": "Network & credentials",
+      "config": "Configuration",
+      "status": "Activity"
+    },
+    "testStatus": {
+      "ok": "Connected",
+      "error": "Error",
+      "failed": "Test failed"
+    },
+    "truncated": "Cut to its limits",
+    "overviewTitle": "From the plugin",
+    "noOverview": "The plugin shows nothing here yet.",
+    "overviewNeedsViews": "Grant Views when you enable the plugin to see its overview here.",
+    "grantedTitle": "Capabilities",
+    "noCapabilities": "Asks for none",
+    "capabilities": {
+      "contextInject": "Inject context",
+      "requestRead": "Read the turn's text",
+      "network": "Network",
+      "storage": "Plugin storage",
+      "uiViews": "Views"
+    },
+    "loadErrors": {
+      "not_found": "No plugin.ts or plugin.js",
+      "ambiguous": "Both plugin.ts and plugin.js",
+      "too_large": "Larger than 8 MiB",
+      "encoding": "Not UTF-8",
+      "syntax": "Syntax error",
+      "async": "async is not supported",
+      "await": "await is not supported",
+      "import": "import is not supported",
+      "reexport": "export … from is not supported",
+      "missing_meta": "No meta export",
+      "invalid_meta": "Invalid meta",
+      "unknown_export": "Exports something other than meta and hooks",
+      "not_function": "A hook is not a function",
+      "load_failed": "The top level failed"
+    },
+    "network": {
+      "origins": "Allowed addresses",
+      "originsHelpLabel": "About allowed addresses",
+      "originsHelp": "The plugin can only reach these addresses. Scheme, host and port must match; any path is allowed. Redirects are not followed.",
+      "noOrigins": "No addresses yet",
+      "originLabel": "Address to allow",
+      "invalidOrigin": "Enter an http or https address with a host, such as https://memory.example.com:8443.",
+      "add": "Add",
+      "save": "Save addresses",
+      "remove": "Remove {{origin}}",
+      "plaintext": "Plain HTTP",
+      "allowPlaintext": "Allow plain HTTP",
+      "plaintextHelpLabel": "About plain HTTP",
+      "plaintextHelp": "Requests to this address, credentials included, travel unencrypted and can be read on the way. Put TLS in front of the server, or reach it through an SSH tunnel.",
+      "trusted": "Trusted",
+      "trustedHelpLabel": "About trusted plugins",
+      "trustedHelp": "Off: the text a plugin receives, for searching and for capture, passes the privacy policy first, as for an untrusted provider. On: it gets the text as it is."
+    },
+    "credentials": {
+      "title": "Credentials",
+      "helpLabel": "About credentials",
+      "help": "Credentials stay in AstrLink's local key store. Core adds one to a request only when it goes to the address the credential is bound to; the plugin never sees the value.",
+      "configured": "Set ···· {{hint}}",
+      "configuredNoHint": "Set",
+      "unset": "Not set",
+      "boundTo": "For {{origin}}",
+      "origin": "Bound address",
+      "needOrigin": "Add an allowed address first",
+      "secret": "Value",
+      "save": "Save credential",
+      "clear": "Clear"
+    },
+    "config": {
+      "title": "Configuration (JSON)",
+      "helpLabel": "About the configuration",
+      "help": "One JSON object of at most 64 KiB. The plugin reads it and cannot change it. Credentials do not belong here: use the credential slots.",
+      "size": "{{size}} KiB / 64 KiB",
+      "format": "Format",
+      "save": "Save configuration",
+      "invalid": "The configuration must be one JSON object.",
+      "tooLarge": "The configuration is larger than 64 KiB."
+    },
+    "status": {
+      "calls": "Calls",
+      "timeouts": "Timeouts",
+      "memoryLimits": "Over memory",
+      "network": "Network",
+      "networkValue": "{{requests}} requests · {{denied}} denied · {{errors}} failed",
+      "failures": "Failed calls",
+      "reasons": {
+        "timeout": "Timed out",
+        "memory_limit": "Over memory",
+        "plugin_error": "Plugin error",
+        "invalid_result": "Invalid result",
+        "canceled": "Canceled",
+        "unavailable": "Unavailable"
+      }
+    },
+    "enableDialog": {
+      "title": "Enable “{{name}}”",
+      "capabilities": "The plugin asks for these capabilities. The ones you untick are not granted:",
+      "purpose": "Network use: {{purpose}}",
+      "notice": "From the plugin",
+      "metadata": "Attributes it registers",
+      "marker": "session marker {{marker}}",
+      "confirm": "Enable"
+    }
+  },
+  "pluginRecords": {
+    "none": "No plugin recorded anything for this request.",
+    "status": {
+      "ok": "Done",
+      "skipped": "Skipped",
+      "failed": "Failed"
+    },
+    "elapsed": "Time",
+    "skipped": "Skipped because",
+    "skipReasons": {
+      "no_project": "No project for this session",
+      "short_query": "The question was too short",
+      "no_hits": "Nothing matched",
+      "server_unavailable": "The server was unavailable",
+      "timeout": "Timed out",
+      "plugin_error": "Plugin error",
+      "privacy_blocked": "Blocked by the privacy policy",
+      "privacy_unavailable": "The privacy check was unavailable"
+    },
+    "injection": "Injected",
+    "placement": {
+      "system_append": "System prompt",
+      "turn_message_prefix": "Start of the turn's message"
+    },
+    "replayed_one": "{{count}} earlier block replayed",
+    "replayed_other": "{{count}} earlier blocks replayed",
+    "dropped_one": "{{count}} item over budget",
+    "dropped_other": "{{count}} items over budget",
+    "network": "Network",
+    "networkCount": "{{requests}} requests · {{denied}} denied · {{errors}} failed · {{wait}} ms waiting",
+    "observe": "Capture",
+    "observeStates": {
+      "queued": "Queued",
+      "skipped_privacy": "Skipped by the privacy policy",
+      "skipped_binding_turn": "Skipped: this turn set the project",
+      "skipped_continuation": "Skipped: not the turn's first call",
+      "queue_full": "Dropped: the queue was full",
+      "disabled": "Off"
+    },
+    "truncated": "Cut to its limits",
+    "metadata": "Metadata",
+    "metadataSources": {
+      "header": "header",
+      "session": "session",
+      "token": "token default"
+    },
+    "metadataTurn": "{{source}}, turn {{turn}}",
+    "metadataIgnored": "Ignored {{key}}={{value}}: {{reason}}",
+    "ignoredReasons": {
+      "invalid_value": "does not match the pattern",
+      "already_bound": "the session is already bound",
+      "in_code_block": "inside a code block"
+    },
+    "metadataEvents": {
+      "bound": "bound to",
+      "rebound": "changed to",
+      "cleared": "cleared"
+    }
+  },
+  "metadata": {
+    "title": "Metadata",
+    "add": "Add attribute",
+    "loading": "Loading attributes…",
+    "loadFailed": "Couldn't load the attributes.",
+    "saveFailed": "Couldn't save the attribute.",
+    "deleteFailed": "Couldn't delete the attribute.",
+    "empty": "No attributes yet",
+    "emptyHint": "Add one to tag requests, such as the environment they come from.",
+    "helpLabel": "About metadata",
+    "help": {
+      "what": "Attributes are tags a request carries, such as a project or an environment. Plugins can register their own; you can only set values for those.",
+      "order": "A request takes each value from its header, then its session's binding, then its access token's default.",
+      "none": "none is reserved for every attribute: it leaves the request or session out.",
+      "headers": "The header of an attribute is X-AstrLink-Meta- and its key, such as X-AstrLink-Meta-Env. AstrLink removes it before forwarding, but keep it out of client configurations committed to shared repositories: without AstrLink it would reach the provider."
+    },
+    "columns": {
+      "label": "Name",
+      "key": "Key",
+      "pattern": "Pattern",
+      "marker": "Session marker",
+      "owner": "Defined by"
+    },
+    "ownerUser": "You",
+    "ownerPlugin": "Plugin {{plugin}}",
+    "ownerMissing": "Plugin {{plugin}} (removed)",
+    "edit": "Edit {{label}}",
+    "delete": "Delete {{label}}",
+    "addTitle": "Add an attribute",
+    "editTitle": "Edit the attribute",
+    "labelPlaceholder": "Environment",
+    "description": "Description",
+    "optional": "Optional",
+    "deleteTitle": "Delete this attribute?",
+    "deleteDescription": "“{{label}}” and every value set for it, token defaults and session bindings, are deleted.",
+    "deleteConfirm": "Delete",
+    "problems": {
+      "key": "The key is a lowercase letter, then up to 31 lowercase letters, digits or underscores.",
+      "label": "The name is 1 to 32 characters.",
+      "anchored": "The pattern starts with ^ and ends with $, so that it checks the whole value.",
+      "pattern": "The pattern is not a valid regular expression.",
+      "marker": "The session marker is a lowercase letter, then up to 31 lowercase letters, digits or hyphens, and must not name AstrLink."
+    }
+  },
+  "tokenMetadata": {
+    "open": "Default metadata of {{name}}",
+    "title": "Default metadata · {{name}}",
+    "helpLabel": "About default metadata",
+    "help": "Requests with this token get these values when their headers and session set none. Suits a token used for one project only.",
+    "loading": "Loading…",
+    "loadFailed": "Couldn't load the default metadata.",
+    "saveFailed": "Couldn't save the default metadata.",
+    "empty": "No attributes yet",
+    "emptyHint": "Add attributes in Settings → Metadata first.",
+    "unset": "Not set",
+    "invalidValue": "The value of {{label}} does not match its pattern."
   }
 }

@@ -2195,6 +2195,57 @@ impl CoreManager {
         serde_json::from_slice(&body).map_err(|_| "sync returned invalid JSON".into())
     }
 
+    /// The plugin page: list, rescan, settings, credentials, tests and status.
+    pub async fn plugin_action(
+        &self,
+        action: &str,
+        key: Option<&str>,
+        name: Option<&str>,
+        input: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let (method, path, body) = plugin_request(action, key, name, input)?;
+        let (_, body) = self
+            .authenticated_control(method, &path, body, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "plugins returned invalid JSON".into())
+    }
+
+    /// The request attributes of the metadata settings.
+    pub async fn metadata_action(
+        &self,
+        action: &str,
+        key: Option<&str>,
+        input: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let (method, path, body) = metadata_request(action, key, input)?;
+        let (_, body) = self
+            .authenticated_control(method, &path, body, None)
+            .await?;
+        if body.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_slice(&body).map_err(|_| "metadata returned invalid JSON".into())
+    }
+
+    /// An access token's default metadata: read it, or replace it with `input`.
+    pub async fn access_token_metadata(
+        &self,
+        token_id: &str,
+        input: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        validate_resource_id(token_id)?;
+        let path = format!("/control/v1/access-tokens/{token_id}/metadata");
+        let method = if input.is_some() {
+            Method::PUT
+        } else {
+            Method::GET
+        };
+        let (_, body) = self
+            .authenticated_control(method, &path, input, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "token metadata returned invalid JSON".into())
+    }
+
     /// `fresh` asks Core to drop its 30s quota snapshot and query the
     /// provider now. Only operator-initiated refreshes set it.
     pub async fn get_service_usage_with(
@@ -3086,6 +3137,92 @@ fn is_builtin_tool_test(method: &Method, path: &str) -> bool {
         )
 }
 
+/// A lowercase letter, then up to 31 lowercase letters, digits or `extra`.
+fn valid_plugin_name(value: &str, extra: char) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('a'..='z'))
+        && value.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == extra)
+}
+
+/// Translates a plugin page action into the control request it makes.
+fn plugin_request(
+    action: &str,
+    key: Option<&str>,
+    name: Option<&str>,
+    input: Option<serde_json::Value>,
+) -> Result<(Method, String, Option<serde_json::Value>), String> {
+    let base = "/control/v1/plugins";
+    if action == "list" {
+        return Ok((Method::GET, base.into(), None));
+    }
+    if action == "reload" {
+        return Ok((Method::POST, format!("{base}/reload"), None));
+    }
+    let key = key
+        .filter(|key| valid_plugin_name(key, '-'))
+        .ok_or("invalid plugin")?;
+    let plugin = format!("{base}/{key}");
+    Ok(match action {
+        "get" => (Method::GET, plugin, None),
+        "update" => (
+            Method::PATCH,
+            plugin,
+            Some(input.ok_or("plugin settings are required")?),
+        ),
+        "test" => (Method::POST, format!("{plugin}/test"), None),
+        "status" => (Method::GET, format!("{plugin}/status"), None),
+        "save_credential" | "delete_credential" => {
+            let name = name
+                .filter(|name| valid_plugin_name(name, '_'))
+                .ok_or("invalid plugin credential")?;
+            let path = format!("{plugin}/credentials/{name}");
+            if action == "save_credential" {
+                (
+                    Method::PUT,
+                    path,
+                    Some(input.ok_or("the credential is required")?),
+                )
+            } else {
+                (Method::DELETE, path, None)
+            }
+        }
+        _ => return Err("unsupported plugin operation".into()),
+    })
+}
+
+/// Translates a metadata settings action into the control request it makes.
+fn metadata_request(
+    action: &str,
+    key: Option<&str>,
+    input: Option<serde_json::Value>,
+) -> Result<(Method, String, Option<serde_json::Value>), String> {
+    let base = "/control/v1/metadata/attributes";
+    match action {
+        "list" => return Ok((Method::GET, base.into(), None)),
+        "create" => {
+            return Ok((
+                Method::POST,
+                base.into(),
+                Some(input.ok_or("the attribute is required")?),
+            ))
+        }
+        _ => {}
+    }
+    let key = key
+        .filter(|key| valid_plugin_name(key, '_'))
+        .ok_or("invalid metadata attribute")?;
+    Ok(match action {
+        "update" => (
+            Method::PATCH,
+            format!("{base}/{key}"),
+            Some(input.ok_or("the attribute is required")?),
+        ),
+        "delete" => (Method::DELETE, format!("{base}/{key}"), None),
+        _ => return Err("unsupported metadata operation".into()),
+    })
+}
+
 /// Translates a sync operation into the control request it makes. Kept apart
 /// from the request itself so the mapping is testable without a running Core.
 fn sync_request(
@@ -3147,6 +3284,14 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     // A sync run does several remote round trips and may retry the merge.
     if method == Method::POST && path == "/control/v1/sync/run" {
         return Duration::from_secs(320);
+    }
+    // Core gives a plugin page hook 10 seconds, and a rescan compiles every
+    // changed plugin.
+    if path.starts_with("/control/v1/plugins/")
+        && ((method == Method::POST && (path.ends_with("/test") || path.ends_with("/reload")))
+            || (method == Method::GET && path.ends_with("/status")))
+    {
+        return Duration::from_secs(20);
     }
     if method == Method::POST
         && (path == SERVICE_MODEL_PROBES_PATH
@@ -6132,6 +6277,127 @@ mod tests {
         );
         assert_eq!(
             control_request_timeout(&Method::PUT, "/control/v1/sync/config"),
+            REQUEST_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn plugin_actions_map_to_their_control_requests() {
+        let settings = serde_json::json!({ "enabled": false });
+        assert_eq!(
+            plugin_request("list", None, None, None).unwrap(),
+            (Method::GET, "/control/v1/plugins".into(), None)
+        );
+        assert_eq!(
+            plugin_request("reload", None, None, None).unwrap(),
+            (Method::POST, "/control/v1/plugins/reload".into(), None)
+        );
+        assert_eq!(
+            plugin_request("update", Some("team-rules"), None, Some(settings.clone())).unwrap(),
+            (
+                Method::PATCH,
+                "/control/v1/plugins/team-rules".into(),
+                Some(settings)
+            )
+        );
+        assert_eq!(
+            plugin_request("status", Some("powercontext"), None, None).unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/powercontext/status".into(),
+                None
+            )
+        );
+        assert_eq!(
+            plugin_request(
+                "delete_credential",
+                Some("powercontext"),
+                Some("api_token"),
+                None
+            )
+            .unwrap(),
+            (
+                Method::DELETE,
+                "/control/v1/plugins/powercontext/credentials/api_token".into(),
+                None
+            )
+        );
+        for (action, key, name, input) in [
+            ("get", Some("../services"), None, None),
+            ("get", Some("Team"), None, None),
+            ("update", Some("team-rules"), None, None),
+            (
+                "save_credential",
+                Some("powercontext"),
+                Some("api-token"),
+                Some(serde_json::json!({})),
+            ),
+            (
+                "save_credential",
+                Some("powercontext"),
+                Some("api_token"),
+                None,
+            ),
+            ("uninstall", Some("powercontext"), None, None),
+        ] {
+            assert!(
+                plugin_request(action, key, name, input).is_err(),
+                "{action} {key:?} {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_actions_map_to_their_control_requests() {
+        let attribute = serde_json::json!({ "key": "env" });
+        assert_eq!(
+            metadata_request("create", None, Some(attribute.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/metadata/attributes".into(),
+                Some(attribute)
+            )
+        );
+        assert_eq!(
+            metadata_request("delete", Some("env"), None).unwrap(),
+            (
+                Method::DELETE,
+                "/control/v1/metadata/attributes/env".into(),
+                None
+            )
+        );
+        for (action, key) in [
+            ("delete", Some("env/../x")),
+            ("delete", Some("Env")),
+            ("update", Some("env")),
+            ("rename", Some("env")),
+        ] {
+            assert!(
+                metadata_request(action, key, None).is_err(),
+                "{action} {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_hooks_get_room_for_their_core_deadline() {
+        for (method, path) in [
+            (Method::POST, "/control/v1/plugins/reload"),
+            (Method::POST, "/control/v1/plugins/powercontext/test"),
+            (Method::GET, "/control/v1/plugins/powercontext/status"),
+        ] {
+            assert_eq!(
+                control_request_timeout(&method, path),
+                Duration::from_secs(20),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            control_request_timeout(&Method::GET, "/control/v1/plugins/powercontext"),
+            REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            control_request_timeout(&Method::PATCH, "/control/v1/plugins/powercontext"),
             REQUEST_TIMEOUT
         );
     }

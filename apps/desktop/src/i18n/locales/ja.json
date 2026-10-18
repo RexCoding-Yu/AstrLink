@@ -156,7 +156,8 @@
     "settings": "設定",
     "gateway": "ゲートウェイ",
     "gatewayStatus": "ゲートウェイ {{status}}",
-    "about": "情報"
+    "about": "情報",
+    "plugins": "プラグイン"
   },
   "chrome": {
     "bar": "ウィンドウ操作",
@@ -358,7 +359,8 @@
     "tabs": {
       "general": "一般",
       "tray": "トレイパネル",
-      "sync": "同期とバックアップ"
+      "sync": "同期とバックアップ",
+      "metadata": "メタデータ"
     },
     "sync": {
       "title": "同期とバックアップ",
@@ -2469,7 +2471,8 @@
       "UPSTREAM": "アップストリーム",
       "RETRY": "再試行",
       "RESTORE": "復元",
-      "RESULT": "結果"
+      "RESULT": "結果",
+      "PLUGIN": "プラグイン"
     },
     "lanes": {
       "client": "クライアント",
@@ -2579,7 +2582,8 @@
       "find": "キーや値を検索します。Enterで次の一致へ移動し、折りたたまれた部分は自動で開きます。いつでも {{shortcut}} を押すと、ここに戻れます。",
       "pinTitle": "最前面に固定",
       "pin": "他のウィンドウより前に浮かび、この呼び出しを保持します。次に選んだ呼び出しは、別のウィンドウで開きます。"
-    }
+    },
+    "plugin": "プラグイン"
   },
   "find": {
     "label": "内容を検索",
@@ -3738,13 +3742,25 @@
       "missing": "不足",
       "unknownReason": "不明な理由",
       "unexpectedValue": "予期しない値"
-    }
+    },
+    "plugin": "無効なプラグインデータ（{{path}}）: {{detail}}",
+    "metadata": "無効なメタデータ（{{path}}）: {{detail}}"
   },
   "controlErrors": {
     "image_provider_not_found": "画像生成に選んだ APIプロバイダーは、もう存在しません。別の APIプロバイダーを選ぶか、画像生成をオフにしてください。",
     "image_provider_unsupported": "画像生成に選んだ APIプロバイダーには Images API がありません。「APIプロバイダーの Images API」は、OpenAI、OpenAI 互換、New API、MiniMax の APIプロバイダーで使えます。Codex サブスクリプションでは、Responses · image_generation を選んでください。",
     "search_provider_not_found": "ウェブ検索に選んだ APIプロバイダーは、もう存在しません。別の APIプロバイダーを選ぶか、ウェブ検索をオフにしてください。",
-    "search_provider_unsupported": "ウェブ検索に選んだ APIプロバイダーには検索 API がありません。「APIプロバイダーの検索 API」は、Codex サブスクリプションと New API の APIプロバイダーで使えます。その他の APIプロバイダーでは、Responses · web_search を選んでください。"
+    "search_provider_unsupported": "ウェブ検索に選んだ APIプロバイダーには検索 API がありません。「APIプロバイダーの検索 API」は、Codex サブスクリプションと New API の APIプロバイダーで使えます。その他の APIプロバイダーでは、Responses · web_search を選んでください。",
+    "invalid_plugin_settings": "プラグインの設定が無効です。権限、アドレス、設定を確認してください。",
+    "metadata_attribute_conflict": "このキーまたはセッションマーカーは、ほかの属性が使っています。",
+    "metadata_attribute_owned": "この属性はプラグインが登録したものです。値の設定だけができます。",
+    "invalid_metadata_attribute": "属性が無効です。キー、検証ルール、セッションマーカーを確認してください。",
+    "invalid_metadata_value": "属性の検証ルールに合わない値があります。",
+    "invalid_credential": "認証情報は 1〜16384 バイトの 1 行で、プラグインがアクセスできるアドレスに紐付ける必要があります。",
+    "plugin_reload_failed": "プラグインディレクトリをスキャンできませんでした。",
+    "plugin_unavailable": "プラグインの設定を読み込めないか、保存できませんでした。",
+    "metadata_unavailable": "メタデータを読み込めないか、保存できませんでした。",
+    "credential_unavailable": "認証情報を保存できませんでした。"
   },
   "webConsole": {
     "title": "AstrLink コンソール",
@@ -3773,5 +3789,263 @@
     "configHint": "この設定をクライアントにコピーしてください。YOUR_ACCESS_TOKEN を、このコンソールのアクセストークンに置き換えてください。YOUR_MODEL を、APIプロバイダーのモデルに置き換えてください。",
     "copy": "設定をコピー",
     "clipboard": "クリップボードを利用できません。下のテキストを選択してコピーしてください。"
+  },
+  "plugins": {
+    "title": "プラグイン",
+    "listLabel": "プラグイン一覧",
+    "loading": "プラグインを読み込んでいます…",
+    "loadFailed": "プラグインを読み込めませんでした。",
+    "detailFailed": "このプラグインを読み込めませんでした。",
+    "statusFailed": "プラグインの状態を読み込めませんでした。",
+    "saveFailed": "変更を保存できませんでした。",
+    "testFailed": "接続テストを実行できませんでした。",
+    "empty": "プラグインはまだありません",
+    "emptyHint": "プラグインをプラグインディレクトリに置いて、再スキャンしてください。",
+    "select": "プラグインを選んでください",
+    "rescan": "再スキャン",
+    "rescanning": "スキャン中…",
+    "directoryHelpLabel": "プラグインディレクトリ",
+    "directoryHelp": "各プラグインはここに自分のフォルダーを持ち、plugin.ts または plugin.js を置きます。フォルダー名がプラグインのキーです。",
+    "rescanHelp": "プラグインを追加・変更したら再スキャンしてください。再起動は不要です。処理中のリクエストは古い版で完了します。",
+    "errorAt": "{{file}} {{line}} 行目",
+    "source": {
+      "builtin": "組み込み",
+      "directory": "ディレクトリ",
+      "override": "組み込みを置換"
+    },
+    "state": {
+      "running": "実行中",
+      "disabled": "停止中",
+      "failed": "読み込み失敗"
+    },
+    "needsNetwork": "ネットワーク必要",
+    "enable": "有効にする",
+    "disable": "無効にする",
+    "test": "接続テスト",
+    "testing": "テスト中…",
+    "tabsLabel": "プラグインの詳細",
+    "tabs": {
+      "overview": "概要",
+      "network": "ネットワークと認証情報",
+      "config": "設定",
+      "status": "稼働状況"
+    },
+    "testStatus": {
+      "ok": "接続 OK",
+      "error": "エラー",
+      "failed": "テスト失敗"
+    },
+    "truncated": "上限を超えたため切り詰めました",
+    "overviewTitle": "プラグインの概要",
+    "noOverview": "プラグインはまだ何も表示していません。",
+    "overviewNeedsViews": "有効にするときに「ビュー」を許可すると、ここにプラグインの概要が表示されます。",
+    "grantedTitle": "権限",
+    "noCapabilities": "権限の申請なし",
+    "capabilities": {
+      "contextInject": "コンテキストの注入",
+      "requestRead": "ターンのテキストを読む",
+      "network": "ネットワーク",
+      "storage": "プラグインストレージ",
+      "uiViews": "ビュー"
+    },
+    "loadErrors": {
+      "not_found": "plugin.ts も plugin.js もありません",
+      "ambiguous": "plugin.ts と plugin.js の両方があります",
+      "too_large": "8 MiB を超えています",
+      "encoding": "UTF-8 ではありません",
+      "syntax": "構文エラー",
+      "async": "async は使えません",
+      "await": "await は使えません",
+      "import": "import は使えません",
+      "reexport": "export … from は使えません",
+      "missing_meta": "meta がエクスポートされていません",
+      "invalid_meta": "meta が無効です",
+      "unknown_export": "meta とフック以外をエクスポートしています",
+      "not_function": "関数でないフックがあります",
+      "load_failed": "トップレベルの実行に失敗しました"
+    },
+    "network": {
+      "origins": "アクセスを許可するアドレス",
+      "originsHelpLabel": "許可するアドレスについて",
+      "originsHelp": "プラグインはこれらのアドレスにだけアクセスできます。スキーム・ホスト・ポートが一致する必要があり、パスは自由です。リダイレクトは追いません。",
+      "noOrigins": "アドレスはまだありません",
+      "originLabel": "許可するアドレス",
+      "invalidOrigin": "ホストを含む http または https のアドレスを入力してください（例: https://memory.example.com:8443）。",
+      "add": "追加",
+      "save": "アドレスを保存",
+      "remove": "{{origin}} を削除",
+      "plaintext": "平文 HTTP",
+      "allowPlaintext": "平文 HTTP を許可",
+      "plaintextHelpLabel": "平文 HTTP について",
+      "plaintextHelp": "このアドレスへのリクエスト（認証情報を含む）は暗号化されず、途中で読み取られる可能性があります。サーバーに TLS を設定するか、SSH トンネル経由でアクセスしてください。",
+      "trusted": "信頼済み",
+      "trustedHelpLabel": "信頼済みについて",
+      "trustedHelp": "オフの場合、プラグインが受け取る検索語とキャプチャするテキストは、信頼していない API プロバイダーと同じくプライバシーポリシーの検査を通ります。オンの場合は原文のまま受け取ります。"
+    },
+    "credentials": {
+      "title": "認証情報",
+      "helpLabel": "認証情報について",
+      "help": "認証情報は AstrLink のローカル鍵ストアに保存されます。Core は、紐付けたアドレス宛てのリクエストにだけ追加し、プラグインは値を読めません。",
+      "configured": "設定済み ···· {{hint}}",
+      "configuredNoHint": "設定済み",
+      "unset": "未設定",
+      "boundTo": "{{origin}} 用",
+      "origin": "紐付けるアドレス",
+      "needOrigin": "先に許可するアドレスを追加してください",
+      "secret": "値",
+      "save": "認証情報を保存",
+      "clear": "削除"
+    },
+    "config": {
+      "title": "プラグイン設定（JSON）",
+      "helpLabel": "プラグイン設定について",
+      "help": "64 KiB までの JSON オブジェクトです。プラグインは読み取るだけで変更できません。認証情報はここに書かず、認証情報の欄を使ってください。",
+      "size": "{{size}} KiB / 64 KiB",
+      "format": "整形",
+      "save": "設定を保存",
+      "invalid": "設定は 1 つの JSON オブジェクトである必要があります。",
+      "tooLarge": "設定が 64 KiB を超えています。"
+    },
+    "status": {
+      "calls": "呼び出し",
+      "timeouts": "タイムアウト",
+      "memoryLimits": "メモリ超過",
+      "network": "ネットワーク",
+      "networkValue": "{{requests}} 件 · 拒否 {{denied}} · 失敗 {{errors}}",
+      "failures": "失敗した呼び出し",
+      "reasons": {
+        "timeout": "タイムアウト",
+        "memory_limit": "メモリ超過",
+        "plugin_error": "プラグインのエラー",
+        "invalid_result": "無効な結果",
+        "canceled": "キャンセル",
+        "unavailable": "利用不可"
+      }
+    },
+    "enableDialog": {
+      "title": "「{{name}}」を有効にする",
+      "capabilities": "プラグインは次の権限を求めています。チェックを外したものは付与しません:",
+      "purpose": "ネットワークの用途: {{purpose}}",
+      "notice": "プラグインからのお知らせ",
+      "metadata": "登録するメタデータ属性",
+      "marker": "セッションマーカー {{marker}}",
+      "confirm": "有効にする"
+    }
+  },
+  "pluginRecords": {
+    "none": "このリクエストにプラグインの記録はありません。",
+    "status": {
+      "ok": "完了",
+      "skipped": "スキップ",
+      "failed": "失敗"
+    },
+    "elapsed": "所要時間",
+    "skipped": "スキップ理由",
+    "skipReasons": {
+      "no_project": "このセッションにプロジェクトがありません",
+      "short_query": "質問が短すぎます",
+      "no_hits": "一致なし",
+      "server_unavailable": "サーバーを利用できません",
+      "timeout": "タイムアウト",
+      "plugin_error": "プラグインのエラー",
+      "privacy_blocked": "プライバシーポリシーでブロック",
+      "privacy_unavailable": "プライバシー検査を利用できません"
+    },
+    "injection": "注入",
+    "placement": {
+      "system_append": "システムプロンプト",
+      "turn_message_prefix": "ターンの最初のメッセージの先頭"
+    },
+    "replayed_one": "過去のブロック {{count}} 件を再送",
+    "replayed_other": "過去のブロック {{count}} 件を再送",
+    "dropped_one": "予算超過で {{count}} 件を除外",
+    "dropped_other": "予算超過で {{count}} 件を除外",
+    "network": "ネットワーク",
+    "networkCount": "{{requests}} 件 · 拒否 {{denied}} · 失敗 {{errors}} · 待機 {{wait}} ms",
+    "observe": "キャプチャ",
+    "observeStates": {
+      "queued": "キュー登録済み",
+      "skipped_privacy": "プライバシーポリシーでスキップ",
+      "skipped_binding_turn": "スキップ: このターンでプロジェクトを設定",
+      "skipped_continuation": "スキップ: ターン最初の呼び出しではありません",
+      "queue_full": "破棄: キューが満杯",
+      "disabled": "オフ"
+    },
+    "truncated": "上限を超えたため切り詰めました",
+    "metadata": "メタデータ",
+    "metadataSources": {
+      "header": "ヘッダー",
+      "session": "セッション",
+      "token": "トークンの既定値"
+    },
+    "metadataTurn": "{{source}} · {{turn}} ターン目",
+    "metadataIgnored": "{{key}}={{value}} を無視: {{reason}}",
+    "ignoredReasons": {
+      "invalid_value": "検証ルールに合いません",
+      "already_bound": "セッションは設定済みです",
+      "in_code_block": "コードブロック内です"
+    },
+    "metadataEvents": {
+      "bound": "設定:",
+      "rebound": "変更:",
+      "cleared": "解除"
+    }
+  },
+  "metadata": {
+    "title": "メタデータ",
+    "add": "属性を追加",
+    "loading": "属性を読み込んでいます…",
+    "loadFailed": "属性を読み込めませんでした。",
+    "saveFailed": "属性を保存できませんでした。",
+    "deleteFailed": "属性を削除できませんでした。",
+    "empty": "属性はまだありません",
+    "emptyHint": "属性を追加すると、たとえば送信元の環境などでリクエストにタグを付けられます。",
+    "helpLabel": "メタデータについて",
+    "help": {
+      "what": "属性はリクエストに付くタグで、プロジェクトや環境などです。プラグインも独自の属性を登録でき、それらは値の設定だけができます。",
+      "order": "各リクエストは「ヘッダー → セッションの設定 → トークンの既定値」の順に値を取ります。",
+      "none": "none はすべての属性の予約値で、そのリクエストやセッションを対象外にします。",
+      "headers": "属性のヘッダーは X-AstrLink-Meta- にキーを付けたもので、例は X-AstrLink-Meta-Env です。AstrLink は転送前に削除しますが、共有リポジトリにコミットするクライアント設定には書かないでください。AstrLink を通らないと、そのまま API プロバイダーに届きます。"
+    },
+    "columns": {
+      "label": "名前",
+      "key": "キー",
+      "pattern": "検証ルール",
+      "marker": "セッションマーカー",
+      "owner": "定義元"
+    },
+    "ownerUser": "ユーザー",
+    "ownerPlugin": "プラグイン {{plugin}}",
+    "ownerMissing": "プラグイン {{plugin}}（削除済み）",
+    "edit": "{{label}} を編集",
+    "delete": "{{label}} を削除",
+    "addTitle": "属性を追加",
+    "editTitle": "属性を編集",
+    "labelPlaceholder": "環境",
+    "description": "説明",
+    "optional": "任意",
+    "deleteTitle": "この属性を削除しますか？",
+    "deleteDescription": "「{{label}}」と、その値（トークンの既定値とセッションの設定）がすべて削除されます。",
+    "deleteConfirm": "削除",
+    "problems": {
+      "key": "キーは小文字で始め、続けて最大 31 文字の小文字・数字・アンダースコアにしてください。",
+      "label": "名前は 1〜32 文字にしてください。",
+      "anchored": "検証ルールは値全体を検査するよう、^ で始まり $ で終わる必要があります。",
+      "pattern": "検証ルールが有効な正規表現ではありません。",
+      "marker": "セッションマーカーは小文字で始め、続けて最大 31 文字の小文字・数字・ハイフンにし、astrlink を含めないでください。"
+    }
+  },
+  "tokenMetadata": {
+    "open": "{{name}} の既定メタデータ",
+    "title": "既定メタデータ · {{name}}",
+    "helpLabel": "既定メタデータについて",
+    "help": "ヘッダーとセッションに値がないとき、このトークンのリクエストはここの値を使います。1 つのプロジェクト専用のトークンに向いています。",
+    "loading": "読み込み中…",
+    "loadFailed": "既定メタデータを読み込めませんでした。",
+    "saveFailed": "既定メタデータを保存できませんでした。",
+    "empty": "メタデータ属性はまだありません",
+    "emptyHint": "先に「設定 → メタデータ」で属性を追加してください。",
+    "unset": "未設定",
+    "invalidValue": "「{{label}}」の値が検証ルールに合いません。"
   }
 }
