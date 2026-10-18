@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/hostapi"
+	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/pricing"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/privacymodel"
@@ -30,6 +31,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/servicetest"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	syncengine "github.com/QuantumNous/astrlink/core/internal/sync"
+	builtinplugins "github.com/QuantumNous/astrlink/core/plugins"
 )
 
 // installOutboundProxy configures the outbound proxy once per process,
@@ -302,6 +304,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		logf("create plugin directory: %v", err)
 	}
 	pluginManager := plugin.NewManager(plugin.ManagerOptions{
+		Builtin:  builtinplugins.Builtin,
 		Dir:      pluginDirectory,
 		Settings: hostapi.Settings{Store: store},
 		Services: plugin.Services{
@@ -309,6 +312,10 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			Store:   hostapi.Store{Values: store},
 		},
 	})
+	pluginHost := pluginhost.New(pluginhost.Options{
+		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Logf: logf,
+	})
+	gatewayDependencies.Plugins = pluginHost
 	// One shared inference handler backs both control-plane seams: the builtin
 	// tool tester and the model classification caller used by the classifier
 	// dry-run for existing_model sources.
@@ -388,6 +395,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			rawVault.Lock()
 			stopMonitors()
 			monitors.Wait()
+			pluginHost.Close()
 			err := store.Close()
 			privacyWorker.Close()
 			if closeClassifier != nil {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,9 +118,13 @@ func (handler *Handler) executeCandidatesWithTest(
 	if request.Context().Err() != nil {
 		return
 	}
+	records := recordSessionFromContext(request.Context())
+	plugins := test == nil && records != nil && records.plugins != nil
+	// Plugin blocks go into the body once, so it must be replayable: a
+	// Gemini body is otherwise streamed through.
 	body, err := captureRequestBody(
 		request,
-		requiresInspectedJSON(classified.Protocol),
+		requiresInspectedJSON(classified.Protocol) || plugins,
 	)
 	if err != nil {
 		writeInferenceError(
@@ -140,6 +145,9 @@ func (handler *Handler) executeCandidatesWithTest(
 		return
 	}
 	defer body.Close()
+	if plugins {
+		records.injectPlugins(body)
+	}
 	if session := recordSessionFromContext(request.Context()); session != nil {
 		session.noteInboundBodyReady(body.Replayable())
 	}
@@ -163,7 +171,6 @@ func (handler *Handler) executeCandidatesWithTest(
 	var last executionFailure
 	var lastNetworkFailure executionFailure
 	var replayLastHTTP func()
-	records := recordSessionFromContext(request.Context())
 	for {
 		candidateIndex, hasNext := schedule.next(request.Context())
 		if !hasNext {
@@ -565,9 +572,12 @@ func (handler *Handler) executeCandidatesWithTest(
 		outWriter := http.ResponseWriter(downstream)
 		var restoring *restoringResponseWriter
 		var relayWriter *relayKitResponseWriter
+		// A compressed reply hides its text from the capture and from the
+		// plugins' marker lines.
 		if recordSession != nil &&
 			(recordSession.responseCaptureEnabled() ||
-				recordSession.upstreamResponseCapture.enabled) {
+				recordSession.upstreamResponseCapture.enabled ||
+				recordSession.plugins != nil) {
 			attemptRequest.Header.Del("Accept-Encoding")
 		}
 		canRepairThinking := body.Replayable() && policy.AllowsThinkingSignatureRecovery() &&
@@ -1165,6 +1175,8 @@ type requestBodySource struct {
 	replayable bool
 	used       bool
 	release    func()
+	// contents is the whole body when the source holds it in memory.
+	contents []byte
 }
 
 func captureRequestBody(request *http.Request, forceBuffer bool) (*requestBodySource, error) {
@@ -1204,17 +1216,44 @@ func captureRequestBody(request *http.Request, forceBuffer bool) (*requestBodySo
 		source.Close()
 		return nil, err
 	}
-	contents := buffered
 	source.replayable = true
-	source.factory = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(contents)), nil
-	}
+	source.replace(buffered)
 	source.releasePermit()
 	return source, nil
 }
 
 func (source *requestBodySource) Replayable() bool {
 	return source != nil && source.replayable
+}
+
+// bytes returns the whole body of a replayable source.
+func (source *requestBodySource) bytes() ([]byte, error) {
+	if source.contents != nil {
+		return source.contents, nil
+	}
+	body, err := source.factory()
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return io.ReadAll(body)
+}
+
+// rewrite makes every attempt send contents in place of the client's body,
+// with the length to match.
+func (source *requestBodySource) rewrite(contents []byte) {
+	source.replace(contents)
+	source.request.ContentLength = int64(len(contents))
+	source.request.Header.Set("Content-Length", strconv.Itoa(len(contents)))
+	source.request.TransferEncoding = nil
+}
+
+// replace makes every attempt of a replayable source send contents.
+func (source *requestBodySource) replace(contents []byte) {
+	source.contents = contents
+	source.factory = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(contents)), nil
+	}
 }
 
 func (source *requestBodySource) Next(ctx context.Context) (*http.Request, bool, error) {

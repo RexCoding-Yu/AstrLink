@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/astrlink/convo"
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
+	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
@@ -228,6 +229,10 @@ type recordSession struct {
 	privacyIgnored  []contract.PrivacyIgnored
 	// metadata is the request's metadata, resolved when the session starts.
 	metadata contract.RequestMetadata
+	// plugins is the plugins' part in the request, nil when none takes part;
+	// pluginRecords is what they reported.
+	plugins       *pluginhost.Run
+	pluginRecords []contract.RequestPluginRecord
 	// requestExposure is the label of the stored client body; empty until
 	// it is stored.
 	requestExposure storage.AuditExposure
@@ -566,8 +571,10 @@ func (session *recordSession) recordSnapshot(
 	record.ConversionDiagnostics = slices.Clone(session.conversionDiagnostics)
 	if !session.metadata.Empty() {
 		metadata := session.metadata
+		metadata.Events = slices.Clone(metadata.Events)
 		record.Metadata = &metadata
 	}
+	record.PluginRecords = slices.Clone(session.pluginRecords)
 	if session.privacyDecision != "" {
 		decision := session.privacyDecision
 		record.PrivacyDecision = &decision
@@ -1253,6 +1260,8 @@ func (session *recordSession) demoteCurrentAttemptToChild(
 	child.ChildCount = 0
 	// The root carries the turn's preview; an attempt would only repeat it.
 	child.InputPreview = nil
+	// The plugins took part in the request once, before any attempt.
+	child.PluginRecords = nil
 	child.Events = eventsForAttempt(session.events, session.attemptIndex)
 	child.Audit = session.upstreamAuditSummary()
 	// A failed attempt produced nothing the client will replay; only the

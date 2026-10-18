@@ -59,6 +59,9 @@ type Request struct {
 	// shape is the body's structure as model routing facts read it. It is only
 	// read for a request that names a routing group, and holds counts alone.
 	shape requestShape
+	// body is the client's body as classify read it, for the plugins to read
+	// the turn from. Never persist, log, or forward it.
+	body []byte
 	// RedirectedModel is the routing model chosen by an enabled model
 	// redirect rule. Model keeps the client's original id so records still
 	// report what the client asked for.
@@ -170,6 +173,9 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 		if err != nil {
 			return Request{}, err
 		}
+		if result.Conversation.Protocol != "" {
+			result.body = raw
+		}
 		attachRoutingBody(&result, raw)
 		attachAutoClassifyText(&result, request, raw, maxBodyBytes)
 		return validateClassifiedRequest(result)
@@ -195,6 +201,7 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	result.InputPreview = metadata.InputPreview
 	result.Conversation = metadata.Conversation
 	attachRoutingBody(&result, metadata.raw)
+	result.body = metadata.raw
 	result.shape = metadata.shape
 	if result.Protocol == contract.ProtocolOpenAIResponses {
 		result.codexTurn = metadata.codexTurn.or(codexTurnFromHeader(request.Header))

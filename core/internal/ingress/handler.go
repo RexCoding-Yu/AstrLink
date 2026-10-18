@@ -29,6 +29,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/imagecompress"
 	"github.com/QuantumNous/astrlink/core/internal/planner"
+	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
@@ -93,6 +94,9 @@ type Dependencies struct {
 	// Metadata is optional. It resolves each request's metadata from its
 	// headers, its session's bindings and its access token's defaults.
 	Metadata MetadataResolver
+	// Plugins is optional. It runs the plugins' part in each request a
+	// client sends; nil runs none.
+	Plugins *pluginhost.Host
 }
 
 // MetadataResolver resolves a request's metadata; *metadata.Registry
@@ -138,6 +142,7 @@ func (function PolicyWarningReporterFunc) ReportPolicyWarning(warning privacy.Wa
 
 type Handler struct {
 	requestMetadata          MetadataResolver
+	plugins                  *pluginhost.Host
 	builtinStates            builtintools.Store
 	searchRefs               searchRefStore
 	codexTurns               codexTurnStore
@@ -288,6 +293,7 @@ func NewWithDependencies(dependencies Dependencies) *Handler {
 	}
 	return &Handler{
 		requestMetadata:  dependencies.Metadata,
+		plugins:          dependencies.Plugins,
 		proxyCredentials: dependencies.ProxyCredentials,
 		resolver:         dependencies.Resolver, authorizer: dependencies.Authorizer, forwarder: dependencies.Forwarder,
 		accessTokenAuthenticator: dependencies.AccessTokenAuthenticator, privacyFilter: dependencies.PrivacyFilter,
@@ -371,6 +377,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		session.attachRequestCapture(request)
 	} else {
 		session = handler.startRecordSession(request, classified)
+		handler.beginPlugins(request, classified, session)
 	}
 	if classifierInternalFrom(request.Context()) == nil || classifierInternalFrom(request.Context()).SharedSession != nil {
 		session.persistPending(request.Context(), handler.requestRecords, handler.recordLogger)
@@ -400,6 +407,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		handler.persistModelRoutingBinding(request.Context(), session)
+		session.finishPlugins(request.Context())
 		// Never delay or fail the client response on persistence errors.
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 	}()
