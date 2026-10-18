@@ -306,10 +306,28 @@ describe("PluginManager", () => {
       network: { requests: 2, denied: 0, errors: 0, wait_ms: 400 },
     });
     await render();
+    expect(bridgeMocks.getPluginStatus).toHaveBeenCalledTimes(1);
     await click(button("测试连接"));
     const result = document.querySelector('[data-testid="plugin-test-result"]');
     expect(result?.textContent).toContain("连接正常");
     expect(result?.textContent).toContain("atomic-memory / topic-memory");
+    // The overview and the counts may have changed with the test.
+    expect(bridgeMocks.getPluginStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens the first plugin a rescan finds", async () => {
+    bridgeMocks.listPlugins.mockResolvedValue({
+      directory: "/data/plugins",
+      plugins: [],
+    });
+    bridgeMocks.reloadPlugins.mockResolvedValue(list);
+    await render();
+    expect(document.body.textContent).toContain("还没有插件");
+    await click(button("重新扫描"));
+    expect(bridgeMocks.getPlugin).toHaveBeenCalledWith("powercontext");
+    expect(
+      document.querySelector('[data-testid="plugin-overview"]'),
+    ).not.toBeNull();
   });
 
   it("says the overview needs the views grant", async () => {

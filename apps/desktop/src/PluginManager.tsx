@@ -105,6 +105,13 @@ function plaintextOrigin(raw: string): boolean {
   }
 }
 
+/** The plugin to show after the list changes: the same one while it is listed, else the first. */
+function keptSelection(current: string | null, list: PluginList) {
+  return current && list.plugins.some((plugin) => plugin.key === current)
+    ? current
+    : (list.plugins[0]?.key ?? null);
+}
+
 function validOrigin(raw: string): boolean {
   try {
     const url = new URL(raw);
@@ -148,11 +155,7 @@ export function PluginManager({
       const next = await listPlugins();
       setList(next);
       setListError(null);
-      setSelectedKey((current) =>
-        current && next.plugins.some((plugin) => plugin.key === current)
-          ? current
-          : (next.plugins[0]?.key ?? null),
-      );
+      setSelectedKey((current) => keptSelection(current, next));
     } catch (error) {
       setListError(controlErrorMessage(error, t("plugins.loadFailed")));
     }
@@ -209,9 +212,12 @@ export function PluginManager({
       const next = await reloadPlugins();
       setList(next);
       setListError(null);
-      if (selectedKey) {
-        const reloaded = await loadDetail(selectedKey);
-        if (reloaded?.state === "loaded") void loadStatus(selectedKey);
+      // A new selection loads through the effect; the kept one reloads here.
+      const kept = keptSelection(selectedKey, next);
+      setSelectedKey(kept);
+      if (kept && kept === selectedKey) {
+        const reloaded = await loadDetail(kept);
+        if (reloaded?.state === "loaded") void loadStatus(kept);
       }
     } catch (error) {
       setListError(controlErrorMessage(error, t("plugins.loadFailed")));
@@ -254,6 +260,8 @@ export function PluginManager({
     try {
       setTestResult(await testPlugin(key));
       setTab("overview");
+      // The test may change what the plugin's overview and counts show.
+      void loadStatus(key);
     } catch (error) {
       setActionError(controlErrorMessage(error, t("plugins.testFailed")));
     } finally {
