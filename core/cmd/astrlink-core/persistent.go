@@ -55,9 +55,12 @@ type persistentOptions struct {
 	observerToken string
 	// stdinLocalKey is the key the desktop injected, or nil. It is cleared
 	// once resolved.
-	stdinLocalKey            []byte
-	localKeyFile             string
-	privacyWorkerPath        string
+	stdinLocalKey     []byte
+	localKeyFile      string
+	privacyWorkerPath string
+	// classifierWorkerPath is the bundled classifier worker for model
+	// routing; empty looks for the sibling binary.
+	classifierWorkerPath     string
 	maxConcurrentInspections int
 	maxRequestBodyMiB        uint32
 	responseStartTimeout     time.Duration
@@ -116,7 +119,11 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		return nil, fmt.Errorf("open persistent store: %w", err)
 	}
 	var privacyWorker *privacyworker.Client
+	var closeClassifier func()
 	fail := func(format string, err error) (*persistentCore, error) {
+		if closeClassifier != nil {
+			closeClassifier()
+		}
 		if privacyWorker != nil {
 			privacyWorker.Close()
 		}
@@ -168,6 +175,17 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	if err != nil {
 		return fail("configure local privacy worker: %w", err)
 	}
+	// The bundled local ONNX classifier composes fail-open: when the worker
+	// binary or model registry is missing, construction returns nil and model
+	// routing keeps the external cloud classifier or its deterministic
+	// fallback. When present, it backs the local classifier seam in
+	// production.
+	var classifierDependency ingress.Classifier
+	classifierDependency, closeClassifier = buildClassifierDependency(classifierOptions{
+		workerPath:    options.classifierWorkerPath,
+		dataDirectory: options.dataDirectory,
+		logf:          logf,
+	})
 	policyRecord, err := store.GetPolicy(ctx, contract.DefaultPrivacyPolicyID)
 	if err != nil {
 		return fail("load local privacy policy: %w", err)
@@ -269,6 +287,8 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		AuditBlobs:               store,
 		RecordLogger:             logf,
 		ConversionEngine:         conversionEngine,
+		Classifier:               classifierDependency,
+		ClassifierSettings:       store,
 		MaxConcurrentInspections: options.maxConcurrentInspections,
 		MaxRequestBodyMiB:        options.maxRequestBodyMiB,
 		ResponseStartTimeout:     options.responseStartTimeout,
@@ -289,6 +309,10 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			Store:   hostapi.Store{Values: store},
 		},
 	})
+	// One shared inference handler backs both control-plane seams: the builtin
+	// tool tester and the model classification caller used by the classifier
+	// dry-run for existing_model sources.
+	gatewayTester := ingress.NewWithDependencies(gatewayDependencies)
 	handler, err := controlapi.NewWithDependencies(options.version, controlapi.Dependencies{
 		ServiceStore: store,
 		PricingStore: store, PricingManager: pricingManager,
@@ -310,7 +334,8 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		CodingPlans:        codingplan.New(store, nil),
 		ServiceModels:      servicemodel.New(store, subscriptionManager, nil),
 		ServiceTester:      servicetest.NewWithDependencies(gatewayDependencies, subscriptionManager.APIBaseURLFor),
-		BuiltinToolTester:  ingress.NewWithDependencies(gatewayDependencies),
+		BuiltinToolTester:  gatewayTester,
+		ModelClassifier:    gatewayTester,
 		ControlToken:       options.controlToken,
 		ObserverToken:      options.observerToken,
 		ConversionEngine:   conversionEngine,
@@ -365,6 +390,9 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			monitors.Wait()
 			err := store.Close()
 			privacyWorker.Close()
+			if closeClassifier != nil {
+				closeClassifier()
+			}
 			return err
 		},
 	}, nil

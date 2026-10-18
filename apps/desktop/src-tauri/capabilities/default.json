@@ -14,6 +14,10 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-start-dragging",
-    "core:window:allow-start-resize-dragging"
+    "core:window:allow-start-resize-dragging",
+    "store:allow-load",
+    "store:allow-get",
+    "store:allow-set",
+    "store:allow-save"
   ]
 }

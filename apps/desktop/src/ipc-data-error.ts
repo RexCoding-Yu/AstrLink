@@ -33,6 +33,7 @@ export type DataProblem =
   | "belowMinimumLength"
   | "integer"
   | "integerBetween"
+  | "number"
   | "nonNegativeNumber"
   | "exceedsTotal"
   | "tooMany"

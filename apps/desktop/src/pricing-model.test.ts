@@ -100,11 +100,21 @@ describe("official pricing boundary", () => {
       coverage: "complete",
       summary,
     };
-    expect(parseServiceBilling({ config, periods: [period] }).periods[0].summary.by_token).toEqual([]);
+    expect(
+      parseServiceBilling({ config, periods: [period] }).periods[0].summary
+        .by_token,
+    ).toEqual([]);
     for (const by_token of [undefined, null, {}]) {
       const invalid = { ...summary, by_token };
-      expect(() => parseBillingSummary(invalid)).toThrow("Invalid pricing list");
-      expect(() => parseServiceBilling({ config, periods: [{ ...period, summary: invalid }] })).toThrow("Invalid pricing list");
+      expect(() => parseBillingSummary(invalid)).toThrow(
+        "Invalid pricing list",
+      );
+      expect(() =>
+        parseServiceBilling({
+          config,
+          periods: [{ ...period, summary: invalid }],
+        }),
+      ).toThrow("Invalid pricing list");
     }
   });
   it("parses token billing groups with the stable token_id field", () => {
@@ -118,15 +128,17 @@ describe("official pricing boundary", () => {
       from: "2026-09-19T00:00:00Z",
       to: "2026-09-20T00:00:00Z",
       by_model: [],
-      by_token: [{
-        token_id: "token_a",
-        amount_usd: "1.25",
-        priced: 1,
-        unpriced: 0,
-        pending: 0,
-        revalued: 0,
-        requests: 1,
-      }],
+      by_token: [
+        {
+          token_id: "token_a",
+          amount_usd: "1.25",
+          priced: 1,
+          unpriced: 0,
+          pending: 0,
+          revalued: 0,
+          requests: 1,
+        },
+      ],
     };
     expect(parseBillingSummary(value).by_token).toEqual(value.by_token);
   });

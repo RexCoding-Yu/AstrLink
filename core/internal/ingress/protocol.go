@@ -50,10 +50,22 @@ type Request struct {
 	Conversation convo.RequestSummary
 	// lastUserText is classifier input only. Never persist, log, or cache it.
 	lastUserText string
+	// routingText is a bounded, request-local text view for literal keyword facts.
+	routingText string
+	// routingBody is the raw body a routing-group request was classified
+	// from, kept so routing can inspect it under the privacy policy before a
+	// classifier reads any of its text. Never persist, log, or forward it.
+	routingBody []byte
+	// shape is the body's structure as model routing facts read it. It is only
+	// read for a request that names a routing group, and holds counts alone.
+	shape requestShape
 	// RedirectedModel is the routing model chosen by an enabled model
 	// redirect rule. Model keeps the client's original id so records still
 	// report what the client asked for.
 	RedirectedModel string
+	// ModelRoutingMember is the concrete target selected from a virtual group.
+	// It is internal and never serialized or forwarded to an upstream.
+	ModelRoutingMember *contract.ModelRoutingMember
 	// codexTurn names the Codex turn a Responses request belongs to. Codex's
 	// own image and search requests for that turn go to the provider that
 	// served it.
@@ -62,6 +74,9 @@ type Request struct {
 
 // routingModel is the model id used to select services and sent upstream.
 func (request Request) routingModel() string {
+	if request.ModelRoutingMember != nil {
+		return request.ModelRoutingMember.Model
+	}
 	if request.RedirectedModel != "" {
 		return request.RedirectedModel
 	}
@@ -155,6 +170,7 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 		if err != nil {
 			return Request{}, err
 		}
+		attachRoutingBody(&result, raw)
 		attachAutoClassifyText(&result, request, raw, maxBodyBytes)
 		return validateClassifiedRequest(result)
 	}
@@ -178,6 +194,8 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	result.ConversationID = metadata.ConversationID
 	result.InputPreview = metadata.InputPreview
 	result.Conversation = metadata.Conversation
+	attachRoutingBody(&result, metadata.raw)
+	result.shape = metadata.shape
 	if result.Protocol == contract.ProtocolOpenAIResponses {
 		result.codexTurn = metadata.codexTurn.or(codexTurnFromHeader(request.Header))
 	}
@@ -196,6 +214,44 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	}
 	attachAutoClassifyText(&result, request, metadata.raw, maxBodyBytes)
 	return validateClassifiedRequest(result)
+}
+
+// attachRoutingBody keeps what model routing reads from the body. Only a
+// request that names a routing group needs it, so every other request skips
+// the copy.
+func attachRoutingBody(result *Request, raw []byte) {
+	if !namesModelRoutingGroup(result.Model) {
+		return
+	}
+	result.routingText = boundedRoutingText(raw)
+	result.routingBody = raw
+}
+
+func boundedRoutingText(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if len(raw) > 64*1024 {
+		raw = raw[:64*1024]
+	}
+	return string(raw)
+}
+
+// classifiedWithSanitizedText rebuilds every text view the routing evaluator
+// reads from the sanitized request bytes. Routing facts must not keep a
+// pre-redaction copy: the classifier and literal keyword matching read only
+// what the privacy policy lets leave this machine. A nil body leaves no text.
+func classifiedWithSanitizedText(classified Request, sanitized []byte) Request {
+	classified.routingText = boundedRoutingText(sanitized)
+	classified.routingBody = nil
+	// Unconditional reassignment: a pre-redaction copy must never survive the
+	// rebuild, even when the sanitized body yields no extractable user text —
+	// the empty extraction is the sanitized truth, not a reason to keep raw text.
+	extracted := autotext.ExtractLastUserText(classified.Protocol, sanitized)
+	classified.lastUserText = extracted
+	classified.Conversation.LastUserText = extracted
+	classified.InputPreview = sanitizePreview(extracted)
+	return classified
 }
 
 func validateClassifiedRequest(request Request) (Request, error) {
@@ -252,6 +308,7 @@ type requestMetadata struct {
 	ConversationID     string
 	InputPreview       string
 	Conversation       convo.RequestSummary
+	shape              requestShape
 	codexTurn          codexTurnRef
 	raw                []byte
 }
@@ -404,6 +461,9 @@ func inspectJSONMetadata(request *http.Request, protocol contract.ProtocolID, ma
 	}
 	if text := builtinToolPreview(protocol, fields); text != "" {
 		metadata.InputPreview = sanitizePreview(text)
+	}
+	if namesModelRoutingGroup(metadata.Model) {
+		metadata.shape = inspectRequestShape(protocol, raw)
 	}
 	metadata.raw = raw
 	return metadata, nil
