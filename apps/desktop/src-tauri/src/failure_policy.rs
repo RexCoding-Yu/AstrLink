@@ -1282,7 +1282,11 @@ mod tests {
             }
         }
         for patch in valid {
-            assert_eq!(validate_routing_settings(&patch, true), Ok(()), "{patch}");
+            assert_eq!(
+                validate_routing_settings(&patch, true, &[]),
+                Ok(()),
+                "{patch}"
+            );
         }
         for invalid in [
             json!({"system_prompt_enabled": null}),
@@ -1327,7 +1331,7 @@ mod tests {
             json!({"adaptive_preset": "everyday", "adaptive_min": "high", "adaptive_max": "medium"}),
         ] {
             assert!(
-                validate_routing_settings(&invalid, true).is_err(),
+                validate_routing_settings(&invalid, true, &[]).is_err(),
                 "{invalid}"
             );
         }
@@ -1338,25 +1342,25 @@ mod tests {
             "max_attempts": 6,
         });
         // Every key above is optional in a full document too.
-        assert_eq!(validate_routing_settings(&settings, false), Ok(()));
+        assert_eq!(validate_routing_settings(&settings, false, &[]), Ok(()));
         settings["reasoning_mode"] = json!("fixed");
         settings["reasoning_level"] = json!("off");
-        assert_eq!(validate_routing_settings(&settings, false), Ok(()));
+        assert_eq!(validate_routing_settings(&settings, false, &[]), Ok(()));
         settings["adaptive_preset"] = json!("custom");
         settings["adaptive_min"] = json!("medium");
         settings["adaptive_max"] = json!("medium");
-        assert_eq!(validate_routing_settings(&settings, false), Ok(()));
+        assert_eq!(validate_routing_settings(&settings, false, &[]), Ok(()));
         settings["adaptive_min"] = json!("high");
-        assert!(validate_routing_settings(&settings, false).is_err());
+        assert!(validate_routing_settings(&settings, false, &[]).is_err());
         settings["adaptive_min"] = json!("low");
         settings["reasoning_override"] = json!("");
-        assert!(validate_routing_settings(&settings, false).is_err());
+        assert!(validate_routing_settings(&settings, false, &[]).is_err());
         settings
             .as_object_mut()
             .unwrap()
             .remove("reasoning_override");
         settings["system_prompt_prefix"] = json!(format!("{}x", "提".repeat(20000)));
-        assert!(validate_routing_settings(&settings, false).is_err());
+        assert!(validate_routing_settings(&settings, false, &[]).is_err());
     }
     #[test]
     fn validates_image_compression_settings() {
@@ -1366,7 +1370,7 @@ mod tests {
             json!({"enabled": true, "mode": "lossy", "quality": 100}),
         ] {
             assert_eq!(
-                validate_routing_settings(&json!({ "image_compression": valid }), true),
+                validate_routing_settings(&json!({ "image_compression": valid }), true, &[]),
                 Ok(()),
                 "{valid}"
             );
@@ -1384,7 +1388,8 @@ mod tests {
             json!({"enabled": true, "mode": "lossy", "quality": 80, "max_side": 2048}),
         ] {
             assert!(
-                validate_routing_settings(&json!({ "image_compression": invalid }), true).is_err(),
+                validate_routing_settings(&json!({ "image_compression": invalid }), true, &[])
+                    .is_err(),
                 "{invalid}"
             );
         }
