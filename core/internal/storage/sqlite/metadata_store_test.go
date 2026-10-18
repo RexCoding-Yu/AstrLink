@@ -3,8 +3,11 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	storagecontract "github.com/QuantumNous/astrlink/core/internal/storage"
@@ -125,5 +128,45 @@ func TestMetadataValuesFollowTheirAttribute(t *testing.T) {
 	}
 	if err := store.DeleteMetadataAttribute(ctx, "team"); !errors.Is(err, storagecontract.ErrNotFound) {
 		t.Fatalf("second delete = %v", err)
+	}
+}
+
+func TestRegisteringAttributesWaitsForOtherWriters(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "metadata.db"))
+	defer store.Close()
+	ctx := context.Background()
+	project := contract.MetadataAttribute{Key: "project", Label: "项目", Pattern: "^[a-z0-9-]{1,32}$", Marker: "memory-project"}
+	if err := store.RegisterPluginAttributes(ctx, "powercontext", []contract.MetadataAttribute{project}); err != nil {
+		t.Fatal(err)
+	}
+	// Core registers a plugin's attributes at start while requests already
+	// bind sessions: the registration reads before it writes.
+	var writers sync.WaitGroup
+	errs := make(chan error, 64)
+	for worker := range 4 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for index := range 20 {
+				now := time.Now()
+				errs <- store.PutMetadataValue(ctx, storagecontract.MetadataValueRecord{
+					TargetKind: storagecontract.MetadataTargetSession, TargetID: fmt.Sprintf("session_%d_%d", worker, index),
+					Key: "project", Value: "astrlink", SetBy: contract.MetadataSetByModelMarker, CreatedAt: now, UpdatedAt: now,
+				})
+			}
+		}()
+	}
+	for range 20 {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			errs <- store.RegisterPluginAttributes(ctx, "powercontext", []contract.MetadataAttribute{project})
+		}()
+	}
+	go func() { writers.Wait(); close(errs) }()
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("a write failed beside another: %v", err)
+		}
 	}
 }

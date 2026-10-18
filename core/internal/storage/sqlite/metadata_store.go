@@ -71,6 +71,9 @@ func (store *Store) CreateMetadataAttribute(ctx context.Context, attribute contr
 		return fmt.Errorf("begin metadata attribute create: %w", err)
 	}
 	defer rollbackOnError(transaction, &err)
+	if err = lockMetadataAttributes(ctx, transaction); err != nil {
+		return err
+	}
 	var exists bool
 	if err = transaction.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM metadata_attributes WHERE key = ?)`, attribute.Key).Scan(&exists); err != nil {
 		return fmt.Errorf("read metadata attributes: %w", err)
@@ -100,6 +103,9 @@ func (store *Store) UpdateMetadataAttribute(ctx context.Context, attribute contr
 		return fmt.Errorf("begin metadata attribute update: %w", err)
 	}
 	defer rollbackOnError(transaction, &err)
+	if err = lockMetadataAttributes(ctx, transaction); err != nil {
+		return err
+	}
 	taken, err := claimed(ctx, transaction, attribute.Key, attribute.Marker, attribute.Owner)
 	if err != nil {
 		return err
@@ -145,6 +151,9 @@ func (store *Store) RegisterPluginAttributes(ctx context.Context, plugin string,
 		return fmt.Errorf("begin metadata attribute registration: %w", err)
 	}
 	defer rollbackOnError(transaction, &err)
+	if err = lockMetadataAttributes(ctx, transaction); err != nil {
+		return err
+	}
 	now := store.now().UTC().Format(time.RFC3339Nano)
 	for _, attribute := range attributes {
 		taken, claimErr := claimed(ctx, transaction, attribute.Key, attribute.Marker, plugin)
@@ -164,6 +173,16 @@ ON CONFLICT(key) DO UPDATE SET label = excluded.label, description = excluded.de
 		}
 	}
 	return transaction.Commit()
+}
+
+// lockMetadataAttributes writes first, so a transaction that reads the
+// attributes before it changes them waits on busy_timeout for another
+// connection's write instead of failing to upgrade with SQLITE_BUSY.
+func lockMetadataAttributes(ctx context.Context, transaction *sql.Tx) error {
+	if _, err := transaction.ExecContext(ctx, `UPDATE metadata_attributes SET key = key WHERE 0`); err != nil {
+		return fmt.Errorf("lock metadata attributes: %w", err)
+	}
+	return nil
 }
 
 func (store *Store) MetadataValues(ctx context.Context, targetKind, targetID string) (map[string]storage.MetadataValueRecord, error) {
