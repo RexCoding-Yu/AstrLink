@@ -78,6 +78,7 @@ export function ModelRoutingRuleRow({
   onMove,
   onRewrite,
   onManageOptions,
+  targetWarning,
 }: {
   rule: ModelRoutingRule;
   index: number;
@@ -98,6 +99,8 @@ export function ModelRoutingRuleRow({
   onMove: (from: number, to: number) => void;
   onRewrite: () => void;
   onManageOptions?: () => void;
+  /** 目标模型不兼容部分请求格式时的说明。 */
+  targetWarning?: string;
 }) {
   const t = useT();
   const rowRef = useRef<HTMLDivElement>(null);
@@ -337,6 +340,7 @@ export function ModelRoutingRuleRow({
           used={used}
           value={memberTarget(group, rule.target_member_id)}
           disabled={disabled}
+          warning={targetWarning}
           aria-label={t("routingGroups.editor.ruleTarget", { index: number })}
           onChange={onTargetChange}
         />
@@ -362,12 +366,15 @@ export function ModelRoutingFallbackRow({
   used,
   disabled,
   onTargetChange,
+  targetWarning,
 }: {
   group: ModelRoutingGroup;
   services: readonly RoutableService[];
   used: readonly RoutingTarget[];
   disabled: boolean;
   onTargetChange: (target: RoutingTarget) => void;
+  /** 「其他情况」的模型不兼容部分请求格式时的说明。 */
+  targetWarning?: string;
 }) {
   const t = useT();
   return (
@@ -395,6 +402,7 @@ export function ModelRoutingFallbackRow({
           used={used}
           value={memberTarget(group, group.default_member_id)}
           disabled={disabled}
+          warning={targetWarning}
           aria-label={t("routingGroups.editor.fallbackTarget")}
           onChange={onTargetChange}
         />

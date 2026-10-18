@@ -14,7 +14,6 @@ import type {
   ModelRoutingExecutionState,
   ModelRoutingFieldObservation,
   ModelRoutingPrivacyDecision,
-  ModelRoutingSelectionSource,
 } from "./request-record-model";
 
 /**
@@ -31,12 +30,6 @@ import type {
 /** 未知 code 原样回显，便于诊断新版本 core 写出的新值。 */
 function text(key: string, fallback: string): string {
   return i18n.exists(key) ? i18n.t(key) : fallback;
-}
-
-export function modelRoutingSelectionSourceLabel(
-  source: ModelRoutingSelectionSource,
-): string {
-  return text(`modelRouting.selectionSource.${source}`, source);
 }
 
 export function modelRoutingExecutionStateLabel(
@@ -70,31 +63,9 @@ export function modelRoutingFieldValueLabel(
   return text(`modelRouting.values.${field}.${value}`, value);
 }
 
-export function modelRoutingFieldSourceLabel(source: string): string {
-  return text(`modelRouting.fieldSource.${source}`, source);
-}
-
 /** 决策记录里的稳定错误码；classifier 的 fail-open code 也走这里。 */
 export function modelRoutingCodeLabel(code: string): string {
   return text(`modelRouting.codes.${code}`, code);
-}
-
-/**
- * 一条规则的摘要：命中哪条规则、优先级多少，或使用了默认成员。
- * `used_default` 是权威位；`rule_id` 只在 `selection_source=rule` 时存在。
- */
-export function modelRoutingRuleSummary(
-  decision: ModelRoutingDecision,
-): string {
-  if (decision.used_default || decision.selection_source !== "rule")
-    return i18n.t("modelRouting.rule.default");
-  const name = decision.rule_id ?? "";
-  return decision.rule_priority === undefined
-    ? i18n.t("modelRouting.rule.hit", { rule: name })
-    : i18n.t("modelRouting.rule.hitWithPriority", {
-        rule: name,
-        priority: decision.rule_priority,
-      });
 }
 
 /**

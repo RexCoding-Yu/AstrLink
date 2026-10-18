@@ -1,7 +1,10 @@
+import { useState } from "react";
+
 import { DataField } from "@/components/DataRow";
 import { Route } from "@/components/icons";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel, PanelHeader } from "@/components/Panel";
+import { ServiceKindIcon } from "@/components/ServiceKindIcon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,206 +15,274 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useT } from "@/i18n";
+import type { ConversionEngineCapability } from "@/core-model";
+import { i18n, useT } from "@/i18n";
 import {
   modelRoutingCodeLabel,
   modelRoutingExecutionStateLabel,
-  modelRoutingFieldLabel,
-  modelRoutingFieldSkipLabel,
-  modelRoutingFieldSourceLabel,
   modelRoutingPrivacyDecisionLabel,
-  modelRoutingRuleSummary,
-  modelRoutingSelectionSourceLabel,
-  sortedFieldObservations,
 } from "@/request-model-routing-model";
 import type {
   ModelRoutingDecision,
   RequestRecord,
 } from "@/request-record-model";
+import type { Service } from "@/service-model";
 import { cn } from "@/lib/utils";
+import {
+  RequestRoutingProcess,
+  useModelRoutingGroupVersion,
+} from "./RequestRoutingProcess";
+import { RoutingVersionDialog } from "./RoutingVersionDialog";
+
+type RoutingService = Pick<
+  Service,
+  "id" | "name" | "kind" | "enabled" | "capabilities"
+>;
 
 /**
- * 请求详情「模型路由」页签。
- *
- * 只展示 V1 单路信息：虚拟模型 → group → 命中规则或默认成员 → 元信息来源 →
- * 选中的具体 member/service/model → 逐 attempt 隐私结果 → 执行与回退。
- *
- * V1 隐藏而不是占位 Fusion 项：branch、lead/sidekick、compaction、双路成本
- * 都不出现在这里，也不留空字段。面板不展示 prompt、媒体 URL、命中关键词、
- * classifier 原文或任何 credential —— 那些内容不在 decision payload 里。
+ * 请求详情「模型路由」页签。左边是和「路由」页签同一个路由过程；右边只留排查用得上的
+ * 数据：配置版本、模型和 API 提供商、耗时和隐私检查，都显示名称而不是 ID。
+ * 面板不展示 prompt、媒体 URL、命中关键词、classifier 原文或任何 credential ——
+ * 那些内容不在 decision payload 里。
  */
 export function RequestModelRoutingPanel({
   record,
+  services = [],
+  conversionEngine,
   onOpenProviderRouting,
+  onEditGroup,
+  onOpenRequest,
+  onOpenService,
+  onServicesChanged,
 }: {
   record: RequestRecord;
-  /** 跳到既有调用轨迹，provider 排序/跳过/故障转移在那里展示。 */
+  services?: readonly RoutingService[];
+  conversionEngine?: ConversionEngineCapability | null;
+  /** 跳到调用轨迹，API 提供商的排序、跳过与故障转移在那里。 */
   onOpenProviderRouting?: () => void;
+  onEditGroup?: (groupID: string) => void;
+  onOpenRequest?: (requestID: string) => void;
+  onOpenService?: (serviceID: string) => void;
+  onServicesChanged?: () => void;
 }) {
   const t = useT();
   const decision = record.model_routing;
-  // 历史记录和未使用虚拟模型的调用没有该字段。这不是错误，也不代表路由失败。
   if (!decision) {
     return (
       <div className="gutter-scroller min-h-0 flex-1 overflow-y-auto py-4">
-        <EmptyState
-          title={t("modelRouting.empty")}
-          description={t("modelRouting.emptyHint")}
-        />
+        <EmptyState title={t("modelRouting.empty")} />
       </div>
     );
   }
   return (
     <div
-      className="gutter-scroller grid min-h-0 flex-1 auto-rows-max content-start gap-3 overflow-y-auto py-4"
+      className="gutter-scroller grid min-h-0 flex-1 auto-rows-max content-start items-start gap-3 overflow-y-auto py-4 @[720px]:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]"
       data-testid="model-routing-panel"
     >
-      <SelectionPanel decision={decision} />
-      <FieldsPanel decision={decision} />
-      <PrivacyPanel decision={decision} />
-      <ExecutionPanel
-        decision={decision}
-        onOpenProviderRouting={onOpenProviderRouting}
-      />
+      <Panel className="p-3">
+        <RequestRoutingProcess
+          record={record}
+          services={services}
+          conversionEngine={conversionEngine}
+          onEditGroup={onEditGroup}
+          onOpenRequest={onOpenRequest}
+          onOpenService={onOpenService}
+          onServicesChanged={onServicesChanged}
+        />
+      </Panel>
+      <div className="grid min-w-0 gap-3">
+        <ConfigurationPanel
+          decision={decision}
+          services={services}
+          onOpenProviderRouting={onOpenProviderRouting}
+        />
+        <PrivacyPanel decision={decision} services={services} />
+      </div>
     </div>
   );
 }
 
-/** 虚拟模型 → group → 快照 → 命中规则或默认成员 → 选中成员。 */
-function SelectionPanel({ decision }: { decision: ModelRoutingDecision }) {
+function serviceName(services: readonly RoutingService[], id: string): string {
+  return (
+    services.find((service) => service.id === id)?.name ??
+    i18n.t("binding.removedService")
+  );
+}
+
+/** 配置版本、模型、API 提供商、状态和耗时；调用轨迹的入口放在标题右边。 */
+function ConfigurationPanel({
+  decision,
+  services,
+  onOpenProviderRouting,
+}: {
+  decision: ModelRoutingDecision;
+  services: readonly RoutingService[];
+  onOpenProviderRouting?: () => void;
+}) {
   const t = useT();
+  const [versionOpen, setVersionOpen] = useState(false);
+  const version = useModelRoutingGroupVersion(
+    decision.group_id,
+    decision.config_version,
+  );
+  const state = decision.execution.status;
+  const service = services.find(
+    (item) => item.id === decision.member_service_id,
+  );
   return (
     <Panel>
-      <PanelHeader>
-        <h2 className="text-sm font-semibold">{t("modelRouting.title")}</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {t("modelRouting.selectionSummary", {
-            source: modelRoutingSelectionSourceLabel(decision.selection_source),
-          })}
-        </p>
+      <PanelHeader
+        size="sm"
+        actions={
+          onOpenProviderRouting ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={onOpenProviderRouting}
+            >
+              <Route aria-hidden="true" />
+              {t("modelRouting.providerLink")}
+            </Button>
+          ) : undefined
+        }
+      >
+        <h2 className="text-sm font-semibold">
+          {t("modelRouting.config.title")}
+        </h2>
       </PanelHeader>
-      <dl className="grid min-w-0 gap-3 p-4 @[720px]:grid-cols-3">
+      <dl className="grid min-w-0 grid-cols-2 gap-3 p-3">
         <DataField
-          label={t("modelRouting.virtualModel")}
-          value={<code className="text-xs">{decision.virtual_model_id}</code>}
-        />
-        <DataField
-          label={t("modelRouting.group")}
-          value={<code className="text-xs">{decision.group_id}</code>}
-        />
-        <DataField
-          label={t("modelRouting.snapshot")}
-          title={t("modelRouting.snapshotHint")}
+          label={t("modelRouting.config.version")}
           value={
-            <code className="text-xs">{decision.config_snapshot_version}</code>
+            decision.config_version ? (
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto justify-start px-0 py-0 text-xs underline underline-offset-3"
+                onClick={() => setVersionOpen(true)}
+                data-routing-config-version={decision.config_version}
+              >
+                {[
+                  t("routingProcess.versionLabel", {
+                    version: decision.config_version,
+                  }),
+                  version
+                    ? new Date(version.created_at).toLocaleString(
+                        i18n.language,
+                        {
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        },
+                      )
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </Button>
+            ) : (
+              t("routingProcess.versionLegacy")
+            )
           }
         />
         <DataField
-          label={t("modelRouting.ruleTitle")}
-          value={modelRoutingRuleSummary(decision)}
+          label={t("modelRouting.execution.stateTitle")}
+          value={
+            <span
+              className={cn(
+                state === "failed" && "text-danger-foreground",
+                state === "succeeded" && "text-foreground",
+              )}
+            >
+              {modelRoutingExecutionStateLabel(state)}
+            </span>
+          }
         />
         <DataField
-          label={t("modelRouting.member.id")}
-          value={<code className="text-xs">{decision.member_id}</code>}
+          label={t("modelRouting.config.model")}
+          value={decision.member_model}
         />
         <DataField
-          label={t("modelRouting.member.service")}
-          value={<code className="text-xs">{decision.member_service_id}</code>}
+          label={t("modelRouting.execution.attemptsTitle")}
+          value={t("modelRouting.config.attempts", {
+            count: decision.execution.attempt_count,
+          })}
         />
         <DataField
-          label={t("modelRouting.member.model")}
-          value={<code className="text-xs">{decision.member_model}</code>}
+          label={t("modelRouting.config.provider")}
+          value={
+            <span
+              className="flex min-w-0 items-center gap-1.5"
+              title={serviceName(services, decision.member_service_id)}
+            >
+              {service ? (
+                <ServiceKindIcon kind={service.kind} size={14} />
+              ) : null}
+              <span className="min-w-0 truncate">
+                {serviceName(services, decision.member_service_id)}
+              </span>
+            </span>
+          }
         />
+        <DataField
+          label={t("modelRouting.execution.durationTitle")}
+          value={t("modelRouting.config.ms", { ms: decision.duration_ms })}
+        />
+        {decision.classifier_duration_ms === undefined ? null : (
+          <DataField
+            label={t("modelRouting.execution.classifierTitle")}
+            value={t("modelRouting.config.ms", {
+              ms: decision.classifier_duration_ms,
+            })}
+          />
+        )}
+        {decision.fallback_reason ? (
+          <DataField
+            label={t("modelRouting.fallback")}
+            value={modelRoutingCodeLabel(decision.fallback_reason)}
+          />
+        ) : null}
+        {decision.error_code ? (
+          <DataField
+            label={t("modelRouting.error")}
+            value={modelRoutingCodeLabel(decision.error_code)}
+          />
+        ) : null}
       </dl>
+      {decision.config_version ? (
+        <RoutingVersionDialog
+          groupID={decision.group_id}
+          version={decision.config_version}
+          open={versionOpen}
+          onOpenChange={setVersionOpen}
+          services={services}
+        />
+      ) : null}
     </Panel>
   );
 }
 
-/** 每个参与求值的字段：来源、是否取得、以及跳过时按哪个极性处理。 */
-function FieldsPanel({ decision }: { decision: ModelRoutingDecision }) {
-  const t = useT();
-  const fields = sortedFieldObservations(decision);
-  if (fields.length === 0) return null;
-  return (
-    <Panel>
-      <PanelHeader>
-        <h2 className="text-sm font-semibold">
-          {t("modelRouting.fields.title")}
-        </h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {t("modelRouting.fields.hint")}
-        </p>
-      </PanelHeader>
-      <Table containerClassName="min-h-0 overflow-x-auto">
-        <TableHeader>
-          <TableRow>
-            <TableHead>{t("modelRouting.fields.field")}</TableHead>
-            <TableHead>{t("modelRouting.fields.source")}</TableHead>
-            <TableHead>{t("modelRouting.fields.state")}</TableHead>
-            <TableHead>{t("modelRouting.fields.note")}</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {fields.map((observation, index) => (
-            <TableRow key={`${observation.field}-${index}`}>
-              <TableCell className="text-xs">
-                {modelRoutingFieldLabel(observation.field)}
-                <code className="ml-1.5 text-micro text-muted-foreground">
-                  {observation.field}
-                </code>
-              </TableCell>
-              <TableCell className="text-xs">
-                {modelRoutingFieldSourceLabel(observation.source)}
-              </TableCell>
-              <TableCell>
-                <Badge variant={observation.known ? "secondary" : "outline"}>
-                  {t(
-                    observation.known
-                      ? "modelRouting.fields.known"
-                      : "modelRouting.fields.unknown",
-                  )}
-                </Badge>
-              </TableCell>
-              <TableCell className="text-xs text-muted-foreground">
-                {/* 未取得时报稳定原因；已取得时只报命中次数，不回显命中内容。 */}
-                {observation.known
-                  ? observation.match_count === undefined
-                    ? ""
-                    : t("modelRouting.fields.matchCount", {
-                        count: observation.match_count,
-                      })
-                  : [
-                      modelRoutingFieldSkipLabel(observation),
-                      observation.error_code
-                        ? modelRoutingCodeLabel(observation.error_code)
-                        : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </Panel>
-  );
-}
-
-/** 隐私 gate 逐 attempt 的结果；任何一次 reject 都在发送前停止。 */
-function PrivacyPanel({ decision }: { decision: ModelRoutingDecision }) {
+/** 每次具体上游尝试前的隐私检查；任何一次被拒绝都在发送前停止。 */
+function PrivacyPanel({
+  decision,
+  services,
+}: {
+  decision: ModelRoutingDecision;
+  services: readonly RoutingService[];
+}) {
   const t = useT();
   return (
     <Panel>
-      <PanelHeader>
+      <PanelHeader size="sm">
         <h2 className="text-sm font-semibold">
           {t("modelRouting.privacy.title")}
         </h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {t("modelRouting.privacy.hint")}
-        </p>
       </PanelHeader>
       {decision.privacy_attempts.length === 0 ? (
-        <p className="p-4 text-xs text-muted-foreground">
+        <p className="p-3 text-xs text-muted-foreground">
           {t("modelRouting.privacy.noAttempts")}
         </p>
       ) : (
@@ -219,7 +290,7 @@ function PrivacyPanel({ decision }: { decision: ModelRoutingDecision }) {
           <TableHeader>
             <TableRow>
               <TableHead>{t("modelRouting.privacy.attemptColumn")}</TableHead>
-              <TableHead>{t("modelRouting.member.service")}</TableHead>
+              <TableHead>{t("modelRouting.config.provider")}</TableHead>
               <TableHead>{t("modelRouting.privacy.decisionColumn")}</TableHead>
               <TableHead>{t("modelRouting.privacy.findingsColumn")}</TableHead>
               <TableHead>{t("modelRouting.privacy.durationColumn")}</TableHead>
@@ -234,7 +305,7 @@ function PrivacyPanel({ decision }: { decision: ModelRoutingDecision }) {
                   })}
                 </TableCell>
                 <TableCell className="text-xs">
-                  <code>{attempt.service_id}</code>
+                  {serviceName(services, attempt.service_id)}
                 </TableCell>
                 <TableCell>
                   <Badge
@@ -265,104 +336,6 @@ function PrivacyPanel({ decision }: { decision: ModelRoutingDecision }) {
           </TableBody>
         </Table>
       )}
-    </Panel>
-  );
-}
-
-/** 单路执行的最终状态、耗时、回退原因，以及去既有 provider 视图的入口。 */
-function ExecutionPanel({
-  decision,
-  onOpenProviderRouting,
-}: {
-  decision: ModelRoutingDecision;
-  onOpenProviderRouting?: () => void;
-}) {
-  const t = useT();
-  const state = decision.execution.status;
-  return (
-    <Panel>
-      <PanelHeader
-        actions={
-          onOpenProviderRouting ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={onOpenProviderRouting}
-            >
-              <Route aria-hidden="true" />
-              {t("modelRouting.providerLink")}
-            </Button>
-          ) : undefined
-        }
-      >
-        <h2 className="text-sm font-semibold">
-          {t("modelRouting.execution.title")}
-        </h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {t("modelRouting.providerLinkHint")}
-        </p>
-      </PanelHeader>
-      <dl className="grid min-w-0 gap-3 p-4 @[720px]:grid-cols-4">
-        <DataField
-          label={t("modelRouting.execution.stateTitle")}
-          value={
-            <span
-              className={cn(
-                state === "failed" && "text-danger-foreground",
-                state === "succeeded" && "text-foreground",
-              )}
-            >
-              {modelRoutingExecutionStateLabel(state)}
-            </span>
-          }
-        />
-        <DataField
-          label={t("modelRouting.execution.attemptsTitle")}
-          value={t("modelRouting.execution.attempts", {
-            count: decision.execution.attempt_count,
-          })}
-        />
-        <DataField
-          label={t("modelRouting.execution.durationTitle")}
-          value={t("modelRouting.execution.duration", {
-            ms: decision.duration_ms,
-          })}
-        />
-        {decision.classifier_duration_ms === undefined ? null : (
-          <DataField
-            label={t("modelRouting.execution.classifierTitle")}
-            value={t("modelRouting.execution.classifierDuration", {
-              ms: decision.classifier_duration_ms,
-            })}
-          />
-        )}
-        {decision.fallback_reason ? (
-          <DataField
-            label={t("modelRouting.fallback")}
-            value={decision.fallback_reason}
-          />
-        ) : null}
-        {decision.error_code ? (
-          <DataField
-            label={t("modelRouting.error")}
-            value={
-              <>
-                {modelRoutingCodeLabel(decision.error_code)}
-                <code className="ml-1.5 text-micro text-muted-foreground">
-                  {decision.error_code}
-                </code>
-              </>
-            }
-          />
-        ) : null}
-        {decision.execution.error_code ? (
-          <DataField
-            label={t("modelRouting.execution.errorTitle")}
-            value={modelRoutingCodeLabel(decision.execution.error_code)}
-          />
-        ) : null}
-      </dl>
     </Panel>
   );
 }

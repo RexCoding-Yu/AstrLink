@@ -31,6 +31,7 @@ import {
   type ModelRoutingGroup,
 } from "./model-routing-group-model";
 import type { RoutableService } from "./service-model";
+import type { ConversionEngineCapability } from "./core-model";
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 
 interface EditingGroup {
@@ -67,6 +68,9 @@ export function ModelRoutingGroupsPanel({
   onGroupIDChange,
   onDryRun,
   onOpenClassifier,
+  conversionEngine,
+  onOpenService,
+  onServicesChanged,
 }: {
   ready: boolean;
   services: readonly RoutableService[];
@@ -86,6 +90,9 @@ export function ModelRoutingGroupsPanel({
   onGroupIDChange?: (from: string, to: string | null) => void;
   onDryRun?: (groupID: string) => void;
   onOpenClassifier?: () => void;
+  conversionEngine?: ConversionEngineCapability | null;
+  onOpenService?: (serviceId: string) => void;
+  onServicesChanged?: () => void;
 }) {
   const t = useT();
   const [settings, setSettings] = useWorkspaceSnapshot<RoutingSettings | null>(
@@ -165,6 +172,9 @@ export function ModelRoutingGroupsPanel({
   };
 
   // A dry run's 「编辑规则」 lands here. An editor with unsaved work stays put.
+  // A request that arrives before the groups have loaded (a link from another
+  // page) waits for them instead of being dropped.
+  const pendingEdit = useRef<string | null>(null);
   useEffect(() => {
     if (!editRequest) return;
     const current = editingRef.current;
@@ -175,9 +185,20 @@ export function ModelRoutingGroupsPanel({
     )
       return;
     if (current?.savedID === editRequest.id) return;
+    if (!groups.some((item) => item.id === editRequest.id)) {
+      pendingEdit.current = editRequest.id;
+      return;
+    }
+    pendingEdit.current = null;
     open(editRequest.id);
     // Only a new request opens an editor, not a settings reload.
   }, [editRequest]);
+  useEffect(() => {
+    const id = pendingEdit.current;
+    if (id === null || !groups.some((item) => item.id === id)) return;
+    pendingEdit.current = null;
+    if (!editingRef.current) open(id);
+  }, [groups]);
 
   /** Read-modify-write of the group list; returns what Core saved. */
   const writeGroups = async (
@@ -315,6 +336,9 @@ export function ModelRoutingGroupsPanel({
           services={services}
           dimensions={dimensions}
           protocols={protocols}
+          conversionEngine={conversionEngine}
+          onOpenService={onOpenService}
+          onServicesChanged={onServicesChanged}
           classifierEnabled={classifier ? classifier.enabled : null}
           ready={ready}
           dirty={dirty}

@@ -53,6 +53,14 @@ import {
   type ModelRoutingGroup,
 } from "@/model-routing-group-model";
 import type { RoutableService } from "@/service-model";
+import type { ConversionEngineCapability } from "@/core-model";
+import {
+  memberAcceptedFormats,
+  routingFormatReport,
+} from "@/model-routing-format-model";
+import { ModelRoutingFormatNotice } from "@/ModelRoutingFormatNotice";
+import { enableServiceEntry } from "@/service-entry-model";
+import { protocolLabel } from "@/service-presets";
 
 /** 改名浮层：组名就是客户端请求的模型名，改了要提醒客户端跟着改。 */
 function RenamePopover({
@@ -147,6 +155,9 @@ export function ModelRoutingGroupEditor({
   onDelete,
   onDryRun,
   onOpenClassifier,
+  conversionEngine,
+  onOpenService,
+  onServicesChanged,
 }: {
   group: ModelRoutingGroup;
   /** The saved name; renaming compares against it. */
@@ -169,6 +180,12 @@ export function ModelRoutingGroupEditor({
   onDelete: () => void;
   onDryRun: () => void;
   onOpenClassifier: () => void;
+  /** Decides which missing entries a provider could open by converting. */
+  conversionEngine?: ConversionEngineCapability | null;
+  /** Opens a provider's entry protocols. */
+  onOpenService?: (serviceId: string) => void;
+  /** A provider changed here (an entry was enabled); reload the list. */
+  onServicesChanged?: () => void;
 }) {
   const t = useT();
   const disabled = !ready || saving;
@@ -187,6 +204,51 @@ export function ModelRoutingGroupEditor({
 
   const issues = useMemo(() => routingRuleIssues(group), [group]);
   const groupIssues = useMemo(() => routingGroupIssues(group), [group]);
+  const formats = useMemo(
+    () => routingFormatReport(group, services, conversionEngine),
+    [group, services, conversionEngine],
+  );
+  const [formatBusy, setFormatBusy] = useState(false);
+  const [formatError, setFormatError] = useState<string | null>(null);
+  const enableConversions = async () => {
+    setFormatBusy(true);
+    setFormatError(null);
+    try {
+      for (const { service, protocols } of formats.fixable.values())
+        for (const protocol of protocols)
+          await enableServiceEntry(service.id, protocol, conversionEngine);
+    } catch {
+      setFormatError(t("routingFormats.enableFailed"));
+    } finally {
+      setFormatBusy(false);
+      onServicesChanged?.();
+    }
+  };
+  /** The words on a target that some request formats cannot reach. */
+  const targetWarning = (memberID: string): string | undefined => {
+    const lacking = formats.memberGaps.get(memberID);
+    const member = group.members.find((item) => item.id === memberID);
+    if (!lacking || !member) return undefined;
+    const list = (protocols: readonly string[]) =>
+      protocols
+        .map((protocol) => protocolLabel(protocol))
+        .join(t("routingFormats.listSeparator"));
+    const accepted = memberAcceptedFormats(member, services);
+    const provider =
+      services.find((service) => service.id === member.service_id)?.name ??
+      member.service_id;
+    return [
+      accepted.length > 0
+        ? t("routingFormats.memberAccepts", {
+            provider,
+            formats: list(accepted),
+          })
+        : null,
+      t("routingFormats.memberFails", { formats: list(lacking) }),
+    ]
+      .filter(Boolean)
+      .join("");
+  };
   const rulesFull = group.rules.length >= maxModelRoutingRulesPerGroup;
   const nameProblem = routingGroupNameIssue(group.id, otherIDs, savedID);
   const nameIssue = nameProblem
@@ -367,6 +429,13 @@ export function ModelRoutingGroupEditor({
           </div>
         </PanelHeader>
         <div className="min-h-0 flex-1 overflow-y-auto" data-tab-scroller>
+          <ModelRoutingFormatNotice
+            report={formats}
+            busy={formatBusy}
+            error={formatError}
+            onEnable={disabled ? undefined : () => void enableConversions()}
+            onOpenService={onOpenService}
+          />
           {group.rules.length === 0 ? (
             <div
               className="grid gap-3 border-b px-4 py-5"
@@ -454,6 +523,7 @@ export function ModelRoutingGroupEditor({
                   onChange(setRuleRoutingPhrases(group, index, []));
                 }}
                 onManageOptions={onOpenClassifier}
+                targetWarning={targetWarning(rule.target_member_id)}
               />
             ))
           )}
@@ -465,6 +535,7 @@ export function ModelRoutingGroupEditor({
             onTargetChange={(target) =>
               onChange(setDefaultRoutingTarget(group, target))
             }
+            targetWarning={targetWarning(group.default_member_id)}
           />
         </div>
       </Panel>

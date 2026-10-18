@@ -10,6 +10,7 @@ import { useT } from "./i18n";
 import { ModelRoutingGroupsPanel } from "./ModelRoutingGroupsPanel";
 import { PageHeader } from "./PageHeader";
 import type { RoutableService } from "./service-model";
+import type { ConversionEngineCapability } from "./core-model";
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 
 export type IntelligentRoutingView = "groups" | "classifier" | "dryRun";
@@ -19,17 +20,28 @@ type DraftTab = "groups" | "classifier";
 
 export function IntelligentRouting({
   initialView = "groups",
+  initialEditGroup,
   services,
   protocols = [],
   ready,
   onDirtyChange,
+  conversionEngine,
+  onOpenService,
+  onServicesChanged,
 }: {
   initialView?: IntelligentRoutingView;
+  /** A group whose editor opens right away. */
+  initialEditGroup?: string;
   services: readonly RoutableService[];
   /** core capabilities' protocol IDs — the value domain of the `protocol` rule field. */
   protocols?: readonly string[];
   ready: boolean;
   onDirtyChange: (dirty: boolean) => void;
+  conversionEngine?: ConversionEngineCapability | null;
+  /** Opens a provider's entry protocols. */
+  onOpenService?: (serviceId: string) => void;
+  /** A provider changed from here; reload the list. */
+  onServicesChanged?: () => void;
 }) {
   const t = useT();
   const [view, setView] = useState<IntelligentRoutingView>(initialView);
@@ -42,7 +54,9 @@ export function IntelligentRouting({
   const [editRequest, setEditRequest] = useState<{
     id: string;
     seq: number;
-  } | null>(null);
+  } | null>(() =>
+    initialEditGroup ? { id: initialEditGroup, seq: Date.now() } : null,
+  );
   const [settings] = useWorkspaceSnapshot<RoutingSettings | null>(
     "routing-settings",
     null,
@@ -158,6 +172,9 @@ export function IntelligentRouting({
               setView("dryRun");
             }}
             onOpenClassifier={() => setView("classifier")}
+            conversionEngine={conversionEngine}
+            onOpenService={onOpenService}
+            onServicesChanged={onServicesChanged}
           />
         </TabsContent>
         <TabsContent

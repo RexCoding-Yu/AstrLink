@@ -7,6 +7,8 @@ const bridge = vi.hoisted(() => ({
   getRoutingSettings: vi.fn(),
   updateRoutingSettings: vi.fn(),
   getClassifierSettings: vi.fn(),
+  getService: vi.fn(),
+  updateService: vi.fn(),
 }));
 vi.mock("./bridge", () => bridge);
 vi.mock("./notify", () => ({
@@ -19,6 +21,7 @@ import { applyLocale } from "./i18n";
 import type { ModelRoutingGroup } from "./model-routing-group-model";
 import { ModelRoutingGroupsPanel } from "./ModelRoutingGroupsPanel";
 import type { RoutableService } from "./service-model";
+import type { ConversionEngineCapability } from "./core-model";
 
 const services: RoutableService[] = [
   {
@@ -686,6 +689,87 @@ describe("routing groups panel", () => {
     expect(handlers.onOpenClassifier).toHaveBeenCalledTimes(1);
   });
 
+  it("points out a model that refuses some request formats and opens its conversion", async () => {
+    const all = ["anthropic.messages", "openai.chat", "openai.responses"].map(
+      (protocol) => ({ protocol, mode: "native" as const, streaming: true }),
+    );
+    const claudeOnly = [
+      {
+        protocol: "anthropic.messages",
+        mode: "native" as const,
+        streaming: true,
+      },
+    ];
+    const formatServices: RoutableService[] = [
+      { ...services[0], capabilities: all },
+      { ...services[1], name: "Claude 订阅", capabilities: claudeOnly },
+    ];
+    const engine: ConversionEngineCapability = {
+      name: "relaykit",
+      version: null,
+      available: true,
+      edges: ["openai.responses", "openai.chat"].map((from) => ({
+        from,
+        to: "anthropic.messages",
+        quality: "good" as const,
+        streaming: true,
+      })),
+    };
+    bridge.getService.mockReset().mockResolvedValue({
+      service: { ...formatServices[1], capabilities: claudeOnly },
+      etag: "etag-1",
+    });
+    bridge.updateService
+      .mockReset()
+      .mockResolvedValue({ service: formatServices[1], etag: "etag-2" });
+    const onServicesChanged = vi.fn();
+    await render({
+      services: formatServices,
+      conversionEngine: engine,
+      onServicesChanged,
+      onOpenService: vi.fn(),
+    });
+    await openEditor();
+
+    const notice = document.querySelector("[data-routing-format-notice]");
+    expect(notice?.textContent).toContain("有模型不兼容部分请求格式");
+    expect(
+      notice?.querySelector('[data-routing-format-row="openai.responses"]')
+        ?.textContent,
+    ).toContain("gpt-5-mini · Claude 订阅 · 第 1 条");
+    expect(
+      notice?.querySelector('[data-routing-format-row="anthropic.messages"]')
+        ?.textContent,
+    ).toContain("全部兼容");
+    // The rule's model says which requests it would fail, on hover.
+    const warning = document.querySelector<HTMLElement>(
+      '[data-routing-target="0"] [data-combobox-warning]',
+    );
+    expect(warning?.title).toContain("Claude 订阅 只接受 Anthropic Messages");
+    expect(
+      document.querySelector(
+        '[data-routing-target="fallback"] [data-combobox-warning]',
+      ),
+    ).toBeNull();
+
+    await click(
+      document.querySelector("[data-routing-format-enable]") as Element,
+    );
+    expect(bridge.updateService).toHaveBeenCalledTimes(2);
+    expect(bridge.updateService).toHaveBeenCalledWith("svc-openai", "etag-1", {
+      capabilities: [
+        ...claudeOnly,
+        {
+          protocol: "openai.responses",
+          mode: "native",
+          streaming: true,
+          convert_to: "anthropic.messages",
+        },
+      ],
+    });
+    expect(onServicesChanged).toHaveBeenCalled();
+  });
+
   it("hands the saved name to the dry run", async () => {
     const handlers = await render();
     await openEditor();
@@ -705,6 +789,37 @@ describe("routing groups panel", () => {
         />,
       ),
     );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="routing-group-editor"]'),
+    ).not.toBeNull();
+  });
+
+  it("opens a requested group once the groups have loaded", async () => {
+    // A link from a request record mounts the panel with the request already
+    // set, before the first settings read has answered.
+    let answer: (value: ReturnType<typeof settings>) => void = () => {};
+    bridge.getRoutingSettings.mockReset().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    await act(async () =>
+      root.render(
+        <ModelRoutingGroupsPanel
+          services={services}
+          ready
+          onDirtyChange={() => {}}
+          editRequest={{ id: "coding-auto", seq: 1 }}
+        />,
+      ),
+    );
+    await flush();
+    expect(
+      container.querySelector('[data-testid="routing-group-editor"]'),
+    ).toBeNull();
+    await act(async () => answer(settings()));
     await flush();
     expect(
       container.querySelector('[data-testid="routing-group-editor"]'),

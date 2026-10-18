@@ -230,6 +230,12 @@ export interface ClassifierDryRunField {
   source: string;
   known: boolean;
   match_count: number;
+  /**
+   * The fact the condition read, in the evaluator's spelling ("true", "12",
+   * "openai.chat"). Null when unknown and always for `literal_keyword`, whose
+   * fact is the request text itself.
+   */
+  value: string | null;
   classifier_confidence: number | null;
   classifier_id: string | null;
   skip_reason: string | null;
@@ -530,6 +536,7 @@ export function parseClassifierDryRunResult(
         source: optional(field, "source", asString, ""),
         known: optional(field, "known", asBoolean, false),
         match_count: optional(field, "match_count", asNumber, 0),
+        value: optionalString(field.value, "value"),
         classifier_confidence: optionalNumber(
           field.classifier_confidence,
           "classifier_confidence",
@@ -573,6 +580,7 @@ export function parseClassifierDryRunResult(
               source: optional(field, "source", asString, ""),
               known: optional(field, "known", asBoolean, false),
               match_count: optional(field, "match_count", asNumber, 0),
+              value: optionalString(field.value, "value"),
               classifier_confidence: null,
               classifier_id: null,
               skip_reason: optionalString(field.skip_reason, "skip_reason"),

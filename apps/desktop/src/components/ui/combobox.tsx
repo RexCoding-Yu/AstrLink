@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { Check, ChevronDown, X } from "@/components/icons";
+import { BadgeAlert, Check, ChevronDown, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -110,6 +110,7 @@ export function Combobox({
   className,
   leadingIcon,
   hint,
+  warning,
   renderOption,
   renderGroup,
   allowCustomValue = true,
@@ -140,6 +141,12 @@ export function Combobox({
    * provider of the chosen model. It gives way to the value when space runs out.
    */
   hint?: string;
+  /**
+   * Marks a value that is valid but will fail in some situations, such as a
+   * model that does not accept every request format its routing group serves.
+   * The text names those situations; it shows on hover and to screen readers.
+   */
+  warning?: string;
   renderOption?: (label: string, option?: ComboboxOption) => ReactNode;
   /** Content of a group heading; defaults to the group name. */
   renderGroup?: (group: string) => ReactNode;
@@ -161,6 +168,7 @@ export function Combobox({
   const expanded = open && !disabled;
   const clearable = !!clearLabel && !!value && !disabled;
   const showHint = !!hint && !expanded;
+  const warned = !!warning && !expanded;
 
   /** The row the current value owns, if the list still offers it. */
   const selectedIndex = options.findIndex((option) => option.value === value);
@@ -236,10 +244,15 @@ export function Combobox({
             }
             autoComplete="off"
             className={cn(
-              clearable ? "pr-14" : "pr-9",
+              clearable || warned ? "pr-14" : "pr-9",
               leadingIcon && "pl-8",
-              showHint && "pr-[calc(35%+2.25rem)] text-ellipsis",
+              showHint &&
+                (warned
+                  ? "pr-[calc(35%+3.75rem)] text-ellipsis"
+                  : "pr-[calc(35%+2.25rem)] text-ellipsis"),
+              warned && "border-warning/55",
             )}
+            aria-description={warned ? warning : undefined}
             value={
               !allowCustomValue && expanded ? query : (displayValue ?? value)
             }
@@ -303,10 +316,23 @@ export function Combobox({
               aria-hidden="true"
               className={cn(
                 "pointer-events-none absolute top-1/2 max-w-[35%] -translate-y-1/2 truncate text-xs text-muted-foreground",
-                clearable ? "right-14" : "right-9",
+                clearable || warned ? "right-14" : "right-9",
+                clearable && warned && "right-20",
               )}
             >
               {hint}
+            </span>
+          ) : null}
+          {warned ? (
+            <span
+              className={cn(
+                "absolute top-1/2 inline-flex -translate-y-1/2 cursor-help text-warning-foreground",
+                clearable ? "right-14" : "right-8",
+              )}
+              title={warning}
+              data-combobox-warning
+            >
+              <BadgeAlert aria-hidden="true" className="size-3.5" />
             </span>
           ) : null}
           {clearable ? (

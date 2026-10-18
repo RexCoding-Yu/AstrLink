@@ -2625,6 +2625,29 @@ impl CoreManager {
 
     /// Dry-run asks Core to classify sample text through the configured
     /// provider; the desktop never contacts the provider itself.
+    /// One saved configuration of a routing group, by the version number a
+    /// request record names.
+    pub async fn get_model_routing_group_version(
+        &self,
+        group_id: &str,
+        version: u32,
+    ) -> Result<serde_json::Value, String> {
+        validate_model_routing_group_id(group_id)?;
+        if version == 0 {
+            return Err("routing group version must be positive".into());
+        }
+        let (_, body) = self
+            .authenticated_control(
+                Method::GET,
+                &format!("/control/v1/model-routing-versions/{group_id}/{version}"),
+                None,
+                None,
+            )
+            .await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("routing group version returned invalid JSON: {error}"))
+    }
+
     pub async fn classifier_dry_run(
         &self,
         input: serde_json::Value,
@@ -4621,6 +4644,23 @@ fn service_risk_events_path(service_id: &str, limit: Option<u32>) -> Result<Stri
             Ok(format!("{path}?limit={limit}"))
         }
         Some(_) => Err("risk event limit must be between 1 and 50".to_string()),
+    }
+}
+
+/// A routing group id as Core accepts it: 1 to 64 lowercase ASCII letters,
+/// digits and inner hyphens. Checked here because it becomes a URL segment.
+fn validate_model_routing_group_id(value: &str) -> Result<(), String> {
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err("invalid routing group id".into())
     }
 }
 

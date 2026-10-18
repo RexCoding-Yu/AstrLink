@@ -5,6 +5,10 @@ import {
 } from "./service-test-model";
 import { parseChannelBindingAudit } from "./channel-binding-model";
 import {
+  parseModelRoutingGroupVersion,
+  type ModelRoutingGroupVersion,
+} from "./model-routing-version-model";
+import {
   parseClientIdentities,
   parseRoutingSettings,
   type ClientIdentities,
@@ -1187,6 +1191,19 @@ export async function updateRoutingSettings(
     knownRoutingDimensions(),
   ]);
   return parseRoutingSettings(settings, dimensions);
+}
+/** 路由组保存过的一版配置；请求记录里的配置版本号指向它。 */
+export async function getModelRoutingGroupVersion(
+  groupId: string,
+  version: number,
+): Promise<ModelRoutingGroupVersion> {
+  requireNativeBridge();
+  return parseModelRoutingGroupVersion(
+    await invoke<unknown>("get_model_routing_group_version", {
+      groupId,
+      version,
+    }),
+  );
 }
 export async function getClientIdentities(): Promise<ClientIdentities> {
   requireNativeBridge();

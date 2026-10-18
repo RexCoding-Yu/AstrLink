@@ -15,6 +15,7 @@ export function ModelSelect({
   clearLabel,
   optionAdornment,
   optionLabel,
+  optionGroup,
   leadingIcon,
   onValueChange,
   ...props
@@ -32,6 +33,11 @@ export function ModelSelect({
    * the value, and the label is what the list filters on.
    */
   optionLabel?: (value: string) => string;
+  /**
+   * Heading an option sits under. Options arrive in group order; consecutive
+   * options with the same heading share one.
+   */
+  optionGroup?: (value: string) => string | undefined;
   /** Overrides the model brand mark; `null` drops the leading icon entirely. */
   leadingIcon?: ReactNode;
 }) {
@@ -48,8 +54,9 @@ export function ModelSelect({
       models.map((model) => ({
         value: model,
         label: optionLabel?.(model) ?? model,
+        group: optionGroup?.(model),
       })),
-    [models, optionLabel, locale],
+    [models, optionLabel, optionGroup, locale],
   );
   // A labelled option set is closed: the control renders the label and each row
   // carries its own value, so a duplicate label can never redirect the write.

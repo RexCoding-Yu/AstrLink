@@ -34,6 +34,7 @@ export function ModelRoutingTargetSelect({
   used = [],
   disabled = false,
   className,
+  warning,
   "aria-label": ariaLabel,
 }: {
   services: readonly RoutableService[];
@@ -42,6 +43,8 @@ export function ModelRoutingTargetSelect({
   used?: readonly RoutingTarget[];
   disabled?: boolean;
   className?: string;
+  /** 这个模型不兼容组里别的模型兼容的请求格式时，写明哪些请求会失败。 */
+  warning?: string;
   "aria-label": string;
 }) {
   const t = useT();
@@ -110,6 +113,7 @@ export function ModelRoutingTargetSelect({
       placeholder={t("routingGroups.target.placeholder")}
       emptyMessage={t("routingGroups.target.empty")}
       hint={hint}
+      warning={warning}
       leadingIcon={
         current ? <ServiceKindIcon kind={current.kind} size={16} /> : undefined
       }

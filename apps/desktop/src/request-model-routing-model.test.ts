@@ -7,8 +7,6 @@ import {
   modelRoutingFieldLabel,
   modelRoutingFieldSkipLabel,
   modelRoutingPrivacyDecisionLabel,
-  modelRoutingRuleSummary,
-  modelRoutingSelectionSourceLabel,
   sortedFieldObservations,
 } from "./request-model-routing-model";
 import type {
@@ -49,22 +47,6 @@ function decision(
 }
 
 describe("model routing decision labels", () => {
-  it("names the five selection sources, which are not provider selections", () => {
-    // `group_binding` is the group-scoped reuse; provider `session_binding` is
-    // a different namespace and is not a valid value here.
-    for (const source of [
-      "rule",
-      "default_member",
-      "group_binding",
-      "response_affinity",
-      "websocket_connection",
-    ] as const) {
-      const label = modelRoutingSelectionSourceLabel(source);
-      expect(label).toBeTruthy();
-      expect(label).not.toBe(source);
-    }
-  });
-
   it("labels execution states and privacy decisions", () => {
     for (const state of [
       "pending",
@@ -83,22 +65,6 @@ describe("model routing decision labels", () => {
   it("keeps an unknown code readable instead of dropping it", () => {
     expect(modelRoutingCodeLabel("brand_new_code")).toBe("brand_new_code");
     expect(modelRoutingFieldLabel("some_new_field")).toBe("some_new_field");
-  });
-
-  it("summarises a rule hit versus a default member", () => {
-    const hit = modelRoutingRuleSummary(decision());
-    expect(hit).toContain("coding");
-    expect(hit).toContain("100");
-    const fallback = modelRoutingRuleSummary(
-      decision({
-        selection_source: "default_member",
-        used_default: true,
-        rule_id: undefined,
-        rule_priority: undefined,
-      }),
-    );
-    expect(fallback).toBeTruthy();
-    expect(fallback).not.toContain("coding");
   });
 
   it("sorts known field observations ahead of unknown ones", () => {

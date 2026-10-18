@@ -42,6 +42,10 @@ const goStructs = {
   decision: "ModelRoutingDecision",
   fieldObservation: "ModelRoutingFieldObservation",
   candidateObservation: "ModelRoutingCandidateObservation",
+  ruleVerdict: "ModelRoutingRuleVerdict",
+  classifierAnswers: "ModelRoutingClassifierAnswers",
+  dimensionAnswer: "ModelRoutingDimensionAnswer",
+  bindingReset: "ModelRoutingBindingReset",
   execution: "ModelRoutingExecution",
   privacyAttempt: "ModelRoutingPrivacyAttempt",
 } as const;

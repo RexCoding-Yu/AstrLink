@@ -2663,22 +2663,7 @@
     "tab": "Model routing",
     "title": "Model routing",
     "empty": "This request has no model routing record",
-    "emptyHint": "Historical requests, and calls that did not name an astrlink/<slug> virtual model, have no model routing record. That is normal.",
-    "virtualModel": "Requested virtual model",
-    "group": "Model routing group",
-    "snapshot": "Config snapshot",
-    "snapshotHint": "The model routing group config version this request used. Diagnostic only; it carries no rule text.",
-    "rule": {
-      "hit": "Matched rule {{rule}}",
-      "hitWithPriority": "Matched rule {{rule}} (priority {{priority}})",
-      "default": "No rule matched; the default member was used"
-    },
     "fields": {
-      "title": "Metadata sources",
-      "hint": "Only the field sources the record kept; matched content itself is never shown.",
-      "known": "Known",
-      "unknown": "Unknown",
-      "matchCount": "{{count}} match(es)",
       "protocol": "Protocol",
       "media_kind": "Media kind",
       "task_type": "Task type",
@@ -2699,11 +2684,7 @@
       "input_text_runes": "Input characters",
       "estimated_input_context_tokens": "Estimated input tokens",
       "literal_keyword": "Literal keyword",
-      "system_time": "Time of day",
-      "field": "Field",
-      "source": "Source",
-      "state": "State",
-      "note": "Note"
+      "system_time": "Time of day"
     },
     "values": {
       "task_type": {
@@ -2721,30 +2702,12 @@
         "unknown": "Unknown"
       }
     },
-    "fieldSource": {
-      "local": "Parsed locally",
-      "classifier": "Classifier"
-    },
     "skipReason": {
       "classifier_unknown": "The classifier returned nothing, so rules depending on this field were skipped",
       "local_unknown": "Local parsing could not resolve this field, so rules depending on it were skipped"
     },
-    "selectionSource": {
-      "rule": "A rule matched",
-      "default_member": "Default member",
-      "group_binding": "Member already bound in this session",
-      "response_affinity": "Reused the member of the previous response",
-      "websocket_connection": "Reused the member bound to this WebSocket connection"
-    },
-    "member": {
-      "title": "Selected member",
-      "id": "Member",
-      "service": "API provider",
-      "model": "Concrete model"
-    },
     "privacy": {
-      "title": "Privacy checks (per attempt)",
-      "hint": "Privacy runs once per concrete upstream attempt; a rejection stops that attempt before it is sent.",
+      "title": "Privacy checks",
       "attempt": "Attempt {{index}}",
       "findings": "{{count}} finding(s)",
       "noAttempts": "This request made no concrete upstream attempt",
@@ -2760,10 +2723,6 @@
       "durationColumn": "Duration"
     },
     "execution": {
-      "title": "Execution",
-      "attempts": "{{count}} upstream attempt(s)",
-      "duration": "Member selection took {{ms}} ms",
-      "classifierDuration": "Classifier took {{ms}} ms",
       "state": {
         "pending": "Selecting",
         "selected": "Selected",
@@ -2780,7 +2739,6 @@
     "fallback": "Fallback reason",
     "error": "Error",
     "providerLink": "View provider routing",
-    "providerLinkHint": "API provider ordering, skips and failover are shown in the call trajectory.",
     "codes": {
       "model_routing_group_not_found": "No model routing group matches this virtual model",
       "model_routing_group_disabled": "The model routing group is disabled and accepts no new requests",
@@ -2814,8 +2772,14 @@
       "atLeast": "{{field}} is at least {{min}}",
       "atMost": "{{field}} is at most {{max}}"
     },
-    "selectionSummary": "Selection source: {{source}}",
-    "ruleTitle": "Matched rule"
+    "config": {
+      "title": "Routing configuration",
+      "version": "Configuration version",
+      "model": "Model",
+      "provider": "API provider",
+      "attempts": "{{count}}",
+      "ms": "{{ms}} ms"
+    }
   },
   "pricing": {
     "title": "Cost details",
@@ -2835,29 +2799,21 @@
     "unavailable": "Cost unavailable"
   },
   "binding": {
-    "tab": "API provider binding",
-    "settingTitle": "Reuse API providers within a conversation",
-    "settingHint": "Prefer the last successful API provider. Failures follow the existing failover policy.",
-    "ttl": "Idle expiry (minutes)",
-    "ttlHint": "Renewed after each successful request. Between 1 and 1440 minutes; 60 recommended.",
-    "manageHint": "Manage bindings in Request records → Conversation details → API provider binding.",
-    "current": "Current API provider preference",
-    "release": "Choose API provider again",
+    "tab": "Session stickiness",
+    "settingTitle": "Keep a session on the model and API provider it used",
+    "ttl": "Idle timeout",
+    "current": "Currently kept",
+    "release": "Choose again",
     "releasing": "Releasing…",
-    "releaseHint": "Clear this conversation’s preferences. The next request follows API provider order and may select the same API provider.",
     "releasedNotice": "Binding released. The next request will choose an API provider again.",
     "releaseFailed": "Could not release binding. Try again.",
     "loadFailed": "Could not load API provider bindings",
-    "disabled": "API provider reuse is off. Existing bindings do not influence ordinary routing; history remains available.",
-    "empty": "No active binding",
-    "emptyHint": "A successful request remembers the API provider automatically.",
-    "emptyDisabled": "Enable “Reuse API providers within a conversation” in Routing.",
+    "disabled": "Off",
+    "empty": "Nothing kept yet",
     "removedService": "Deleted API provider",
     "token": "Token …{{id}}",
     "expires": "Valid until {{time}}",
-    "strictHint": "Choosing again does not interrupt active requests. Stateful Responses continuations and established WebSocket connections still use their original API provider.",
     "history": "Binding history",
-    "historyHint": "Session matches, API provider preferences, switches and manual releases. Conversation text is not stored here.",
     "noEvents": "No binding history yet",
     "viewRequest": "View this request",
     "actions": {
@@ -2883,7 +2839,14 @@
       "echo_id": "Tool or response identifier match",
       "fingerprint": "Assistant text fingerprint match"
     },
-    "retention": "Up to 50,000 binding audit entries are retained locally."
+    "settingHelpLabel": "How session stickiness works",
+    "settingHelp": "After a request succeeds, the model intelligent routing chose and the API provider that served it are remembered, and later requests in the same session reuse them. After the idle timeout (1–1440 minutes) they're chosen again. Disabling a routing group or removing the model from it ends the reuse; failures follow the failover policy. View or reset them in a session's details under Requests.",
+    "ttlUnit": "minutes",
+    "currentHelpLabel": "What choosing again does",
+    "currentHelp": "Choose again clears everything this session keeps. The next request is judged by the rules and the provider order again and may land on the same choice. Requests in progress, Responses continuations and open WebSocket connections are not affected.",
+    "disabledHelp": "Session stickiness is off, so the entries below aren't used. Turn it on in Routing → Session stickiness.",
+    "historyHelpLabel": "What the binding history records",
+    "historyHelp": "Session matching, reuse, switches and manual resets for API providers, without conversation text. Up to 50,000 entries are kept locally. Whether intelligent routing reused its earlier model shows on each request's Route tab."
   },
   "serviceProxy": {
     "title": "Instance proxy",
@@ -2976,7 +2939,15 @@
     "configuredIn": "Configured in {{clients}}",
     "entryRequired": "Entry required",
     "entryWillEnable": "{{service}} has no {{protocol}} entry yet. Writing the configuration will enable it automatically, converting to {{target}}.",
-    "entryEnableFailed": "Could not enable the {{protocol}} entry for {{service}}"
+    "entryEnableFailed": "Could not enable the {{protocol}} entry for {{service}}",
+    "groupsHeading": "Intelligent routing",
+    "modelsHeading": "Models",
+    "groupEntries_one": "{{count}} entry to enable",
+    "groupEntries_other": "{{count}} entries to enable",
+    "groupIncompatible_one": "{{count}} model incompatible",
+    "groupIncompatible_other": "{{count}} models incompatible",
+    "groupIncompatibleItem": "{{model}} ({{service}}) doesn't accept {{protocol}} requests",
+    "noteSeparator": "; "
   },
   "providerImport": {
     "title": "Add API provider",
@@ -3877,5 +3848,58 @@
       "tooMany": "Task type has at most {{max}} options.",
       "inUse": "A rule in routing group {{group}} still uses {{label}}; change that rule first."
     }
+  },
+  "routingFormats": {
+    "title": "Some models don't accept every request format",
+    "helpLabel": "Why requests fail",
+    "help": "After the rules pick a model, the gateway needs an entry on that model's API provider that accepts the request's format; without one the request fails. Requests in the formats below fail when they hit the listed rules.",
+    "format": "Request format",
+    "incompatible": "Incompatible models",
+    "allCompatible": "All compatible",
+    "rules": "rule {{numbers}}",
+    "listSeparator": ", ",
+    "openService": "Provider settings",
+    "enableOne": "Enable conversion on {{service}}",
+    "enableMany": "Enable conversion on {{count}} API providers",
+    "enableFailed": "Conversion couldn't be enabled. Check the entry protocols in the provider settings.",
+    "memberAccepts": "{{provider}} only accepts {{formats}}. ",
+    "memberFails": "{{formats}} requests that reach this model fail."
+  },
+  "routingProcess": {
+    "yes": "yes",
+    "no": "no",
+    "keywordFound": "The request contains “{{keyword}}”",
+    "keywordMissing": "The request doesn't contain “{{keyword}}”",
+    "keywordsFound_one": "The request contains {{count}} of these keywords",
+    "keywordsFound_other": "The request contains {{count}} of these keywords",
+    "keywordsMissing": "The request contains none of these keywords",
+    "title": "Intelligent routing",
+    "chosenByRule": "Chose {{model}} ({{provider}}) by rule {{index}}.",
+    "chosenByRuleId": "Chose {{model}} ({{provider}}) by rule {{rule}}.",
+    "chosenByDefault": "Chose {{model}} ({{provider}}). No rule matched, so the Otherwise model was used.",
+    "bindingReused": "Kept {{model}} ({{provider}}), chosen earlier in this session, until {{time}}.",
+    "bindingReusedNoTime": "Kept {{model}} ({{provider}}), chosen earlier in this session.",
+    "affinityReused": "Kept {{model}} ({{provider}}), where the previous response lives.",
+    "websocketReused": "Kept {{model}} ({{provider}}), chosen for this WebSocket connection.",
+    "bindingReset": " The session's earlier model, {{model}}, left the group, so the rules were judged again.",
+    "unsupported": "Chose {{model}} ({{provider}}), but it doesn't accept {{format}} requests, so nothing was sent.",
+    "unavailable": "Chose {{model}} ({{provider}}), but it's unavailable right now, so nothing was sent.",
+    "bindingHelpLabel": "What session stickiness is",
+    "bindingHelp": "A session keeps the model chosen earlier until it sits idle past the timeout, without judging the rules again. Disabling the group or removing the model from it chooses again. Set it in Routing → Session stickiness.",
+    "viewOrigin": "View that judgment",
+    "classifierDuration": "{{ms}} ms",
+    "legacyHelpLabel": "Why there are no rule verdicts",
+    "legacyHelp": "This request predates the upgrade. Only the chosen rule was recorded then, so the other rules' verdicts can't be shown.",
+    "notInRequest": "Not available from this request",
+    "when": "When",
+    "versionLabel": "Version {{version}}",
+    "versionSaved": "Saved {{time}}",
+    "versionLatest": "Current: version {{version}}",
+    "versionView": "Show as",
+    "versionRules": "Rules",
+    "copyJson": "Copy JSON",
+    "versionLegacy": "Before versions",
+    "fieldsTitle": "Conditions read",
+    "fieldKnown": "available"
   }
 }

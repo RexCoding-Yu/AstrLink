@@ -2663,22 +2663,7 @@
     "tab": "模型路由",
     "title": "模型路由",
     "empty": "该请求没有模型路由记录",
-    "emptyHint": "历史请求，或未使用 astrlink/<slug> 虚拟模型的调用，不会有模型路由记录。这属于正常情况。",
-    "virtualModel": "请求的虚拟模型",
-    "group": "模型路由组",
-    "snapshot": "配置快照",
-    "snapshotHint": "本次请求使用的模型路由组配置版本，只用于诊断，不含规则原文。",
-    "rule": {
-      "hit": "命中规则 {{rule}}",
-      "hitWithPriority": "命中规则 {{rule}}（优先级 {{priority}}）",
-      "default": "没有规则命中，使用默认成员"
-    },
     "fields": {
-      "title": "元信息来源",
-      "hint": "只列出记录里保留的字段来源，不展示命中的内容本身。",
-      "known": "已取得",
-      "unknown": "未知",
-      "matchCount": "命中 {{count}} 次",
       "protocol": "协议",
       "media_kind": "媒体类型",
       "task_type": "任务类型",
@@ -2699,11 +2684,7 @@
       "input_text_runes": "输入字符数",
       "estimated_input_context_tokens": "估算输入 token",
       "literal_keyword": "字面关键词",
-      "system_time": "时间段",
-      "field": "字段",
-      "source": "来源",
-      "state": "状态",
-      "note": "说明"
+      "system_time": "时间段"
     },
     "values": {
       "task_type": {
@@ -2721,30 +2702,12 @@
         "unknown": "未知"
       }
     },
-    "fieldSource": {
-      "local": "本地解析",
-      "classifier": "分类器"
-    },
     "skipReason": {
       "classifier_unknown": "分类器未给出结果，依赖该字段的规则被跳过",
       "local_unknown": "本地解析取不到该字段，依赖该字段的规则被跳过"
     },
-    "selectionSource": {
-      "rule": "命中规则",
-      "default_member": "默认成员",
-      "group_binding": "会话内已绑定的成员",
-      "response_affinity": "复用上一条响应所属成员",
-      "websocket_connection": "复用 WebSocket 连接已绑定成员"
-    },
-    "member": {
-      "title": "选中成员",
-      "id": "成员",
-      "service": "API 提供商",
-      "model": "具体模型"
-    },
     "privacy": {
-      "title": "隐私检查（逐次尝试）",
-      "hint": "每次具体上游尝试都会执行一次隐私检查；任何一次被拒绝都会在发送前停止。",
+      "title": "隐私检查",
       "attempt": "第 {{index}} 次尝试",
       "findings": "命中 {{count}} 项",
       "noAttempts": "本次没有具体上游尝试",
@@ -2760,10 +2723,6 @@
       "durationColumn": "耗时"
     },
     "execution": {
-      "title": "执行结果",
-      "attempts": "上游尝试 {{count}} 次",
-      "duration": "成员选择耗时 {{ms}} ms",
-      "classifierDuration": "分类器耗时 {{ms}} ms",
       "state": {
         "pending": "选择中",
         "selected": "已选中",
@@ -2780,7 +2739,6 @@
     "fallback": "回退原因",
     "error": "错误",
     "providerLink": "查看提供商路由",
-    "providerLinkHint": "API 提供商的排序、跳过与故障转移在调用轨迹中展示。",
     "codes": {
       "model_routing_group_not_found": "虚拟模型没有对应的模型路由组",
       "model_routing_group_disabled": "模型路由组已停用，不接受新请求",
@@ -2814,8 +2772,14 @@
       "atLeast": "{{field}} 不小于 {{min}}",
       "atMost": "{{field}} 不大于 {{max}}"
     },
-    "selectionSummary": "选择来源：{{source}}",
-    "ruleTitle": "命中的规则"
+    "config": {
+      "title": "路由配置",
+      "version": "配置版本",
+      "model": "模型",
+      "provider": "API 提供商",
+      "attempts": "{{count}} 次",
+      "ms": "{{ms}} ms"
+    }
   },
   "pricing": {
     "title": "费用明细",
@@ -2835,29 +2799,21 @@
     "unavailable": "金额暂不可用"
   },
   "binding": {
-    "tab": "API 提供商绑定",
-    "settingTitle": "同一会话优先复用 API 提供商",
-    "settingHint": "沿用上次成功的 API 提供商，减少会话中的 API 提供商切换；失败时遵循现有故障转移策略。",
-    "ttl": "闲置过期时间（分钟）",
-    "ttlHint": "每次请求成功后重新计时，范围 1–1440 分钟，推荐 60 分钟。",
-    "manageHint": "在请求记录的会话详情 → API 提供商绑定中查看记录或重新选择 API 提供商。",
-    "current": "当前复用 API 提供商",
-    "release": "重新选择 API 提供商",
+    "tab": "会话粘性",
+    "settingTitle": "同一会话沿用之前的模型和 API 提供商",
+    "ttl": "闲置过期",
+    "current": "当前沿用",
+    "release": "重新选择",
     "releasing": "正在解除…",
-    "releaseHint": "清除本会话的 API 提供商偏好。下次请求按 API 提供商顺序重新选择，仍可能选中同一 API 提供商。",
     "releasedNotice": "已解除绑定，下次请求将重新选择 API 提供商",
     "releaseFailed": "解除绑定失败，请重试",
     "loadFailed": "无法读取 API 提供商绑定",
-    "disabled": "API 提供商复用已关闭。已有绑定暂不参与普通选路，历史记录仍可查看。",
-    "empty": "暂无有效绑定",
-    "emptyHint": "请求成功后自动记住 API 提供商，无需手动绑定。",
-    "emptyDisabled": "可在路由设置中开启“同一会话优先复用 API 提供商”。",
+    "disabled": "已关闭",
+    "empty": "暂无沿用记录",
     "removedService": "已删除的 API 提供商",
     "token": "令牌 …{{id}}",
     "expires": "有效至 {{time}}",
-    "strictHint": "重新选择不会中断正在进行的请求；依赖上游状态的 Responses 续接和已建立的 WebSocket 连接仍使用原 API 提供商。",
     "history": "绑定记录",
-    "historyHint": "记录会话识别、API 提供商复用、切换与手动解除，不保存对话正文。",
     "noEvents": "暂无绑定记录",
     "viewRequest": "查看这次请求",
     "actions": {
@@ -2883,7 +2839,14 @@
       "echo_id": "工具或响应标识匹配",
       "fingerprint": "助手文本指纹匹配"
     },
-    "retention": "本地最多保留 50,000 条绑定审计记录。"
+    "settingHelpLabel": "会话粘性怎么工作",
+    "settingHelp": "请求成功后记住这次用的模型（智能路由）和 API 提供商，同一会话的后续请求优先沿用；闲置超过设定时间后重新选择，范围 1–1440 分钟。路由组停用或模型移出组后不再沿用；失败时按故障转移策略处理。在请求记录的会话详情里可以查看或重新选择。",
+    "ttlUnit": "分钟",
+    "currentHelpLabel": "重新选择会怎样",
+    "currentHelp": "「重新选择」会清掉这个会话的全部记录，下次请求按规则和 API 提供商顺序重新选择，可能仍选中同一个。正在进行的请求、Responses 续接和已建立的 WebSocket 连接不受影响。",
+    "disabledHelp": "会话粘性已关闭，下面的记录暂不生效。可在「路由 → 会话粘性」里开启。",
+    "historyHelpLabel": "绑定记录包括什么",
+    "historyHelp": "记录 API 提供商的会话识别、复用、切换与手动解除，不保存对话正文。本地最多保留 50,000 条。智能路由每次是沿用还是重新判定，写在那条请求的「路由」页签里。"
   },
   "serviceProxy": {
     "title": "实例代理",
@@ -2976,7 +2939,15 @@
     "configuredIn": "已配置到 {{clients}}",
     "entryRequired": "需开启入口",
     "entryWillEnable": "{{service}} 尚未开启 {{protocol}} 入口，写入配置时将自动开启（转换为 {{target}}）",
-    "entryEnableFailed": "无法为 {{service}} 开启 {{protocol}} 入口"
+    "entryEnableFailed": "无法为 {{service}} 开启 {{protocol}} 入口",
+    "groupsHeading": "智能路由",
+    "modelsHeading": "模型",
+    "groupEntries_one": "需开启 {{count}} 个入口",
+    "groupEntries_other": "需开启 {{count}} 个入口",
+    "groupIncompatible_one": "{{count}} 个模型不兼容",
+    "groupIncompatible_other": "{{count}} 个模型不兼容",
+    "groupIncompatibleItem": "{{model}}（{{service}}）不接受 {{protocol}} 请求",
+    "noteSeparator": "；"
   },
   "providerImport": {
     "title": "添加 API 提供商",
@@ -3877,5 +3848,58 @@
       "tooMany": "任务类型最多 {{max}} 个选项。",
       "inUse": "路由组 {{group}} 的规则还在用 {{label}}，请先修改那条规则。"
     }
+  },
+  "routingFormats": {
+    "title": "有模型不兼容部分请求格式",
+    "helpLabel": "为什么会失败",
+    "help": "路由组按规则选出模型后，要在这个模型的 API 提供商上找能接这种请求格式的入口，找不到就会失败。用下面这些格式发来的请求，命中对应规则时会失败。",
+    "format": "请求格式",
+    "incompatible": "不兼容模型",
+    "allCompatible": "全部兼容",
+    "rules": "第 {{numbers}} 条",
+    "listSeparator": "、",
+    "openService": "去提供商设置",
+    "enableOne": "给 {{service}} 开启转换",
+    "enableMany": "给 {{count}} 个 API 提供商开启转换",
+    "enableFailed": "开启转换没有成功，请到提供商设置里检查入口协议。",
+    "memberAccepts": "{{provider}} 只接受 {{formats}}。",
+    "memberFails": "{{formats}} 的请求选到这个模型时会失败。"
+  },
+  "routingProcess": {
+    "yes": "是",
+    "no": "否",
+    "keywordFound": "请求里出现了「{{keyword}}」",
+    "keywordMissing": "请求里没有出现「{{keyword}}」",
+    "keywordsFound_one": "请求里出现了其中 {{count}} 个关键词",
+    "keywordsFound_other": "请求里出现了其中 {{count}} 个关键词",
+    "keywordsMissing": "请求里没有出现这些关键词",
+    "title": "智能路由",
+    "chosenByRule": "选中 {{model}}（{{provider}}），由第 {{index}} 条规则选出。",
+    "chosenByRuleId": "选中 {{model}}（{{provider}}），由规则 {{rule}} 选出。",
+    "chosenByDefault": "选中 {{model}}（{{provider}}）。没有规则满足，使用其他情况的模型。",
+    "bindingReused": "沿用本会话之前选中的 {{model}}（{{provider}}），有效至 {{time}}。",
+    "bindingReusedNoTime": "沿用本会话之前选中的 {{model}}（{{provider}}）。",
+    "affinityReused": "沿用上一条响应所在的 {{model}}（{{provider}}）。",
+    "websocketReused": "沿用这条 WebSocket 连接选中的 {{model}}（{{provider}}）。",
+    "bindingReset": "本会话之前用的 {{model}} 已移出路由组，所以重新判定。",
+    "unsupported": "选中 {{model}}（{{provider}}），但它不接受 {{format}} 请求，请求没有发出。",
+    "unavailable": "选中 {{model}}（{{provider}}），但它现在不可用，请求没有发出。",
+    "bindingHelpLabel": "什么是会话粘性",
+    "bindingHelp": "同一会话在闲置过期前沿用之前选中的模型，不重新判定规则；路由组停用或模型移出组后重新选择。在「路由 → 会话粘性」里设置。",
+    "viewOrigin": "查看当时的判定",
+    "classifierDuration": "用时 {{ms}} ms",
+    "legacyHelpLabel": "为什么没有逐条判定",
+    "legacyHelp": "这条请求发生在升级之前，当时只记下了选中的规则，其他规则的判定无法显示。",
+    "notInRequest": "这次请求里取不到这个值",
+    "when": "当",
+    "versionLabel": "第 {{version}} 版",
+    "versionSaved": "{{time}} 保存",
+    "versionLatest": "当前为第 {{version}} 版",
+    "versionView": "显示方式",
+    "versionRules": "规则",
+    "copyJson": "复制 JSON",
+    "versionLegacy": "升级前",
+    "fieldsTitle": "条件取值",
+    "fieldKnown": "已取得"
   }
 }

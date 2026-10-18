@@ -179,6 +179,12 @@ export interface ModelRoutingFieldObservation {
   source: string;
   known: boolean;
   match_count?: number;
+  /**
+   * The fact the condition read ("true", "12", "openai.chat", "14:20"). Absent
+   * when unknown and always for `literal_keyword`: a record keeps how many
+   * keywords matched, never the text.
+   */
+  value?: string;
   /** Upstream-reported score, passed through verbatim. Absent on every fallback. */
   classifier_confidence?: number;
   /** A stable classifier ID, never free text. */
@@ -224,6 +230,54 @@ export interface ModelRoutingPrivacyAttempt {
   error_code?: string;
 }
 
+/** A rule verdict's state; the dry run reports the same four. */
+export type ModelRoutingRuleState =
+  | "true"
+  | "false"
+  | "unknown"
+  | "not_evaluated";
+
+/**
+ * One rule's own outcome in the evaluation that routed this request, in
+ * evaluation order. The dry run returns the same shape, so a live request
+ * explains itself the way the preview does.
+ */
+export interface ModelRoutingRuleVerdict {
+  rule_id: string;
+  priority: number;
+  target_member_id: string;
+  target_model?: string;
+  state: ModelRoutingRuleState;
+  selected: boolean;
+  target_missing?: boolean;
+  fields?: ModelRoutingFieldObservation[];
+}
+
+/** One configured custom dimension's answer. */
+export interface ModelRoutingDimensionAnswer {
+  name: string;
+  label?: string;
+  score?: number;
+  known: boolean;
+  produced: boolean;
+}
+
+/** What the classifier said for this request, recorded once per run. */
+export interface ModelRoutingClassifierAnswers {
+  /** Absent when the answer was unusable; `fallback_reason` says why. */
+  task_type?: string;
+  confidence?: number;
+  dimensions?: ModelRoutingDimensionAnswer[];
+}
+
+/** The session binding a request could not reuse because its member left the group. */
+export interface ModelRoutingBindingReset {
+  reason: "member_removed";
+  member_id: string;
+  service_id: string;
+  model: string;
+}
+
 /**
  * The V1 model routing decision attached to a record. V1 has no Fusion fields:
  * branch, lead/sidekick, compaction and dual-route cost are absent from the
@@ -234,11 +288,21 @@ export interface ModelRoutingDecision {
   virtual_model_id: string;
   group_id: string;
   config_snapshot_version: string;
+  /** The group's saved configuration version; absent on records from before versions. */
+  config_version?: number;
   selection_source: ModelRoutingSelectionSource;
   rule_id?: string;
   rule_priority?: number;
   used_default: boolean;
   fields: ModelRoutingFieldObservation[];
+  /** Every rule's verdict; absent when no rule was judged (a reused binding, a pinned connection, an older record). */
+  rules?: ModelRoutingRuleVerdict[];
+  classifier?: ModelRoutingClassifierAnswers;
+  /** The request whose rules chose the member a reused session binding names. */
+  binding_request_id?: string;
+  /** When the session binding this request left behind lapses. */
+  binding_expires_at?: string;
+  binding_reset?: ModelRoutingBindingReset;
   member_id: string;
   member_service_id: string;
   member_model: string;
@@ -1093,11 +1157,140 @@ function optionalModelRouting(
       decision.classifier_duration_ms,
       `${path}.classifier_duration_ms`,
     );
+  if (decision.config_version !== undefined)
+    parsed.config_version = intAt(
+      decision.config_version,
+      `${path}.config_version`,
+    );
+  if (decision.rules !== undefined)
+    parsed.rules = modelRoutingRuleVerdicts(decision.rules, `${path}.rules`);
+  if (decision.classifier !== undefined)
+    parsed.classifier = modelRoutingClassifierAnswers(
+      decision.classifier,
+      `${path}.classifier`,
+    );
+  for (const key of ["binding_request_id", "binding_expires_at"] as const) {
+    if (decision[key] !== undefined)
+      parsed[key] = stringAt(decision[key], `${path}.${key}`);
+  }
+  if (decision.binding_reset !== undefined) {
+    const at = `${path}.binding_reset`;
+    const reset = objectAt(decision.binding_reset, at);
+    if (reset.reason !== "member_removed") invalid(`${at}.reason`, "原因无效");
+    parsed.binding_reset = {
+      reason: "member_removed",
+      member_id: stringAt(reset.member_id, `${at}.member_id`),
+      service_id: stringAt(reset.service_id, `${at}.service_id`),
+      model: stringAt(reset.model, `${at}.model`),
+    };
+  }
 
   // A rule-sourced decision names its rule; a default one must not pretend to.
   if (parsed.selection_source === "rule" && parsed.rule_id === undefined)
     invalid(`${path}.rule_id`, "命中规则时必须给出规则 ID");
   return { model_routing: parsed };
+}
+
+const modelRoutingRuleStates = new Set<ModelRoutingRuleState>([
+  "true",
+  "false",
+  "unknown",
+  "not_evaluated",
+]);
+const maxModelRoutingRules = 128;
+
+function modelRoutingObservation(
+  item: unknown,
+  at: string,
+): ModelRoutingFieldObservation {
+  const observation = objectAt(item, at);
+  const field: ModelRoutingFieldObservation = {
+    field: stringAt(observation.field, `${at}.field`),
+    source: stringAt(observation.source, `${at}.source`),
+    known: boolAt(observation.known, `${at}.known`),
+    match_count: intAt(observation.match_count, `${at}.match_count`),
+  };
+  for (const key of ["value", "skip_reason", "error_code"] as const) {
+    if (observation[key] !== undefined)
+      field[key] = stringAt(observation[key], `${at}.${key}`);
+  }
+  return field;
+}
+
+function modelRoutingRuleVerdicts(
+  value: unknown,
+  path: string,
+): ModelRoutingRuleVerdict[] {
+  if (!Array.isArray(value)) invalid(path, "应为数组");
+  if (value.length > maxModelRoutingRules) invalid(path, "条目过多");
+  return value.map((item, index) => {
+    const at = `${path}[${index}]`;
+    const rule = objectAt(item, at);
+    if (
+      typeof rule.state !== "string" ||
+      !modelRoutingRuleStates.has(rule.state as ModelRoutingRuleState)
+    )
+      invalid(`${at}.state`, "判定结果无效");
+    const verdict: ModelRoutingRuleVerdict = {
+      rule_id: stringAt(rule.rule_id, `${at}.rule_id`),
+      priority: intAt(rule.priority, `${at}.priority`),
+      target_member_id: stringAt(
+        rule.target_member_id,
+        `${at}.target_member_id`,
+      ),
+      state: rule.state as ModelRoutingRuleState,
+      selected: boolAt(rule.selected, `${at}.selected`),
+    };
+    if (rule.target_model !== undefined)
+      verdict.target_model = stringAt(rule.target_model, `${at}.target_model`);
+    if (rule.target_missing !== undefined)
+      verdict.target_missing = boolAt(
+        rule.target_missing,
+        `${at}.target_missing`,
+      );
+    if (rule.fields !== undefined) {
+      if (!Array.isArray(rule.fields)) invalid(`${at}.fields`, "应为数组");
+      if (rule.fields.length > maxModelRoutingObservations)
+        invalid(`${at}.fields`, "条目过多");
+      verdict.fields = rule.fields.map((field, position) =>
+        modelRoutingObservation(field, `${at}.fields[${position}]`),
+      );
+    }
+    return verdict;
+  });
+}
+
+function modelRoutingClassifierAnswers(
+  value: unknown,
+  path: string,
+): ModelRoutingClassifierAnswers {
+  const answers = objectAt(value, path);
+  const parsed: ModelRoutingClassifierAnswers = {};
+  if (answers.task_type !== undefined)
+    parsed.task_type = stringAt(answers.task_type, `${path}.task_type`);
+  if (answers.confidence !== undefined)
+    parsed.confidence = numberAt(answers.confidence, `${path}.confidence`);
+  if (answers.dimensions !== undefined) {
+    if (!Array.isArray(answers.dimensions))
+      invalid(`${path}.dimensions`, "应为数组");
+    if (answers.dimensions.length > maxModelRoutingObservations)
+      invalid(`${path}.dimensions`, "条目过多");
+    parsed.dimensions = answers.dimensions.map((item, index) => {
+      const at = `${path}.dimensions[${index}]`;
+      const dimension = objectAt(item, at);
+      const answer: ModelRoutingDimensionAnswer = {
+        name: stringAt(dimension.name, `${at}.name`),
+        known: boolAt(dimension.known, `${at}.known`),
+        produced: boolAt(dimension.produced, `${at}.produced`),
+      };
+      if (dimension.label !== undefined)
+        answer.label = stringAt(dimension.label, `${at}.label`);
+      if (dimension.score !== undefined)
+        answer.score = numberAt(dimension.score, `${at}.score`);
+      return answer;
+    });
+  }
+  return parsed;
 }
 
 const conversionPhases = new Set(["request", "response"]);

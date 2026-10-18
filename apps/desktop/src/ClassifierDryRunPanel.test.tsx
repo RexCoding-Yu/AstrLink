@@ -102,6 +102,7 @@ function field(name: string, known: boolean, skip: string | null = null) {
     source: "",
     known,
     match_count: 0,
+    value: null,
     classifier_confidence: null,
     classifier_id: null,
     skip_reason: skip,

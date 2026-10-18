@@ -89,7 +89,12 @@ type WorkspacePage =
   | { kind: "safety"; view?: "models" }
   | { kind: "records"; tokenId?: string }
   | { kind: "routing" }
-  | { kind: "intelligentRouting"; view?: IntelligentRoutingView }
+  | {
+      kind: "intelligentRouting";
+      view?: IntelligentRoutingView;
+      /** Opens this group's rule editor, e.g. from a request's routing. */
+      editGroup?: string;
+    }
   | { kind: "agentTools"; preselectSkill?: AgentSkillId }
   | { kind: "settings" }
   | { kind: "about" }
@@ -1071,6 +1076,18 @@ export default function App() {
                 initialLocalAccessTokenId={page.tokenId}
                 services={catalog.items}
                 isReady={isReady}
+                conversionEngine={snapshot?.capabilities?.conversion_engine}
+                onEditRoutingGroup={(groupID) =>
+                  navigate({
+                    kind: "intelligentRouting",
+                    view: "groups",
+                    editGroup: groupID,
+                  })
+                }
+                onOpenService={(serviceId) =>
+                  navigate({ kind: "edit", serviceId, tab: "protocols" })
+                }
+                onServicesChanged={() => void refreshServices({ silent: true })}
               />
             ) : page.kind === "routing" ? (
               <RouteManager
@@ -1080,11 +1097,18 @@ export default function App() {
               />
             ) : page.kind === "intelligentRouting" ? (
               <IntelligentRouting
+                key={page.editGroup ?? ""}
                 initialView={page.view}
+                initialEditGroup={page.editGroup}
                 ready={isReady}
                 services={catalog.items}
                 protocols={protocolIDs}
                 onDirtyChange={handleEditorDirtyChange}
+                conversionEngine={snapshot?.capabilities?.conversion_engine}
+                onOpenService={(serviceId) =>
+                  navigate({ kind: "edit", serviceId, tab: "protocols" })
+                }
+                onServicesChanged={() => void refreshServices({ silent: true })}
               />
             ) : page.kind === "agentTools" ? (
               <AgentDebugSettings preselectSkill={page.preselectSkill} />

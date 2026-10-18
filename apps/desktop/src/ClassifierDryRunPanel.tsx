@@ -5,13 +5,15 @@ import { Field } from "./components/Field";
 import { FormMessage } from "./components/FormMessage";
 import { HelpDisclosure } from "./components/HelpDisclosure";
 import { HelpPopover } from "./components/HelpPopover";
-import { ModelRoutingPhraseTags } from "./ModelRoutingRuleRow";
 import { Panel, PanelFooter, PanelHeader } from "./components/Panel";
 import { SegmentedControl } from "./components/SegmentedControl";
+import {
+  RoutingAnswerList,
+  RoutingRuleList,
+} from "./components/RoutingProcess";
 import { SplitWorkspace } from "./components/SplitWorkspace";
 import {
   ArrowUpRight,
-  Brain,
   CircleCheck,
   Flask,
   SlidersHorizontal,
@@ -34,14 +36,11 @@ import {
 import { Textarea } from "./components/ui/textarea";
 import { classifierDryRun, getRoutingSettings } from "./bridge";
 import type {
-  ClassifierDryRunDimension,
   ClassifierDryRunField,
   ClassifierDryRunResult,
-  ClassifierDryRunRule,
 } from "./classifier-settings-model";
 import { i18n, useT } from "./i18n";
 import { intelligentRoutingErrorText } from "./intelligent-routing-errors";
-import { cn } from "./lib/utils";
 import { isClassifierField } from "./model-routing-editor-model";
 import {
   modelRoutingMediaKinds,
@@ -49,7 +48,6 @@ import {
   modelRoutingTimeStepSeconds,
   type ModelRoutingGroup,
 } from "./model-routing-group-model";
-import { routingFieldName } from "./model-routing-phrase-text";
 import {
   modelRoutingCodeLabel,
   modelRoutingFieldValueLabel,
@@ -57,6 +55,7 @@ import {
 import type { RoutingSettings } from "./failure-policy-model";
 import type { RoutableService } from "./service-model";
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
+import { classifierValueTexts, memberModel } from "./routing-process-model";
 
 /** What the run was asked to judge, kept with its result: the form may change after. */
 interface CompletedRun {
@@ -89,10 +88,6 @@ const dryRunFactFields = new Set([
   "continuation",
   "system_time",
 ]);
-
-function percent(value: number): string {
-  return `${Math.round(value * 100)}%`;
-}
 
 /**
  * The classifier's full ranked output for one field. `rank` is 0-based on the
@@ -140,64 +135,6 @@ function CandidateTable({ field }: { field: ClassifierDryRunField }) {
   );
 }
 
-/** One line of the classifier's answers: what it said, how sure, whether rules can use it. */
-function AnswerRow({
-  name,
-  mono = false,
-  value,
-  code,
-  score,
-  usable,
-  caveat,
-  ...props
-}: {
-  name: string;
-  mono?: boolean;
-  value: string;
-  code?: string;
-  score: string | null;
-  usable: boolean;
-  caveat?: string;
-} & Record<`data-${string}`, string | undefined>) {
-  const t = useT();
-  return (
-    <div
-      className="grid grid-cols-[minmax(0,6rem)_minmax(0,1fr)_auto] items-center gap-x-3 text-sm"
-      {...props}
-    >
-      <span className="flex min-w-0 items-center gap-1 text-muted-foreground">
-        <Brain
-          aria-hidden="true"
-          className="size-3 shrink-0 text-violet-foreground"
-        />
-        <span className={cn("truncate", mono && "font-mono")}>{name}</span>
-      </span>
-      <span className="min-w-0 truncate font-medium">
-        {value}
-        {code && code !== value ? (
-          <span className="ml-1.5 font-mono text-micro font-normal text-muted-foreground">
-            {code}
-          </span>
-        ) : null}
-      </span>
-      <span className="flex shrink-0 items-center gap-2">
-        {score === null ? null : (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {score}
-          </span>
-        )}
-        {usable ? (
-          <Badge variant="accent">{t("dryRunTab.usable")}</Badge>
-        ) : (
-          <Badge variant="outline" className="text-warning-foreground">
-            {caveat}
-          </Badge>
-        )}
-      </span>
-    </div>
-  );
-}
-
 function ClassifierAnswers({ result }: { result: ClassifierDryRunResult }) {
   const t = useT();
   const lowConfidence = result.fallback_reason === "classifier_low_confidence";
@@ -209,32 +146,12 @@ function ClassifierAnswers({ result }: { result: ClassifierDryRunResult }) {
       <h3 className="text-xs font-medium text-text-secondary">
         {t("dryRunTab.classifierTitle")}
       </h3>
-      <div className="grid gap-2">
-        <AnswerRow
-          name={t("dryRunTab.taskType")}
-          value={
-            result.category === ""
-              ? t("classifier.dryRun.unknown")
-              : modelRoutingFieldValueLabel("task_type", result.category)
-          }
-          code={result.category === "" ? undefined : result.category}
-          score={result.confidence === null ? null : percent(result.confidence)}
-          usable={result.category !== ""}
-          caveat={
-            lowConfidence
-              ? t("classifier.dryRun.dimensionBelowThreshold")
-              : t("dryRunTab.noAnswer")
-          }
-          data-classifier-dry-run-task-type={result.category || "unknown"}
-        />
-        {result.dimensions.length === 0 ? null : (
-          <div className="grid gap-2" data-classifier-dry-run-dimensions="true">
-            {result.dimensions.map((dimension) => (
-              <DimensionRow key={dimension.name} dimension={dimension} />
-            ))}
-          </div>
-        )}
-      </div>
+      <RoutingAnswerList
+        taskType={result.category}
+        confidence={result.confidence}
+        lowConfidence={lowConfidence}
+        dimensions={result.dimensions}
+      />
       {result.fallback_reason === null ? null : (
         <p
           className="text-xs text-warning-foreground"
@@ -266,32 +183,6 @@ function ClassifierAnswers({ result }: { result: ClassifierDryRunResult }) {
   );
 }
 
-/**
- * A custom dimension's answer. `known` is the threshold verdict, so a known
- * dimension is one a rule could match on; `produced` separates "skipped" from
- * "answered below the threshold", which need different fixes.
- */
-function DimensionRow({ dimension }: { dimension: ClassifierDryRunDimension }) {
-  const t = useT();
-  return (
-    <AnswerRow
-      name={dimension.name}
-      mono
-      value={dimension.label === "" ? "—" : dimension.label}
-      score={dimension.produced ? percent(dimension.score) : null}
-      usable={dimension.known}
-      caveat={
-        dimension.produced
-          ? t("classifier.dryRun.dimensionBelowThreshold")
-          : t("classifier.dryRun.dimensionNotProduced")
-      }
-      data-classifier-dry-run-dimension={dimension.name}
-      data-dimension-known={dimension.known ? "true" : "false"}
-      data-dimension-produced={dimension.produced ? "true" : "false"}
-    />
-  );
-}
-
 /** Why a rule's field had no fact in this run, in the reader's terms. */
 function unknownReason(field: ClassifierDryRunField): string {
   if (isClassifierField(field.field))
@@ -304,139 +195,6 @@ function unknownReason(field: ClassifierDryRunField): string {
     dryRunFactFields.has(field.field)
       ? "dryRunTab.reasons.factUnset"
       : "dryRunTab.reasons.notAvailable",
-  );
-}
-
-function memberModel(group: ModelRoutingGroup, memberID: string): string {
-  return group.members.find((member) => member.id === memberID)?.model ?? "";
-}
-
-function RuleVerdictRow({
-  number,
-  rule,
-  verdict,
-  model,
-  classifierValues,
-}: {
-  number: number;
-  rule: ModelRoutingGroup["rules"][number] | undefined;
-  verdict: ClassifierDryRunRule;
-  model: string;
-  classifierValues: Map<string, string>;
-}) {
-  const t = useT();
-  const hit = verdict.state === "true" && verdict.selected;
-  const unknownFields = verdict.fields.filter((field) => !field.known);
-  const evaluated = verdict.state === "true" || verdict.state === "false";
-  const usedAnswers = evaluated
-    ? [...new Set(verdict.fields.map((field) => field.field))].filter((field) =>
-        classifierValues.has(field),
-      )
-    : [];
-  const reason =
-    verdict.state === "unknown" && unknownFields.length > 0
-      ? unknownFields
-          .map((field) =>
-            t("dryRunTab.reasonLine", {
-              field: routingFieldName(field.field),
-              reason: unknownReason(field),
-            }),
-          )
-          .join(t("dryRunTab.reasonSeparator"))
-      : usedAnswers.length > 0
-        ? usedAnswers
-            .map((field) =>
-              t("dryRunTab.classifierValue", {
-                field: routingFieldName(field),
-                value: classifierValues.get(field),
-              }),
-            )
-            .join(t("dryRunTab.reasonSeparator"))
-        : null;
-  const badge =
-    verdict.state === "true"
-      ? verdict.target_missing
-        ? {
-            variant: "outline" as const,
-            tone: "text-warning-foreground",
-            text: t("dryRunTab.verdict.targetMissing"),
-          }
-        : verdict.selected
-          ? {
-              variant: "default" as const,
-              tone: "",
-              text: t("dryRunTab.verdict.selected"),
-            }
-          : {
-              variant: "outline" as const,
-              tone: "",
-              text: t("dryRunTab.verdict.true"),
-            }
-      : verdict.state === "false"
-        ? {
-            variant: "outline" as const,
-            tone: "text-muted-foreground",
-            text: t("dryRunTab.verdict.false"),
-          }
-        : verdict.state === "unknown"
-          ? {
-              variant: "outline" as const,
-              tone: "text-warning-foreground",
-              text: t("dryRunTab.verdict.unknown"),
-            }
-          : {
-              variant: "outline" as const,
-              tone: "text-muted-foreground",
-              text: t("dryRunTab.verdict.notEvaluated"),
-            };
-  return (
-    <li
-      className={cn(
-        "relative grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-2 border-b px-3 py-2 last:border-b-0",
-        hit &&
-          "bg-accent/70 before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-tide",
-      )}
-      data-classifier-dry-run-rule={verdict.rule_id}
-      data-rule-state={verdict.state}
-      data-rule-selected={verdict.selected ? "true" : "false"}
-    >
-      <span className="text-center text-xs text-muted-foreground tabular-nums">
-        {number}
-      </span>
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
-        {rule ? (
-          <ModelRoutingPhraseTags rule={rule} />
-        ) : (
-          <span className="font-mono text-text-secondary">
-            {verdict.rule_id}
-          </span>
-        )}
-        <span className="text-muted-foreground">→</span>
-        <span className={hit ? "font-semibold" : undefined}>
-          {model || verdict.target_member_id}
-        </span>
-        {reason ? (
-          <span
-            className={cn(
-              "basis-full text-micro",
-              verdict.state === "unknown"
-                ? "text-warning-foreground"
-                : "text-muted-foreground",
-            )}
-            data-rule-reason
-          >
-            {reason}
-          </span>
-        ) : null}
-      </div>
-      <Badge
-        variant={badge.variant}
-        className={badge.tone}
-        data-rule-state-badge={verdict.state}
-      >
-        {badge.text}
-      </Badge>
-    </li>
   );
 }
 
@@ -456,20 +214,11 @@ function RuleVerdicts({
   const { result, group, groupId } = run;
   const decision = result.decision;
   if (decision === null) return null;
-  const rules = group?.rules ?? [];
-  const classifierValues = new Map<string, string>();
-  if (result.category !== "")
-    classifierValues.set(
-      "task_type",
-      result.confidence === null
-        ? modelRoutingFieldValueLabel("task_type", result.category)
-        : t("dryRunTab.valueWithScore", {
-            value: modelRoutingFieldValueLabel("task_type", result.category),
-            score: percent(result.confidence),
-          }),
-    );
-  for (const dimension of result.dimensions)
-    if (dimension.known) classifierValues.set(dimension.name, dimension.label);
+  const classifierValues = classifierValueTexts(
+    result.category,
+    result.confidence,
+    result.dimensions,
+  );
   const fallbackModel = group
     ? memberModel(group, group.default_member_id)
     : decision.used_default
@@ -502,57 +251,14 @@ function RuleVerdicts({
           {t("dryRunTab.noRules")}
         </p>
       ) : null}
-      <ol className="m-0 list-none overflow-hidden rounded-md border p-0">
-        {result.rules.map((verdict, index) => {
-          const position = rules.findIndex(
-            (rule) => rule.id === verdict.rule_id,
-          );
-          const rule = position < 0 ? undefined : rules[position];
-          return (
-            <RuleVerdictRow
-              key={verdict.rule_id}
-              number={position < 0 ? index + 1 : position + 1}
-              rule={rule}
-              verdict={verdict}
-              model={
-                verdict.target_model ||
-                (group ? memberModel(group, verdict.target_member_id) : "")
-              }
-              classifierValues={classifierValues}
-            />
-          );
-        })}
-        <li
-          className={cn(
-            "relative grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-2 bg-muted/45 px-3 py-2",
-            decision.used_default &&
-              "bg-accent/70 before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-tide",
-          )}
-          data-classifier-dry-run-fallback-row
-          data-rule-selected={decision.used_default ? "true" : "false"}
-        >
-          <span />
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
-            <span className="font-medium">{t("dryRunTab.fallbackRow")}</span>
-            <span className="text-muted-foreground">→</span>
-            <span
-              className={decision.used_default ? "font-semibold" : undefined}
-            >
-              {fallbackModel}
-            </span>
-          </div>
-          <Badge
-            variant={decision.used_default ? "default" : "outline"}
-            className={
-              decision.used_default ? undefined : "text-muted-foreground"
-            }
-          >
-            {decision.used_default
-              ? t("dryRunTab.verdict.fallbackUsed")
-              : t("dryRunTab.verdict.fallbackUnused")}
-          </Badge>
-        </li>
-      </ol>
+      <RoutingRuleList
+        group={group}
+        rules={result.rules}
+        usedDefault={decision.used_default}
+        fallbackModel={fallbackModel}
+        classifierValues={classifierValues}
+        unknownReason={unknownReason}
+      />
     </section>
   );
 }

@@ -27,8 +27,14 @@ export const modelRoutingWireContract = {
       "duration_ms",
     ],
     optional: [
+      "config_version",
       "rule_id",
       "rule_priority",
+      "rules",
+      "classifier",
+      "binding_request_id",
+      "binding_expires_at",
+      "binding_reset",
       "fallback_reason",
       "classifier_duration_ms",
       "error_code",
@@ -38,6 +44,8 @@ export const modelRoutingWireContract = {
   fieldObservation: {
     required: ["field", "source", "known", "match_count"],
     optional: [
+      // The fact the condition read; never the request text.
+      "value",
       "classifier_confidence",
       "classifier_id",
       "skip_reason",
@@ -55,6 +63,23 @@ export const modelRoutingWireContract = {
    */
   candidateObservation: {
     required: ["value", "score", "rank", "chosen"],
+    optional: [],
+  },
+  /** One rule's own verdict, the dry run's shape. */
+  ruleVerdict: {
+    required: ["rule_id", "priority", "target_member_id", "state", "selected"],
+    optional: ["target_model", "target_missing", "fields"],
+  },
+  classifierAnswers: {
+    required: [],
+    optional: ["task_type", "confidence", "dimensions"],
+  },
+  dimensionAnswer: {
+    required: ["name", "known", "produced"],
+    optional: ["label", "score"],
+  },
+  bindingReset: {
+    required: ["reason", "member_id", "service_id", "model"],
     optional: [],
   },
   execution: {

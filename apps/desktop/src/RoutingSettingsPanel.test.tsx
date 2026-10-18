@@ -387,7 +387,7 @@ describe("shared global recovery settings", () => {
       );
       await selectTab("会话粘性");
       const heading = [...container.querySelectorAll("h2")].find(
-        (h) => h.textContent === "同一会话优先复用 API 提供商",
+        (h) => h.textContent === "同一会话沿用之前的模型和 API 提供商",
       )!;
       const toggle = container.querySelector<HTMLButtonElement>(
         `[role="switch"][aria-labelledby="${heading.id}"]`,
@@ -395,7 +395,7 @@ describe("shared global recovery settings", () => {
       expect(toggle.getAttribute("aria-checked")).toBe(String(enabled ?? true));
       expect(dirty).toHaveBeenLastCalledWith(false);
       await act(async () => toggle.click());
-      expect(container.textContent?.includes("闲置过期时间（分钟）")).toBe(
+      expect(container.textContent?.includes("闲置过期")).toBe(
         enabled === false,
       );
       await flushAutosave();
