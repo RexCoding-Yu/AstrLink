@@ -1,13 +1,18 @@
 package controlapi
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
+	"github.com/QuantumNous/astrlink/core/internal/metadata"
 )
 
 type attributeList struct {
@@ -128,5 +133,63 @@ func TestAccessTokenDefaultMetadata(t *testing.T) {
 	}
 	if defaults := handler.metadata.TokenDefaults(token); len(defaults) != 0 {
 		t.Fatalf("defaults outlived their token: %v", defaults)
+	}
+}
+
+func TestSessionMetadataIsSetByHandAndUnboundToNone(t *testing.T) {
+	store, _, manager, _ := newPluginHandler(t)
+	registry := metadata.NewRegistry(store)
+	tokens, err := accesstoken.NewManager(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewWithDependencies(contract.DefaultVersionResponse("0.1.0-test", "abc1234"), Dependencies{
+		ServiceStore: store, RequestRecords: store, ControlToken: testControlToken, ObserverToken: testObserverToken,
+		AccessTokenManager: tokens, Plugins: manager, PluginStore: store, Metadata: registry, MetadataStore: store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/demo", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusOK {
+		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
+	}
+	started := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	session, turn := contract.SessionID("session_bound"), 3
+	if err := store.InsertRequestRecord(context.Background(), contract.RequestRecord{
+		ID: "request_bound", StartedAt: started, Status: contract.RequestStatusSucceeded,
+		InputProtocol: contract.ProtocolAnthropicMessages, SessionID: &session, TurnIndex: &turn, Audit: contract.NotCapturedAuditSummary(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := RequestSessionsPath + "/session_bound/metadata"
+	if got := decodeBody[contract.SessionMetadata](t, controlRequest(t, handler, http.MethodGet, path, "", "", "")); len(got.Values) != 0 {
+		t.Fatalf("metadata before any = %+v", got)
+	}
+	response := controlRequest(t, handler, http.MethodPut, path+"/project", "application/json", `{"value":"astrlink"}`, "")
+	if got := decodeBody[contract.SessionMetadata](t, response); response.Code != http.StatusOK ||
+		got.Values["project"].Value != "astrlink" || got.Values["project"].SetBy != contract.MetadataSetByManual || got.Values["project"].Turn != 3 {
+		t.Fatalf("PUT = %d %s", response.Code, response.Body.String())
+	}
+	response = controlRequest(t, handler, http.MethodDelete, path+"/project", "", "", "")
+	if got := decodeBody[contract.SessionMetadata](t, response); response.Code != http.StatusOK || got.Values["project"].Value != contract.MetadataNone {
+		t.Fatalf("DELETE = %d %s", response.Code, response.Body.String())
+	}
+	for _, request := range [][3]string{
+		{http.MethodPut, path + "/project", `{"value":"Not Valid"}`},
+		{http.MethodPut, path + "/unknown", `{"value":"x"}`},
+		{http.MethodPut, RequestSessionsPath + "/session_missing/metadata/project", `{"value":"x"}`},
+		{http.MethodPost, path, `{}`},
+	} {
+		if response := controlRequest(t, handler, request[0], request[1], "application/json", request[2], ""); response.Code < 400 {
+			t.Fatalf("%s %s = %d %s", request[0], request[1], response.Code, response.Body.String())
+		}
+	}
+	observer := httptest.NewRequest(http.MethodPut, path+"/project", strings.NewReader(`{"value":"astrlink"}`))
+	observer.Header.Set("Authorization", "Bearer "+testObserverToken)
+	observer.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, observer)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("an observer changed a binding: %d", recorder.Code)
 	}
 }

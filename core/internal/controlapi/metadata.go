@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
@@ -220,4 +221,87 @@ func (handler *Handler) accessTokenDefaults(writer http.ResponseWriter, request 
 		writer.Header().Set("Allow", "GET, PUT")
 		writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "use GET or PUT")
 	}
+}
+
+// sessionMetadata serves a session's bindings under
+// /control/v1/request-sessions/{id}/metadata. A binding set here goes in as
+// manual. Removing one stores none instead of deleting it: with nothing
+// stored, the session's next request would bind it again from the markers
+// in the history its client replays.
+func (handler *Handler) sessionMetadata(writer http.ResponseWriter, request *http.Request) {
+	if !handler.metadataAvailable(writer) {
+		return
+	}
+	rest := strings.TrimPrefix(request.URL.Path, RequestSessionsPath+"/")
+	rawID, path, _ := strings.Cut(rest, "/metadata")
+	id := contract.SessionID(rawID)
+	key := strings.TrimPrefix(path, "/")
+	if id.Validate() != nil || strings.Contains(key, "/") || (path != "" && key == "") {
+		writeError(writer, http.StatusNotFound, "not_found", "control API path not found")
+		return
+	}
+	detail, err := handler.requestRecords.GetRequestSession(request.Context(), string(id))
+	if err != nil {
+		handler.writeRequestRecordStoreError(writer, err)
+		return
+	}
+	if key == "" {
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is allowed")
+			return
+		}
+		handler.writeSessionMetadata(writer, request.Context(), id)
+		return
+	}
+	if _, found := handler.metadataAttribute(key); !found {
+		writeError(writer, http.StatusNotFound, "not_found", "metadata attribute not found")
+		return
+	}
+	value := contract.MetadataNone
+	switch request.Method {
+	case http.MethodPut:
+		var input contract.SessionMetadataInput
+		if !decodeControlJSON(writer, request, &input) {
+			return
+		}
+		value = strings.TrimSpace(input.Value)
+		if !handler.metadata.Valid(key, value) {
+			writeError(writer, http.StatusUnprocessableEntity, "invalid_metadata_value", "the value of "+key+" does not suit the attribute")
+			return
+		}
+	case http.MethodDelete:
+	default:
+		writer.Header().Set("Allow", "PUT, DELETE")
+		writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "use PUT or DELETE")
+		return
+	}
+	turn := detail.TurnCount
+	for _, record := range detail.Turns {
+		if record.TurnIndex != nil && *record.TurnIndex > turn {
+			turn = *record.TurnIndex
+		}
+	}
+	now := time.Now().UTC()
+	if err := handler.metadataStore.PutMetadataValue(request.Context(), storage.MetadataValueRecord{
+		TargetKind: storage.MetadataTargetSession, TargetID: string(id), Key: key, Value: value,
+		SetBy: contract.MetadataSetByManual, Turn: turn, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not save the metadata")
+		return
+	}
+	handler.writeSessionMetadata(writer, request.Context(), id)
+}
+
+func (handler *Handler) writeSessionMetadata(writer http.ResponseWriter, ctx context.Context, id contract.SessionID) {
+	values, err := handler.metadataStore.MetadataValues(ctx, storage.MetadataTargetSession, string(id))
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not read the metadata")
+		return
+	}
+	response := contract.SessionMetadata{Values: map[string]contract.SessionMetadataValue{}}
+	for key, value := range values {
+		response.Values[key] = contract.SessionMetadataValue{Value: value.Value, SetBy: value.SetBy, Turn: value.Turn, UpdatedAt: value.UpdatedAt.UTC()}
+	}
+	writeJSON(writer, http.StatusOK, response)
 }

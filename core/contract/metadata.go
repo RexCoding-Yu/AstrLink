@@ -159,6 +159,25 @@ type AccessTokenMetadata struct {
 	Values map[string]string `json:"values"`
 }
 
+// SessionMetadata is what a session is bound to, by attribute key.
+type SessionMetadata struct {
+	Values map[string]SessionMetadataValue `json:"values"`
+}
+
+// SessionMetadataValue is one binding of a session: its value, how it was
+// set, the turn it was set in (0 when not known) and when.
+type SessionMetadataValue struct {
+	Value     string    `json:"value"`
+	SetBy     string    `json:"set_by"`
+	Turn      int       `json:"turn,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// SessionMetadataInput sets one binding of a session by hand.
+type SessionMetadataInput struct {
+	Value string `json:"value"`
+}
+
 // RequestMetadata is the metadata of one request, kept with its record.
 type RequestMetadata struct {
 	// Values holds the value of each attribute the request has, by key.

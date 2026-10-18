@@ -37,9 +37,17 @@ func (handler *Handler) registerRequestRecordRoutes() {
 	handler.mux.HandleFunc(AccessTokenUsagePath, handler.authenticated(handler.listAccessTokenUsage, RoleObserver))
 	handler.mux.HandleFunc(RequestsPurgePath, handler.authenticated(handler.purgeRequestRecords, RoleOperator))
 	handler.mux.HandleFunc(RequestSessionsPath, handler.authenticated(handler.requestSessionCollection, RoleObserver))
-	handler.mux.HandleFunc(RequestSessionsPath+"/", handler.authenticated(handler.requestSessionItem, RoleObserver))
+	handler.mux.HandleFunc(RequestSessionsPath+"/", handler.authenticatedBy(handler.requestSessionItem, requestSessionItemRole))
 	handler.mux.HandleFunc(RequestsPath, handler.authenticated(handler.requestRecordCollection, RoleObserver))
 	handler.mux.HandleFunc(RequestsPath+"/", handler.authenticatedBy(handler.requestRecordItem, requestRecordItemRole))
+}
+
+// requestSessionItemRole leaves changing a session's metadata to operators.
+func requestSessionItemRole(request *http.Request) Role {
+	if !isSafeMethod(request.Method) && strings.Contains(request.URL.Path, "/metadata") {
+		return RoleOperator
+	}
+	return RoleObserver
 }
 
 // requestRecordItemRole admits observers to reads and to filing a raw
@@ -88,6 +96,10 @@ func (handler *Handler) requestSessionCollection(writer http.ResponseWriter, req
 func (handler *Handler) requestSessionItem(writer http.ResponseWriter, request *http.Request) {
 	if strings.HasSuffix(request.URL.Path, "/channel-bindings") {
 		handler.sessionChannelBinding(writer, request)
+		return
+	}
+	if _, rest, found := strings.Cut(strings.TrimPrefix(request.URL.Path, RequestSessionsPath+"/"), "/"); found && (rest == "metadata" || strings.HasPrefix(rest, "metadata/")) {
+		handler.sessionMetadata(writer, request)
 		return
 	}
 	if request.Method != http.MethodGet {
