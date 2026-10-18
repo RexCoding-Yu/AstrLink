@@ -246,6 +246,17 @@ func (group *ModelRoutingGroup) UnmarshalJSON(data []byte) error {
 
 func (group ModelRoutingGroup) PublicModelID() string { return ModelRoutingModelPrefix + group.ID }
 
+// HasMember reports whether the group still defines this exact member: the
+// same ID naming the same API provider and model.
+func (group ModelRoutingGroup) HasMember(id string, serviceID ServiceID, model string) bool {
+	for _, member := range group.Members {
+		if member.ID == id {
+			return member.ServiceID == serviceID && member.Model == model
+		}
+	}
+	return false
+}
+
 func (group ModelRoutingGroup) Validate() error {
 	return group.validate(nil)
 }
@@ -780,6 +791,11 @@ type ModelRoutingFieldObservation struct {
 	Source     string `json:"source"`
 	Known      bool   `json:"known"`
 	MatchCount int    `json:"match_count"`
+	// Value is the fact the condition read, in the evaluator's own spelling
+	// ("true", "12", "openai.chat", "14:20"). It stays empty for an unknown
+	// field and for literal_keyword, whose fact is the request text itself:
+	// MatchCount is all a record may say about it.
+	Value string `json:"value,omitempty"`
 	// ClassifierConfidence is the upstream-reported score passed through
 	// verbatim; zero for the bundled worker and every fallback path.
 	ClassifierConfidence float64 `json:"classifier_confidence,omitempty"`
@@ -808,25 +824,97 @@ type ModelRoutingPrivacyAttempt struct {
 	ErrorCode    string                      `json:"error_code,omitempty"`
 }
 
+// Rule verdict states. A row that came out false and one that never ran both
+// leave the member unselected, but only the first is something the operator
+// can change by rewriting the rule, so the two are never collapsed.
+const (
+	ModelRoutingRuleTrue         = "true"
+	ModelRoutingRuleFalse        = "false"
+	ModelRoutingRuleUnknown      = "unknown"
+	ModelRoutingRuleNotEvaluated = "not_evaluated"
+)
+
+// ModelRoutingRuleVerdict is one rule's own outcome in an evaluation. The
+// dry-run preview and the request record carry the same shape, so a live
+// request explains itself exactly the way the preview does.
+type ModelRoutingRuleVerdict struct {
+	RuleID         string                         `json:"rule_id"`
+	Priority       int                            `json:"priority"`
+	TargetMemberID string                         `json:"target_member_id"`
+	TargetModel    string                         `json:"target_model,omitempty"`
+	State          string                         `json:"state"`
+	Selected       bool                           `json:"selected"`
+	TargetMissing  bool                           `json:"target_missing,omitempty"`
+	Fields         []ModelRoutingFieldObservation `json:"fields,omitempty"`
+}
+
+// ModelRoutingClassifierAnswers is what the classifier said for one request,
+// recorded once per run rather than on every rule that read it. TaskType is
+// empty when the answer was unusable; the decision's fallback_reason says why.
+type ModelRoutingClassifierAnswers struct {
+	TaskType   string                        `json:"task_type,omitempty"`
+	Confidence float64                       `json:"confidence,omitempty"`
+	Dimensions []ModelRoutingDimensionAnswer `json:"dimensions,omitempty"`
+}
+
+// ModelRoutingDimensionAnswer is one configured custom dimension. Known is the
+// threshold verdict, so a known dimension is one a rule could match on;
+// Produced separates "not answered" from "answered below the threshold",
+// which need different fixes.
+type ModelRoutingDimensionAnswer struct {
+	Name     string  `json:"name"`
+	Label    string  `json:"label,omitempty"`
+	Score    float64 `json:"score,omitempty"`
+	Known    bool    `json:"known"`
+	Produced bool    `json:"produced"`
+}
+
+// ModelRoutingBindingMemberRemoved is the one reason a session binding is
+// dropped while its group still serves requests: the member it names is no
+// longer in the group, so the rules are judged again.
+const ModelRoutingBindingMemberRemoved = "member_removed"
+
+// ModelRoutingBindingReset names the session binding a request could not reuse.
+type ModelRoutingBindingReset struct {
+	Reason    string    `json:"reason"`
+	MemberID  string    `json:"member_id"`
+	ServiceID ServiceID `json:"service_id"`
+	Model     string    `json:"model"`
+}
+
 type ModelRoutingDecision struct {
-	SchemaVersion         int                            `json:"schema_version"`
-	VirtualModelID        string                         `json:"virtual_model_id"`
-	GroupID               string                         `json:"group_id"`
-	ConfigSnapshotVersion string                         `json:"config_snapshot_version"`
-	SelectionSource       ModelRoutingSelectionSource    `json:"selection_source"`
-	RuleID                string                         `json:"rule_id,omitempty"`
-	RulePriority          *int                           `json:"rule_priority,omitempty"`
-	UsedDefault           bool                           `json:"used_default"`
-	Fields                []ModelRoutingFieldObservation `json:"fields"`
-	MemberID              string                         `json:"member_id"`
-	MemberServiceID       ServiceID                      `json:"member_service_id"`
-	MemberModel           string                         `json:"member_model"`
-	FallbackReason        string                         `json:"fallback_reason,omitempty"`
-	Execution             ModelRoutingExecution          `json:"execution"`
-	PrivacyAttempts       []ModelRoutingPrivacyAttempt   `json:"privacy_attempts"`
-	DurationMS            int                            `json:"duration_ms"`
-	ClassifierDurationMS  int                            `json:"classifier_duration_ms,omitempty"`
-	ErrorCode             string                         `json:"error_code,omitempty"`
+	SchemaVersion         int    `json:"schema_version"`
+	VirtualModelID        string `json:"virtual_model_id"`
+	GroupID               string `json:"group_id"`
+	ConfigSnapshotVersion string `json:"config_snapshot_version"`
+	// ConfigVersion is the group's saved configuration version the request
+	// was routed under; zero for records written before versions existed.
+	ConfigVersion   int                            `json:"config_version,omitempty"`
+	SelectionSource ModelRoutingSelectionSource    `json:"selection_source"`
+	RuleID          string                         `json:"rule_id,omitempty"`
+	RulePriority    *int                           `json:"rule_priority,omitempty"`
+	UsedDefault     bool                           `json:"used_default"`
+	Fields          []ModelRoutingFieldObservation `json:"fields"`
+	// Rules is every rule's own verdict in evaluation order. It is empty when
+	// no rule was judged: a reused session binding, a strict protocol pin, or
+	// a record written before verdicts were kept.
+	Rules      []ModelRoutingRuleVerdict      `json:"rules,omitempty"`
+	Classifier *ModelRoutingClassifierAnswers `json:"classifier,omitempty"`
+	// BindingRequestID is the request whose rule evaluation chose the member a
+	// reused session binding names; BindingExpiresAt is when that binding
+	// lapses after this request.
+	BindingRequestID     string                       `json:"binding_request_id,omitempty"`
+	BindingExpiresAt     string                       `json:"binding_expires_at,omitempty"`
+	BindingReset         *ModelRoutingBindingReset    `json:"binding_reset,omitempty"`
+	MemberID             string                       `json:"member_id"`
+	MemberServiceID      ServiceID                    `json:"member_service_id"`
+	MemberModel          string                       `json:"member_model"`
+	FallbackReason       string                       `json:"fallback_reason,omitempty"`
+	Execution            ModelRoutingExecution        `json:"execution"`
+	PrivacyAttempts      []ModelRoutingPrivacyAttempt `json:"privacy_attempts"`
+	DurationMS           int                          `json:"duration_ms"`
+	ClassifierDurationMS int                          `json:"classifier_duration_ms,omitempty"`
+	ErrorCode            string                       `json:"error_code,omitempty"`
 }
 
 func (decision ModelRoutingDecision) Validate() error {
@@ -895,6 +983,46 @@ func (decision ModelRoutingDecision) Validate() error {
 			return fmt.Errorf("field %q must not mark more than one chosen candidate", field.Field)
 		}
 	}
+	if decision.ConfigVersion < 0 {
+		return fmt.Errorf("config_version must be non-negative")
+	}
+	if len(decision.Rules) > MaxModelRoutingRulesPerGroup {
+		return fmt.Errorf("model routing rules exceed %d", MaxModelRoutingRulesPerGroup)
+	}
+	for _, verdict := range decision.Rules {
+		if err := verdict.validate(); err != nil {
+			return err
+		}
+	}
+	if decision.Classifier != nil {
+		if err := decision.Classifier.validate(); err != nil {
+			return err
+		}
+	}
+	if decision.BindingRequestID != "" {
+		if err := RequestID(decision.BindingRequestID).Validate(); err != nil {
+			return fmt.Errorf("binding_request_id: %w", err)
+		}
+	}
+	if decision.BindingExpiresAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, decision.BindingExpiresAt); err != nil {
+			return fmt.Errorf("binding_expires_at must be an RFC 3339 time")
+		}
+	}
+	if reset := decision.BindingReset; reset != nil {
+		if reset.Reason != ModelRoutingBindingMemberRemoved {
+			return fmt.Errorf("unknown binding_reset reason %q", reset.Reason)
+		}
+		if err := validateModelRoutingSlug("binding_reset member_id", reset.MemberID, MaxModelRoutingMemberIDRunes); err != nil {
+			return err
+		}
+		if err := reset.ServiceID.Validate(); err != nil {
+			return err
+		}
+		if err := validateModelRoutingModel("binding_reset model", reset.Model); err != nil {
+			return err
+		}
+	}
 	if !decision.Execution.Status.Valid() || decision.Execution.AttemptCount < 0 {
 		return fmt.Errorf("invalid model routing execution")
 	}
@@ -919,6 +1047,59 @@ func (decision ModelRoutingDecision) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (verdict ModelRoutingRuleVerdict) validate() error {
+	if utf8.RuneCountInString(verdict.RuleID) > MaxModelRoutingRuleIDRunes || utf8.RuneCountInString(verdict.TargetMemberID) > MaxModelRoutingMemberIDRunes {
+		return fmt.Errorf("rule verdict ids are too long")
+	}
+	if verdict.Priority < 0 || verdict.Priority > MaxModelRoutingPriority {
+		return fmt.Errorf("rule verdict priority is invalid")
+	}
+	if verdict.TargetModel != "" {
+		if err := validateModelRoutingModel("rule verdict target_model", verdict.TargetModel); err != nil {
+			return err
+		}
+	}
+	switch verdict.State {
+	case ModelRoutingRuleTrue, ModelRoutingRuleFalse, ModelRoutingRuleUnknown, ModelRoutingRuleNotEvaluated:
+	default:
+		return fmt.Errorf("unknown rule verdict state %q", verdict.State)
+	}
+	if len(verdict.Fields) > MaxModelRoutingObservationFields {
+		return fmt.Errorf("rule verdict fields exceed %d", MaxModelRoutingObservationFields)
+	}
+	for _, field := range verdict.Fields {
+		if err := validateModelRoutingValue("rule verdict field", field.Field); err != nil {
+			return err
+		}
+		if field.MatchCount < 0 || utf8.RuneCountInString(field.Value) > MaxModelRoutingValueRunes {
+			return fmt.Errorf("rule verdict field %q is invalid", field.Field)
+		}
+	}
+	return nil
+}
+
+func (answers ModelRoutingClassifierAnswers) validate() error {
+	if utf8.RuneCountInString(answers.TaskType) > MaxModelRoutingValueRunes || !unitScore(answers.Confidence) {
+		return fmt.Errorf("classifier task_type answer is invalid")
+	}
+	if len(answers.Dimensions) > MaxModelRoutingObservationFields {
+		return fmt.Errorf("classifier dimensions exceed %d", MaxModelRoutingObservationFields)
+	}
+	for _, dimension := range answers.Dimensions {
+		if err := validateModelRoutingValue("classifier dimension", dimension.Name); err != nil {
+			return err
+		}
+		if utf8.RuneCountInString(dimension.Label) > MaxModelRoutingValueRunes || !unitScore(dimension.Score) {
+			return fmt.Errorf("classifier dimension %q answer is invalid", dimension.Name)
+		}
+	}
+	return nil
+}
+
+func unitScore(score float64) bool {
+	return !math.IsNaN(score) && !math.IsInf(score, 0) && score >= 0 && score <= 1
 }
 
 func (decision *ModelRoutingDecision) UnmarshalJSON(data []byte) error {
@@ -1071,16 +1252,7 @@ func ModelRoutingSnapshotVersionWithDimensions(groups []ModelRoutingGroup, dimen
 	}
 	sort.Slice(copyGroups, func(i, j int) bool { return copyGroups[i].ID < copyGroups[j].ID })
 	for i := range copyGroups {
-		sort.Slice(copyGroups[i].Members, func(a, b int) bool { return copyGroups[i].Members[a].ID < copyGroups[i].Members[b].ID })
-		sort.Slice(copyGroups[i].Rules, func(a, b int) bool {
-			if copyGroups[i].Rules[a].Priority != copyGroups[i].Rules[b].Priority {
-				return copyGroups[i].Rules[a].Priority < copyGroups[i].Rules[b].Priority
-			}
-			return copyGroups[i].Rules[a].ID < copyGroups[i].Rules[b].ID
-		})
-		for j := range copyGroups[i].Rules {
-			canonicalizeCondition(&copyGroups[i].Rules[j].When)
-		}
+		canonicalizeModelRoutingGroup(&copyGroups[i])
 	}
 	encoded, err := json.Marshal(copyGroups)
 	if err != nil {
@@ -1088,6 +1260,22 @@ func ModelRoutingSnapshotVersionWithDimensions(groups []ModelRoutingGroup, dimen
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// canonicalizeModelRoutingGroup puts one group into the order every content
+// hash reads it in: members by ID, rules in evaluation order, condition lists
+// sorted. Two saves that differ only in that order are the same configuration.
+func canonicalizeModelRoutingGroup(group *ModelRoutingGroup) {
+	sort.Slice(group.Members, func(a, b int) bool { return group.Members[a].ID < group.Members[b].ID })
+	sort.Slice(group.Rules, func(a, b int) bool {
+		if group.Rules[a].Priority != group.Rules[b].Priority {
+			return group.Rules[a].Priority < group.Rules[b].Priority
+		}
+		return group.Rules[a].ID < group.Rules[b].ID
+	})
+	for j := range group.Rules {
+		canonicalizeCondition(&group.Rules[j].When)
+	}
 }
 
 func canonicalizeCondition(condition *ModelRoutingCondition) {
@@ -1123,9 +1311,13 @@ type ModelRoutingBinding struct {
 	ServiceID             ServiceID  `json:"service_id"`
 	Model                 string     `json:"model"`
 	ConfigSnapshotVersion string     `json:"config_snapshot_version"`
-	CreatedAt             string     `json:"created_at"`
-	UpdatedAt             string     `json:"updated_at"`
-	ExpiresAt             string     `json:"expires_at"`
+	// RequestID is the request whose rule evaluation chose this member. Later
+	// requests that reuse the binding keep it, so each of them can point back
+	// at the judgment it inherited.
+	RequestID string `json:"request_id,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 func (binding ModelRoutingBinding) Validate() error {
@@ -1153,5 +1345,23 @@ func (binding ModelRoutingBinding) Validate() error {
 	if err := binding.ServiceID.Validate(); err != nil {
 		return err
 	}
+	if binding.RequestID != "" {
+		if err := RequestID(binding.RequestID).Validate(); err != nil {
+			return fmt.Errorf("binding request_id: %w", err)
+		}
+	}
 	return validateModelRoutingModel("binding model", binding.Model)
+}
+
+// ModelRoutingBindingCurrent reports whether a session binding may still be
+// reused under the given configuration: its group is enabled and still has the
+// member the binding names. Any other binding is dropped by the next request,
+// which judges the rules again.
+func ModelRoutingBindingCurrent(binding ModelRoutingBinding, groups []ModelRoutingGroup) bool {
+	for _, group := range groups {
+		if group.ID == binding.GroupID {
+			return group.Enabled && group.HasMember(binding.MemberID, binding.ServiceID, binding.Model)
+		}
+	}
+	return false
 }

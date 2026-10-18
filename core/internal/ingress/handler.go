@@ -131,6 +131,7 @@ type Handler struct {
 	builtinStates            builtintools.Store
 	proxyCredentials         secretstore.SecretStore
 	affinities               responseAffinities
+	routingVersions          modelRoutingVersions
 	resolver                 endpoint.Resolver
 	authorizer               endpoint.Authorizer
 	forwarder                Forwarder
@@ -446,11 +447,12 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		session.captureUnreadRequestBody(request)
 		if classified.ModelRoutingMember != nil {
 			code, status := "model_routing_member_unavailable", http.StatusServiceUnavailable
+			message := fmt.Sprintf("selected model routing member %q is unavailable", classified.ModelRoutingMember.ID)
 			var capabilityErr *endpoint.CapabilityUnavailableError
 			if errors.As(err, &capabilityErr) {
 				code, status = "model_routing_member_unsupported", http.StatusUnprocessableEntity
+				message = handler.modelRoutingUnsupportedMessage(request.Context(), classified, *classified.ModelRoutingMember, capabilityErr.Reason)
 			}
-			message := fmt.Sprintf("selected model routing member %q is unavailable", classified.ModelRoutingMember.ID)
 			writeInferenceError(outWriter, status, code, message, status >= http.StatusServiceUnavailable, nil)
 			session.noteFailed(errorSummaryFromInference(code, message, status >= http.StatusServiceUnavailable))
 			return

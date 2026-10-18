@@ -2421,6 +2421,40 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /control/v1/model-routing-versions/{group_id}/{version}:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: observer
+      tags: [Routes]
+      operationId: getModelRoutingGroupVersion
+      summary: Read one saved configuration of a routing group.
+      description: >
+        Each group's configuration is numbered from 1 and gains a version
+        only when how it routes changes; switching the group on or off does
+        not. Request records name the version they were routed under in
+        model_routing.config_version.
+      parameters:
+        - name: group_id
+          in: path
+          required: true
+          schema: { type: string, maxLength: 64 }
+        - name: version
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: The configuration as it was saved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelRoutingGroupVersion"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /control/v1/client-identities:
     x-astrlink-implementation-status: implemented
     get:
@@ -3349,8 +3383,8 @@ paths:
       x-astrlink-role: operator
       tags: [Requests]
       operationId: releaseSessionChannelBindings
-      summary: Release all ordinary channel preferences for this session and fence in-flight writes.
-      description: Preserves request records, audit history and strict Responses or WebSocket bindings. The next ordinary request follows service order and may choose the same channel.
+      summary: Release all ordinary channel preferences and routing-group bindings for this session and fence in-flight writes.
+      description: Preserves request records, audit history and strict Responses or WebSocket bindings. The next ordinary request follows service order and may choose the same channel; the next request to a routing group judges its rules again.
       responses:
         "200":
           description: Updated bindings and audit history.
@@ -4325,6 +4359,21 @@ components:
           minLength: 1
           maxLength: 64
           description: Must name a member of the same group.
+    ModelRoutingGroupVersion:
+      type: object
+      additionalProperties: false
+      required: [group_id, version, latest_version, created_at, group]
+      properties:
+        group_id: { type: string }
+        version: { type: integer, minimum: 1 }
+        latest_version:
+          {
+            type: integer,
+            minimum: 1,
+            description: "The group's newest version when this one was read.",
+          }
+        created_at: { type: string, format: date-time }
+        group: { $ref: "#/components/schemas/ModelRoutingGroup" }
     ModelRoutingGroup:
       type: object
       additionalProperties: false
@@ -4420,16 +4469,53 @@ components:
             service_id: { type: string }
             previous_service_id: { type: string }
             request_id: { type: string }
+    ModelRoutingSessionBinding:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          local_access_token_id,
+          protocol,
+          virtual_model_id,
+          service_id,
+          model,
+          expires_at,
+        ]
+      properties:
+        local_access_token_id: { type: string }
+        protocol: { type: string }
+        virtual_model_id:
+          {
+            type: string,
+            description: "The routing group as clients name it, astrlink/<id>.",
+          }
+        service_id: { type: string }
+        model: { type: string }
+        request_id:
+          {
+            type: string,
+            description: "The request whose rule evaluation chose this model; requests reusing the binding keep it.",
+          }
+        expires_at: { type: string, format: date-time }
     ChannelBindingAudit:
       type: object
       additionalProperties: false
-      required: [enabled, bindings, events, has_more]
+      required: [enabled, bindings, model_routing_bindings, events, has_more]
       properties:
-        enabled: { type: boolean }
+        enabled:
+          {
+            type: boolean,
+            description: "Session stickiness. One switch and idle timeout govern API provider bindings and routing-group bindings alike.",
+          }
         bindings:
           type: array
           items:
             $ref: "#/components/schemas/ChannelBinding"
+        model_routing_bindings:
+          type: array
+          description: Routing-group bindings a request would still reuse. A binding whose group is disabled, or whose member left the group, is not listed.
+          items:
+            $ref: "#/components/schemas/ModelRoutingSessionBinding"
         events:
           type: array
           maxItems: 100
@@ -4633,7 +4719,8 @@ components:
       required: [enabled, classifier_source, credential_configured]
       properties:
         enabled: { type: boolean }
-        classifier_source: { type: string, enum: [inline, provider_ref, existing_model] }
+        classifier_source:
+          { type: string, enum: [inline, provider_ref, existing_model] }
         inline:
           $ref: "#/components/schemas/ClassifierInlineSource"
         provider_ref:
@@ -4773,6 +4860,12 @@ components:
                     source: { type: string }
                     known: { type: boolean }
                     match_count: { type: integer }
+                    value:
+                      {
+                        type: string,
+                        maxLength: 128,
+                        description: "The fact the condition read, in the evaluator's spelling (true, 12, openai.chat, 14:20). Empty when unknown and always empty for literal_keyword, whose fact is the request text.",
+                      }
                     skip_reason: { type: string }
                     error_code: { type: string }
         fields:
@@ -4787,6 +4880,12 @@ components:
               source: { type: string }
               known: { type: boolean }
               match_count: { type: integer }
+              value:
+                {
+                  type: string,
+                  maxLength: 128,
+                  description: "The fact the condition read; empty when unknown and for literal_keyword.",
+                }
               classifier_confidence: { type: number }
               classifier_id: { type: string }
               skip_reason: { type: string }

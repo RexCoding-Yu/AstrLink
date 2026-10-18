@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,10 +19,22 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
-// Keep V1 binding retention bounded without expanding the persisted settings
-// contract. One hour covers normal conversational turn gaps while limiting
-// stale member selection after a session is abandoned.
-const defaultModelRoutingBindingTTL = time.Hour
+// modelRoutingBindingTTL is how long a routing group's session binding lives,
+// or false when session stickiness is off. The routing-settings switch and
+// idle timeout that govern API provider bindings govern these too: one
+// setting decides whether a session keeps what it was given.
+func modelRoutingBindingTTL(settings *contract.RoutingSettings) (time.Duration, bool) {
+	if settings == nil || settings.ChannelStickiness == nil || !settings.ChannelStickiness.Enabled || settings.ChannelStickiness.TTLSeconds <= 0 {
+		return 0, false
+	}
+	return time.Duration(settings.ChannelStickiness.TTLSeconds) * time.Second, true
+}
+
+// modelRoutingBindingTime is the fixed-width spelling binding times are
+// stored in, so string comparison in the store orders them correctly.
+func modelRoutingBindingTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+}
 
 type modelRoutingHTTPError struct {
 	status  int
@@ -32,6 +45,7 @@ type modelRoutingHTTPError struct {
 func (err *modelRoutingHTTPError) Error() string { return err.message }
 
 func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSession, classified Request, settings contract.RoutingSettings) (Request, error) {
+	started := time.Now()
 	if classified.Model == "" || !strings.HasPrefix(classified.Model, contract.ModelRoutingModelPrefix) || classified.Protocol.IsModelDiscovery() {
 		return classified, nil
 	}
@@ -49,6 +63,12 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	if group == nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_not_found", message: fmt.Sprintf("model routing group %q was not found", groupID)}
 	}
+	// A disabled group serves nothing: not a session bound to it, not a
+	// Responses continuation, not a WebSocket opened before it was switched
+	// off. Disabling must not depend on how the client sends its next turn.
+	if !group.Enabled {
+		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_disabled", message: fmt.Sprintf("model routing group %q is disabled", groupID)}
+	}
 	// One classifier read at most per request, shared by the version check
 	// below and the classification further down; a request that is pinned
 	// before classification and names no custom dimension makes none.
@@ -57,12 +77,15 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	if err != nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_invalid", message: err.Error()}
 	}
+	configVersion := handler.modelRoutingGroupVersion(ctx, session, *group, version)
 	if turn := responsesWSTurnFromContext(ctx); turn != nil && turn.session.serviceID != "" && turn.session.routingModel != "" {
 		for index := range group.Members {
 			member := &group.Members[index]
 			if member.ServiceID == turn.session.serviceID && member.Model == turn.session.routingModel {
 				decision := modelRoutingDecisionFromBinding(contract.ModelRoutingBinding{GroupID: group.ID, MemberID: member.ID, ServiceID: member.ServiceID, Model: member.Model, ConfigSnapshotVersion: version}, classified.Model, version)
 				decision.SelectionSource = contract.ModelRoutingSelectionWebSocket
+				decision.ConfigVersion = configVersion
+				decision.DurationMS = int(time.Since(started).Milliseconds())
 				classified.ModelRoutingMember = member
 				pinModelRoutingWebSocket(ctx, member.Model)
 				if session != nil {
@@ -91,6 +114,8 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 			}
 			decision := modelRoutingDecisionFromBinding(contract.ModelRoutingBinding{GroupID: group.ID, MemberID: member.ID, ServiceID: member.ServiceID, Model: member.Model, ConfigSnapshotVersion: version}, classified.Model, version)
 			decision.SelectionSource = contract.ModelRoutingSelectionResponseAffinity
+			decision.ConfigVersion = configVersion
+			decision.DurationMS = int(time.Since(started).Milliseconds())
 			classified.ModelRoutingMember = member
 			pinModelRoutingWebSocket(ctx, member.Model)
 			if session != nil {
@@ -99,19 +124,25 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 			return classified, nil
 		}
 	}
+	var bindingReset *contract.ModelRoutingBindingReset
 	if binding, ok, bindingErr := handler.loadModelRoutingBinding(ctx, session, classified); bindingErr != nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_invalid", message: bindingErr.Error()}
-	} else if ok {
+	} else if ok && group.HasMember(binding.MemberID, binding.ServiceID, binding.Model) {
 		decision := modelRoutingDecisionFromBinding(binding, classified.Model, version)
+		decision.ConfigVersion = configVersion
+		decision.DurationMS = int(time.Since(started).Milliseconds())
+		decision.BindingRequestID = binding.RequestID
 		classified.ModelRoutingMember = &contract.ModelRoutingMember{ID: binding.MemberID, ServiceID: binding.ServiceID, Model: binding.Model}
 		pinModelRoutingWebSocket(ctx, binding.Model)
 		if session != nil {
 			session.noteModelRouting(ctx, decision)
 		}
 		return classified, nil
-	}
-	if !group.Enabled {
-		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_disabled", message: fmt.Sprintf("model routing group %q is disabled", groupID)}
+	} else if ok {
+		// The member this session was bound to has left the group. The rules
+		// pick again, and the record says why the session's model changed.
+		bindingReset = &contract.ModelRoutingBindingReset{Reason: contract.ModelRoutingBindingMemberRemoved, MemberID: binding.MemberID, ServiceID: binding.ServiceID, Model: binding.Model}
+		handler.dropModelRoutingBinding(ctx, session, binding)
 	}
 	facts := modelRoutingFacts(classified, session)
 	var taskType modelrouting.TaskTypeOutcome
@@ -126,7 +157,9 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	// outcome leaves the map nil, which is the single-dimension configuration:
 	// every rule that tests a built-in field evaluates exactly as before.
 	facts.Dimensions = modelrouting.DimensionFacts(taskType)
-	selection := modelrouting.Evaluate(*group, facts)
+	// Explain selects exactly as Evaluate does and also keeps every rule's own
+	// verdict, so the record can show the walk the dry-run preview shows.
+	selection, verdicts := modelrouting.Explain(*group, facts)
 	// One conversion owns the provenance stamping, so the dry-run preview and
 	// this record cannot describe the same attempt differently.
 	modelrouting.StampClassifierProvenance(selection.Fields, taskType, *group, selection.TaskTypeCandidateIndex)
@@ -150,6 +183,13 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 		Execution:             contract.ModelRoutingExecution{Status: contract.ModelRoutingExecutionPending},
 		PrivacyAttempts:       []contract.ModelRoutingPrivacyAttempt{},
 		ClassifierDurationMS:  taskType.DurationMS,
+		DurationMS:            int(time.Since(started).Milliseconds()),
+		ConfigVersion:         configVersion,
+		Rules:                 modelrouting.RuleVerdicts(verdicts, *group),
+		BindingReset:          bindingReset,
+	}
+	if modelRoutingNeedsClassification(*group, dimensions) {
+		decision.Classifier = modelrouting.ClassifierAnswers(taskType, facts.Dimensions, dimensions)
 	}
 	if err := decision.Validate(); err != nil {
 		return classified, &modelRoutingHTTPError{status: 422, code: "model_routing_group_invalid", message: err.Error()}
@@ -263,6 +303,10 @@ func (handler *Handler) persistModelRoutingBinding(ctx context.Context, session 
 	if handler == nil || session == nil || session.modelRouting == nil || session.status != contract.RequestStatusSucceeded || session.sessionID == "" || handler.requestRecords == nil {
 		return
 	}
+	ttl, enabled := modelRoutingBindingTTL(session.routingSettings)
+	if !enabled {
+		return
+	}
 	store, ok := handler.requestRecords.(storage.ModelRoutingBindingStore)
 	if !ok {
 		return
@@ -273,21 +317,36 @@ func (handler *Handler) persistModelRoutingBinding(ctx context.Context, session 
 		// anonymous namespace that could make same-session IDs cross-talk.
 		return
 	}
+	decision := session.modelRouting
+	// A reused binding keeps pointing at the request whose rules chose the
+	// member; any other decision is its own origin.
+	origin := string(session.id)
+	if decision.SelectionSource == contract.ModelRoutingSelectionGroupBinding {
+		origin = decision.BindingRequestID
+	}
 	now := time.Now().UTC()
+	expires := modelRoutingBindingTime(now.Add(ttl))
 	binding := contract.ModelRoutingBinding{
 		Principal: principal, SessionID: session.sessionID, Protocol: session.classified.Protocol,
-		VirtualModelID: session.modelRouting.VirtualModelID, GroupID: session.modelRouting.GroupID,
-		MemberID: session.modelRouting.MemberID, ServiceID: session.modelRouting.MemberServiceID,
-		Model: session.modelRouting.MemberModel, ConfigSnapshotVersion: session.modelRouting.ConfigSnapshotVersion,
-		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(defaultModelRoutingBindingTTL).Format(time.RFC3339Nano),
+		VirtualModelID: decision.VirtualModelID, GroupID: decision.GroupID,
+		MemberID: decision.MemberID, ServiceID: decision.MemberServiceID,
+		Model: decision.MemberModel, ConfigSnapshotVersion: decision.ConfigSnapshotVersion, RequestID: origin,
+		CreatedAt: modelRoutingBindingTime(now), UpdatedAt: modelRoutingBindingTime(now), ExpiresAt: expires,
 	}
-	if err := store.UpsertModelRoutingBinding(ctx, binding); err != nil && session.persistLogf != nil {
-		session.persistLogf("model routing binding write failed: %v", err)
+	if err := store.UpsertModelRoutingBinding(ctx, binding, session.startedAt); err != nil {
+		if session.persistLogf != nil {
+			session.persistLogf("model routing binding write failed: %v", err)
+		}
+		return
 	}
+	decision.BindingExpiresAt = expires
 }
 
 func (handler *Handler) loadModelRoutingBinding(ctx context.Context, session *recordSession, classified Request) (contract.ModelRoutingBinding, bool, error) {
 	if session == nil || session.sessionID == "" || handler.requestRecords == nil {
+		return contract.ModelRoutingBinding{}, false, nil
+	}
+	if _, enabled := modelRoutingBindingTTL(session.routingSettings); !enabled {
 		return contract.ModelRoutingBinding{}, false, nil
 	}
 	store, ok := handler.requestRecords.(storage.ModelRoutingBindingStore)
@@ -308,6 +367,71 @@ func (handler *Handler) loadModelRoutingBinding(ctx context.Context, session *re
 		return contract.ModelRoutingBinding{}, false, err
 	}
 	return binding, true, nil
+}
+
+// dropModelRoutingBinding forgets a binding the group can no longer honor.
+// Failing to delete it is harmless: the next request finds the same missing
+// member and judges the rules again.
+func (handler *Handler) dropModelRoutingBinding(ctx context.Context, session *recordSession, binding contract.ModelRoutingBinding) {
+	store, ok := handler.requestRecords.(storage.ModelRoutingBindingStore)
+	if !ok {
+		return
+	}
+	if err := store.DeleteModelRoutingBinding(ctx, binding.Principal, binding.SessionID, binding.Protocol, binding.VirtualModelID); err != nil && session != nil && session.persistLogf != nil {
+		session.persistLogf("model routing binding delete failed: %v", err)
+	}
+}
+
+// modelRoutingVersions remembers which saved version a group had under each
+// settings snapshot. Snapshots change only when settings are saved, so after
+// the first request under a configuration, labeling a record costs no hashing
+// and no database read. The bound keeps a long-running Core from collecting
+// one entry per save forever.
+type modelRoutingVersions struct {
+	mu      sync.Mutex
+	entries map[string]int
+}
+
+const maxModelRoutingVersionEntries = 256
+
+func (versions *modelRoutingVersions) get(key string) (int, bool) {
+	versions.mu.Lock()
+	defer versions.mu.Unlock()
+	version, ok := versions.entries[key]
+	return version, ok
+}
+
+func (versions *modelRoutingVersions) put(key string, version int) {
+	versions.mu.Lock()
+	defer versions.mu.Unlock()
+	if versions.entries == nil || len(versions.entries) >= maxModelRoutingVersionEntries {
+		versions.entries = make(map[string]int)
+	}
+	versions.entries[key] = version
+}
+
+// modelRoutingGroupVersion reads the saved configuration version the group is
+// routed under. The number only labels the record, so a store that cannot
+// answer leaves it at zero rather than failing the request. snapshot is the
+// whole configuration's content version, already computed for the request.
+func (handler *Handler) modelRoutingGroupVersion(ctx context.Context, session *recordSession, group contract.ModelRoutingGroup, snapshot string) int {
+	store, ok := handler.requestRecords.(storage.ModelRoutingVersionStore)
+	if !ok {
+		return 0
+	}
+	key := group.ID + "\x00" + snapshot
+	if version, ok := handler.routingVersions.get(key); ok {
+		return version
+	}
+	version, err := store.EnsureModelRoutingGroupVersion(ctx, group)
+	if err != nil {
+		if session != nil && session.persistLogf != nil {
+			session.persistLogf("model routing version lookup failed: %v", err)
+		}
+		return 0
+	}
+	handler.routingVersions.put(key, version)
+	return version
 }
 
 func modelRoutingBindingPrincipal(session *recordSession) (string, bool) {
@@ -704,6 +828,30 @@ func (handler *Handler) modelRoutingTaskTypeCloud(ctx context.Context, text stri
 		ClassifierID:           string(failed.ClassifierID),
 		LowConfidenceThreshold: plan.LowConfidenceThreshold,
 	}
+}
+
+// modelRoutingUnsupportedMessage names everything a client needs to fix a
+// member that cannot take this request: the group, the model, the API
+// provider by the name the user gave it, and the request format. Clients such
+// as coding agents show only this message, so it has to stand on its own.
+func (handler *Handler) modelRoutingUnsupportedMessage(ctx context.Context, classified Request, member contract.ModelRoutingMember, reason contract.RoutingSkipReason) string {
+	group := strings.TrimPrefix(classified.Model, contract.ModelRoutingModelPrefix)
+	provider := string(member.ServiceID)
+	if services, ok := handler.requestRecords.(interface {
+		GetService(context.Context, contract.ServiceID) (storage.ServiceRecord, error)
+	}); ok {
+		if record, err := services.GetService(ctx, member.ServiceID); err == nil && record.Service.Name != "" {
+			provider = record.Service.Name
+		}
+	}
+	format := string(classified.Protocol) + " requests"
+	switch reason {
+	case contract.RoutingSkipStreamingUnsupported:
+		format = "streaming " + format
+	case contract.RoutingSkipWebSocketUnsupported:
+		format = string(classified.Protocol) + " over WebSocket"
+	}
+	return fmt.Sprintf("routing group %q chose %s on %q, which does not accept %s; enable a conversion in its entry protocols or route this rule to another model", group, member.Model, provider, format)
 }
 
 func pinModelRoutingWebSocket(ctx context.Context, model string) {

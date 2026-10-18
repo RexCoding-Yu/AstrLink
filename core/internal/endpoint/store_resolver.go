@@ -191,7 +191,7 @@ func (resolver *StoreResolver) ResolveMemberCandidates(ctx context.Context, requ
 		}
 		switch ranked.Skip {
 		case contract.RoutingSkipProtocolUnsupported, contract.RoutingSkipStreamingUnsupported, contract.RoutingSkipConversionUnavailable, contract.RoutingSkipWebSocketUnsupported:
-			return nil, &CapabilityUnavailableError{Protocol: request.Protocol, Model: model, Modes: []contract.CapabilityMode{contract.CapabilityModeNative, contract.CapabilityModeDelegated}, Streaming: request.Streaming}
+			return nil, &CapabilityUnavailableError{Protocol: request.Protocol, Model: model, Modes: []contract.CapabilityMode{contract.CapabilityModeNative, contract.CapabilityModeDelegated}, Streaming: request.Streaming, Reason: ranked.Skip}
 		}
 	}
 	return nil, ErrNoEndpoint

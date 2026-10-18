@@ -172,6 +172,34 @@ func DimensionFacts(outcome TaskTypeOutcome) map[string]contract.DimensionFact {
 	return facts
 }
 
+// ClassifierAnswers is what one classification said, in the shape the
+// request record keeps: the task type when it is usable, and one entry per
+// configured custom dimension — including a dimension the classifier skipped,
+// which is the case an operator most needs to see. facts are the dimension
+// facts the evaluator read, so a dimension reported known is one a rule could
+// match on.
+func ClassifierAnswers(outcome TaskTypeOutcome, facts map[string]contract.DimensionFact, configured []contract.ClassifierDimension) *contract.ModelRoutingClassifierAnswers {
+	answers := &contract.ModelRoutingClassifierAnswers{}
+	if outcome.Value != "" {
+		answers.TaskType = outcome.Value
+		answers.Confidence = outcome.Confidence
+	}
+	for _, dimension := range configured {
+		if dimension.Name == contract.BuiltInTaskTypeDimension {
+			continue
+		}
+		fact := facts[dimension.Name]
+		answers.Dimensions = append(answers.Dimensions, contract.ModelRoutingDimensionAnswer{
+			Name:     dimension.Name,
+			Label:    fact.Value,
+			Score:    fact.Score,
+			Known:    fact.Known,
+			Produced: fact.Produced,
+		})
+	}
+	return answers
+}
+
 // taskTypeCandidatesContainLabel reports whether the ranked sequence already
 // describes the label.
 func taskTypeCandidatesContainLabel(candidates []autoclassifier.Candidate, label string) bool {

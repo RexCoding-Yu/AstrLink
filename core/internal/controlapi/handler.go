@@ -234,6 +234,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 	handler.mux.HandleFunc(PricingPath+"/", handler.authenticated(handler.pricingResource, RoleObserver))
 	handler.mux.HandleFunc(BuiltinToolsPath, handler.authenticated(handler.builtinToolResource, RoleOperator))
 	handler.mux.HandleFunc(RoutingSettingsPath, handler.authenticated(handler.routingSettingsResource, RoleObserver))
+	handler.mux.HandleFunc(ModelRoutingVersionsPath+"/", handler.authenticated(handler.modelRoutingGroupVersion, RoleObserver))
 	if classifierSettings != nil {
 		// GET reads at observer parity with routing settings; PUT and the
 		// credential/dry-run subresources require the operator role.

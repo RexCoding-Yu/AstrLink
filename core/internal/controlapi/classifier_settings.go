@@ -194,30 +194,13 @@ type classifierDryRunResponse struct {
 	Decision         *classifierDryRunDecision               `json:"decision,omitempty"`
 	Fields           []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
 	// Rules is every rule in the group with its own verdict, in evaluation
-	// order. The selection above reports only the winner, which cannot answer
-	// "why did the rule I wrote not fire?" — this is the rest of the table.
-	Rules []classifierDryRunRuleVerdict `json:"rules,omitempty"`
-}
-
-// classifierDryRunRuleVerdict is one rule's own outcome. State is one of
-// "true", "false", "unknown" or "not_evaluated":
-//
-//   - true/false      the row was tested and came out that way
-//   - unknown         the row was tested, but a field it reads had no fact
-//   - not_evaluated   an earlier row already won, so this one never ran
-//
-// The last three all end up not selecting the member, and only the first of
-// them is a fact the operator can act on by writing a better rule; collapsing
-// them into one "no match" is what makes a rule set hard to debug.
-type classifierDryRunRuleVerdict struct {
-	RuleID         string                                  `json:"rule_id"`
-	Priority       int                                     `json:"priority"`
-	TargetMemberID string                                  `json:"target_member_id"`
-	TargetModel    string                                  `json:"target_model,omitempty"`
-	State          string                                  `json:"state"`
-	Selected       bool                                    `json:"selected"`
-	TargetMissing  bool                                    `json:"target_missing,omitempty"`
-	Fields         []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
+	// order, in the same shape a request record keeps. The selection above
+	// reports only the winner, which cannot answer "why did the rule I wrote
+	// not fire?" — this is the rest of the table. State is one of "true",
+	// "false", "unknown" or "not_evaluated": the last three all leave the
+	// member unselected, but only the first is a fact the operator can act on
+	// by writing a better rule.
+	Rules []contract.ModelRoutingRuleVerdict `json:"rules,omitempty"`
 }
 
 type dryRunDimensionScore struct {
@@ -385,7 +368,7 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		// record a live request would write.
 		modelrouting.StampClassifierProvenance(selection.Fields, taskType, *group, selection.TaskTypeCandidateIndex)
 		response.Fields = selection.Fields
-		response.Rules = dryRunRuleVerdicts(verdicts, *group)
+		response.Rules = modelrouting.RuleVerdicts(verdicts, *group)
 		response.Decision = &classifierDryRunDecision{
 			MemberID:    selection.Member.ID,
 			ServiceID:   string(selection.Member.ServiceID),
@@ -395,45 +378,6 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		}
 	}
 	writeJSON(writer, http.StatusOK, response)
-}
-
-// dryRunRuleVerdicts renders the per-rule walk for the wire. The member model
-// is resolved here rather than in the evaluator: naming a member's model is a
-// property of the group document, not of the evaluation.
-func dryRunRuleVerdicts(verdicts []modelrouting.RuleVerdict, group contract.ModelRoutingGroup) []classifierDryRunRuleVerdict {
-	if len(verdicts) == 0 {
-		return nil
-	}
-	models := make(map[string]string, len(group.Members))
-	for _, member := range group.Members {
-		models[member.ID] = member.Model
-	}
-	rendered := make([]classifierDryRunRuleVerdict, 0, len(verdicts))
-	for _, verdict := range verdicts {
-		priority := 0
-		if verdict.RulePriority != nil {
-			priority = *verdict.RulePriority
-		}
-		state := verdict.State.String()
-		if !verdict.Decided {
-			// "never ran" and "ran but a field was unknown" both carry triUnknown.
-			// Reaching the second requires the facts to have been read, so only
-			// the first is reported as unevaluated — a row that was skipped
-			// because an earlier one won cannot be improved by editing it.
-			state = "not_evaluated"
-		}
-		rendered = append(rendered, classifierDryRunRuleVerdict{
-			RuleID:         verdict.RuleID,
-			Priority:       priority,
-			TargetMemberID: verdict.TargetMemberID,
-			TargetModel:    models[verdict.TargetMemberID],
-			State:          state,
-			Selected:       verdict.Selected,
-			TargetMissing:  verdict.TargetMissing,
-			Fields:         verdict.Fields,
-		})
-	}
-	return rendered
 }
 
 func boolPtrDryRun(value bool) *bool { return &value }

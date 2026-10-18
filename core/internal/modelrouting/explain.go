@@ -102,3 +102,43 @@ func plainObservations(observations []contract.ModelRoutingFieldObservation) []c
 	}
 	return plain
 }
+
+// RuleVerdicts renders the per-rule walk in the shape the dry-run preview and
+// the request record share. The member model is resolved here rather than in
+// the evaluator: naming a member's model is a property of the group document,
+// not of the evaluation.
+func RuleVerdicts(verdicts []RuleVerdict, group contract.ModelRoutingGroup) []contract.ModelRoutingRuleVerdict {
+	if len(verdicts) == 0 {
+		return nil
+	}
+	models := make(map[string]string, len(group.Members))
+	for _, member := range group.Members {
+		models[member.ID] = member.Model
+	}
+	rendered := make([]contract.ModelRoutingRuleVerdict, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		priority := 0
+		if verdict.RulePriority != nil {
+			priority = *verdict.RulePriority
+		}
+		state := verdict.State.String()
+		if !verdict.Decided {
+			// "never ran" and "ran but a field was unknown" both carry triUnknown.
+			// Reaching the second requires the facts to have been read, so only
+			// the first is reported as unevaluated — a row that was skipped
+			// because an earlier one won cannot be improved by editing it.
+			state = contract.ModelRoutingRuleNotEvaluated
+		}
+		rendered = append(rendered, contract.ModelRoutingRuleVerdict{
+			RuleID:         verdict.RuleID,
+			Priority:       priority,
+			TargetMemberID: verdict.TargetMemberID,
+			TargetModel:    models[verdict.TargetMemberID],
+			State:          state,
+			Selected:       verdict.Selected,
+			TargetMissing:  verdict.TargetMissing,
+			Fields:         verdict.Fields,
+		})
+	}
+	return rendered
+}

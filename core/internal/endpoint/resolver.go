@@ -29,6 +29,10 @@ type CapabilityUnavailableError struct {
 	Model     string
 	Modes     []contract.CapabilityMode
 	Streaming bool
+	// Reason is why one exact target was refused, set only when a routing
+	// group named the service; a request open to every provider has no
+	// single reason.
+	Reason contract.RoutingSkipReason
 }
 
 func (err *CapabilityUnavailableError) Error() string {

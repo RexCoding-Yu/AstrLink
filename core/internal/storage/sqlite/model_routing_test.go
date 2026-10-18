@@ -47,7 +47,7 @@ func TestModelRoutingRecordAndBindingRoundTrip(t *testing.T) {
 
 	now := time.Now().UTC()
 	binding := contract.ModelRoutingBinding{Principal: "principal_01", SessionID: "session_01", Protocol: contract.ProtocolOpenAIResponses, VirtualModelID: "astrlink/superclaude", GroupID: "superclaude", MemberID: "strong", ServiceID: "service_01", Model: "model-strong", ConfigSnapshotVersion: decision.ConfigSnapshotVersion, CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano)}
-	if err := store.UpsertModelRoutingBinding(ctx, binding); err != nil {
+	if err := store.UpsertModelRoutingBinding(ctx, binding, now); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.GetModelRoutingBinding(ctx, binding.Principal, binding.SessionID, binding.Protocol, binding.VirtualModelID)

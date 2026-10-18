@@ -247,6 +247,11 @@ func evaluateLeafValue(condition contract.ModelRoutingCondition, facts contract.
 		observation.SkipReason = "unknown"
 		return triUnknown, []contract.ModelRoutingFieldObservation{observation}
 	}
+	// The keyword fact is the request text itself; a record keeps only how
+	// many keywords it contained, never the text.
+	if condition.Field != "literal_keyword" {
+		observation.Value = value
+	}
 
 	var matched bool
 	switch {
@@ -280,6 +285,7 @@ func evaluateLeafValue(condition contract.ModelRoutingCondition, facts contract.
 		number, err := strconv.Atoi(value)
 		if err != nil {
 			observation.Known = false
+			observation.Value = ""
 			observation.SkipReason = "invalid"
 			return triUnknown, []contract.ModelRoutingFieldObservation{observation}
 		}

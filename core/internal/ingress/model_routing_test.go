@@ -99,6 +99,8 @@ type modelRoutingBindingTestStore struct {
 	binding     *contract.ModelRoutingBinding
 	getCalls    int
 	upsertCalls int
+	deleteCalls int
+	started     time.Time
 }
 
 func (store *modelRoutingBindingTestStore) GetModelRoutingBinding(_ context.Context, principal string, sessionID contract.SessionID, protocol contract.ProtocolID, virtualModelID string) (contract.ModelRoutingBinding, error) {
@@ -111,16 +113,23 @@ func (store *modelRoutingBindingTestStore) GetModelRoutingBinding(_ context.Cont
 	return *store.binding, nil
 }
 
-func (store *modelRoutingBindingTestStore) UpsertModelRoutingBinding(_ context.Context, binding contract.ModelRoutingBinding) error {
+func (store *modelRoutingBindingTestStore) UpsertModelRoutingBinding(_ context.Context, binding contract.ModelRoutingBinding, started time.Time) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.upsertCalls++
+	store.started = started
 	copy := binding
 	store.binding = &copy
 	return nil
 }
 
-func (store *modelRoutingBindingTestStore) DeleteModelRoutingBinding(context.Context, string, contract.SessionID, contract.ProtocolID, string) error {
+func (store *modelRoutingBindingTestStore) DeleteModelRoutingBinding(_ context.Context, principal string, sessionID contract.SessionID, protocol contract.ProtocolID, virtualModelID string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.deleteCalls++
+	if store.binding != nil && store.binding.Principal == principal && store.binding.SessionID == sessionID && store.binding.Protocol == protocol && store.binding.VirtualModelID == virtualModelID {
+		store.binding = nil
+	}
 	return nil
 }
 
@@ -131,6 +140,8 @@ func TestModelRoutingBindingRequiresAccessToken(t *testing.T) {
 	session := newRecordSession(request, "", contract.AuditSettings{})
 	session.sessionID = "session-x"
 	session.status = contract.RequestStatusSucceeded
+	settings := contract.DefaultRoutingSettings()
+	session.routingSettings = &settings
 	session.modelRouting = &contract.ModelRoutingDecision{
 		VirtualModelID: request.Model, GroupID: "group-x", MemberID: "member-x",
 		MemberServiceID: "service_01", MemberModel: "model-x",
@@ -160,8 +171,8 @@ func TestModelRoutingBindingRequiresAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remaining := time.Until(expiresAt); remaining < defaultModelRoutingBindingTTL-time.Second || remaining > defaultModelRoutingBindingTTL+time.Second {
-		t.Fatalf("binding TTL = %s, want about %s", remaining, defaultModelRoutingBindingTTL)
+	if remaining := time.Until(expiresAt); remaining < time.Hour-time.Second || remaining > time.Hour+time.Second {
+		t.Fatalf("binding TTL = %s, want about the default hour", remaining)
 	}
 	if _, found, err := handler.loadModelRoutingBinding(context.Background(), session, request); err != nil || !found {
 		t.Fatalf("token binding load = found %v, err %v; want hit", found, err)
