@@ -18,16 +18,21 @@ const (
 	ProtocolOpenAICompletions      ProtocolID = "openai.completions"
 	ProtocolOpenAIModels           ProtocolID = "openai.models"
 	ProtocolGoogleModels           ProtocolID = "google.models"
+	ProtocolOpenAIEmbeddings       ProtocolID = "openai.embeddings"
+	ProtocolGoogleEmbeddings       ProtocolID = "google.embeddings"
+	ProtocolRerank                 ProtocolID = "rerank"
 
 	// Post-Alpha IDs are reserved now so enabling them later does not require a
 	// persistent identifier migration.
-	ProtocolOpenAIRealtime   ProtocolID = "openai.realtime"
-	ProtocolOpenAIEmbeddings ProtocolID = "openai.embeddings"
-	ProtocolGoogleEmbeddings ProtocolID = "google.embeddings"
-	ProtocolOpenAIImages     ProtocolID = "openai.images"
-	ProtocolOpenAIAudio      ProtocolID = "openai.audio"
-	ProtocolRerank           ProtocolID = "rerank"
-	ProtocolOpenAIVideos     ProtocolID = "openai.videos"
+	ProtocolOpenAIRealtime ProtocolID = "openai.realtime"
+	ProtocolOpenAIImages   ProtocolID = "openai.images"
+	ProtocolOpenAIAudio    ProtocolID = "openai.audio"
+	ProtocolOpenAIVideos   ProtocolID = "openai.videos"
+
+	// ProtocolOpenAISearch records Codex's standalone web search requests. The
+	// gateway answers them with its own search tool, so no provider declares
+	// it and it has no descriptor.
+	ProtocolOpenAISearch ProtocolID = "openai.search"
 )
 
 type ProtocolPhase string
@@ -53,12 +58,12 @@ var descriptors = [...]ProtocolDescriptor{
 	{ID: ProtocolOpenAICompletions, Phase: ProtocolPhaseAlpha, Streaming: true},
 	{ID: ProtocolOpenAIModels, Phase: ProtocolPhaseAlpha, Streaming: false},
 	{ID: ProtocolGoogleModels, Phase: ProtocolPhaseAlpha, Streaming: false},
+	{ID: ProtocolOpenAIEmbeddings, Phase: ProtocolPhaseAlpha, Streaming: false},
+	{ID: ProtocolGoogleEmbeddings, Phase: ProtocolPhaseAlpha, Streaming: false},
+	{ID: ProtocolRerank, Phase: ProtocolPhaseAlpha, Streaming: false},
 	{ID: ProtocolOpenAIRealtime, Phase: ProtocolPhasePostAlpha, Streaming: true},
-	{ID: ProtocolOpenAIEmbeddings, Phase: ProtocolPhasePostAlpha, Streaming: false},
-	{ID: ProtocolGoogleEmbeddings, Phase: ProtocolPhasePostAlpha, Streaming: false},
 	{ID: ProtocolOpenAIImages, Phase: ProtocolPhasePostAlpha, Streaming: false},
 	{ID: ProtocolOpenAIAudio, Phase: ProtocolPhasePostAlpha, Streaming: true},
-	{ID: ProtocolRerank, Phase: ProtocolPhasePostAlpha, Streaming: false},
 	{ID: ProtocolOpenAIVideos, Phase: ProtocolPhasePostAlpha, Streaming: false},
 }
 

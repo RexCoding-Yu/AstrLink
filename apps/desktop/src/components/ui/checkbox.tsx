@@ -27,4 +27,36 @@ function Checkbox({
   );
 }
 
-export { Checkbox };
+/**
+ * The checkbox look for a control that is itself the toggle, such as a list
+ * row in selection mode. It is decorative; the control carries the state.
+ */
+function CheckboxMark({
+  checked,
+  className,
+  disabled = false,
+}: {
+  checked: boolean;
+  className?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "grid size-4 shrink-0 place-content-center rounded-sm border border-input bg-card transition-colors data-[state=checked]:border-primary-fill data-[state=checked]:bg-primary-fill data-[state=checked]:text-primary-fill-foreground",
+        disabled && "opacity-45",
+        className,
+      )}
+      data-slot="checkbox-mark"
+      data-state={checked ? "checked" : "unchecked"}
+    >
+      {/* The row hover would otherwise replay the tick on every checked row. */}
+      {checked ? (
+        <CheckIcon animateOnHover={false} className="size-3.5" />
+      ) : null}
+    </span>
+  );
+}
+
+export { Checkbox, CheckboxMark };

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  controlErrorCode,
   newPasswordIssue,
   parseRawSealingOutcome,
   parseRawSealingStatus,
@@ -189,18 +188,5 @@ describe("new raw passwords", () => {
     expect(passwordIsShort("")).toBe(false);
     expect(passwordIsShort("eightchr")).toBe(true);
     expect(passwordIsShort("twelve chars")).toBe(false);
-  });
-});
-
-describe("control error codes", () => {
-  it("reads the code from a host error", () => {
-    expect(
-      controlErrorCode(
-        new Error(
-          'POST /control/v1/audit/raw-unlock returned 409 Conflict: {"error":{"code":"raw_access_unavailable","message":"x"}}',
-        ),
-      ),
-    ).toBe("raw_access_unavailable");
-    expect(controlErrorCode("core did not answer")).toBeNull();
   });
 });

@@ -3,7 +3,7 @@ import {
   CodexColor,
   CursorMono,
   GrokMono,
-  PiMono,
+  PiColor,
 } from "@/components/brand-icons";
 import { cn } from "@/lib/utils";
 
@@ -14,7 +14,7 @@ const marks = {
   claude: ClaudeCodeColor,
   codex: CodexColor,
   grok: GrokMono,
-  pi: PiMono,
+  pi: PiColor,
 } satisfies Record<AgentToolId | "pi", typeof CursorMono>;
 export type AgentToolIconId = keyof typeof marks;
 

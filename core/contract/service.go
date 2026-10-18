@@ -26,12 +26,14 @@ const (
 	ServiceKindGrokSubscription        ServiceKind = "grok_subscription"
 	ServiceKindAntigravitySubscription ServiceKind = "antigravity_subscription"
 	ServiceKindCopilotSubscription     ServiceKind = "copilot_subscription"
+	ServiceKindDroidSubscription       ServiceKind = "droid_subscription"
 	ServiceKindOpenCodeGo              ServiceKind = "opencode_go"
 	ServiceKindOpenCodeZen             ServiceKind = "opencode_zen"
 	ServiceKindKimiCoding              ServiceKind = "kimi_coding"
 	ServiceKindGLMCoding               ServiceKind = "glm_coding"
 	ServiceKindMiniMaxCoding           ServiceKind = "minimax_coding"
 	ServiceKindNewAPI                  ServiceKind = "newapi"
+	ServiceKindMagpie                  ServiceKind = "magpie"
 	ServiceKindOpenAI                  ServiceKind = "openai"
 	ServiceKindAnthropic               ServiceKind = "anthropic"
 	ServiceKindGemini                  ServiceKind = "gemini"
@@ -48,10 +50,10 @@ const (
 
 func (kind ServiceKind) Valid() bool {
 	switch kind {
-	case ServiceKindCodexSubscription, ServiceKindNewAPI, ServiceKindOpenAI,
+	case ServiceKindCodexSubscription, ServiceKindNewAPI, ServiceKindMagpie, ServiceKindOpenAI,
 		ServiceKindAnthropic, ServiceKindGemini, ServiceKindOpenAICompatible,
 		ServiceKindCustom, ServiceKindClaudeSubscription, ServiceKindGrokSubscription, ServiceKindAntigravitySubscription,
-		ServiceKindCopilotSubscription, ServiceKindOpenCodeGo,
+		ServiceKindCopilotSubscription, ServiceKindDroidSubscription, ServiceKindOpenCodeGo,
 		ServiceKindOpenCodeZen, ServiceKindKimiCoding, ServiceKindGLMCoding, ServiceKindMiniMaxCoding,
 		ServiceKindDeepSeek, ServiceKindQwen, ServiceKindMoonshot, ServiceKindGLM, ServiceKindMiniMax, ServiceKindDoubao, ServiceKindXAI:
 		return true
@@ -62,7 +64,8 @@ func (kind ServiceKind) Valid() bool {
 
 func (kind ServiceKind) IsSubscription() bool {
 	return kind == ServiceKindCodexSubscription || kind == ServiceKindClaudeSubscription || kind == ServiceKindGrokSubscription ||
-		kind == ServiceKindAntigravitySubscription || kind == ServiceKindCopilotSubscription
+		kind == ServiceKindAntigravitySubscription || kind == ServiceKindCopilotSubscription ||
+		kind == ServiceKindDroidSubscription
 }
 
 func (kind ServiceKind) SubscriptionProvider() SubscriptionProvider {
@@ -75,6 +78,8 @@ func (kind ServiceKind) SubscriptionProvider() SubscriptionProvider {
 		return SubscriptionProviderXAIGrok
 	case ServiceKindCopilotSubscription:
 		return SubscriptionProviderGitHubCopilot
+	case ServiceKindDroidSubscription:
+		return SubscriptionProviderFactoryDroid
 	case ServiceKindCodexSubscription:
 		return SubscriptionProviderOpenAICodex
 	default:
@@ -193,6 +198,9 @@ type Service struct {
 	Proxy *ServiceProxy `json:"proxy,omitempty"`
 	// Nil preserves the provider default for existing documents; explicit false is retained.
 	ResponsesWebSocketEnabled *bool `json:"responses_websocket_enabled,omitempty"`
+	// PrivacyTrusted forwards requests to this provider as the client wrote
+	// them: the privacy policy neither inspects nor rewrites them.
+	PrivacyTrusted bool `json:"privacy_trusted,omitempty"`
 	// ModelRedirects belong to this provider alone: a requested model is
 	// served as the rule's target when the provider lists it. Routing keeps
 	// the requested model, so other providers that list it can still serve it.
@@ -270,9 +278,9 @@ func (service Service) UpstreamModelFor(model string) (string, bool) {
 }
 
 // ResponsesWebSocket reports the effective per-channel transport setting.
-// The Copilot API serves Responses over HTTP only.
+// The Copilot API and Factory's gateway serve Responses over HTTP only.
 func (service Service) ResponsesWebSocket() bool {
-	if service.Kind == ServiceKindCopilotSubscription {
+	if service.Kind == ServiceKindCopilotSubscription || service.Kind == ServiceKindDroidSubscription {
 		return false
 	}
 	if service.ResponsesWebSocketEnabled != nil {

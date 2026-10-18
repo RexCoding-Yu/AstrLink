@@ -208,9 +208,10 @@ func (resolver *StoreResolver) ResolveService(ctx context.Context, id contract.S
 		return Resolved{}, err
 	}
 	for _, service := range services {
-		if service.ID == id && service.Kind.IsHTTP() && service.HTTP != nil {
-			return Resolved{Service: service, BaseURL: service.HTTP.BaseURL, Mode: contract.CapabilityModeNative}, nil
+		if service.ID != id || (service.Kind.IsHTTP() && service.HTTP == nil) {
+			continue
 		}
+		return Resolved{Service: service, BaseURL: baseURLForService(service, resolver.subscriptionBaseURL), Mode: contract.CapabilityModeNative}, nil
 	}
 	return Resolved{}, ErrNoEndpoint
 }
@@ -468,6 +469,9 @@ func baseURLForService(service contract.Service, subscriptionBaseURL string) str
 	}
 	if service.Kind == contract.ServiceKindCopilotSubscription {
 		return accountauth.DefaultCopilotAPIBaseURL
+	}
+	if service.Kind == contract.ServiceKindDroidSubscription {
+		return accountauth.DefaultDroidAPIBaseURL
 	}
 	if service.Kind.IsSubscription() {
 		return subscriptionBaseURL

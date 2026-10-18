@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   compareReleaseVersions,
+  defaultPrivacyAllowlistRules,
   defaultPrivacyKindRules,
   isResourceHeavyVariant,
   localModelActive,
+  missingDefaultPrivacyAllowlistRules,
   parsePrivacyDryRunResult,
   parsePrivacyModelCatalog,
   parsePrivacyModelInstallation,
@@ -13,6 +15,8 @@ import {
   parsePrivacyPolicyPage,
   parsePrivacyPolicyRecord,
   patchUnloadsLocalModel,
+  privacyKindRulesAreDefault,
+  privacyRestoreSettingsAreDefault,
   validateLocalProbeInput,
   validatePrivacyDryRunInput,
   validatePrivacyModelInstallInput,
@@ -187,6 +191,11 @@ describe("privacy-policy IPC contract", () => {
       inspected_body: '{"messages":[{"content":"y","role":"user"}]}',
     };
     expect(parsePrivacyDryRunResult(dryRun)).toEqual(dryRun);
+    const crowded = {
+      ...dryRun,
+      findings: Array.from({ length: 5_000 }, () => dryRun.findings[0]),
+    };
+    expect(parsePrivacyDryRunResult(crowded).findings).toHaveLength(5_000);
     expect(
       validatePrivacyDryRunInput({
         protocol: "openai.chat",
@@ -281,6 +290,35 @@ describe("privacy-policy IPC contract", () => {
       }),
     ).toThrow("duplicate kind rule");
 
+    // A Core predating notify notified about every kind.
+    expect(
+      parsePrivacyPolicyPage({
+        items: [
+          {
+            ...policy,
+            kind_rules: [
+              { kind: "email", enabled: true, style: "natural" },
+              { kind: "phone", enabled: true, style: "token", notify: false },
+            ],
+          },
+        ],
+        next_cursor: null,
+      }).items[0].kind_rules.map((rule) => rule.notify),
+    ).toEqual([true, false]);
+    expect(() =>
+      parsePrivacyPolicyPage({
+        items: [
+          {
+            ...policy,
+            kind_rules: [
+              { kind: "email", enabled: true, style: "natural", notify: "no" },
+            ],
+          },
+        ],
+        next_cursor: null,
+      }),
+    ).toThrow("expected a boolean");
+
     expect(() =>
       parsePrivacyPolicyPage({
         items: [
@@ -291,9 +329,56 @@ describe("privacy-policy IPC contract", () => {
     ).toThrow("unknown allowlist type");
   });
 
+  it("compares kind rules and restore flags against the defaults", () => {
+    const parsed = parsePrivacyPolicyRecord({
+      policy,
+      etag: `"sha256:${"a".repeat(64)}"`,
+    });
+    expect(privacyKindRulesAreDefault(parsed.policy.kind_rules)).toBe(true);
+    expect(
+      privacyKindRulesAreDefault(
+        defaultPrivacyKindRules().map((rule) =>
+          rule.kind === "email" ? { ...rule, style: "token" } : rule,
+        ),
+      ),
+    ).toBe(false);
+    expect(privacyKindRulesAreDefault(defaultPrivacyKindRules().slice(1))).toBe(
+      false,
+    );
+    expect(
+      privacyKindRulesAreDefault(
+        defaultPrivacyKindRules().map((rule) =>
+          rule.kind === "email" ? { ...rule, notify: false } : rule,
+        ),
+      ),
+    ).toBe(false);
+
+    expect(privacyRestoreSettingsAreDefault(parsed.policy)).toBe(true);
+    expect(
+      privacyRestoreSettingsAreDefault({
+        ...parsed.policy,
+        inspect_additional_tools: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("lists the default allowlist entries a policy no longer has", () => {
+    const defaults = defaultPrivacyAllowlistRules();
+    expect(missingDefaultPrivacyAllowlistRules([])).toEqual(defaults);
+    expect(missingDefaultPrivacyAllowlistRules(defaults)).toEqual([]);
+    expect(
+      missingDefaultPrivacyAllowlistRules([
+        { type: "domain_suffix", value: "LocalHost" },
+        { type: "literal", value: "github.com" },
+      ]),
+    ).toEqual(defaults.slice(1));
+  });
+
   it("carries kind rules, allowlist, and restore flags through a dry-run patch", () => {
     const patch = {
-      kind_rules: [{ kind: "email", enabled: true, style: "token" }] as const,
+      kind_rules: [
+        { kind: "email", enabled: true, style: "token", notify: false },
+      ] as const,
       allowlist_rules: [
         { type: "domain_suffix", value: "github.com" },
       ] as const,
@@ -323,7 +408,12 @@ describe("privacy-policy IPC contract", () => {
         sample_text: "hello",
         policy: {
           kind_rules: [
-            { kind: "common_secret", enabled: true, style: "natural" },
+            {
+              kind: "common_secret",
+              enabled: true,
+              style: "natural",
+              notify: true,
+            },
           ],
         },
       }),

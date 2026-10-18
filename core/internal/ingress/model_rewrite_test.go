@@ -20,6 +20,8 @@ func TestRewriteRequestModelJSONProtocolsPreserveUnrelatedBytes(t *testing.T) {
 		contract.ProtocolOpenAIChat,
 		contract.ProtocolOpenAICompletions,
 		contract.ProtocolAnthropicMessages,
+		contract.ProtocolOpenAIEmbeddings,
+		contract.ProtocolRerank,
 	}
 	tests := []struct {
 		name          string
@@ -194,6 +196,58 @@ func TestRewriteRequestModelGeminiPath(t *testing.T) {
 				t.Fatalf("gemini body changed: %q", body)
 			}
 		})
+	}
+}
+
+func TestRewriteRequestModelGeminiEmbeddings(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		body     string
+		wantPath string
+		wantBody string
+	}{
+		{
+			name:     "embedContent keeps its body",
+			path:     "/v1beta/models/public-embed:embedContent",
+			body:     `{"model":"models/public-embed","content":{"parts":[{"text":"hi"}]}}`,
+			wantPath: "/v1beta/models/real-embed:embedContent",
+			wantBody: `{"model":"models/public-embed","content":{"parts":[{"text":"hi"}]}}`,
+		},
+		{
+			name:     "batch rewrites each named model and adds none",
+			path:     "/v1beta/models/public-embed:batchEmbedContents",
+			body:     `{"requests":[{"model":"models/public-embed","content":{"parts":[{"text":"a"}]}},{"content":{"parts":[{"text":"b"}]}}]}`,
+			wantPath: "/v1beta/models/real-embed:batchEmbedContents",
+			wantBody: `{"requests":[{"model":"models/real-embed","content":{"parts":[{"text":"a"}]}},{"content":{"parts":[{"text":"b"}]}}]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			got, err := rewriteRequestModel(request, Request{Protocol: contract.ProtocolGoogleEmbeddings}, "real-embed", true)
+			if err != nil {
+				t.Fatalf("rewriteRequestModel: %v", err)
+			}
+			if got.URL.Path != test.wantPath {
+				t.Fatalf("Path = %q, want %q", got.URL.Path, test.wantPath)
+			}
+			body, err := io.ReadAll(got.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != test.wantBody {
+				t.Fatalf("body = %s, want %s", body, test.wantBody)
+			}
+			if got.ContentLength != int64(len(body)) {
+				t.Fatalf("ContentLength = %d, want %d", got.ContentLength, len(body))
+			}
+		})
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/public-embed:batchEmbedContents", strings.NewReader(`{"requests":[]}`))
+	if _, err := rewriteRequestModel(request, Request{Protocol: contract.ProtocolGoogleEmbeddings}, "real-embed", false); err == nil {
+		t.Fatal("batch rewrite of an unbuffered body succeeded")
 	}
 }
 

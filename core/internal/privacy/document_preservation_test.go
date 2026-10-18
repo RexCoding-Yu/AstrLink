@@ -134,6 +134,12 @@ func TestNoticePreservesExistingJSONBytes(t *testing.T) {
 			`"system" : [{"text":"__NOTICE__","type":"text"}  ], "messages":[{"content":"alice@example.com","role":"user"}]`, true,
 		},
 		{
+			// The notice follows an official client identity that opens the prompt.
+			"anthropic Claude Code identity", contract.ProtocolAnthropicMessages,
+			`"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"text":"alice@example.com","type":"text"}], "messages":[]`,
+			`"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"text":"__NOTICE__","type":"text"},{"text":"alice@example.com","type":"text"}], "messages":[]`, true,
+		},
+		{
 			"gemini blocks", contract.ProtocolGoogleGenerateContent,
 			`"systemInstruction":{"z":null,"parts":[ {"z":1.00,"text":"alice@example.com","a":"\u0061"} ],"role":"system"}, "contents":[]`,
 			`"systemInstruction":{"z":null,"parts":[{"text":"__NOTICE__"}, {"z":1.00,"text":"alice@example.com","a":"\u0061"} ],"role":"system"}, "contents":[]`, true,

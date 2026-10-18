@@ -38,6 +38,7 @@ type serviceCreateRequest struct {
 	Name                      string                  `json:"name"`
 	Kind                      *contract.ServiceKind   `json:"kind"`
 	Enabled                   json.RawMessage         `json:"enabled,omitempty"`
+	PrivacyTrusted            json.RawMessage         `json:"privacy_trusted,omitempty"`
 	Models                    json.RawMessage         `json:"models,omitempty"`
 	HTTP                      json.RawMessage         `json:"http,omitempty"`
 	Capabilities              json.RawMessage         `json:"capabilities,omitempty"`
@@ -309,6 +310,12 @@ func (handler *Handler) createService(writer http.ResponseWriter, request *http.
 		}
 		service.ResponsesWebSocketEnabled = &enabled
 	}
+	if input.PrivacyTrusted != nil {
+		if isJSONNull(input.PrivacyTrusted) || strictUnmarshal(input.PrivacyTrusted, &service.PrivacyTrusted) != nil {
+			writeError(writer, http.StatusUnprocessableEntity, "invalid_service", "privacy_trusted must be a boolean")
+			return
+		}
+	}
 	if input.ModelRedirects != nil {
 		redirects, err := decodeServiceModelRedirects(input.ModelRedirects)
 		if err != nil {
@@ -502,6 +509,13 @@ func (handler *Handler) serviceAuthorization(writer http.ResponseWriter, request
 					http.StatusServiceUnavailable,
 					accountauth.ErrCodeCallbackPortsBusy,
 					"OAuth callback ports 1455 and 1457 are unavailable, and Device Code login could not start",
+				)
+			case errors.Is(err, accountauth.ErrLoopbackCallbackUnavailable):
+				writeError(
+					writer,
+					http.StatusUnprocessableEntity,
+					accountauth.ErrCodeLoopbackCallbackUnavailable,
+					"this sign-in finishes in a browser on the machine running AstrLink, which the server edition does not support yet",
 				)
 			case errors.Is(err, accountauth.ErrDeviceCodeUnavailable):
 				writeError(
@@ -856,9 +870,10 @@ func (handler *Handler) getServiceUsage(writer http.ResponseWriter, request *htt
 		usage, err = handler.subscriptions.Usage(request.Context(), id)
 	case handler.codingPlans != nil && codingplan.Supports(record.Service.Kind):
 		if refresh {
-			handler.codingPlans.ForgetUsage(id)
+			usage, err = handler.codingPlans.Refresh(request.Context(), record.Service)
+		} else {
+			usage, err = handler.codingPlans.Usage(request.Context(), record.Service)
 		}
-		usage, err = handler.codingPlans.Usage(request.Context(), record.Service)
 	default:
 		writeError(writer, http.StatusConflict, "service_not_subscription", "service does not support subscription usage")
 		return
@@ -947,6 +962,9 @@ func (handler *Handler) clearServiceRisk(writer http.ResponseWriter, request *ht
 		}
 		return
 	}
+	if handler.rateLimits != nil {
+		handler.rateLimits.ReleaseRateLimits(id)
+	}
 	record, err := handler.serviceStore.GetService(request.Context(), id)
 	if err != nil {
 		handler.writeStoreError(writer, err)
@@ -1001,7 +1019,13 @@ func writeServiceResetError(writer http.ResponseWriter, err error) {
 }
 
 func writeServiceUsageError(writer http.ResponseWriter, err error) {
+	var limited *codingplan.RateLimitError
 	switch {
+	case errors.As(err, &limited):
+		seconds := max(1, int((limited.RetryAfter+time.Second-1)/time.Second))
+		writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+		writeErrorDetails(writer, http.StatusTooManyRequests, "subscription_usage_rate_limited", sanitizeUsageError(err),
+			[]errorDetail{{Reason: "retry_after", RetryAfterSeconds: seconds}})
 	case errors.Is(err, subscription.ErrNotConnected):
 		writeError(writer, http.StatusConflict, "service_not_connected", "subscription service is not connected")
 	case errors.Is(err, codingplan.ErrUnsupported):
@@ -1117,7 +1141,7 @@ func applyServicePatch(
 	allowed := map[string]bool{
 		"proxy": true, "name": true, "enabled": true, "models": true, "failure_policy": true,
 		"responses_websocket_enabled": true, "capabilities": true,
-		"model_redirects": true,
+		"model_redirects": true, "privacy_trusted": true,
 	}
 	if service.Kind.IsHTTP() {
 		allowed["http"] = true
@@ -1154,6 +1178,11 @@ func applyServicePatch(
 			return service, credential, err
 		}
 		service.ResponsesWebSocketEnabled = &enabled
+	}
+	if raw, ok := patch["privacy_trusted"]; ok {
+		if err := strictUnmarshal(raw, &service.PrivacyTrusted); err != nil {
+			return service, credential, err
+		}
 	}
 	if raw, ok := patch["models"]; ok {
 		models, err := decodeServiceModels(raw)

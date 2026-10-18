@@ -13,7 +13,11 @@ import (
 // fingerprint never shipped with.
 const (
 	ClaudeUserAgentPrefix = "claude-cli/"
-	claudeCLIVersion      = "2.1.258"
+	// claudeCLIVersion and the SDK headers of DefaultClaudeIdentity were
+	// captured together from the Claude Code 2.1.296 CLI on 2026-10-12, sent
+	// to a local server. Opus 5.5 rejects Claude Code releases before 2.1.280
+	// (claude_code_version_too_old).
+	claudeCLIVersion = "2.1.296"
 	// DefaultClaudeUserAgent mirrors the Claude Code CLI. api.anthropic.com
 	// routes unknown agents (including Go's default) into a far stricter
 	// rate-limit bucket on the OAuth usage and models endpoints.
@@ -38,6 +42,11 @@ const (
 	// pins (packages/opencode/src/plugin/github-copilot/copilot.ts).
 	DefaultCopilotClientVersion = "1.18.34"
 	copilotAPIVersion           = "2026-06-01"
+
+	// DefaultDroidClientVersion is the Droid CLI release AstrLink presents to
+	// Factory's API (npm @factory/cli), with the client headers it sends.
+	DefaultDroidClientVersion = "0.237.0"
+	droidClientSurface        = "cli"
 )
 
 // ClientIdentity is one subscription client's upstream identity: its
@@ -58,11 +67,11 @@ func DefaultClaudeIdentity() ClientIdentity {
 		Version:   claudeCLIVersion,
 		Headers: map[string]string{
 			"X-Stainless-Lang":                          "js",
-			"X-Stainless-Package-Version":               "0.94.0",
+			"X-Stainless-Package-Version":               "0.128.0",
 			"X-Stainless-Os":                            stainlessOS(runtime.GOOS),
 			"X-Stainless-Arch":                          stainlessArch(runtime.GOARCH),
 			"X-Stainless-Runtime":                       "node",
-			"X-Stainless-Runtime-Version":               "v24.3.0",
+			"X-Stainless-Runtime-Version":               "v26.3.0",
 			"X-Stainless-Retry-Count":                   "0",
 			"X-Stainless-Timeout":                       "600",
 			"X-App":                                     "cli",
@@ -88,6 +97,19 @@ func DefaultCopilotIdentity() ClientIdentity {
 		UserAgent: "opencode/" + DefaultCopilotClientVersion,
 		Version:   DefaultCopilotClientVersion,
 		Headers:   map[string]string{"X-Github-Api-Version": copilotAPIVersion},
+	}
+}
+
+// DefaultDroidIdentity is the Droid CLI's identity on Factory's API: its
+// User-Agent and the client surface and version headers.
+func DefaultDroidIdentity() ClientIdentity {
+	return ClientIdentity{
+		UserAgent: "factory-cli/" + DefaultDroidClientVersion,
+		Version:   DefaultDroidClientVersion,
+		Headers: map[string]string{
+			"X-Factory-Client": droidClientSurface,
+			"X-Client-Version": DefaultDroidClientVersion,
+		},
 	}
 }
 

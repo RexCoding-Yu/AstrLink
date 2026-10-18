@@ -9,8 +9,32 @@ use core_foundation::{
     url::{CFURLRef, CFURL},
 };
 
+/// The app bundle a development build runs from. `make start` keeps the
+/// system identity development builds always had; `make dev` stages its own,
+/// so both can run at once.
 #[cfg(any(dev, test))]
-const DEV_BUNDLE_IDENTIFIER: &str = "com.astrlink.desktop.dev";
+struct DevBundle {
+    directory: &'static str,
+    identifier: &'static str,
+    name: &'static str,
+    link_scheme: &'static str,
+}
+
+#[cfg(any(dev, test))]
+const DEV_BUNDLE: DevBundle = DevBundle {
+    directory: "AstrLink Dev.app",
+    identifier: "com.astrlink.desktop.dev",
+    name: "AstrLink",
+    link_scheme: crate::instance::LINK_SCHEME,
+};
+
+#[cfg(any(dev, test))]
+const ISOLATED_BUNDLE: DevBundle = DevBundle {
+    directory: "AstrLink Isolated.app",
+    identifier: crate::instance::ISOLATED_IDENTIFIER,
+    name: crate::instance::ISOLATED_NAME,
+    link_scheme: crate::instance::ISOLATED_LINK_SCHEME,
+};
 
 #[link(name = "CoreServices", kind = "framework")]
 extern "C" {
@@ -87,7 +111,12 @@ pub fn enter_dev_bundle() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let frameworks = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
-    let bundled_executable = stage_dev_bundle(&executable, &frameworks)?;
+    let target = if crate::instance::is_isolated() {
+        &ISOLATED_BUNDLE
+    } else {
+        &DEV_BUNDLE
+    };
+    let bundled_executable = stage_dev_bundle(&executable, &frameworks, target)?;
     let bundle = bundle_for_executable(&bundled_executable).ok_or("invalid development bundle")?;
     register_bundle(bundle)?;
     Err(Command::new(bundled_executable)
@@ -97,13 +126,17 @@ pub fn enter_dev_bundle() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(any(dev, test))]
-fn stage_dev_bundle(executable: &Path, frameworks: &Path) -> std::io::Result<std::path::PathBuf> {
+fn stage_dev_bundle(
+    executable: &Path,
+    frameworks: &Path,
+    target: &DevBundle,
+) -> std::io::Result<std::path::PathBuf> {
     use std::{fs, io};
 
     let directory = executable
         .parent()
         .ok_or_else(|| io::Error::other("executable has no parent"))?;
-    let contents = directory.join("AstrLink Dev.app/Contents");
+    let contents = directory.join(target.directory).join("Contents");
     let macos = contents.join("MacOS");
     let resources = contents.join("Resources");
     fs::create_dir_all(&macos)?;
@@ -115,21 +148,24 @@ fn stage_dev_bundle(executable: &Path, frameworks: &Path) -> std::io::Result<std
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>{DEV_BUNDLE_IDENTIFIER}</string>
-<key>CFBundleName</key><string>AstrLink</string>
-<key>CFBundleDisplayName</key><string>AstrLink</string>
+<key>CFBundleIdentifier</key><string>{identifier}</string>
+<key>CFBundleName</key><string>{name}</string>
+<key>CFBundleDisplayName</key><string>{name}</string>
 <key>CFBundleExecutable</key><string>astrlink-desktop</string>
 <key>CFBundleIconFile</key><string>icon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>CFBundleURLTypes</key><array><dict>
-<key>CFBundleURLName</key><string>AstrLink</string>
-<key>CFBundleURLSchemes</key><array><string>astrlink</string></array>
+<key>CFBundleURLName</key><string>{name}</string>
+<key>CFBundleURLSchemes</key><array><string>{link_scheme}</string></array>
 </dict></array>
 <key>LSMinimumSystemVersion</key><string>13.4</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
-"#
+"#,
+        identifier = target.identifier,
+        name = target.name,
+        link_scheme = target.link_scheme,
     );
     fs::write(contents.join("Info.plist"), plist)?;
     fs::write(
@@ -201,7 +237,7 @@ mod tests {
         let frameworks = directory.join("frameworks");
         fs::create_dir_all(&frameworks).unwrap();
         fs::write(frameworks.join("runtime.dylib"), b"runtime").unwrap();
-        let bundled = stage_dev_bundle(&executable, &frameworks).unwrap();
+        let bundled = stage_dev_bundle(&executable, &frameworks, &DEV_BUNDLE).unwrap();
         assert_eq!(fs::read(&bundled).unwrap(), b"first build");
         assert!(!fs::symlink_metadata(&bundled)
             .unwrap()
@@ -229,7 +265,7 @@ mod tests {
             CFBundle::new(CFURL::from_path(contents.parent().unwrap(), true).unwrap()).unwrap();
         let info = bundle.info_dictionary();
         for (key, expected) in [
-            ("CFBundleIdentifier", DEV_BUNDLE_IDENTIFIER),
+            ("CFBundleIdentifier", DEV_BUNDLE.identifier),
             ("CFBundleDisplayName", "AstrLink"),
             ("CFBundleIconFile", "icon.icns"),
         ] {
@@ -237,7 +273,26 @@ mod tests {
             assert_eq!(value.to_string(), expected);
         }
         fs::write(&executable, b"second build").unwrap();
-        assert_eq!(stage_dev_bundle(&executable, &frameworks).unwrap(), bundled);
+        assert_eq!(
+            stage_dev_bundle(&executable, &frameworks, &DEV_BUNDLE).unwrap(),
+            bundled
+        );
+        assert_eq!(fs::read(&bundled).unwrap(), b"second build");
+
+        // `make dev` stages beside it, so both keep running.
+        let isolated = stage_dev_bundle(&executable, &frameworks, &ISOLATED_BUNDLE).unwrap();
+        assert_ne!(isolated, bundled);
+        let isolated_bundle = bundle_for_executable(&isolated).unwrap();
+        let info = CFBundle::new(CFURL::from_path(isolated_bundle, true).unwrap())
+            .unwrap()
+            .info_dictionary();
+        for (key, expected) in [
+            ("CFBundleIdentifier", crate::instance::ISOLATED_IDENTIFIER),
+            ("CFBundleDisplayName", crate::instance::ISOLATED_NAME),
+        ] {
+            let value = info.get(CFString::new(key)).downcast::<CFString>().unwrap();
+            assert_eq!(value.to_string(), expected);
+        }
         assert_eq!(fs::read(&bundled).unwrap(), b"second build");
         fs::remove_dir_all(directory).unwrap();
     }

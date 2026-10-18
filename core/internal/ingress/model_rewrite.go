@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/jsonedit"
+	"github.com/tidwall/gjson"
 )
 
 // rewriteRequestModel replaces only the model the upstream reads: the Gemini
@@ -24,15 +27,49 @@ func rewriteRequestModel(
 	switch classified.Protocol {
 	case contract.ProtocolGoogleGenerateContent:
 		return rewriteGeminiPathModel(request, upstreamModel)
+	case contract.ProtocolGoogleEmbeddings:
+		if _, err := rewriteGeminiPathModel(request, upstreamModel); err != nil {
+			return nil, err
+		}
+		return rewriteGeminiBatchModels(request, upstreamModel, replayable)
 	case contract.ProtocolOpenAIResponses,
 		contract.ProtocolOpenAIResponsesCompact,
 		contract.ProtocolOpenAIChat,
 		contract.ProtocolOpenAICompletions,
-		contract.ProtocolAnthropicMessages:
+		contract.ProtocolAnthropicMessages,
+		contract.ProtocolOpenAIEmbeddings,
+		contract.ProtocolRerank:
 		return rewriteJSONBodyModel(request, upstreamModel, replayable)
 	default:
 		return nil, fmt.Errorf("model rewrite is not supported for protocol %q", classified.Protocol)
 	}
+}
+
+// rewriteGeminiBatchModels repeats the path's model in each request of a
+// batchEmbedContents body, which names its model again per request. Only a
+// model the client wrote is replaced; none is added.
+func rewriteGeminiBatchModels(request *http.Request, upstreamModel string, replayable bool) (*http.Request, error) {
+	if !strings.HasSuffix(request.URL.Path, ":batchEmbedContents") {
+		return request, nil
+	}
+	if !replayable {
+		return nil, fmt.Errorf("model rewrite requires a fully buffered request body")
+	}
+	contents, err := io.ReadAll(request.Body)
+	if err != nil {
+		return nil, err
+	}
+	model := "models/" + upstreamModel
+	for index, item := range gjson.GetBytes(contents, "requests").Array() {
+		if item.Get("model").Type != gjson.String {
+			continue
+		}
+		if contents, err = jsonedit.Set(contents, "requests."+strconv.Itoa(index)+".model", model); err != nil {
+			return nil, err
+		}
+	}
+	replaceRecoveryRequestBody(request, contents)
+	return request, nil
 }
 
 func rewriteGeminiPathModel(request *http.Request, upstreamModel string) (*http.Request, error) {

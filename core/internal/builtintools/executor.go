@@ -48,7 +48,11 @@ type Executor struct {
 	Native  func(context.Context, contract.BuiltinTool, Object) (Object, error)
 	// Images posts to a configured provider's Images API path with that
 	// provider's own credential, proxy and header policy.
-	Images  func(ctx context.Context, config contract.BuiltinTool, path, contentType string, body io.Reader) (Object, error)
+	Images func(ctx context.Context, config contract.BuiltinTool, path, contentType string, body io.Reader) (Object, error)
+	// Search posts a standalone web search, the body Codex sends to
+	// /alpha/search, to a configured provider's own search API with that
+	// provider's credential, proxy and header policy.
+	Search  func(ctx context.Context, config contract.BuiltinTool, body Object) (Object, error)
 	Inspect func(context.Context, Object) (Object, error)
 }
 
@@ -106,6 +110,9 @@ func (executor Executor) Execute(ctx context.Context, config contract.BuiltinToo
 	}
 	if config.Backend == "upstream" {
 		return executor.native(ctx, config, call)
+	}
+	if config.Backend == "service_search" {
+		return executor.serviceSearch(ctx, config, call)
 	}
 	if call.Kind == "web_search" {
 		return executor.search(ctx, config, call)
@@ -186,14 +193,14 @@ func publicURL(raw string) bool {
 }
 
 func (executor Executor) search(ctx context.Context, config contract.BuiltinTool, call Invocation) (Result, error) {
-	if err := checkOptions(call.Options, "type search_context_size filters external_web_access user_location"); err != nil {
+	// Codex declares search_content_types for image-capable models and
+	// indexed_web_access in its indexed mode. Tavily searches the live web
+	// for every request, including Codex's default cached-only mode.
+	if err := checkOptions(call.Options, "type search_context_size filters external_web_access indexed_web_access search_content_types user_location"); err != nil {
 		return Result{}, err
 	}
 	if call.Options["user_location"] != nil {
 		return Result{}, fmt.Errorf("Tavily backend does not support precise user_location")
-	}
-	if call.Options["external_web_access"] == false {
-		return Result{}, fmt.Errorf("Tavily backend does not support offline search")
 	}
 	action := String(call.Arguments["action"])
 	if action == "" {
@@ -285,6 +292,102 @@ func (executor Executor) search(ctx context.Context, config contract.BuiltinTool
 	return Result{Items: []Object{item}, Output: Text(Object{"results": records, "citation_instruction": "Cite sources using their exact URL in Markdown links."}), Sources: sources, Usage: Map(response["usage"])}, nil
 }
 
+// serviceSearch runs one search, open or find through a provider's own search
+// API. Pages are named by URL, which that API takes wherever Codex passes a
+// reference ID, so each call stands alone and no search session is kept.
+func (executor Executor) serviceSearch(ctx context.Context, config contract.BuiltinTool, call Invocation) (Result, error) {
+	if err := checkOptions(call.Options, "type search_context_size filters external_web_access indexed_web_access search_content_types user_location"); err != nil {
+		return Result{}, err
+	}
+	if executor.Search == nil {
+		return Result{}, fmt.Errorf("provider search API is unavailable")
+	}
+	action := String(call.Arguments["action"])
+	if action == "" {
+		action = "search"
+	}
+	address := String(call.Arguments["url"])
+	var commands, wireAction Object
+	switch action {
+	case "search":
+		query := String(call.Arguments["query"])
+		if strings.TrimSpace(query) == "" {
+			return Result{}, fmt.Errorf("search query is required")
+		}
+		commands = Object{"search_query": []any{Object{"q": query}}}
+		wireAction = Object{"type": "search", "query": query}
+	case "open", "find":
+		if !publicURL(address) {
+			return Result{}, fmt.Errorf("a public HTTP(S) page URL is required")
+		}
+		commands = Object{"open": []any{Object{"ref_id": address}}}
+		wireAction = Object{"type": "open_page", "url": address}
+		if action == "find" {
+			pattern := String(call.Arguments["pattern"])
+			if pattern == "" {
+				return Result{}, fmt.Errorf("find pattern is required")
+			}
+			commands = Object{"find": []any{Object{"ref_id": address, "pattern": pattern}}}
+			wireAction = Object{"type": "find_in_page", "url": address, "pattern": pattern}
+		}
+	default:
+		return Result{}, fmt.Errorf("unsupported search action")
+	}
+	if err := checkOptions(Map(call.Options["filters"]), "allowed_domains blocked_domains"); err != nil {
+		return Result{}, err
+	}
+	// The hosted tool's settings have the same names and values in a search
+	// request.
+	settings := Object{}
+	for _, key := range []string{"search_context_size", "filters", "user_location", "external_web_access"} {
+		if value := call.Options[key]; value != nil {
+			settings[key] = value
+		}
+	}
+	body := Object{"id": searchSessionID(), "model": config.Model, "commands": commands}
+	if len(settings) != 0 {
+		body["settings"] = settings
+	}
+	response, err := executor.Search(ctx, config, body)
+	if err != nil {
+		return Result{}, err
+	}
+	output, ok := response["output"].(string)
+	if !ok {
+		return Result{}, fmt.Errorf("search provider returned an invalid answer")
+	}
+	// The output names results by reference ID; the model opens and cites
+	// them by URL.
+	sources := []Object{}
+	references := []Object{}
+	for _, raw := range Array(response["results"]) {
+		item := Map(raw)
+		address := String(item["url"])
+		if !publicURL(address) {
+			continue
+		}
+		sources = append(sources, Object{"type": "url", "url": address, "title": String(item["title"])})
+		references = append(references, Object{"ref_id": String(item["ref_id"]), "url": address, "title": String(item["title"])})
+	}
+	if action == "search" {
+		wireAction["sources"] = sources
+	}
+	item := Object{"id": ID("ws_"), "type": "web_search_call", "status": "completed", "action": wireAction}
+	return Result{Items: []Object{item}, Output: Text(Object{"output": output, "sources": references, "citation_instruction": "Cite sources using their exact URL in Markdown links. To open or search a page, pass its URL."}), Sources: sources}, nil
+}
+
+// searchSessionID returns a random version 4 UUID, the form of the session ID
+// Codex sends with its own searches.
+func searchSessionID() string {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		panic(err)
+	}
+	data[6] = data[6]&0x0f | 0x40
+	data[8] = data[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", data[0:4], data[4:6], data[6:8], data[8:10], data[10:16])
+}
+
 func (executor Executor) image(ctx context.Context, config contract.BuiltinTool, call Invocation) (Result, error) {
 	if err := checkOptions(call.Options, "type model action size quality background output_format output_compression moderation partial_images input_image_mask"); err != nil {
 		return Result{}, err
@@ -355,26 +458,24 @@ func (executor Executor) image(ctx context.Context, config contract.BuiltinTool,
 	for _, raw := range Array(response["data"]) {
 		entry := Map(raw)
 		encoded := String(entry["b64_json"])
-		format := String(payload["output_format"])
-		if format == "" {
-			format = "png"
-		}
 		if encoded == "" && entry["url"] != nil {
-			var mime string
-			encoded, mime, err = relaykitbridge.ResolveImageData(ctx, String(entry["url"]))
-			format = strings.TrimPrefix(mime, "image/")
+			encoded, _, err = relaykitbridge.ResolveImageData(ctx, String(entry["url"]))
 		}
 		if err != nil {
 			return Result{}, fmt.Errorf("could not load generated image")
 		}
 		data, decodeErr := base64.StdEncoding.DecodeString(encoded)
-		if decodeErr != nil || len(data) == 0 || len(data) > MaxImageBytes || !strings.HasPrefix(http.DetectContentType(data), "image/") {
+		mime := http.DetectContentType(data)
+		if decodeErr != nil || len(data) == 0 || len(data) > MaxImageBytes || !strings.HasPrefix(mime, "image/") {
 			return Result{}, fmt.Errorf("invalid or oversized generated image")
 		}
+		// The bytes decide the format: MiniMax, for one, answers with JPEG
+		// whatever output_format asked for.
+		format := strings.TrimPrefix(mime, "image/")
 		id := ID("ig_")
 		item := Object{"id": id, "type": "image_generation_call", "status": "completed", "result": encoded, "output_format": format, "revised_prompt": entry["revised_prompt"]}
 		result.Items = append(result.Items, item)
-		result.Images = append(result.Images, "data:image/"+format+";base64,"+encoded)
+		result.Images = append(result.Images, "data:"+mime+";base64,"+encoded)
 	}
 	if len(result.Items) == 0 {
 		return Result{}, fmt.Errorf("image backend returned no image")

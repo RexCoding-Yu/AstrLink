@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { downloadWithRetry } from "./download-with-retry.mjs";
 import { stageWindowsVcRuntime } from "./stage-windows-vc-runtime.mjs";
 
 const onnxRuntimeVersion = "1.23.2";
@@ -137,13 +138,10 @@ async function stageOnnxRuntimeNotices() {
       const url =
         `https://raw.githubusercontent.com/microsoft/onnxruntime/` +
         `v${onnxRuntimeVersion}/${notice.source}`;
-      const response = await fetch(url, { redirect: "follow" });
-      if (!response.ok) {
-        throw new Error(
-          `Unable to download pinned ONNX Runtime notice: HTTP ${response.status}`,
-        );
-      }
-      const bytes = Buffer.from(await response.arrayBuffer());
+      const bytes = await downloadWithRetry(
+        url,
+        `pinned ONNX Runtime ${notice.source}`,
+      );
       if (bytes.byteLength !== notice.size || sha256(bytes) !== notice.sha256) {
         throw new Error(
           `Pinned ONNX Runtime ${notice.source} failed integrity verification.`,
@@ -194,13 +192,10 @@ async function stageMacOSRuntime() {
     const url =
       `https://github.com/microsoft/onnxruntime/releases/download/` +
       `v${onnxRuntimeVersion}/${asset.archive}`;
-    const response = await fetch(url, { redirect: "follow" });
-    if (!response.ok) {
-      throw new Error(
-        `Unable to download pinned ONNX Runtime ${onnxRuntimeVersion}: HTTP ${response.status}`,
-      );
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
+    const bytes = await downloadWithRetry(
+      url,
+      `pinned ONNX Runtime ${onnxRuntimeVersion}`,
+    );
     if (bytes.byteLength !== asset.size || sha256(bytes) !== asset.sha256) {
       throw new Error(
         `Pinned ONNX Runtime ${onnxRuntimeVersion} archive failed integrity verification.`,
@@ -271,13 +266,10 @@ async function stageLinuxRuntime() {
     const url =
       `https://github.com/microsoft/onnxruntime/releases/download/` +
       `v${onnxRuntimeVersion}/${asset.archive}`;
-    const response = await fetch(url, { redirect: "follow" });
-    if (!response.ok) {
-      throw new Error(
-        `Unable to download pinned ONNX Runtime ${onnxRuntimeVersion}: HTTP ${response.status}`,
-      );
-    }
-    const bytes = Buffer.from(await response.arrayBuffer());
+    const bytes = await downloadWithRetry(
+      url,
+      `pinned ONNX Runtime ${onnxRuntimeVersion}`,
+    );
     if (bytes.byteLength !== asset.size || sha256(bytes) !== asset.sha256) {
       throw new Error(
         `Pinned ONNX Runtime ${onnxRuntimeVersion} archive failed integrity verification.`,

@@ -104,6 +104,18 @@ describe("animated icon interaction", () => {
     expect(controls.start).toHaveBeenLastCalledWith("animate");
   });
 
+  it("returns a standalone icon to rest on leave even after a click focuses it", async () => {
+    await act(async () => root.render(<Icon />));
+    const svg = container.querySelector("svg")!;
+    await act(async () => svg.dispatchEvent(new MouseEvent("mouseenter")));
+    expect(controls.start).toHaveBeenLastCalledWith("animate");
+    await act(async () => {
+      svg.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      svg.dispatchEvent(new MouseEvent("mouseleave"));
+    });
+    expect(controls.start).toHaveBeenLastCalledWith("normal");
+  });
+
   it.each(["disabled", "aria-disabled"])(
     "does not animate a %s control",
     async (attribute) => {

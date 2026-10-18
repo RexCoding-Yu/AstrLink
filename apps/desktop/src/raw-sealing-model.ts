@@ -297,13 +297,3 @@ export function passwordIsShort(password: string): boolean {
   const length = passwordLength(password);
   return length > 0 && length < SUGGESTED_PASSWORD_LENGTH;
 }
-
-/**
- * The Control API error code inside a host error such as
- * `POST … returned 409 Conflict: {"error":{"code":"…"}}`.
- */
-export function controlErrorCode(error: unknown): string | null {
-  const message = error instanceof Error ? error.message : String(error);
-  const match = /"code"\s*:\s*"([a-z0-9_]{1,64})"/.exec(message);
-  return match ? match[1] : null;
-}

@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/builtintools"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
+	"github.com/QuantumNous/astrlink/core/internal/providerapi"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
 )
 
@@ -82,19 +83,7 @@ func (handler *Handler) tryBuiltinTools(writer http.ResponseWriter, request *htt
 	}, Binding: func() (string, string) { return string(mainMode.Target), mainMode.Model }, Store: &handler.builtinStates, Executor: handler.builtinExecutor(request, classified), Model: func(ctx context.Context, body builtintools.Object) (builtintools.Object, error) {
 		return handler.builtinModel(ctx, request, body, mainMode)
 	}, Observe: func(kind string, config contract.BuiltinTool, started time.Time, result builtintools.Result, err error) {
-		status := contract.RequestStatusSucceeded
-		if err != nil {
-			status = contract.RequestStatusFailed
-		}
-		summary := fmt.Sprintf("%s · %s %s · %d ms", kind, config.Backend, config.ServiceID, time.Since(started).Milliseconds())
-		if result.Usage != nil {
-			summary += " · usage " + builtintools.Text(result.Usage)
-		}
-		if err != nil {
-			summary += " · " + err.Error()
-		}
-		ended := time.Now().UTC()
-		session.events = append(session.events, contract.RequestEvent{Kind: contract.RequestEventUpstream, StartedAt: started.UTC(), EndedAt: &ended, Status: status, Summary: sanitizeSummary(summary), AttemptIndex: session.attemptIndex})
+		session.noteBuiltinTool(kind, config, started, result, err)
 		if err != nil {
 			session.noteFailed(errorSummaryFromInference("builtin_tool_failed", err.Error(), false))
 		}
@@ -115,18 +104,38 @@ func (handler *Handler) tryBuiltinTools(writer http.ResponseWriter, request *htt
 	return true
 }
 
+// noteBuiltinTool records one built-in tool execution as an upstream event.
+func (session *recordSession) noteBuiltinTool(kind string, config contract.BuiltinTool, started time.Time, result builtintools.Result, err error) {
+	if session == nil {
+		return
+	}
+	status := contract.RequestStatusSucceeded
+	if err != nil {
+		status = contract.RequestStatusFailed
+	}
+	summary := fmt.Sprintf("%s · %s %s · %d ms", kind, config.Backend, config.ServiceID, time.Since(started).Milliseconds())
+	if result.Usage != nil {
+		summary += " · usage " + builtintools.Text(result.Usage)
+	}
+	if err != nil {
+		summary += " · " + err.Error()
+	}
+	ended := time.Now().UTC()
+	session.events = append(session.events, contract.RequestEvent{Kind: contract.RequestEventUpstream, StartedAt: started.UTC(), EndedAt: &ended, Status: status, Summary: sanitizeSummary(summary), AttemptIndex: session.attemptIndex})
+}
+
 func (handler *Handler) builtinExecutor(request *http.Request, classified Request) builtintools.Executor {
 	return builtintools.Executor{Secrets: handler.proxyCredentials, Native: func(ctx context.Context, config contract.BuiltinTool, body builtintools.Object) (builtintools.Object, error) {
 		shared, _ := ctx.Value(builtinTestSessionKey{}).(*recordSession)
 		return handler.builtinModel(ctx, request, body, &builtinInternal{Target: config.ServiceID, Native: true, SharedSession: shared})
-	}, Images: handler.builtinServiceImages, Inspect: func(ctx context.Context, args builtintools.Object) (builtintools.Object, error) {
+	}, Images: handler.builtinServiceImages, Search: handler.builtinServiceSearch, Inspect: func(ctx context.Context, args builtintools.Object) (builtintools.Object, error) {
 		body := builtintools.Text(builtintools.Object{"input": builtintools.Text(args), "model": classified.Model})
 		inspect := request.Clone(ctx)
 		inspect.Body = io.NopCloser(strings.NewReader(body))
 		inspect.GetBody = nil
 		inspect.ContentLength = int64(len(body))
 		capture := &builtinCapture{header: make(http.Header)}
-		finish, _, err := handler.applyPrivacy(capture, inspect, classified, "")
+		finish, _, err := handler.applyPrivacy(capture, inspect, classified, contract.Service{})
 		defer finish()
 		if err != nil {
 			return nil, fmt.Errorf("tool arguments blocked by privacy policy")
@@ -193,9 +202,10 @@ func (handler *Handler) builtinModel(ctx context.Context, original *http.Request
 }
 
 // builtinServiceImages sends one Images API request to the configured
-// provider. It shares the provider's credential, proxy and gateway-header
-// stripping with ordinary forwarding, but never retries or fails over: a lost
-// response must not cause a second billed image.
+// provider, converted to image_generation for MiniMax. It shares the
+// provider's credential, proxy and gateway-header stripping with ordinary
+// forwarding, but never retries or fails over: a lost response must not cause
+// a second billed image.
 func (handler *Handler) builtinServiceImages(ctx context.Context, config contract.BuiltinTool, path, contentType string, body io.Reader) (builtintools.Object, error) {
 	resolver, ok := handler.resolver.(endpoint.ServiceResolver)
 	if !ok {
@@ -206,7 +216,7 @@ func (handler *Handler) builtinServiceImages(ctx context.Context, config contrac
 		return nil, fmt.Errorf("image provider is unavailable or disabled")
 	}
 	if !contract.BuiltinImagesServiceKind(candidate.Service.Kind) {
-		return nil, fmt.Errorf("image provider does not offer an OpenAI Images API")
+		return nil, fmt.Errorf("image provider does not offer an image generation API")
 	}
 	authorization, err := candidate.AuthorizationEndpoint()
 	if err != nil {
@@ -215,6 +225,17 @@ func (handler *Handler) builtinServiceImages(ctx context.Context, config contrac
 	baseURL, err := url.Parse(candidate.EffectiveBaseURL())
 	if err != nil {
 		return nil, fmt.Errorf("image provider configuration is invalid")
+	}
+	minimax := minimaxImageKind(candidate.Service.Kind)
+	if minimax {
+		data, err := minimaxImageRequest(path, contentType, body)
+		if err != nil {
+			return nil, err
+		}
+		path, contentType, body = "/image_generation", "application/json", bytes.NewReader(data)
+		// MiniMax serves images beside Chat under /v1, whichever of its
+		// documented roots the provider was saved with.
+		baseURL = providerapi.BaseURL(candidate.Service.Kind, contract.ProtocolOpenAIChat, baseURL)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/v1"+path, body)
 	if err != nil {
@@ -247,11 +268,90 @@ func (handler *Handler) builtinServiceImages(ctx context.Context, config contrac
 	if capture.status < 200 || capture.status >= 300 {
 		return nil, fmt.Errorf("image provider returned HTTP %d", capture.status)
 	}
+	if minimax {
+		return minimaxImageResponse(capture.buffer)
+	}
 	var response builtintools.Object
 	if json.Unmarshal(capture.buffer, &response) != nil || response == nil {
 		return nil, fmt.Errorf("invalid image provider response")
 	}
 	return response, nil
+}
+
+// builtinToolService is the provider a configured built-in tool backend sends
+// to, whose privacy trust then applies. An external backend is no provider,
+// and a provider that cannot be resolved is not trusted.
+func (handler *Handler) builtinToolService(ctx context.Context, config contract.BuiltinTool) contract.Service {
+	service := contract.Service{ID: config.ServiceID}
+	if config.ServiceID == "" || config.Backend == "external" {
+		return service
+	}
+	resolver, ok := handler.resolver.(endpoint.ServiceResolver)
+	if !ok {
+		return service
+	}
+	candidate, err := resolver.ResolveService(ctx, config.ServiceID)
+	if err != nil {
+		return service
+	}
+	return candidate.CanonicalService()
+}
+
+// searchService resolves a provider configured to answer web searches with
+// its own search API.
+func (handler *Handler) searchService(ctx context.Context, id contract.ServiceID) (endpoint.Resolved, error) {
+	resolver, ok := handler.resolver.(endpoint.ServiceResolver)
+	if !ok {
+		return endpoint.Resolved{}, fmt.Errorf("provider lookup is unavailable")
+	}
+	candidate, err := resolver.ResolveService(ctx, id)
+	if err != nil {
+		return endpoint.Resolved{}, fmt.Errorf("search provider is unavailable or disabled")
+	}
+	if !contract.BuiltinSearchServiceKind(candidate.CanonicalService().Kind) {
+		return endpoint.Resolved{}, fmt.Errorf("search provider does not offer a search API")
+	}
+	return candidate, nil
+}
+
+// builtinServiceSearch posts a search to a configured provider's own search
+// API the way Codex's own search reaches it, with the provider's shared client
+// identity.
+func (handler *Handler) builtinServiceSearch(ctx context.Context, config contract.BuiltinTool, body builtintools.Object) (builtintools.Object, error) {
+	candidate, err := handler.searchService(ctx, config.ServiceID)
+	if err != nil {
+		return nil, err
+	}
+	data := []byte(builtintools.Text(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/v1/alpha/search", bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	// An empty value suppresses Go's default client identity.
+	request.Header.Set("User-Agent", "")
+	var answer builtintools.Object
+	err = handler.forwardCodexTool(&builtinCapture{header: make(http.Header)}, request, candidate, codexTurnBinding{}, handler.requestRoutingSettings(ctx), data, func(response *http.Response) error {
+		defer response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return fmt.Errorf("search provider returned HTTP %d", response.StatusCode)
+		}
+		data, err := readCodexToolResponse(response, maxCodexSearchResponseBytes)
+		if err != nil {
+			return err
+		}
+		if json.Unmarshal(data, &answer) != nil || answer == nil {
+			return fmt.Errorf("invalid search provider response")
+		}
+		return nil
+	})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return answer, nil
 }
 
 // builtinCapture parses bounded individual SSE frames. Large image payloads
@@ -384,6 +484,11 @@ func (handler *Handler) TestBuiltinTool(ctx context.Context, kind string, config
 	classified := Request{Protocol: contract.ProtocolOpenAIResponses, Model: config.Model, InputPreview: "Builtin tool test · " + kind}
 	session := handler.startRecordSession(request, classified)
 	session.addEvent(contract.RequestEventAccepted, contract.RequestStatusPending, "builtin tool test · "+kind)
+	if config.Backend == "service_images" || config.Backend == "service_search" {
+		// The provider's own API is called directly, never through
+		// routing, so the record names the tested provider here.
+		session.noteAttemptedService(config.ServiceID)
+	}
 	session.persistPending(ctx, handler.requestRecords, handler.recordLogger)
 	defer func() {
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)

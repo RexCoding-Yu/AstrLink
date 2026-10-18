@@ -36,6 +36,9 @@ func (store *Store) GetRoutingSettings(ctx context.Context) (contract.RoutingSet
 	if err := store.db.QueryRowContext(ctx, `SELECT document_json FROM routing_settings WHERE id = 1`).Scan(&document); err != nil {
 		return settings, err
 	}
+	// Keys the document lacks keep their defaults: a document saved before the
+	// adaptive ranges loads the everyday preset and the custom range low
+	// through max.
 	if err := json.Unmarshal([]byte(document), &settings); err != nil {
 		return settings, fmt.Errorf("%w: routing settings", storage.ErrInvalidRecord)
 	}
@@ -46,6 +49,15 @@ func (store *Store) GetRoutingSettings(ctx context.Context) (contract.RoutingSet
 	}
 	if settings.ModelRoutingGroups == nil {
 		settings.ModelRoutingGroups = []contract.ModelRoutingGroup{}
+	}
+	// Builds made before the reasoning modes got their current names saved
+	// passthrough as follow and adaptive as auto. They load under the current
+	// names, which the next save writes; a PATCH accepts only the current names.
+	switch settings.ReasoningMode {
+	case "follow":
+		settings.ReasoningMode = contract.ReasoningModePassthrough
+	case "auto":
+		settings.ReasoningMode = contract.ReasoningModeAdaptive
 	}
 	if err := settings.ValidateWithDimensions(store.routingSettingsDimensions(ctx)); err != nil {
 		return settings, fmt.Errorf("%w: routing settings: %v", storage.ErrInvalidRecord, err)

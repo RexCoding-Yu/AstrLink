@@ -15,6 +15,7 @@ import {
   formatCacheHitPercent,
   isUsageRangePreset,
   localDayKey,
+  localDayWindow,
   mergeCatalogServiceUsage,
   modelUsageLabel,
   resolveUsageWindow,
@@ -177,6 +178,19 @@ describe("usage range windows", () => {
     expect(localDayKey(start)).toBe("2026-07-25");
     expect(start.getHours()).toBe(0);
     expect(start.getMinutes()).toBe(0);
+  });
+
+  it("covers today from local midnight to the next", () => {
+    const now = new Date(2026, 6, 25, 23, 59, 59);
+    const window = localDayWindow(now);
+    const from = new Date(window.from);
+    const to = new Date(window.to);
+    expect(localDayKey(from)).toBe("2026-07-25");
+    expect(localDayKey(to)).toBe("2026-07-26");
+    expect([from.getHours(), from.getMinutes()]).toEqual([0, 0]);
+    expect([to.getHours(), to.getMinutes()]).toEqual([0, 0]);
+    expect(from.getTime()).toBeLessThanOrEqual(now.getTime());
+    expect(now.getTime()).toBeLessThan(to.getTime());
   });
 
   it("pads an empty summary with one zero bucket per window day", () => {

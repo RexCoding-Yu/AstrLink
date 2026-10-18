@@ -27,7 +27,7 @@ export { default as MistralColor } from "@lobehub/icons/es/Mistral/components/Co
 export { default as OpenAIMono } from "@lobehub/icons/es/OpenAI/components/Mono";
 export { default as OpenCodeMono } from "@lobehub/icons/es/OpenCode/components/Mono";
 export { default as OpenClawColor } from "@lobehub/icons/es/OpenClaw/components/Color";
-export { default as PiMono } from "@lobehub/icons/es/Pi/components/Mono";
+export { PiColor } from "./PiColor";
 export { default as QwenColor } from "@lobehub/icons/es/Qwen/components/Color";
 export { default as RooCodeMono } from "@lobehub/icons/es/RooCode/components/Mono";
 export { default as StepfunMono } from "@lobehub/icons/es/Stepfun/components/Mono";

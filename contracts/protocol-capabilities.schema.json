@@ -16,7 +16,7 @@
     },
     "protocols": {
       "type": "array",
-      "minItems": 8,
+      "minItems": 11,
       "items": {
         "$ref": "#/$defs/ProtocolSummary"
       },
@@ -74,9 +74,12 @@
         "openai.chat",
         "openai.completions",
         "openai.models",
-        "google.models"
+        "google.models",
+        "openai.embeddings",
+        "google.embeddings",
+        "rerank"
       ],
-      "description": "Required Alpha text and model-discovery protocol IDs. openai.models covers /v1/models and /v1beta/openai/models; google.models covers native Gemini model discovery."
+      "description": "Required Alpha text, model-discovery, embedding and rerank protocol IDs. openai.models covers /v1/models and /v1beta/openai/models; google.models covers native Gemini model discovery. openai.embeddings is /v1/embeddings, google.embeddings is Gemini embedContent and batchEmbedContents, and rerank is /v1/rerank."
     },
     "ProtocolPhase": {
       "type": "string",
@@ -294,6 +297,7 @@
         "doubao",
         "xai",
         "newapi",
+        "magpie",
         "openai",
         "anthropic",
         "gemini",
@@ -625,6 +629,27 @@
               },
               "minContains": 1,
               "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/ProtocolWithIdOpenaiEmbeddings"
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/ProtocolWithIdGoogleEmbeddings"
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/ProtocolWithIdRerank"
+              },
+              "minContains": 1,
+              "maxContains": 1
             }
           ]
         }
@@ -683,6 +708,15 @@
     },
     "ProtocolWithIdGoogleModels": {
       "$ref": "#/$defs/ProtocolIdConstraintGoogleModels"
+    },
+    "ProtocolWithIdOpenaiEmbeddings": {
+      "$ref": "#/$defs/ProtocolIdConstraintOpenaiEmbeddings"
+    },
+    "ProtocolWithIdGoogleEmbeddings": {
+      "$ref": "#/$defs/ProtocolIdConstraintGoogleEmbeddings"
+    },
+    "ProtocolWithIdRerank": {
+      "$ref": "#/$defs/ProtocolIdConstraintRerank"
     },
     "ProtocolIdConstraintOpenaiResponses": {
       "type": "object",
@@ -745,6 +779,30 @@
       "required": ["id", "phase"],
       "properties": {
         "id": { "const": "google.models" },
+        "phase": { "const": "alpha" }
+      }
+    },
+    "ProtocolIdConstraintOpenaiEmbeddings": {
+      "type": "object",
+      "required": ["id", "phase"],
+      "properties": {
+        "id": { "const": "openai.embeddings" },
+        "phase": { "const": "alpha" }
+      }
+    },
+    "ProtocolIdConstraintGoogleEmbeddings": {
+      "type": "object",
+      "required": ["id", "phase"],
+      "properties": {
+        "id": { "const": "google.embeddings" },
+        "phase": { "const": "alpha" }
+      }
+    },
+    "ProtocolIdConstraintRerank": {
+      "type": "object",
+      "required": ["id", "phase"],
+      "properties": {
+        "id": { "const": "rerank" },
         "phase": { "const": "alpha" }
       }
     },

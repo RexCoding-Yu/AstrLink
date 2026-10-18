@@ -186,9 +186,9 @@ type recordSession struct {
 	// routingSettings is the request's single settings read; nil when the
 	// store has none or the read failed.
 	routingSettings *contract.RoutingSettings
-	// privacy is the one request-level privacy preflight plan; execution and
-	// discovery reuse its outcome and redactions instead of re-inspecting.
-	privacy               *privacyPlan
+	// sentReasoningEffort is the level the current attempt sent when the
+	// reasoning settings changed the client's; nil keeps the client's level.
+	sentReasoningEffort   *string
 	pendingAttempt        *pendingAttemptRecord
 	recovery              *contract.RequestRecovery
 	modelRedirect         *contract.RequestModelRedirect
@@ -205,7 +205,10 @@ type recordSession struct {
 	upstreamHTTPStatus    int
 	hasUpstreamHTTPStatus bool
 	endpointID            *contract.ServiceID
-	plan                  *contract.ExecutionPlan
+	// codexOfficial is set when the current attempt forwarded a Codex
+	// subscription request with the Codex client's own identity.
+	codexOfficial bool
+	plan          *contract.ExecutionPlan
 	// conversionDiagnostics is what the current attempt's local protocol
 	// conversion dropped or rewrote, request side first.
 	conversionDiagnostics []contract.ConversionDiagnostic
@@ -215,10 +218,14 @@ type recordSession struct {
 	// privacyGated is set when a privacy filter is configured, so the client
 	// body may not be shared before a decision (plan §5.11.3).
 	privacyGated bool
+	// privacyTrusted is set while the current attempt goes uninspected to a
+	// trusted provider, so its upstream body holds the client's own values.
+	privacyTrusted bool
 	// privacyDecision is the most severe decision any attempt reached; empty
 	// until one inspection decides.
 	privacyDecision contract.PrivacyDecision
 	privacyFindings []contract.PrivacyFinding
+	privacyIgnored  []contract.PrivacyIgnored
 	// requestExposure is the label of the stored client body; empty until
 	// it is stored.
 	requestExposure storage.AuditExposure
@@ -538,7 +545,7 @@ func (session *recordSession) recordSnapshot(
 		Status:             session.status,
 		InputProtocol:      session.classified.Protocol,
 		RequestedModel:     requestedModel,
-		ReasoningEffort:    session.classified.ReasoningEffort,
+		ReasoningEffort:    session.reasoningEffort(),
 		Streaming:          session.classified.Streaming,
 		ServiceID:          session.endpointID,
 		LocalAccessTokenID: session.accessTokenID,
@@ -551,6 +558,7 @@ func (session *recordSession) recordSnapshot(
 		Audit:              session.liveAuditSummary(),
 		PrivacyRestore:     session.privacyRestore,
 		PrivacyFindings:    append([]contract.PrivacyFinding(nil), session.privacyFindings...),
+		PrivacyIgnored:     append([]contract.PrivacyIgnored(nil), session.privacyIgnored...),
 		Events:             append([]contract.RequestEvent(nil), session.events...),
 	}
 	record.ConversionDiagnostics = slices.Clone(session.conversionDiagnostics)
@@ -729,6 +737,65 @@ func (session *recordSession) noteSelected(candidate endpoint.Resolved, plan con
 	session.plan = &planCopy
 }
 
+// gatewayReasoningDiagnostic is the request diagnostic that explains what
+// the reasoning settings did to an attempt.
+const gatewayReasoningDiagnostic = "gateway_reasoning"
+
+// noteGatewayReasoning records what the reasoning settings did to the current
+// network attempt: the level it sent when they changed the client's, and the
+// diagnostic that explains the decision.
+func (session *recordSession) noteGatewayReasoning(reasoning gatewayReasoning) {
+	if session == nil {
+		return
+	}
+	session.sentReasoningEffort = nil
+	if level := reasoning.effort; level != "" {
+		session.sentReasoningEffort = &level
+	}
+	if reasoning.diagnostic != "" {
+		session.noteConversionDiagnostics(contract.ConversionDiagnosticPhaseRequest, []relaykitbridge.ConversionDiagnostic{{
+			Code: gatewayReasoningDiagnostic, Path: "reasoning", Message: reasoning.diagnostic, Severity: string(contract.ConversionDiagnosticWarning),
+		}})
+	}
+}
+
+// addImageCompressionEvent records what image compression did to the
+// attempt beginNetworkAttempt opens. Compression ran while the attempt was
+// prepared, so the phase keeps its own times and lands ahead of the route
+// event, which is stamped when the request leaves.
+func (session *recordSession) addImageCompressionEvent(result imageCompressionResult) {
+	summary := result.summary()
+	if summary == "" {
+		return
+	}
+	ended := result.endedAt
+	session.events = append(session.events, contract.RequestEvent{
+		Kind:         contract.RequestEventImageCompression,
+		StartedAt:    result.startedAt,
+		EndedAt:      &ended,
+		Status:       contract.RequestStatusSucceeded,
+		Summary:      sanitizeSummary(summary),
+		AttemptIndex: session.attemptIndex,
+	})
+}
+
+// reasoningEffort is the level the record shows: the one the attempt sent.
+func (session *recordSession) reasoningEffort() *string {
+	if session.sentReasoningEffort != nil {
+		level := *session.sentReasoningEffort
+		return &level
+	}
+	return session.classified.ReasoningEffort
+}
+
+// noteCodexOfficial records whether the current attempt forwarded a Codex
+// subscription request with the Codex client's own identity.
+func (session *recordSession) noteCodexOfficial(official bool) {
+	if session != nil {
+		session.codexOfficial = official
+	}
+}
+
 // noteAttemptedService attributes a failure that never reached a RoundTrip to
 // the provider it was prepared for. A real network attempt already recorded on
 // the root wins, matching the failure reported to the client.
@@ -798,6 +865,7 @@ func (session *recordSession) beginNetworkAttempt(
 	ctx context.Context,
 	candidate endpoint.Resolved,
 	plan contract.ExecutionPlan,
+	images imageCompressionResult,
 	store RequestRecordStore,
 	logf func(string, ...any),
 ) {
@@ -810,6 +878,7 @@ func (session *recordSession) beginNetworkAttempt(
 	session.networkAttemptOpen = true
 	session.upstreamScanner = newUsageScanner(plan.UpstreamProtocol, session.classified.Streaming)
 	session.noteSelected(candidate, plan)
+	session.addImageCompressionEvent(images)
 	serviceName := string(candidate.Service.ID)
 	session.addEvent(contract.RequestEventRouted, contract.RequestStatusSucceeded, string(plan.Type)+" · "+serviceName)
 	session.addEvent(contract.RequestEventUpstream, contract.RequestStatusPending, string(plan.UpstreamProtocol))
@@ -983,6 +1052,14 @@ func (session *recordSession) beginPrivacyAttempt() {
 	}
 	session.privacyRestore = nil
 	session.privacyBatch = ""
+	session.privacyTrusted = false
+}
+
+func (session *recordSession) notePrivacyTrusted() {
+	if session == nil {
+		return
+	}
+	session.privacyTrusted = true
 }
 
 // beginPrivacyInspection opens the privacy phase before the detector runs. A
@@ -1493,7 +1570,9 @@ func (session *recordSession) sealCapture(
 // auditExposure labels a part at capture time with who may read it without
 // proof (plan §5.11.3). Upstream parts already left the machine and meta is
 // redacted before storage; the client body follows the privacy decision and
-// the client response is withheld once real values were restored into it.
+// the client response is withheld once real values were restored into it. A
+// request sent to a trusted provider skipped the policy, so it is withheld
+// like the client body it copies.
 func (session *recordSession) auditExposure(direction storage.AuditDirection) storage.AuditExposure {
 	switch direction {
 	case storage.AuditDirectionRequest:
@@ -1514,6 +1593,11 @@ func (session *recordSession) auditExposure(direction storage.AuditDirection) st
 	case storage.AuditDirectionResponse:
 		if restore := session.privacyRestore; restore != nil &&
 			(restore.RestoredCount > 0 || restore.ToolArgumentRestoredCount > 0) {
+			return storage.AuditExposureRaw
+		}
+		return storage.AuditExposureShareable
+	case storage.AuditDirectionUpstreamRequest:
+		if session.privacyTrusted {
 			return storage.AuditExposureRaw
 		}
 		return storage.AuditExposureShareable
@@ -1603,19 +1687,42 @@ func (session *recordSession) visibleInputPreview() string {
 }
 
 // notePrivacyOutcome keeps the structured decision beside the event summary.
-// Findings are kept only for decisions that withhold the client body; their
-// paths are reduced to structure so no request value reaches the record.
-func (session *recordSession) notePrivacyOutcome(decision contract.PrivacyDecision, findings []privacy.Finding) {
+// Findings are kept for every decision that found something (warn, redact and
+// block); their paths are reduced to structure so no request value reaches the
+// record. Suppressed matches are counted for every decision, allow included,
+// so a call that found only allowlisted values is told apart from a clean one.
+// threshold is the policy's model confidence threshold, nil for regex.
+func (session *recordSession) notePrivacyOutcome(
+	decision contract.PrivacyDecision,
+	findings, suppressed []privacy.Finding,
+	threshold *float64,
+) {
 	if session == nil || !decision.Valid() {
 		return
 	}
 	if session.privacyDecision == "" || decision.Severity() > session.privacyDecision.Severity() {
 		session.privacyDecision = decision
 	}
-	if decision != contract.PrivacyDecisionRedact && decision != contract.PrivacyDecisionBlock {
-		return
+	session.privacyFindings = mergePrivacyFindings(session.privacyFindings, findings, threshold)
+	session.privacyIgnored = mergePrivacyIgnored(session.privacyIgnored, suppressed, threshold)
+}
+
+// requestID is the root record's id, which every attempt shares; empty when
+// the request is not recorded.
+func (session *recordSession) requestID() contract.RequestID {
+	if session == nil {
+		return ""
 	}
-	session.privacyFindings = mergePrivacyFindings(session.privacyFindings, findings)
+	return session.id
+}
+
+// inboundClientType is the client recognized from the request headers; empty
+// when unknown or when the request is not recorded.
+func (session *recordSession) inboundClientType() contract.ClientType {
+	if session == nil {
+		return ""
+	}
+	return session.clientType
 }
 
 // sealHTTPMeta encrypts the redacted HTTP envelope as a third blob direction.

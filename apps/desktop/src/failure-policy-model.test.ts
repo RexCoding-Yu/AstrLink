@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  adaptivePresets,
+  adaptiveRange,
   defaultFailurePolicy,
   identityLearningKeys,
   identitySettingKeys,
   identityVersionKeys,
+  maxSystemPromptLength,
   modelRedirectIssues,
   parseClientIdentities,
   parseFailurePolicy,
   parseFailoverPolicy,
   parseRoutingSettings,
+  reasoningLevels,
+  reasoningModes,
   subscriptionProtectionKeys,
   validIdentityVersion,
   type ModelRedirect,
@@ -101,6 +106,179 @@ describe("failure policies", () => {
     expect(
       validIdentityVersion("codex_identity_version", "0.144.1-alpha"),
     ).toBe(true);
+  });
+  it("parses the global prompt and thinking settings with defaults for absent keys", () => {
+    const settings = {
+      default_failure_policy: defaultFailurePolicy(),
+      allow_unmatched_failover: true,
+      strategy: "failover_only",
+      max_attempts: 6,
+    };
+    expect(parseRoutingSettings(settings)).toMatchObject({
+      system_prompt_enabled: false,
+      system_prompt_prefix: "",
+      system_prompt_suffix: "",
+      reasoning_mode: "passthrough",
+      reasoning_level: "medium",
+      adaptive_preset: "everyday",
+      adaptive_min: "low",
+      adaptive_max: "max",
+    });
+    const longest = "\u{1F600}".repeat(maxSystemPromptLength);
+    const saved = {
+      system_prompt_enabled: true,
+      system_prompt_prefix: "  Answer in English.\n\nBe brief.  ",
+      system_prompt_suffix: longest,
+    };
+    expect(parseRoutingSettings({ ...settings, ...saved })).toMatchObject(
+      saved,
+    );
+    for (const reasoning_mode of reasoningModes) {
+      expect(
+        parseRoutingSettings({ ...settings, reasoning_mode }),
+      ).toMatchObject({ reasoning_mode, reasoning_level: "medium" });
+      for (const reasoning_level of reasoningLevels) {
+        const thinking = { reasoning_mode, reasoning_level };
+        expect(
+          parseRoutingSettings({ ...settings, ...thinking }),
+        ).toMatchObject(thinking);
+      }
+    }
+    for (const reasoning_level of reasoningLevels)
+      expect(
+        parseRoutingSettings({ ...settings, reasoning_level }),
+      ).toMatchObject({ reasoning_mode: "passthrough", reasoning_level });
+    for (const invalid of [
+      { system_prompt_enabled: null },
+      { system_prompt_enabled: "true" },
+      { system_prompt_enabled: 1 },
+      { system_prompt_prefix: null },
+      { system_prompt_prefix: 1 },
+      { system_prompt_suffix: ["text"] },
+      { system_prompt_prefix: "x".repeat(maxSystemPromptLength + 1) },
+      { system_prompt_suffix: `${longest}x` },
+      { reasoning_mode: "" },
+      { reasoning_mode: null },
+      { reasoning_mode: "Fixed" },
+      { reasoning_mode: "manual" },
+      // The modes were renamed before release.
+      { reasoning_mode: "follow" },
+      { reasoning_mode: "auto" },
+      { reasoning_mode: 1 },
+      { reasoning_mode: ["adaptive"] },
+      { reasoning_level: "" },
+      { reasoning_level: null },
+      { reasoning_level: "High" },
+      { reasoning_level: "xhigh" },
+      { reasoning_level: "minimal" },
+      { reasoning_level: "none" },
+      { reasoning_level: 3 },
+      { reasoning_level: false },
+      // The single override key was replaced by the mode and level.
+      { reasoning_override: "" },
+      { reasoning_override: "high" },
+    ])
+      expect(() => parseRoutingSettings({ ...settings, ...invalid })).toThrow();
+  });
+  it("parses the adaptive range and keeps its lower end at most its upper end", () => {
+    const settings = {
+      default_failure_policy: defaultFailurePolicy(),
+      allow_unmatched_failover: true,
+      strategy: "failover_only",
+      max_attempts: 6,
+    };
+    for (const adaptive_preset of adaptivePresets)
+      expect(
+        parseRoutingSettings({ ...settings, adaptive_preset }),
+      ).toMatchObject({
+        adaptive_preset,
+        adaptive_min: "low",
+        adaptive_max: "max",
+      });
+    reasoningLevels.forEach((adaptive_min, index) => {
+      for (const adaptive_max of reasoningLevels.slice(index)) {
+        const range = { adaptive_min, adaptive_max };
+        expect(parseRoutingSettings({ ...settings, ...range })).toMatchObject(
+          range,
+        );
+      }
+    });
+    // An end the document lacks takes its default before the check.
+    expect(
+      parseRoutingSettings({ ...settings, adaptive_min: "max" }),
+    ).toMatchObject({ adaptive_min: "max", adaptive_max: "max" });
+    for (const invalid of [
+      { adaptive_preset: "" },
+      { adaptive_preset: null },
+      { adaptive_preset: "daily" },
+      { adaptive_preset: "Everyday" },
+      { adaptive_min: "xhigh" },
+      { adaptive_min: null },
+      { adaptive_max: "none" },
+      { adaptive_max: 4 },
+      { adaptive_min: "low", adaptive_max: "off" },
+      { adaptive_min: "max", adaptive_max: "high" },
+      { adaptive_max: "off" },
+      // The range is checked under every preset.
+      {
+        adaptive_preset: "research",
+        adaptive_min: "high",
+        adaptive_max: "low",
+      },
+    ])
+      expect(() => parseRoutingSettings({ ...settings, ...invalid })).toThrow();
+  });
+  it("parses image compression with the core's rules and reads its absence as off", () => {
+    const settings = {
+      default_failure_policy: defaultFailurePolicy(),
+      allow_unmatched_failover: true,
+      strategy: "failover_only",
+      max_attempts: 6,
+    };
+    expect(parseRoutingSettings(settings).image_compression).toEqual({
+      enabled: false,
+      mode: "lossless",
+      quality: 85,
+    });
+    for (const image_compression of [
+      { enabled: true, mode: "lossless", quality: 85 },
+      { enabled: true, mode: "lossy", quality: 1 },
+      { enabled: false, mode: "lossy", quality: 100 },
+    ])
+      expect(
+        parseRoutingSettings({ ...settings, image_compression })
+          .image_compression,
+      ).toEqual(image_compression);
+    for (const image_compression of [
+      null,
+      true,
+      { enabled: true, mode: "lossless" },
+      { enabled: "true", mode: "lossless", quality: 85 },
+      { enabled: true, mode: "webp", quality: 85 },
+      { enabled: true, mode: "lossy", quality: 0 },
+      { enabled: true, mode: "lossy", quality: 101 },
+      { enabled: true, mode: "lossy", quality: 80.5 },
+      { enabled: true, mode: "lossy", quality: 80, max_side: 2048 },
+    ])
+      expect(() =>
+        parseRoutingSettings({ ...settings, image_compression }),
+      ).toThrow();
+  });
+  it("names the range each preset uses", () => {
+    const custom = { adaptive_min: "off", adaptive_max: "high" } as const;
+    expect(adaptiveRange({ adaptive_preset: "everyday", ...custom })).toEqual([
+      "low",
+      "max",
+    ]);
+    expect(adaptiveRange({ adaptive_preset: "research", ...custom })).toEqual([
+      "medium",
+      "max",
+    ]);
+    expect(adaptiveRange({ adaptive_preset: "custom", ...custom })).toEqual([
+      "off",
+      "high",
+    ]);
+    expect(adaptiveRange({})).toEqual(["low", "max"]);
   });
   it("parses learned and built-in client identity versions", () => {
     const identities = {

@@ -37,10 +37,12 @@ func (action Action) Valid() bool {
 		action == ActionBlock || action == ActionWarn
 }
 
-// KindRule is the effective per-kind detection switch and placeholder shape.
+// KindRule is the effective per-kind detection switch, placeholder shape, and
+// warning notification.
 type KindRule struct {
 	Enabled bool
 	Style   contract.PlaceholderStyle
+	Notify  bool
 }
 
 // Policy is the minimal execution contract. Storage/control-plane adapters may
@@ -53,10 +55,10 @@ type Policy struct {
 	RegexSource      contract.PolicyRegexSource
 	CustomRegexRules []contract.PolicyRegexRule
 	// KindRules holds one entry per canonical kind. A nil map means every kind
-	// is enabled with token placeholders: for a privacy filter the safe default
-	// is to redact, so an unresolved or hand-built policy must never quietly
-	// forward plaintext. Once the map is present it is authoritative, and a kind
-	// omitted from it is disabled.
+	// is enabled with token placeholders and notifies: for a privacy filter the
+	// safe default is to redact, so an unresolved or hand-built policy must
+	// never quietly forward plaintext. Once the map is present it is
+	// authoritative, and a kind omitted from it is disabled.
 	KindRules            map[Kind]KindRule
 	Allowlist            []contract.PolicyAllowlistRule
 	Action               Action
@@ -73,7 +75,7 @@ type Policy struct {
 // a nil map redacts everything rather than nothing.
 func (policy Policy) KindRule(kind Kind) KindRule {
 	if policy.KindRules == nil {
-		return KindRule{Enabled: true, Style: contract.PlaceholderStyleToken}
+		return KindRule{Enabled: true, Style: contract.PlaceholderStyleToken, Notify: true}
 	}
 	rule, exists := policy.KindRules[kind]
 	if !exists {
@@ -219,6 +221,13 @@ type Result struct {
 	// (the record's preview). Like Redactions it stays in process: never
 	// stored, logged, or forwarded.
 	Protected []string
+	// Notified are the accepted findings of a warn decision whose kind rule
+	// notifies; the other accepted findings are recorded but never notify.
+	Notified []Finding
+	// Fingerprints are keyed digests of the distinct values the Notified
+	// findings cover, so the gateway can tell a value it already warned about
+	// from a new one. Like Protected they stay in process.
+	Fingerprints []Fingerprint
 	// NoticeInjected reports that a placeholder convention note was prepended
 	// to the upstream system prompt.
 	NoticeInjected bool

@@ -8,6 +8,7 @@ const chips: TrajectoryChip[] = [
   "CLIENT",
   "REDIRECT",
   "POLICY",
+  "COMPRESS",
   "ROUTE",
   "UPSTREAM",
   "RETRY",

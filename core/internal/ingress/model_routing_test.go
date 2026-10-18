@@ -465,10 +465,9 @@ func TestModelRoutingFallsBackDeterministicallyWithoutClassifier(t *testing.T) {
 	}
 }
 
-// The order counterexample for A4: with a redacting privacy policy active, the
-// classifier that feeds task_type facts must never see the raw sensitive text.
-// The sanitized request body is the only view routing may classify, and the
-// same sanitized bytes are what every failover upstream receives.
+// With a redacting privacy policy active, the classifier that feeds task_type
+// facts must never see the raw sensitive text: routing classifies only the
+// redacted view, and the provider attempt redacts the body it sends.
 func TestModelRoutingClassifierReceivesSanitizedText(t *testing.T) {
 	store := newRedirectSettingsStore()
 	store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{{

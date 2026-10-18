@@ -64,6 +64,9 @@ type Dependencies struct {
 	AuditSettings      storage.AuditSettingsStore
 	AuditKeys          storage.AuditKeyStore
 	AuditBlobs         storage.AuditBlobStore
+	// PrivacyWarnings is the feed of requests the warn action let through.
+	// Optional; without it the route is not registered.
+	PrivacyWarnings PrivacyWarningFeed
 	// RawVault guards raw audit parts. Nil until raw sealing is set up
 	// by the runtime; see RawVault.
 	RawVault RawVault
@@ -72,6 +75,9 @@ type Dependencies struct {
 	// ClientIdentities reports learned client identity versions. Optional.
 	ClientIdentities ClientIdentityReporter
 	Subscriptions    *subscription.Manager
+	// RateLimits releases gateway cooldowns when subscription risk is cleared.
+	// Supply the same resolver used by ingress. Optional.
+	RateLimits RateLimitReleaser
 	// CodingPlans reads first-party plan quotas for API-key coding plan
 	// services (Kimi, GLM, MiniMax, OpenCode Go). Optional.
 	CodingPlans   CodingPlanUsage
@@ -91,12 +97,23 @@ type Dependencies struct {
 	NewServiceID     func() (contract.ServiceID, error)
 	ConversionEngine relaykitbridge.ConversionEngine
 	Shutdown         context.CancelFunc
+	// ConsoleSessions is set by the server edition, whose web console signs
+	// in with the raw password. See ConsoleSessions.
+	ConsoleSessions ConsoleSessions
+	// Sync is the configuration engine. Optional; without it the sync surface
+	// reports 503.
+	Sync SyncManager
+}
+
+// RateLimitReleaser restores a service after an operator clears its risk.
+type RateLimitReleaser interface {
+	ReleaseRateLimits(contract.ServiceID)
 }
 
 // CodingPlanUsage is satisfied by *codingplan.Fetcher.
 type CodingPlanUsage interface {
 	Usage(context.Context, contract.Service) (contract.SubscriptionUsage, error)
-	ForgetUsage(contract.ServiceID)
+	Refresh(context.Context, contract.Service) (contract.SubscriptionUsage, error)
 }
 
 type AccessTokenManager interface {
@@ -134,6 +151,7 @@ type Handler struct {
 	policyStore        storage.PolicyStore
 	privacyModels      PrivacyModelRegistry
 	privacyFilter      privacy.Filter
+	privacyWarnings    PrivacyWarningFeed
 	policyChanged      func(contract.Policy)
 	requestRecords     storage.RequestRecordStore
 	auditSettings      storage.AuditSettingsStore
@@ -144,6 +162,7 @@ type Handler struct {
 	localData          storage.LocalDataStore
 	clientIdentities   ClientIdentityReporter
 	subscriptions      *subscription.Manager
+	rateLimits         RateLimitReleaser
 	codingPlans        CodingPlanUsage
 	serviceModels      ServiceModelProber
 	serviceTester      ServiceTester
@@ -157,6 +176,8 @@ type Handler struct {
 	privacyMu          sync.Mutex
 	shutdown           context.CancelFunc
 	observers          *observerTracker
+	consoleSessions    ConsoleSessions
+	syncManager        SyncManager
 }
 
 func New(version contract.VersionResponse) *Handler {
@@ -205,6 +226,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		policyStore:        dependencies.PolicyStore,
 		privacyModels:      dependencies.PrivacyModels,
 		privacyFilter:      dependencies.PrivacyFilter,
+		privacyWarnings:    dependencies.PrivacyWarnings,
 		policyChanged:      dependencies.PolicyChanged,
 		requestRecords:     dependencies.RequestRecords,
 		auditSettings:      dependencies.AuditSettings,
@@ -214,6 +236,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		rawGrants:          newRawGrantManager(),
 		localData:          dependencies.LocalData,
 		subscriptions:      dependencies.Subscriptions,
+		rateLimits:         dependencies.RateLimits,
 		codingPlans:        dependencies.CodingPlans,
 		serviceModels:      dependencies.ServiceModels,
 		serviceTester:      dependencies.ServiceTester,
@@ -224,6 +247,8 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		observerToken:      []byte(dependencies.ObserverToken),
 		newServiceID:       dependencies.NewServiceID,
 		shutdown:           dependencies.Shutdown,
+		consoleSessions:    dependencies.ConsoleSessions,
+		syncManager:        dependencies.Sync,
 		mux:                http.NewServeMux(),
 		observers:          newObserverTracker(),
 	}
@@ -231,6 +256,9 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 	handler.observers.active = handler.rawGrants.activeCount
 	handler.observers.passwordRequired = handler.rawPasswordRequired
 	handler.mux.HandleFunc(ObserversPath, handler.authenticated(handler.getObservers, RoleObserver))
+	if handler.privacyWarnings != nil {
+		handler.mux.HandleFunc(PrivacyWarningsPath, handler.authenticated(handler.getPrivacyWarnings, RoleObserver))
+	}
 	handler.mux.HandleFunc(PricingPath+"/", handler.authenticated(handler.pricingResource, RoleObserver))
 	handler.mux.HandleFunc(BuiltinToolsPath, handler.authenticated(handler.builtinToolResource, RoleOperator))
 	handler.mux.HandleFunc(RoutingSettingsPath, handler.authenticated(handler.routingSettingsResource, RoleObserver))
@@ -241,6 +269,11 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		handler.mux.HandleFunc(ClassifierSettingsPath, handler.authenticated(handler.classifierResource, RoleObserver))
 		handler.mux.HandleFunc(ClassifierSettingsPath+"/", handler.authenticated(handler.classifierSubResource, RoleOperator))
 	}
+	// Sync configuration names the remote and its credentials, and the
+	// passphrase unlocks the package, so the surface is operator-only. The
+	// route is always registered: without an engine it answers 503, which is
+	// how the desktop tells "no sync in this build" from "wrong path".
+	handler.mux.HandleFunc(SyncPath+"/", handler.authenticated(handler.syncResource, RoleOperator))
 	handler.mux.HandleFunc(HealthPath, handler.getOnly(func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, contract.HealthResponse{Status: "ok"})
 	}))
@@ -250,6 +283,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 	handler.mux.HandleFunc(CapabilitiesPath, handler.getOnly(func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, handler.capabilities)
 	}))
+	handler.mux.HandleFunc(NetworkAddressesPath, handler.authenticated(handler.getOnly(handler.getNetworkAddresses), RoleOperator))
 	if handler.shutdown != nil {
 		handler.mux.HandleFunc(ShutdownPath, handler.authenticated(func(writer http.ResponseWriter, request *http.Request) {
 			if request.Method != http.MethodPost {

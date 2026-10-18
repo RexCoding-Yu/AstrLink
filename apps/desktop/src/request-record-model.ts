@@ -1,5 +1,6 @@
 import { i18n } from "./i18n";
 import { modelRoutingWireContract } from "./model-routing-wire-contract";
+import { invalidData, type DataProblem } from "./ipc-data-error";
 
 export const CLIENT_TYPES = [
   "unknown",
@@ -86,6 +87,53 @@ export interface PrivacyHitCount {
   count: number;
 }
 
+/**
+ * What the privacy policy did to this request. `none` means no policy applied,
+ * so the body went upstream untouched; `trusted` means a policy applied but the
+ * body went uninspected to a provider the user trusts; `allow` means a policy
+ * inspected it and found nothing to act on. Absent on records written before
+ * decisions existed.
+ */
+export type PrivacyDecision =
+  | "none"
+  | "trusted"
+  | "allow"
+  | "warn"
+  | "redact"
+  | "block"
+  | "fail_open";
+
+/** One privacy hit, by kind and structural path only. Never a value. */
+export interface PrivacyFinding {
+  kind: string;
+  json_path: string;
+  count: number;
+  /** Absent when the regex detector decided and on older records. */
+  confidence?: PrivacyConfidence;
+}
+
+/** Local model confidence over the matches an entry counts, from 0 to 1. */
+export interface PrivacyConfidence {
+  min: number;
+  max: number;
+  /** The policy threshold the matches were judged against. */
+  threshold: number;
+}
+
+export type PrivacyIgnoreReason =
+  | "kind_disabled"
+  | "low_confidence"
+  | "allowlisted";
+
+/** Matches of one kind the policy left in the request for one reason. */
+export interface PrivacyIgnored {
+  kind: string;
+  reason: PrivacyIgnoreReason;
+  count: number;
+  /** Absent when the regex detector decided and on older records. */
+  confidence?: PrivacyConfidence;
+}
+
 export interface PrivacyRestoreSummary {
   enabled: boolean;
   mapping_count: number;
@@ -104,6 +152,7 @@ export type RequestEventKind =
   | "accepted"
   | "model_redirect"
   | "privacy"
+  | "image_compression"
   | "routed"
   | "upstream"
   | "restore"
@@ -419,6 +468,12 @@ export interface RequestRecord {
   error: RequestErrorSummary | null;
   audit: RequestAuditSummary;
   privacy_restore: PrivacyRestoreSummary | null;
+  /** Absent on historical records and while the decision is still pending. */
+  privacy_decision?: PrivacyDecision;
+  /** Present for redact and block decisions; absent otherwise. */
+  privacy_findings?: PrivacyFinding[];
+  /** Absent when nothing was left in place and on older records. */
+  privacy_ignored?: PrivacyIgnored[];
   session_id: string | null;
   previous_response_id: string | null;
   output_response_id: string | null;
@@ -467,6 +522,11 @@ export interface RequestSession {
   input_protocol: string;
   service_id: string | null;
   local_access_token_id: string | null;
+  /**
+   * Set when the warn action let at least one call through as is; absent
+   * otherwise and from a Core that predates it.
+   */
+  privacy_warned?: boolean;
 }
 
 export interface RequestSessionPage {
@@ -530,6 +590,8 @@ export type AuditWithheldReason =
   | "privacy_blocked"
   | "privacy_restored"
   | "privacy_fail_open"
+  /** Sent uninspected to a trusted provider, so it holds the original values. */
+  | "privacy_trusted"
   | "privacy_pending"
   | "privacy_unknown"
   | "raw_locked"
@@ -625,20 +687,24 @@ const statuses = new Set<RequestStatus>([
 
 const sessionStatuses = new Set<SessionStatus>([...statuses, "interrupted"]);
 
-function invalid(path: string, message: string): never {
-  throw new Error(`请求记录数据无效（${path}）：${message}`);
+function invalid(
+  path: string,
+  problem: DataProblem,
+  values?: Record<string, number>,
+): never {
+  return invalidData("requestRecord", path, problem, values);
 }
 
 function objectAt(value: unknown, path: string): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return invalid(path, "应为对象");
+    return invalid(path, "object");
   }
   return value as JsonObject;
 }
 
 function stringAt(value: unknown, path: string): string {
   if (typeof value !== "string") {
-    return invalid(path, "应为字符串");
+    return invalid(path, "string");
   }
   return value;
 }
@@ -650,7 +716,7 @@ function nullableStringAt(value: unknown, path: string): string | null {
 
 function intAt(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    return invalid(path, "应为整数");
+    return invalid(path, "integer");
   }
   return value;
 }
@@ -658,7 +724,7 @@ function intAt(value: unknown, path: string): number {
 /** A finite float: classifier confidence is a ratio, not a count. */
 function numberAt(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    return invalid(path, "应为数字");
+    return invalid(path, "number");
   }
   return value;
 }
@@ -670,7 +736,7 @@ function nullableIntAt(value: unknown, path: string): number | null {
 
 function boolAt(value: unknown, path: string): boolean {
   if (typeof value !== "boolean") {
-    return invalid(path, "应为布尔值");
+    return invalid(path, "boolean");
   }
   return value;
 }
@@ -823,10 +889,10 @@ function parsePrivacyRestore(
     visibleRestoredCount < 0 ||
     toolArgumentRestoredCount < 0
   ) {
-    return invalid(path, "计数不得为负数");
+    return invalid(path, "nonNegativeInteger");
   }
   if (visibleRestoredCount + toolArgumentRestoredCount > restoredCount) {
-    return invalid(path, "分通道还原计数不得超过总数");
+    return invalid(path, "exceedsTotal");
   }
   const parsed: PrivacyRestoreSummary = {
     enabled: boolAt(summary.enabled, `${path}.enabled`),
@@ -844,7 +910,7 @@ function parsePrivacyRestore(
 
 function parsePrivacyHits(value: unknown, path: string): PrivacyHitCount[] {
   if (!Array.isArray(value)) {
-    return invalid(path, "应为数组");
+    return invalid(path, "array");
   }
   const seen = new Set<string>();
   return value.map((item, index) => {
@@ -852,29 +918,148 @@ function parsePrivacyHits(value: unknown, path: string): PrivacyHitCount[] {
     const kind = stringAt(hit.kind, `${path}[${index}].kind`);
     const count = intAt(hit.count, `${path}[${index}].count`);
     if (!privacyHitKinds.has(kind)) {
-      return invalid(`${path}[${index}].kind`, "类别无效");
+      return invalid(`${path}[${index}].kind`, "unknownType");
     }
     if (count < 1) {
-      return invalid(`${path}[${index}].count`, "计数必须为正整数");
+      return invalid(`${path}[${index}].count`, "positiveInteger");
     }
     if (seen.has(kind)) {
-      return invalid(`${path}[${index}].kind`, "类别重复");
+      return invalid(`${path}[${index}].kind`, "duplicate");
     }
     seen.add(kind);
     return { kind, count };
   });
 }
 
+function optionalPrivacyDecision(
+  value: unknown,
+  path: string,
+): { privacy_decision?: PrivacyDecision } {
+  const decision = parsePrivacyDecision(value, `${path}.privacy_decision`);
+  return decision === null ? {} : { privacy_decision: decision };
+}
+
+function optionalPrivacyFindings(
+  value: unknown,
+  path: string,
+): { privacy_findings?: PrivacyFinding[] } {
+  const findings = parsePrivacyFindings(value, `${path}.privacy_findings`);
+  return findings.length === 0 ? {} : { privacy_findings: findings };
+}
+
+const privacyDecisions = new Set<PrivacyDecision>([
+  "none",
+  "trusted",
+  "allow",
+  "warn",
+  "redact",
+  "block",
+  "fail_open",
+]);
+
+function parsePrivacyDecision(
+  value: unknown,
+  path: string,
+): PrivacyDecision | null {
+  if (value === undefined || value === null) return null;
+  if (
+    typeof value !== "string" ||
+    !privacyDecisions.has(value as PrivacyDecision)
+  ) {
+    return invalid(path, "unknownDecision");
+  }
+  return value as PrivacyDecision;
+}
+
+function parsePrivacyFindings(value: unknown, path: string): PrivacyFinding[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return invalid(path, "array");
+  return value.map((item, index) => {
+    const finding = objectAt(item, `${path}[${index}]`);
+    const count = intAt(finding.count, `${path}[${index}].count`);
+    if (count < 1) return invalid(`${path}[${index}].count`, "positiveInteger");
+    return {
+      kind: stringAt(finding.kind, `${path}[${index}].kind`),
+      json_path: stringAt(finding.json_path, `${path}[${index}].json_path`),
+      count,
+      ...optionalPrivacyConfidence(
+        finding.confidence,
+        `${path}[${index}].confidence`,
+      ),
+    };
+  });
+}
+
+const privacyIgnoreReasons = new Set<PrivacyIgnoreReason>([
+  "kind_disabled",
+  "low_confidence",
+  "allowlisted",
+]);
+
+function optionalPrivacyIgnored(
+  value: unknown,
+  path: string,
+): { privacy_ignored?: PrivacyIgnored[] } {
+  if (value === undefined || value === null) return {};
+  if (!Array.isArray(value)) return invalid(`${path}.privacy_ignored`, "array");
+  const ignored = value.map((item, index): PrivacyIgnored => {
+    const itemPath = `${path}.privacy_ignored[${index}]`;
+    const entry = objectAt(item, itemPath);
+    const reason = stringAt(entry.reason, `${itemPath}.reason`);
+    if (!privacyIgnoreReasons.has(reason as PrivacyIgnoreReason)) {
+      return invalid(`${itemPath}.reason`, "unknownReason");
+    }
+    const count = intAt(entry.count, `${itemPath}.count`);
+    if (count < 1) return invalid(`${itemPath}.count`, "positiveInteger");
+    return {
+      kind: stringAt(entry.kind, `${itemPath}.kind`),
+      reason: reason as PrivacyIgnoreReason,
+      count,
+      ...optionalPrivacyConfidence(entry.confidence, `${itemPath}.confidence`),
+    };
+  });
+  return ignored.length === 0 ? {} : { privacy_ignored: ignored };
+}
+
+function optionalPrivacyConfidence(
+  value: unknown,
+  path: string,
+): { confidence?: PrivacyConfidence } {
+  if (value === undefined || value === null) return {};
+  const confidence = objectAt(value, path);
+  const min = probabilityAt(confidence.min, `${path}.min`);
+  const max = probabilityAt(confidence.max, `${path}.max`);
+  if (min > max) return invalid(`${path}.min`, "unexpectedValue");
+  return {
+    confidence: {
+      min,
+      max,
+      threshold: probabilityAt(confidence.threshold, `${path}.threshold`),
+    },
+  };
+}
+
+function probabilityAt(value: unknown, path: string): number {
+  if (typeof value !== "number" || !(value >= 0 && value <= 1)) {
+    return invalid(path, "unexpectedValue");
+  }
+  return value;
+}
+
 function parseRecovery(value: unknown, path: string): RequestRecovery {
   const record = objectAt(value, path);
   const delay = intAt(record.delay_ms, `${path}.delay_ms`);
-  if (delay < 0 || delay > 60000) invalid(path, "invalid recovery delay");
+  if (delay < 0 || delay > 60000)
+    invalid(`${path}.delay_ms`, "integerBetween", {
+      minimum: 0,
+      maximum: 60000,
+    });
   if (
     record.action !== undefined &&
     record.action !== "retry" &&
     record.action !== "failover"
   )
-    invalid(path, "invalid recovery action");
+    invalid(`${path}.action`, "unexpectedValue");
   const result: RequestRecovery = { delay_ms: delay };
   if (record.action) result.action = record.action as RequestRecovery["action"];
   for (const key of [
@@ -889,7 +1074,7 @@ function parseRecovery(value: unknown, path: string): RequestRecovery {
     if (record[key] !== undefined) {
       const text = stringAt(record[key], `${path}.${key}`);
       if ([...text].length > (key === "upstream_model" ? 256 : 128))
-        invalid(path, "recovery text too long");
+        invalid(`${path}.${key}`, "tooLong");
       result[key] = text;
     }
   }
@@ -905,7 +1090,7 @@ function parseModelRedirect(
   const from = stringAt(redirect.from, `${path}.from`);
   const to = stringAt(redirect.to, `${path}.to`);
   if (!from || !to || [...from].length > 256 || [...to].length > 256)
-    invalid(path, "模型重定向无效");
+    invalid(path, "badFormat");
   return { from, to };
 }
 
@@ -945,8 +1130,8 @@ function optionalRoutingDecision(
 ): { routing_decision?: RequestRoutingDecision } {
   if (value == null) return {};
   const decision = objectAt(value, path);
-  if (!Array.isArray(decision.skipped)) invalid(`${path}.skipped`, "应为数组");
-  if (decision.skipped.length > 64) invalid(`${path}.skipped`, "条目过多");
+  if (!Array.isArray(decision.skipped)) invalid(`${path}.skipped`, "array");
+  if (decision.skipped.length > 64) invalid(`${path}.skipped`, "tooMany");
   const parsed: RequestRoutingDecision = {
     skipped: decision.skipped.map((item, index) => {
       const skip = objectAt(item, `${path}.skipped[${index}]`);
@@ -954,7 +1139,7 @@ function optionalRoutingDecision(
         typeof skip.reason !== "string" ||
         !routingSkipReasons.has(skip.reason as RoutingSkipReason)
       ) {
-        invalid(`${path}.skipped[${index}].reason`, "跳过原因无效");
+        invalid(`${path}.skipped[${index}].reason`, "unknownReason");
       }
       return {
         service_id: stringAt(
@@ -970,7 +1155,7 @@ function optionalRoutingDecision(
       typeof decision.selected !== "string" ||
       !routingSelections.has(decision.selected as RoutingSelection)
     ) {
-      invalid(`${path}.selected`, "选择原因无效");
+      invalid(`${path}.selected`, "unknownReason");
     }
     parsed.selected = decision.selected as RoutingSelection;
   }
@@ -1011,18 +1196,18 @@ function optionalModelRouting(
   if (value == null) return {};
   const decision = objectAt(value, path);
   if (decision.schema_version !== modelRoutingSchemaVersion)
-    invalid(`${path}.schema_version`, "模型路由 schema 版本不支持");
+    invalid(`${path}.schema_version`, "unexpectedValue");
   if (
     typeof decision.selection_source !== "string" ||
     !modelRoutingSelectionSources.has(
       decision.selection_source as ModelRoutingSelectionSource,
     )
   )
-    invalid(`${path}.selection_source`, "选择来源无效");
+    invalid(`${path}.selection_source`, "unexpectedValue");
 
-  if (!Array.isArray(decision.fields)) invalid(`${path}.fields`, "应为数组");
+  if (!Array.isArray(decision.fields)) invalid(`${path}.fields`, "array");
   if (decision.fields.length > maxModelRoutingObservations)
-    invalid(`${path}.fields`, "条目过多");
+    invalid(`${path}.fields`, "tooMany");
   const fields = decision.fields.map((item, index) => {
     const at = `${path}.fields[${index}]`;
     const observation = objectAt(item, at);
@@ -1041,9 +1226,9 @@ function optionalModelRouting(
       );
     if (observation.candidates !== undefined) {
       if (!Array.isArray(observation.candidates))
-        invalid(`${at}.candidates`, "应为数组");
+        invalid(`${at}.candidates`, "array");
       if (observation.candidates.length > maxModelRoutingCandidates)
-        invalid(`${at}.candidates`, "条目过多");
+        invalid(`${at}.candidates`, "tooMany");
       field.candidates = observation.candidates.map((item, index) => {
         const candidateAt = `${at}.candidates[${index}]`;
         const candidate = objectAt(item, candidateAt);
@@ -1074,7 +1259,7 @@ function optionalModelRouting(
       executionValue.status as ModelRoutingExecutionState,
     )
   )
-    invalid(`${path}.execution.status`, "执行状态无效");
+    invalid(`${path}.execution.status`, "unknownStatus");
   const execution: ModelRoutingExecution = {
     status: executionValue.status as ModelRoutingExecutionState,
     attempt_count: intAt(
@@ -1091,9 +1276,9 @@ function optionalModelRouting(
   }
 
   if (!Array.isArray(decision.privacy_attempts))
-    invalid(`${path}.privacy_attempts`, "应为数组");
+    invalid(`${path}.privacy_attempts`, "array");
   if (decision.privacy_attempts.length > maxModelRoutingPrivacyAttempts)
-    invalid(`${path}.privacy_attempts`, "条目过多");
+    invalid(`${path}.privacy_attempts`, "tooMany");
   // Privacy runs per concrete attempt, so this is an array, not one decision.
   const privacyAttempts = decision.privacy_attempts.map((item, index) => {
     const at = `${path}.privacy_attempts[${index}]`;
@@ -1104,7 +1289,7 @@ function optionalModelRouting(
         attempt.decision as ModelRoutingPrivacyDecision,
       )
     )
-      invalid(`${at}.decision`, "隐私决定无效");
+      invalid(`${at}.decision`, "unknownDecision");
     const parsed: ModelRoutingPrivacyAttempt = {
       attempt_index: intAt(attempt.attempt_index, `${at}.attempt_index`),
       service_id: stringAt(attempt.service_id, `${at}.service_id`),
@@ -1176,7 +1361,8 @@ function optionalModelRouting(
   if (decision.binding_reset !== undefined) {
     const at = `${path}.binding_reset`;
     const reset = objectAt(decision.binding_reset, at);
-    if (reset.reason !== "member_removed") invalid(`${at}.reason`, "原因无效");
+    if (reset.reason !== "member_removed")
+      invalid(`${at}.reason`, "unknownReason");
     parsed.binding_reset = {
       reason: "member_removed",
       member_id: stringAt(reset.member_id, `${at}.member_id`),
@@ -1187,7 +1373,7 @@ function optionalModelRouting(
 
   // A rule-sourced decision names its rule; a default one must not pretend to.
   if (parsed.selection_source === "rule" && parsed.rule_id === undefined)
-    invalid(`${path}.rule_id`, "命中规则时必须给出规则 ID");
+    invalid(`${path}.rule_id`, "missing");
   return { model_routing: parsed };
 }
 
@@ -1221,8 +1407,8 @@ function modelRoutingRuleVerdicts(
   value: unknown,
   path: string,
 ): ModelRoutingRuleVerdict[] {
-  if (!Array.isArray(value)) invalid(path, "应为数组");
-  if (value.length > maxModelRoutingRules) invalid(path, "条目过多");
+  if (!Array.isArray(value)) invalid(path, "array");
+  if (value.length > maxModelRoutingRules) invalid(path, "tooMany");
   return value.map((item, index) => {
     const at = `${path}[${index}]`;
     const rule = objectAt(item, at);
@@ -1230,7 +1416,7 @@ function modelRoutingRuleVerdicts(
       typeof rule.state !== "string" ||
       !modelRoutingRuleStates.has(rule.state as ModelRoutingRuleState)
     )
-      invalid(`${at}.state`, "判定结果无效");
+      invalid(`${at}.state`, "unknownOutcome");
     const verdict: ModelRoutingRuleVerdict = {
       rule_id: stringAt(rule.rule_id, `${at}.rule_id`),
       priority: intAt(rule.priority, `${at}.priority`),
@@ -1249,9 +1435,9 @@ function modelRoutingRuleVerdicts(
         `${at}.target_missing`,
       );
     if (rule.fields !== undefined) {
-      if (!Array.isArray(rule.fields)) invalid(`${at}.fields`, "应为数组");
+      if (!Array.isArray(rule.fields)) invalid(`${at}.fields`, "array");
       if (rule.fields.length > maxModelRoutingObservations)
-        invalid(`${at}.fields`, "条目过多");
+        invalid(`${at}.fields`, "tooMany");
       verdict.fields = rule.fields.map((field, position) =>
         modelRoutingObservation(field, `${at}.fields[${position}]`),
       );
@@ -1272,9 +1458,9 @@ function modelRoutingClassifierAnswers(
     parsed.confidence = numberAt(answers.confidence, `${path}.confidence`);
   if (answers.dimensions !== undefined) {
     if (!Array.isArray(answers.dimensions))
-      invalid(`${path}.dimensions`, "应为数组");
+      invalid(`${path}.dimensions`, "array");
     if (answers.dimensions.length > maxModelRoutingObservations)
-      invalid(`${path}.dimensions`, "条目过多");
+      invalid(`${path}.dimensions`, "tooMany");
     parsed.dimensions = answers.dimensions.map((item, index) => {
       const at = `${path}.dimensions[${index}]`;
       const dimension = objectAt(item, at);
@@ -1301,8 +1487,8 @@ function optionalConversionDiagnostics(
   path: string,
 ): { conversion_diagnostics?: ConversionDiagnostic[] } {
   if (value == null) return {};
-  if (!Array.isArray(value)) invalid(path, "应为数组");
-  if (value.length > 64) invalid(path, "条目过多");
+  if (!Array.isArray(value)) invalid(path, "array");
+  if (value.length > 64) invalid(path, "tooMany");
   if (value.length === 0) return {};
   return {
     conversion_diagnostics: value.map((item, index) => {
@@ -1312,16 +1498,16 @@ function optionalConversionDiagnostics(
         typeof diagnostic.phase !== "string" ||
         !conversionPhases.has(diagnostic.phase)
       ) {
-        invalid(`${at}.phase`, "转换阶段无效");
+        invalid(`${at}.phase`, "unexpectedValue");
       }
       if (
         typeof diagnostic.severity !== "string" ||
         !conversionSeverities.has(diagnostic.severity)
       ) {
-        invalid(`${at}.severity`, "影响程度无效");
+        invalid(`${at}.severity`, "unexpectedValue");
       }
       const code = stringAt(diagnostic.code, `${at}.code`);
-      if (!code) invalid(`${at}.code`, "不得为空");
+      if (!code) invalid(`${at}.code`, "empty");
       const parsed: ConversionDiagnostic = {
         phase: diagnostic.phase as ConversionDiagnostic["phase"],
         severity: diagnostic.severity as ConversionDiagnostic["severity"],
@@ -1354,12 +1540,12 @@ export function parseRequestRecord(value: unknown): RequestRecord {
 
 function parseRequestRecordAt(value: unknown, path: string): RequestRecord {
   const record = objectAt(value, path);
-  if (!Object.hasOwn(record, "id")) invalid(`${path}.id`, "缺少字段");
+  if (!Object.hasOwn(record, "id")) invalid(`${path}.id`, "missing");
   if (
     typeof record.status !== "string" ||
     !statuses.has(record.status as RequestStatus)
   ) {
-    invalid(`${path}.status`, "状态枚举无效");
+    invalid(`${path}.status`, "unknownStatus");
   }
 
   const attemptIndex = Object.hasOwn(record, "attempt_index")
@@ -1368,8 +1554,8 @@ function parseRequestRecordAt(value: unknown, path: string): RequestRecord {
   const childCount = Object.hasOwn(record, "child_count")
     ? intAt(record.child_count, `${path}.child_count`)
     : 0;
-  if (attemptIndex < 0) invalid(`${path}.attempt_index`, "不得为负数");
-  if (childCount < 0) invalid(`${path}.child_count`, "不得为负数");
+  if (attemptIndex < 0) invalid(`${path}.attempt_index`, "nonNegativeInteger");
+  if (childCount < 0) invalid(`${path}.child_count`, "nonNegativeInteger");
 
   return {
     ...(record.recovery === undefined
@@ -1430,6 +1616,9 @@ function parseRequestRecordAt(value: unknown, path: string): RequestRecord {
       record.privacy_restore,
       `${path}.privacy_restore`,
     ),
+    ...optionalPrivacyDecision(record.privacy_decision, path),
+    ...optionalPrivacyFindings(record.privacy_findings, path),
+    ...optionalPrivacyIgnored(record.privacy_ignored, path),
     session_id: Object.hasOwn(record, "session_id")
       ? nullableStringAt(record.session_id, `${path}.session_id`)
       : null,
@@ -1466,7 +1655,7 @@ function sessionCursorKindAt(value: unknown, path: string): SessionCursorKind {
     typeof value !== "string" ||
     !sessionCursorKinds.has(value as SessionCursorKind)
   ) {
-    return invalid(path, "游标类型无效");
+    return invalid(path, "unknownType");
   }
   return value as SessionCursorKind;
 }
@@ -1476,7 +1665,7 @@ function sessionCursorKindAt(value: unknown, path: string): SessionCursorKind {
 function parseTurnIndex(value: unknown, path: string): number | null {
   if (value === undefined || value === null) return null;
   const turn = intAt(value, path);
-  if (turn < 1) return invalid(path, "轮次必须至少为 1");
+  if (turn < 1) return invalid(path, "integerAtLeast", { minimum: 1 });
   return turn;
 }
 
@@ -1491,12 +1680,12 @@ function parseSessionLink(value: unknown, path: string): SessionLink | null {
 
 function parseSessionCursors(value: unknown, path: string): SessionCursor[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) return invalid(path, "应为数组");
+  if (!Array.isArray(value)) return invalid(path, "array");
   return value.map((item, index) => {
     const cursor = objectAt(item, `${path}[${index}]`);
     const direction = cursor.direction;
     if (direction !== "in" && direction !== "out") {
-      return invalid(`${path}[${index}].direction`, "游标方向无效");
+      return invalid(`${path}[${index}].direction`, "unexpectedValue");
     }
     return {
       kind: sessionCursorKindAt(cursor.kind, `${path}[${index}].kind`),
@@ -1510,6 +1699,7 @@ const eventKinds = new Set<RequestEventKind>([
   "accepted",
   "model_redirect",
   "privacy",
+  "image_compression",
   "routed",
   "upstream",
   "restore",
@@ -1520,20 +1710,20 @@ function parseRequestEvents(value: unknown, path: string): RequestEvent[] {
   // A record with no trajectory arrives as a nil Go slice, i.e. `null`, and
   // records written before events existed omit the key. Both mean "no events".
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) invalid(path, "应为数组");
+  if (!Array.isArray(value)) invalid(path, "array");
   return value.map((item, index) => {
     const event = objectAt(item, `${path}[${index}]`);
     if (
       typeof event.kind !== "string" ||
       !eventKinds.has(event.kind as RequestEventKind)
     ) {
-      invalid(`${path}[${index}].kind`, "事件类型无效");
+      invalid(`${path}[${index}].kind`, "unknownType");
     }
     if (
       typeof event.status !== "string" ||
       !statuses.has(event.status as RequestStatus)
     ) {
-      invalid(`${path}[${index}].status`, "状态枚举无效");
+      invalid(`${path}[${index}].status`, "unknownStatus");
     }
     return {
       kind: event.kind as RequestEventKind,
@@ -1565,7 +1755,7 @@ function optionalPerformanceNumber(
     value < 0 ||
     (integer && !Number.isInteger(value))
   ) {
-    return invalid(path, "应为非负有效数值");
+    return invalid(path, integer ? "nonNegativeInteger" : "nonNegativeNumber");
   }
   return value;
 }
@@ -1576,24 +1766,23 @@ function parseRequestSessionAt(value: unknown, path: string): RequestSession {
     typeof session.status !== "string" ||
     !sessionStatuses.has(session.status as SessionStatus)
   ) {
-    invalid(`${path}.status`, "状态枚举无效");
+    invalid(`${path}.status`, "unknownStatus");
   }
   const turnCount = intAt(session.turn_count, `${path}.turn_count`);
   const callCount = intAt(session.call_count, `${path}.call_count`);
   if (turnCount < 1 || callCount < 1) {
-    invalid(path, "计数必须至少为 1");
+    invalid(path, "integerAtLeast", { minimum: 1 });
   }
   const durationMs = intAt(session.duration_ms, `${path}.duration_ms`);
-  if (durationMs < 0) invalid(`${path}.duration_ms`, "应为非负整数");
+  if (durationMs < 0) invalid(`${path}.duration_ms`, "nonNegativeInteger");
   if (!Array.isArray(session.active_request_starts)) {
-    invalid(`${path}.active_request_starts`, "应为数组");
+    invalid(`${path}.active_request_starts`, "array");
   }
   const activeRequestStarts = session.active_request_starts.map(
     (value, index) => {
       const itemPath = `${path}.active_request_starts[${index}]`;
       const started = stringAt(value, itemPath);
-      if (!Number.isFinite(Date.parse(started)))
-        invalid(itemPath, "时间戳无效");
+      if (!Number.isFinite(Date.parse(started))) invalid(itemPath, "timestamp");
       return started;
     },
   );
@@ -1646,12 +1835,20 @@ function parseRequestSessionAt(value: unknown, path: string): RequestSession {
       session.local_access_token_id,
       `${path}.local_access_token_id`,
     ),
+    ...(session.privacy_warned == null
+      ? {}
+      : {
+          privacy_warned: boolAt(
+            session.privacy_warned,
+            `${path}.privacy_warned`,
+          ),
+        }),
   };
 }
 
 export function parseRequestSessionPage(value: unknown): RequestSessionPage {
   const page = objectAt(value, "$");
-  if (!Array.isArray(page.items)) invalid("$.items", "应为数组");
+  if (!Array.isArray(page.items)) invalid("$.items", "array");
   const nextCursor =
     page.next_cursor === null
       ? null
@@ -1669,7 +1866,7 @@ export function parseRequestSessionDetail(
 ): RequestSessionDetail {
   const session = parseRequestSessionAt(value, "$");
   const detail = objectAt(value, "$");
-  if (!Array.isArray(detail.turns)) invalid("$.turns", "应为数组");
+  if (!Array.isArray(detail.turns)) invalid("$.turns", "array");
   return {
     ...session,
     turns: detail.turns.map((item, index) =>
@@ -1680,7 +1877,7 @@ export function parseRequestSessionDetail(
 
 export function parseRequestRecordPage(value: unknown): RequestRecordPage {
   const page = objectAt(value, "$");
-  if (!Array.isArray(page.items)) invalid("$.items", "应为数组");
+  if (!Array.isArray(page.items)) invalid("$.items", "array");
   const nextCursor =
     page.next_cursor === null
       ? null
@@ -1698,6 +1895,7 @@ const auditWithheldReasons = new Set<AuditWithheldReason>([
   "privacy_blocked",
   "privacy_restored",
   "privacy_fail_open",
+  "privacy_trusted",
   "privacy_pending",
   "privacy_unknown",
   "raw_locked",
@@ -1726,14 +1924,14 @@ function parseAuditContentPart(
   const captured_bytes = intAt(part.captured_bytes, `${path}.captured_bytes`);
   if (Object.hasOwn(part, "withheld")) {
     if (boolAt(part.withheld, `${path}.withheld`) !== true) {
-      invalid(`${path}.withheld`, "应为 true");
+      invalid(`${path}.withheld`, "unexpectedValue");
     }
     if (Object.hasOwn(part, "content")) {
-      invalid(`${path}.content`, "未读部分不应含正文");
+      invalid(`${path}.content`, "unsupportedField");
     }
     const reason = stringAt(part.reason, `${path}.reason`);
     if (!auditWithheldReasons.has(reason as AuditWithheldReason)) {
-      invalid(`${path}.reason`, "未知原因");
+      invalid(`${path}.reason`, "unknownReason");
     }
     return {
       withheld: {
@@ -1754,7 +1952,7 @@ function parseAuditContentPart(
   if (Object.hasOwn(part, "exposure")) {
     const exposure = stringAt(part.exposure, `${path}.exposure`);
     if (exposure !== "shareable" && exposure !== "raw") {
-      invalid(`${path}.exposure`, "应为 shareable 或 raw");
+      invalid(`${path}.exposure`, "unexpectedValue");
     }
     readable.exposure = exposure;
   }
@@ -1767,7 +1965,7 @@ function parseAuditPrivacyFinding(
 ): AuditPrivacyFinding {
   const finding = objectAt(value, path);
   const kind = stringAt(finding.kind, `${path}.kind`);
-  if (kind === "") invalid(`${path}.kind`, "不能为空");
+  if (kind === "") invalid(`${path}.kind`, "empty");
   return {
     kind,
     json_path: stringAt(finding.json_path, `${path}.json_path`),
@@ -1791,10 +1989,10 @@ function parseAuditHTTPMeta(
   if (value === null) return null;
   const meta = objectAt(value, path);
   if (!Array.isArray(meta.request_headers)) {
-    invalid(`${path}.request_headers`, "应为数组");
+    invalid(`${path}.request_headers`, "array");
   }
   if (!Array.isArray(meta.response_headers)) {
-    invalid(`${path}.response_headers`, "应为数组");
+    invalid(`${path}.response_headers`, "array");
   }
   return {
     method: stringAt(meta.method, `${path}.method`),
@@ -1819,7 +2017,7 @@ export function parseAuditContent(value: unknown): AuditContent {
     ? stringAt(content.view, "$.view")
     : "full";
   if (view !== "shareable" && view !== "full") {
-    invalid("$.view", "应为 shareable 或 full");
+    invalid("$.view", "unexpectedValue");
   }
   const withheld: AuditContent["withheld"] = {};
   const parts = {} as Record<AuditBodyPartName, AuditContentPart | null>;
@@ -1833,7 +2031,7 @@ export function parseAuditContent(value: unknown): AuditContent {
     ? content.privacy_findings
     : [];
   if (!Array.isArray(findings)) {
-    invalid("$.privacy_findings", "应为数组");
+    invalid("$.privacy_findings", "array");
   }
   return {
     request_id: stringAt(content.request_id, "$.request_id"),

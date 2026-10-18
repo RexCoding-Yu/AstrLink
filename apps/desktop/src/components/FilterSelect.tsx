@@ -17,6 +17,7 @@ export function FilterSelect({
   value,
   onChange,
   options,
+  variant = "outline",
 }: {
   ariaLabel: string;
   className?: string;
@@ -25,6 +26,8 @@ export function FilterSelect({
   value: string;
   onChange: (value: string) => void;
   options: Array<{ label: string; value: string; displayLabel?: ReactNode }>;
+  /** `filled` sets the filter that scopes the whole list apart from the outlined ones beside it. */
+  variant?: "outline" | "filled";
 }) {
   return (
     <Select
@@ -34,7 +37,12 @@ export function FilterSelect({
     >
       <SelectTrigger
         aria-label={ariaLabel}
-        className={cn("min-w-0 text-xs", className)}
+        className={cn(
+          "min-w-0 text-xs",
+          variant === "filled" && "border-transparent bg-secondary",
+          className,
+        )}
+        data-variant={variant}
         size="sm"
         title={options.find((option) => option.value === value)?.label}
       >

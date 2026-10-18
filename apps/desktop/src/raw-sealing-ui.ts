@@ -1,11 +1,8 @@
 import type { ProofInput, ProofResult } from "@/components/ProofConfirmDialog";
 
+import { controlErrorCode } from "./control-error";
 import { i18n } from "./i18n";
-import {
-  controlErrorCode,
-  type RawProof,
-  type RawSealingOutcome,
-} from "./raw-sealing-model";
+import type { RawProof, RawSealingOutcome } from "./raw-sealing-model";
 
 const errorKeys: Record<string, string> = {
   raw_access_unavailable: "rawSealing.errors.notConfigured",

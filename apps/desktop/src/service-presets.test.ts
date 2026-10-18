@@ -19,7 +19,7 @@ describe("HTTP service product presets", () => {
     expect(preset.kind).toBe("newapi");
     expect(preset.authScheme).toBe("bearer");
     expect(preset.baseURL).toBe("");
-    expect(preset.capabilities).toHaveLength(8);
+    expect(preset.capabilities).toHaveLength(11);
     expect(new Set(preset.capabilities.map(({ mode }) => mode))).toEqual(
       new Set(["native"]),
     );
@@ -32,7 +32,35 @@ describe("HTTP service product presets", () => {
       "openai.completions",
       "openai.models",
       "google.models",
+      "openai.embeddings",
+      "google.embeddings",
+      "rerank",
     ]);
+  });
+
+  it("points magpie at the local gateway with its documented native surface", () => {
+    const preset = httpServicePreset("magpie");
+
+    expect(preset).toMatchObject({
+      kind: "magpie",
+      baseURL: "http://127.0.0.1:3425",
+      authScheme: "bearer",
+      advancedOnStart: false,
+      sites: [{ id: "local", baseURL: "http://127.0.0.1:3425" }],
+    });
+    expect(preset.capabilities).toEqual([
+      { protocol: "openai.responses", mode: "native", streaming: true },
+      { protocol: "anthropic.messages", mode: "native", streaming: true },
+      { protocol: "google.generate_content", mode: "native", streaming: true },
+      { protocol: "openai.chat", mode: "native", streaming: true },
+      { protocol: "openai.models", mode: "native", streaming: false },
+      { protocol: "google.models", mode: "native", streaming: false },
+    ]);
+    // The OpenAI SDK base keeps its /v1; another host or port is a custom address.
+    expect(serviceSiteForBaseURL(preset, "http://127.0.0.1:3425/v1")).toBe(
+      "local",
+    );
+    expect(serviceSiteForBaseURL(preset, "http://192.168.1.8:3425")).toBeNull();
   });
 
   it("does not expose API-key services as Codex, Claude, or Gemini subscriptions", () => {
@@ -43,6 +71,7 @@ describe("HTTP service product presets", () => {
       "glm_coding",
       "minimax_coding",
       "newapi",
+      "magpie",
       "openai_compatible",
       "openai",
       "anthropic",
@@ -74,6 +103,7 @@ describe("HTTP service product presets", () => {
           streaming: true,
         },
         { protocol: "openai.models", mode: "native", streaming: false },
+        { protocol: "openai.embeddings", mode: "native", streaming: false },
       ],
     });
   });
@@ -96,6 +126,7 @@ describe("HTTP service product presets", () => {
           streaming: true,
         },
         { protocol: "openai.models", mode: "native", streaming: false },
+        { protocol: "openai.embeddings", mode: "native", streaming: false },
       ],
     });
     expect(httpServicePreset("anthropic")).toMatchObject({
@@ -120,6 +151,7 @@ describe("HTTP service product presets", () => {
           streaming: true,
         },
         { protocol: "google.models", mode: "native", streaming: false },
+        { protocol: "google.embeddings", mode: "native", streaming: false },
         {
           protocol: "openai.chat",
           mode: "native",
@@ -395,6 +427,7 @@ describe("default protocol conversions", () => {
         "gemini": [
           "google.generate_content:native:true",
           "google.models:native:false",
+          "google.embeddings:native:false",
           "openai.chat:native:true → google.generate_content",
           "openai.responses:native:true → google.generate_content",
         ],
@@ -416,6 +449,14 @@ describe("default protocol conversions", () => {
           "openai.chat:native:true",
           "openai.models:native:false",
           "google.generate_content:native:true → openai.responses",
+        ],
+        "magpie": [
+          "openai.responses:native:true",
+          "anthropic.messages:native:true",
+          "google.generate_content:native:true",
+          "openai.chat:native:true",
+          "openai.models:native:false",
+          "google.models:native:false",
         ],
         "minimax": [
           "openai.responses:native:true",
@@ -447,6 +488,9 @@ describe("default protocol conversions", () => {
           "openai.completions:native:true",
           "openai.models:native:false",
           "google.models:native:false",
+          "openai.embeddings:native:false",
+          "google.embeddings:native:false",
+          "rerank:native:false",
         ],
         "openai": [
           "openai.responses:native:true",
@@ -454,6 +498,7 @@ describe("default protocol conversions", () => {
           "openai.chat:native:true",
           "openai.completions:native:true",
           "openai.models:native:false",
+          "openai.embeddings:native:false",
           "anthropic.messages:native:true → openai.responses",
           "google.generate_content:native:true → openai.responses",
         ],
@@ -461,6 +506,7 @@ describe("default protocol conversions", () => {
           "openai.chat:native:true",
           "openai.completions:native:true",
           "openai.models:native:false",
+          "openai.embeddings:native:false",
           "openai.responses:native:true → openai.chat",
           "anthropic.messages:native:true → openai.chat",
           "google.generate_content:native:true → openai.chat",
@@ -518,7 +564,11 @@ describe("default protocol conversions", () => {
           streaming: true,
         });
       }
-      if (["opencode_go", "opencode_zen", "custom", "newapi"].includes(id))
+      if (
+        ["opencode_go", "opencode_zen", "custom", "newapi", "magpie"].includes(
+          id,
+        )
+      )
         expect(current).toEqual(original);
     },
   );

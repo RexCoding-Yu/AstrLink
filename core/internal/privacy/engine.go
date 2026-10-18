@@ -2,13 +2,17 @@ package privacy
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 type Engine struct {
@@ -17,6 +21,7 @@ type Engine struct {
 	modelDetector Detector
 	// derivationKey keys the placeholder HMAC. Empty means the process-wide key.
 	derivationKey []byte
+	standIns      standInLedgers
 }
 
 func New(provider PolicyProvider, modelDetector Detector) (*Engine, error) {
@@ -28,6 +33,30 @@ func New(provider PolicyProvider, modelDetector Detector) (*Engine, error) {
 		regexDetector: NewRegexDetector(),
 		modelDetector: modelDetector,
 	}, nil
+}
+
+// placeholderKeyInfo is the HKDF info string that separates the placeholder
+// key from every other use of the audit data key. Changing it renames every
+// value once.
+const placeholderKeyInfo = "astrlink/privacy-placeholder/v1"
+
+// PersistPlaceholders derives the placeholder key from the device's audit data
+// key and keeps each conversation's IPv4 stand-ins in store, so a restart
+// gives no value a new name: the history a client sends back then matches
+// the upstream prompt cache, and a placeholder quoted in unrestored reasoning
+// is still the one the response path restores. Call it before the engine
+// serves requests.
+func (engine *Engine) PersistPlaceholders(auditKey []byte, store storage.PrivacyStandInStore) error {
+	if len(auditKey) == 0 || store == nil {
+		return fmt.Errorf("privacy: an audit key and a stand-in store are required")
+	}
+	key, err := hkdf.Key(sha256.New, auditKey, nil, placeholderKeyInfo, sha256.Size)
+	if err != nil {
+		return fmt.Errorf("privacy: derive the placeholder key: %w", err)
+	}
+	engine.derivationKey = key
+	engine.standIns.store = store
+	return nil
 }
 
 func (engine *Engine) ResolvePolicy(ctx context.Context, scope Scope) (Policy, error) {
@@ -99,15 +128,10 @@ func (engine *Engine) Inspect(ctx context.Context, policy Policy, protocol contr
 		return Result{}, normalizeDetectorError(ctx, err)
 	}
 	findings, err = normalizeFindings(findings, segments)
-	if err == nil {
-		findings, err = alignStructuredFindings(extracted, findings)
-	}
 	if err != nil {
-		if errors.Is(err, ErrDetectorLimit) {
-			return Result{}, ErrDetectorLimit
-		}
 		return Result{}, ErrDetectorUnavailable
 	}
+	findings = alignStructuredFindings(extracted, findings)
 	accepted, suppressed := engine.partitionFindings(policy, findings, segments)
 	if len(accepted) == 0 {
 		return Result{
@@ -118,10 +142,13 @@ func (engine *Engine) Inspect(ctx context.Context, policy Policy, protocol contr
 
 	switch policy.Action {
 	case ActionWarn:
+		notified := notifiedFindings(policy, accepted)
 		return Result{
 			Decision:           DecisionWarn,
 			Findings:           accepted,
 			SuppressedFindings: suppressed,
+			Notified:           notified,
+			Fingerprints:       warningFingerprints(notified, segments),
 		}, nil
 	case ActionBlock:
 		return Result{
@@ -138,6 +165,9 @@ func (engine *Engine) Inspect(ctx context.Context, policy Policy, protocol contr
 			}, ErrUnsafeRewrite
 		}
 		allocator := newPlaceholderAllocator(engine.derivationKey, policy.KindRule, body)
+		if slices.ContainsFunc(accepted, func(finding Finding) bool { return finding.Kind == KindIPAddress }) {
+			allocator.ledger = engine.standIns.conversation(ctx, conversationFrom(ctx))
+		}
 		skillListed := placeholderSkillListed(protocol, body)
 		notice := ""
 		if policy.PlaceholderNotice && !skillListed {
@@ -157,6 +187,7 @@ func (engine *Engine) Inspect(ctx context.Context, policy Policy, protocol contr
 				SuppressedFindings: suppressed,
 			}, ErrUnsafeRewrite
 		}
+		allocator.ledger.save(ctx)
 		return Result{
 			Decision:           DecisionRedact,
 			Body:               outcome.Body,
@@ -270,17 +301,27 @@ func normalizeDetectorError(ctx context.Context, err error) error {
 }
 
 func normalizeFindings(findings []Finding, segments []Segment) ([]Finding, error) {
-	if len(findings) > maxDetectorFindings {
-		return nil, ErrDetectorLimit
-	}
+	// Each value is validated once; a span then only has to fall on rune
+	// boundaries. Validating the prefix of every span instead costs the length
+	// of the text for each one.
+	validated := make(map[int]bool)
 	for _, finding := range findings {
 		if finding.Segment < 0 || finding.Segment >= len(segments) ||
 			finding.Start < 0 || finding.End <= finding.Start ||
 			finding.End > len(segments[finding.Segment].Value) ||
 			!validKind(finding.Kind) ||
-			!validMinConfidence(finding.Confidence) ||
-			!utf8.ValidString(segments[finding.Segment].Value[:finding.Start]) ||
-			!utf8.ValidString(segments[finding.Segment].Value[:finding.End]) {
+			!validMinConfidence(finding.Confidence) {
+			return nil, ErrDetectorUnavailable
+		}
+		value := segments[finding.Segment].Value
+		if !validated[finding.Segment] {
+			if !utf8.ValidString(value) {
+				return nil, ErrDetectorUnavailable
+			}
+			validated[finding.Segment] = true
+		}
+		if !utf8.RuneStart(value[finding.Start]) ||
+			(finding.End < len(value) && !utf8.RuneStart(value[finding.End])) {
 			return nil, ErrDetectorUnavailable
 		}
 	}

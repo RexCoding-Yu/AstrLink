@@ -8,10 +8,13 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
+	"github.com/QuantumNous/astrlink/core/internal/jsonedit"
+	"github.com/tidwall/gjson"
 )
 
 // codexSubscriptionUnsupportedFields are rejected by the ChatGPT Codex backend.
@@ -20,7 +23,7 @@ import (
 var codexSubscriptionUnsupportedFields = []string{
 	"max_output_tokens", "max_completion_tokens", "temperature", "top_p",
 	"frequency_penalty", "presence_penalty", "truncation", "prompt_cache_retention",
-	"safety_identifier", "user", "metadata", "stream_options",
+	"prompt_cache_options", "safety_identifier", "user", "metadata", "stream_options",
 }
 
 const codexEncryptedReasoningInclude = "reasoning.encrypted_content"
@@ -174,6 +177,142 @@ func scopeCodexPromptCacheKey(body map[string]json.RawMessage, scope contract.Se
 // protocol headers from a request converted for the Codex backend.
 func filterCodexRelayKitHeaders(header http.Header) {
 	stripHeaderPrefixes(header, "x-stainless-", "anthropic-")
+}
+
+// Codex marks a Responses Lite request with this header, or with this
+// client_metadata entry on a WebSocket turn. Lite takes no top-level tools; it
+// declares them in additional_tools input items.
+const (
+	codexResponsesLiteHeader   = "X-Openai-Internal-Codex-Responses-Lite"
+	codexResponsesLiteMetadata = "ws_request_header_x_openai_internal_codex_responses_lite"
+)
+
+// codexWebSearchHistoryTool searches cached results only.
+var codexWebSearchHistoryTool = struct {
+	Type              string `json:"type"`
+	ExternalWebAccess bool   `json:"external_web_access"`
+}{Type: "web_search"}
+
+// declareCodexWebSearchHistory reads the attempt body and declares the
+// web_search tool its history needs, see withCodexWebSearchHistoryTool. A
+// compressed body is forwarded as it is.
+func declareCodexWebSearchHistory(request *http.Request) error {
+	if request.Body == nil || request.Body == http.NoBody {
+		return nil
+	}
+	if encoding := strings.ToLower(strings.TrimSpace(request.Header.Get("Content-Encoding"))); encoding != "" && encoding != "identity" {
+		return nil
+	}
+	raw, err := io.ReadAll(request.Body)
+	_ = request.Body.Close()
+	if err != nil {
+		return fmt.Errorf("Codex subscription request could not be prepared")
+	}
+	body, _ := withCodexWebSearchHistoryTool(raw, request.Header)
+	replaceRecoveryRequestBody(request, body)
+	return nil
+}
+
+// withCodexWebSearchHistoryTool declares a cached-only web_search tool when the
+// Responses input replays a hosted web_search_call item but no web search tool
+// is declared. The Codex backend rejects that history ("response protection is
+// unavailable"), and Codex's local compaction sends exactly that: the whole
+// history with tools:[]. Responses Lite gets the declaration in its first
+// additional_tools item, or in a new one kept before a trailing
+// compaction_trigger. When the caller offered no tools, tool_choice becomes
+// "none" so the declared tool cannot run. Only the added values are encoded;
+// a body that needs nothing, or cannot be edited in place, is returned as is.
+func withCodexWebSearchHistoryTool(body []byte, header http.Header) ([]byte, bool) {
+	if !bytes.Contains(body, []byte(`"web_search_call"`)) {
+		return body, false
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body, false
+	}
+	items := input.Array()
+	replayed, offered, additional := false, false, -1
+	for index, item := range items {
+		switch item.Get("type").String() {
+		case "web_search_call":
+			replayed = true
+		case "additional_tools":
+			tools := item.Get("tools")
+			if codexDeclaresWebSearch(tools) {
+				return body, false
+			}
+			offered = offered || tools.IsArray() && len(tools.Array()) > 0
+			if additional < 0 {
+				additional = index
+			}
+		}
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !replayed || codexDeclaresWebSearch(tools) {
+		return body, false
+	}
+	offered = offered || tools.IsArray() && len(tools.Array()) > 0
+
+	path := "tools"
+	lite := codexResponsesLite(header, body)
+	if lite && additional >= 0 {
+		path = "input." + strconv.Itoa(additional) + ".tools"
+		tools = items[additional].Get("tools")
+	}
+	var declared []byte
+	var err error
+	switch {
+	case lite && additional < 0:
+		at := len(items)
+		if at > 0 && items[at-1].Get("type").String() == "compaction_trigger" {
+			at--
+		}
+		item := struct {
+			Type  string `json:"type"`
+			Role  string `json:"role"`
+			Tools []any  `json:"tools"`
+		}{"additional_tools", "developer", []any{codexWebSearchHistoryTool}}
+		declared, err = jsonedit.Insert(body, "input", at, item)
+	case tools.IsArray():
+		declared, err = jsonedit.Insert(body, path, len(tools.Array()), codexWebSearchHistoryTool)
+	case !tools.Exists() || tools.Type == gjson.Null:
+		declared, err = jsonedit.Set(body, path, []any{codexWebSearchHistoryTool})
+	default:
+		// A malformed tools value is left for the upstream to judge.
+		return body, false
+	}
+	if err != nil {
+		return body, false
+	}
+	if !offered {
+		// Only a choice among no tools is pinned; any other is the caller's.
+		choice := gjson.GetBytes(declared, "tool_choice")
+		mode := strings.ToLower(strings.TrimSpace(choice.Str))
+		if !choice.Exists() || choice.Type == gjson.Null || choice.Type == gjson.String && (mode == "" || mode == "auto" || mode == "none") {
+			if declared, err = jsonedit.Set(declared, "tool_choice", "none"); err != nil {
+				return body, false
+			}
+		}
+	}
+	return declared, true
+}
+
+// codexDeclaresWebSearch reports a web_search tool of any version in tools.
+func codexDeclaresWebSearch(tools gjson.Result) bool {
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if strings.HasPrefix(strings.TrimSpace(tool.Get("type").String()), "web_search") {
+			return true
+		}
+	}
+	return false
+}
+
+func codexResponsesLite(header http.Header, body []byte) bool {
+	return strings.EqualFold(strings.TrimSpace(header.Get(codexResponsesLiteHeader)), "true") ||
+		strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "client_metadata."+codexResponsesLiteMetadata).String()), "true")
 }
 
 func isJSONNull(value json.RawMessage) bool {

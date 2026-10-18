@@ -1,15 +1,19 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useState, type ComponentProps } from "react";
 import { builtinToolAction } from "../bridge";
 import {
+  builtinImageModels,
   builtinImagesServiceKinds,
+  builtinSearchServiceKinds,
   defaultBuiltinTools,
+  isImageGenerationModel,
   parseBuiltinTools,
+  runsImageGenerationTool,
   type BuiltinTool,
   type BuiltinToolKind,
   type BuiltinTools,
 } from "@/builtin-tools-model";
 import type { RoutableService } from "@/service-model";
-import { useT } from "@/i18n";
+import { currentLocale, useT } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { Field } from "./Field";
 import { FilterSelect } from "./FilterSelect";
@@ -21,6 +25,47 @@ import { ServiceSelect } from "./ServiceSelect";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Switch } from "./ui/switch";
+
+/**
+ * Typed text reaches the routing draft only on selection, Enter, or blur.
+ * Routing autosaves, and a saved tool applies to the next request, so a
+ * half-typed model or URL must never be stored.
+ */
+function useCommittedText(
+  value: string | undefined,
+  onCommit: (value: string) => void,
+) {
+  const [text, setText] = useState(value ?? "");
+  useEffect(() => setText(value ?? ""), [value]);
+  const commit = (next: string) => {
+    const trimmed = next.trim();
+    setText(trimmed);
+    if (trimmed !== (value ?? "")) onCommit(trimmed);
+  };
+  return { text, setText, commit };
+}
+
+function CommittedInput({
+  value,
+  onCommit,
+  ...props
+}: Omit<ComponentProps<typeof Input>, "value" | "onChange"> & {
+  value: string | undefined;
+  onCommit: (value: string) => void;
+}) {
+  const field = useCommittedText(value, onCommit);
+  return (
+    <Input
+      {...props}
+      value={field.text}
+      onChange={(event) => field.setText(event.target.value)}
+      onBlur={(event) => field.commit(event.currentTarget.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") field.commit(event.currentTarget.value);
+      }}
+    />
+  );
+}
 
 function ToolEditor({
   kind,
@@ -55,20 +100,32 @@ function ToolEditor({
       : [kind];
   const backend = value.backend || "upstream";
   const direct = backend === "service_images";
+  const searchAPI = backend === "service_search";
   const providersFor = (backend: BuiltinTool["backend"]) =>
     services.filter(
       (service) =>
         service.enabled &&
         (backend === "service_images"
           ? builtinImagesServiceKinds.includes(service.kind)
-          : service.capabilities.some(
-              (capability) =>
-                capability.protocol === "openai.responses" &&
-                !capability.convert_to,
-            )),
+          : backend === "service_search"
+            ? builtinSearchServiceKinds.includes(service.kind)
+            : service.capabilities.some(
+                (capability) =>
+                  capability.protocol === "openai.responses" &&
+                  !capability.convert_to,
+              )),
     );
   const providers = providersFor(backend);
   const selected = providers.find((service) => service.id === value.service_id);
+  const models = selected?.models ?? [];
+  const modelOptions = direct
+    ? [
+        ...((selected && builtinImageModels[selected.kind]) || []),
+        ...models.filter(isImageGenerationModel),
+      ]
+    : kind === "image_generation"
+      ? models.filter(runsImageGenerationTool)
+      : models;
   useEffect(() => {
     if (disabled) return;
     let active = true;
@@ -88,6 +145,23 @@ function ToolEditor({
     setError("");
     onChange({ ...value, ...patch });
   };
+  const model = useCommittedText(value.model, (model) => change({ model }));
+  const missing = (
+    !value.enabled
+      ? []
+      : backend === "external"
+        ? [
+            !value.base_url && t("builtinTools.apiUrl"),
+            kind === "image_generation" &&
+              !value.model &&
+              t("builtinTools.imageModel"),
+          ]
+        : [
+            !value.service_id && t("builtinTools.provider"),
+            !value.model &&
+              t(direct ? "builtinTools.imageModel" : "builtinTools.model"),
+          ]
+  ).filter((field): field is string => Boolean(field));
   // For image generation the model is a chat model when one executes the
   // tool and an image model otherwise, so it only carries over between the
   // Images API backends.
@@ -193,7 +267,9 @@ function ToolEditor({
                         : "builtinTools.externalImagesHint"
                       : direct
                         ? "builtinTools.serviceImagesHint"
-                        : "builtinTools.upstreamHint",
+                        : searchAPI
+                          ? "builtinTools.serviceSearchHint"
+                          : "builtinTools.upstreamHint",
                   )}
                 </p>
               </div>
@@ -204,9 +280,11 @@ function ToolEditor({
                     {t(
                       direct || backend === "external"
                         ? "builtinTools.serviceImageModelHint"
-                        : kind === "web_search"
-                          ? "builtinTools.searchModelHint"
-                          : "builtinTools.imageExecutorHint",
+                        : searchAPI
+                          ? "builtinTools.serviceSearchModelHint"
+                          : kind === "web_search"
+                            ? "builtinTools.searchModelHint"
+                            : "builtinTools.imageExecutorHint",
                     )}
                   </p>
                 </div>
@@ -239,6 +317,10 @@ function ToolEditor({
               options={
                 kind === "web_search"
                   ? [
+                      {
+                        value: "service_search",
+                        label: t("builtinTools.serviceSearch"),
+                      },
                       {
                         value: "upstream",
                         label: t("builtinTools.upstream", { tool: kind }),
@@ -283,9 +365,10 @@ function ToolEditor({
                       : "builtinTools.modelFor",
                     { tool: title },
                   )}
-                  options={selected?.models ?? []}
-                  value={value.model ?? ""}
-                  onValueChange={(model) => change({ model })}
+                  options={modelOptions}
+                  value={model.text}
+                  onValueChange={model.setText}
+                  onValueCommit={model.commit}
                 />
               </Field>
             </>
@@ -299,10 +382,10 @@ function ToolEditor({
                     : undefined
                 }
               >
-                <Input
+                <CommittedInput
                   aria-label={t("builtinTools.urlFor", { tool: title })}
-                  value={value.base_url ?? ""}
-                  onChange={(event) => change({ base_url: event.target.value })}
+                  value={value.base_url}
+                  onCommit={(base_url) => change({ base_url })}
                   placeholder={
                     kind === "web_search"
                       ? "https://api.tavily.com"
@@ -312,12 +395,12 @@ function ToolEditor({
               </Field>
               {kind === "image_generation" ? (
                 <Field label={t("builtinTools.imageModel")}>
-                  <Input
+                  <CommittedInput
                     aria-label={t("builtinTools.imageModelFor", {
                       tool: title,
                     })}
-                    value={value.model ?? ""}
-                    onChange={(event) => change({ model: event.target.value })}
+                    value={value.model}
+                    onCommit={(model) => change({ model })}
                   />
                 </Field>
               ) : null}
@@ -329,9 +412,18 @@ function ToolEditor({
             {t(
               direct
                 ? "builtinTools.noImageProviders"
-                : "builtinTools.noProviders",
+                : searchAPI
+                  ? "builtinTools.noSearchProviders"
+                  : "builtinTools.noProviders",
             )}
           </p>
+        ) : null}
+        {missing.length ? (
+          <FormMessage tone="warning">
+            {t("builtinTools.incomplete", {
+              fields: new Intl.ListFormat(currentLocale()).format(missing),
+            })}
+          </FormMessage>
         ) : null}
         {backend === "external" ? (
           <Field

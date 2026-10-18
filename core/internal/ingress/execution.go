@@ -152,7 +152,11 @@ func (handler *Handler) executeCandidatesWithTest(
 	}
 	var rateLimited []endpoint.RateLimitedCandidate
 	schedule := newRecoverySchedule(candidates, body.Replayable())
-	protection := handler.subscriptionProtection(request.Context())
+	routingSettings := handler.requestRoutingSettings(request.Context())
+	protection := subscriptionProtectionFrom(routingSettings)
+	rewrite := gatewayRewriteFrom(routingSettings)
+	compression := imageCompressionFrom(routingSettings)
+	haiku := claudeCodeHaikuRequest(detectClientType(request.Header), classified.Model)
 	// Each official client identity is learned at most once per request.
 	learnedClaude, learnedCodex, learnedGrok := false, false, false
 	repairedTargets := map[string][]byte{}
@@ -160,14 +164,6 @@ func (handler *Handler) executeCandidatesWithTest(
 	var lastNetworkFailure executionFailure
 	var replayLastHTTP func()
 	records := recordSessionFromContext(request.Context())
-	// Privacy was decided once before routing; every attempt (and every
-	// failover) restores from the same redactions. There is no per-candidate
-	// privacy call left in this loop.
-	privacyResult := privacyOutcome{}
-	if records != nil && records.privacy != nil {
-		privacyResult = records.privacy.outcome
-	}
-	redactions := privacyResult.redactions
 	for {
 		candidateIndex, hasNext := schedule.next(request.Context())
 		if !hasNext {
@@ -303,12 +299,32 @@ func (handler *Handler) executeCandidatesWithTest(
 		}
 
 		resetResponseHeaders(downstream.Header(), initialHeaders)
+		finishPrivacy, privacyResult, privacyErr := handler.applyPrivacy(
+			downstream,
+			attemptRequest,
+			classified,
+			candidate.Service,
+		)
+		redactions := privacyResult.redactions
+		if request.Context().Err() != nil {
+			finishPrivacy()
+			_ = attemptRequest.Body.Close()
+			return
+		}
+		if privacyErr != nil {
+			finishPrivacy()
+			_ = attemptRequest.Body.Close()
+			records.noteAttemptedService(candidate.Service.ID)
+			handler.writePrivacyError(downstream, request, privacyErr)
+			return
+		}
 		// conversion belongs to this attempt only: its state must reach this
 		// attempt's response conversion and never a retry's.
 		var conversion relaykitbridge.ConvertRequestOutput
 		if plan.Type == contract.PlanTypeRelayKit {
 			convertedInput, readErr := io.ReadAll(attemptRequest.Body)
 			if readErr != nil {
+				finishPrivacy()
 				_ = attemptRequest.Body.Close()
 				last = executionFailure{kind: executionFailureConversionUnsupported, err: readErr, endpointID: candidate.Service.ID}
 				records.noteCandidateRejected(last.endpointID, last.code())
@@ -321,8 +337,35 @@ func (handler *Handler) executeCandidatesWithTest(
 				Body: convertedInput, PublicModel: classified.Model, UpstreamModel: upstreamModel, Streaming: classified.Streaming,
 			})
 			if convertErr != nil || adaptRelayKitRequest(attemptRequest, plan.UpstreamProtocol, classified.Streaming, upstreamModel, conversion.Body) != nil {
+				finishPrivacy()
 				last = executionFailure{kind: executionFailureConversionUnsupported, err: convertErr, endpointID: candidate.Service.ID}
 				records.noteCandidateRejected(last.endpointID, last.code())
+				continue
+			}
+		}
+
+		// The global system prompt, reasoning settings and image compression
+		// edit the body in the upstream protocol, before the subscription
+		// identity steps below, so an official identity they add or check stays
+		// first. Connection tests send their own fixed request.
+		var reasoning gatewayReasoning
+		var images imageCompressionResult
+		if test == nil {
+			var rewriteErr error
+			reasoning, rewriteErr = handler.applyGatewayRewrite(attemptRequest, plan.UpstreamProtocol, rewrite, haiku)
+			if rewriteErr == nil {
+				images, rewriteErr = handler.applyImageCompression(attemptRequest, plan.UpstreamProtocol, compression)
+			}
+			if rewriteErr != nil {
+				finishPrivacy()
+				if request.Context().Err() != nil {
+					return
+				}
+				last = executionFailure{kind: executionFailureConfiguration, err: rewriteErr, endpointID: candidate.Service.ID}
+				records.noteCandidateRejected(last.endpointID, last.code())
+				if !body.Replayable() {
+					break
+				}
 				continue
 			}
 		}
@@ -340,7 +383,8 @@ func (handler *Handler) executeCandidatesWithTest(
 				handler.learnClientIdentity(request.Context(), contract.SubscriptionProviderOpenAICodex, attemptRequest.Header)
 			}
 			if recognized && protection.officialPassthrough {
-				// A genuine Codex CLI request is forwarded untouched.
+				// A genuine Codex CLI request is forwarded untouched, apart
+				// from the web_search declaration below.
 				clientClass = accountauth.ClientClassOfficial
 			} else {
 				clientClass = accountauth.ClientClassThirdParty
@@ -356,6 +400,7 @@ func (handler *Handler) executeCandidatesWithTest(
 				}
 				forced, err := prepareCodexSubscriptionRequest(attemptRequest, plan.UpstreamProtocol, options)
 				if err != nil {
+					finishPrivacy()
 					kind := executionFailureConfiguration
 					if converted {
 						kind = executionFailureConversionUnsupported
@@ -365,6 +410,17 @@ func (handler *Handler) executeCandidatesWithTest(
 					continue
 				}
 				codexForcedStream = forced
+			}
+			// The backend rejects a replayed hosted web search without a declared
+			// web_search tool, whichever client sent it; compaction has its own
+			// wire shape.
+			if protection.codexRequests && plan.UpstreamProtocol == contract.ProtocolOpenAIResponses {
+				if err := declareCodexWebSearchHistory(attemptRequest); err != nil {
+					finishPrivacy()
+					last = executionFailure{kind: executionFailureConfiguration, err: err, endpointID: candidate.Service.ID}
+					records.noteCandidateRejected(last.endpointID, last.code())
+					continue
+				}
 			}
 		}
 
@@ -402,6 +458,7 @@ func (handler *Handler) executeCandidatesWithTest(
 					}
 				}
 				if err := prepareClaudeSubscriptionRequest(attemptRequest, options); err != nil {
+					finishPrivacy()
 					last = executionFailure{kind: executionFailureConfiguration, endpointID: candidate.Service.ID, err: err}
 					records.noteCandidateRejected(last.endpointID, last.code())
 					continue
@@ -416,6 +473,7 @@ func (handler *Handler) executeCandidatesWithTest(
 				handler.learnClientIdentity(request.Context(), contract.SubscriptionProviderXAIGrok, attemptRequest.Header)
 			}
 		}
+		records.noteCodexOfficial(clientClass == accountauth.ClientClassOfficial)
 		var headers http.Header
 		authorizationEndpoint, authorizeErr := candidate.AuthorizationEndpoint()
 		// The recognized class rides the proxy context so the authorizer, which
@@ -432,6 +490,7 @@ func (handler *Handler) executeCandidatesWithTest(
 			authorizeErr = headersErr
 		}
 		if authorizeErr != nil {
+			finishPrivacy()
 			_ = attemptRequest.Body.Close()
 			if request.Context().Err() != nil {
 				return
@@ -452,6 +511,7 @@ func (handler *Handler) executeCandidatesWithTest(
 		}
 		baseURL, parseErr := url.Parse(candidate.BaseURL)
 		if parseErr != nil {
+			finishPrivacy()
 			_ = attemptRequest.Body.Close()
 			last = executionFailure{
 				kind:       executionFailureConfiguration,
@@ -481,6 +541,7 @@ func (handler *Handler) executeCandidatesWithTest(
 				rateLimited = append(rateLimited, endpoint.RateLimitedCandidate{
 					Service: candidate.Service.ID, ServiceName: candidate.Service.Name, Model: upstreamModel, Until: until,
 				})
+				finishPrivacy()
 				_ = attemptRequest.Body.Close()
 				if !body.Replayable() {
 					break
@@ -541,6 +602,7 @@ func (handler *Handler) executeCandidatesWithTest(
 				outWriter, handler.conversionEngine, plan, classified.Model, upstreamModel, conversion.State,
 			)
 			if planErr != nil {
+				finishPrivacy()
 				_ = attemptRequest.Body.Close()
 				last = executionFailure{kind: executionFailureConversionUnsupported, err: planErr, endpointID: candidate.Service.ID}
 				continue
@@ -584,10 +646,12 @@ func (handler *Handler) executeCandidatesWithTest(
 					request.Context(),
 					candidate,
 					plan,
+					images,
 					handler.requestRecords,
 					handler.recordLogger,
 				)
 				recordSession.noteConversionDiagnostics(contract.ConversionDiagnosticPhaseRequest, conversion.Diagnostics)
+				recordSession.noteGatewayReasoning(reasoning)
 				recordSession.observeOutboundCapture(outbound)
 			}
 			if test != nil && test.observer.Outbound != nil {
@@ -639,6 +703,12 @@ func (handler *Handler) executeCandidatesWithTest(
 					action = contract.FailureFailover
 					schedule.excludeService(candidate.CanonicalService().ID)
 				}
+				if response.StatusCode == http.StatusBadRequest && candidate.Service.Kind == contract.ServiceKindClaudeSubscription &&
+					claudeExtraUsageRejection(response, inspect) {
+					// Another Claude subscription would refuse it as well, or bill
+					// it to extra usage.
+					schedule.excludeKind(contract.ServiceKindClaudeSubscription)
+				}
 				var repaired []byte
 				if response.StatusCode == http.StatusBadRequest && !downstream.Committed() && !accountBlocked &&
 					(canRepairThinking || canRepairOpenAI) && repairedTargets[repairTarget] == nil &&
@@ -682,22 +752,6 @@ func (handler *Handler) executeCandidatesWithTest(
 					}
 				}
 				recovering := false
-				if repaired != nil {
-					// A repaired body is derived content, not the preflight's
-					// sanitized bytes: rebuilding it can move text into positions
-					// the detector treats differently. Re-inspect it under the
-					// same policy before it may leave; an unusable repair just
-					// falls back to normal failure handling.
-					sanitized, extraRedactions, usable := handler.sanitizeRepairedBody(request.Context(), records, classified.Protocol, repaired)
-					if !usable {
-						repaired = nil
-					} else {
-						repaired = sanitized
-						if len(extraRedactions) > 0 {
-							redactions = append(redactions, extraRedactions...)
-						}
-					}
-				}
 				if repaired != nil && schedule.repair(candidateIndex) {
 					repairedTargets[repairTarget] = repaired
 					recovering = true
@@ -793,6 +847,7 @@ func (handler *Handler) executeCandidatesWithTest(
 		if retryHTTP == nil && relayWriter != nil && forwardErr != nil && !downstream.Committed() {
 			_ = relayWriter.streamClose()
 		}
+		finishPrivacy()
 		_ = attemptRequest.Body.Close()
 
 		if retryHTTP != nil {
@@ -1093,7 +1148,10 @@ func requiresInspectedJSON(protocol contract.ProtocolID) bool {
 		contract.ProtocolOpenAIResponsesCompact,
 		contract.ProtocolAnthropicMessages,
 		contract.ProtocolOpenAIChat,
-		contract.ProtocolOpenAICompletions:
+		contract.ProtocolOpenAICompletions,
+		contract.ProtocolOpenAIEmbeddings,
+		contract.ProtocolRerank,
+		contract.ProtocolGoogleEmbeddings:
 		return true
 	default:
 		return false

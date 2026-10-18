@@ -108,6 +108,78 @@ export function validIdentityVersion(
   return match[4] === undefined;
 }
 
+/**
+ * How the gateway sets thinking: "passthrough" leaves it to each client,
+ * "fixed" sends every request at the level, and "adaptive" sends the lower
+ * end of the preset's range for a simple request and moves up a level for
+ * each of a long conversation, many tools and a long last message.
+ */
+export const reasoningModes = ["passthrough", "fixed", "adaptive"] as const;
+export type ReasoningMode = (typeof reasoningModes)[number];
+/** Thinking levels from least to most; "max" is each model's highest. */
+export const reasoningLevels = ["off", "low", "medium", "high", "max"] as const;
+export type ReasoningLevel = (typeof reasoningLevels)[number];
+/** The adaptive ranges; "custom" runs from adaptive_min to adaptive_max. */
+export const adaptivePresets = ["everyday", "research", "custom"] as const;
+export type AdaptivePreset = (typeof adaptivePresets)[number];
+export type LevelRange = readonly [ReasoningLevel, ReasoningLevel];
+/** The ranges of the presets that set their own. */
+export const presetRanges = {
+  everyday: ["low", "max"],
+  research: ["medium", "max"],
+} as const satisfies Record<Exclude<AdaptivePreset, "custom">, LevelRange>;
+
+/** The range the adaptive mode uses with the settings' preset. */
+export function adaptiveRange(
+  settings: Pick<
+    RoutingSettings,
+    "adaptive_preset" | "adaptive_min" | "adaptive_max"
+  >,
+): LevelRange {
+  const preset = settings.adaptive_preset ?? "everyday";
+  if (preset !== "custom") return presetRanges[preset];
+  return [settings.adaptive_min ?? "low", settings.adaptive_max ?? "max"];
+}
+
+/** The core's limit for the global prompt prefix and suffix, in code points. */
+export const maxSystemPromptLength = 20000;
+const systemPromptTextKeys = [
+  "system_prompt_prefix",
+  "system_prompt_suffix",
+] as const;
+export const thinkingPromptKeys = [
+  "system_prompt_enabled",
+  ...systemPromptTextKeys,
+  "reasoning_mode",
+  "reasoning_level",
+  "adaptive_preset",
+  "adaptive_min",
+  "adaptive_max",
+] as const;
+
+/**
+ * "lossless" keeps every pixel and re-encodes PNG and single-frame GIF images;
+ * "lossy" encodes at the quality and also re-encodes JPEG images, sending a
+ * PNG or GIF lossless when that is smaller.
+ */
+export const imageCompressionModes = ["lossless", "lossy"] as const;
+export type ImageCompressionMode = (typeof imageCompressionModes)[number];
+
+/**
+ * Re-encodes the base64 images of inference requests as WebP before they are
+ * forwarded. An image is replaced only when its WebP is smaller.
+ */
+export interface ImageCompression {
+  enabled: boolean;
+  mode: ImageCompressionMode;
+  /** The lossy encoder's quality, 1–100; kept while lossless is chosen. */
+  quality: number;
+}
+
+export function defaultImageCompression(): ImageCompression {
+  return { enabled: false, mode: "lossless", quality: 85 };
+}
+
 export interface ModelRedirect {
   from: string;
   to: string;
@@ -204,6 +276,24 @@ export interface RoutingSettings {
   codex_identity_version?: string;
   claude_identity_version?: string;
   grok_identity_version?: string;
+  /**
+   * Adds the prefix and suffix to the system prompt of inference requests when
+   * on. Claude Code's Haiku requests keep their own prompt.
+   */
+  system_prompt_enabled?: boolean;
+  system_prompt_prefix?: string;
+  system_prompt_suffix?: string;
+  reasoning_mode?: ReasoningMode;
+  /**
+   * The fixed mode's level. It and the adaptive fields are kept while another
+   * mode is chosen, so switching back restores them.
+   */
+  reasoning_level?: ReasoningLevel;
+  adaptive_preset?: AdaptivePreset;
+  /** The custom range; the lower end is at most the upper end. */
+  adaptive_min?: ReasoningLevel;
+  adaptive_max?: ReasoningLevel;
+  image_compression?: ImageCompression;
   model_redirects?: ModelRedirect[];
   /**
    * Model routing groups, replaced wholesale by one PATCH. Absent means none;
@@ -466,6 +556,22 @@ export function parseClientIdentities(value: unknown): ClientIdentities {
   };
 }
 
+/** Mirrors contract.ImageCompression; an older core without it reads as off. */
+function parseImageCompression(value: unknown): ImageCompression {
+  if (value === undefined) return defaultImageCompression();
+  const settings = object(value, "image_compression");
+  keys(settings, ["enabled", "mode", "quality"], [], "image_compression");
+  if (typeof settings.enabled !== "boolean")
+    throw Error("image_compression.enabled: expected a boolean");
+  if (!imageCompressionModes.includes(settings.mode as ImageCompressionMode))
+    throw Error("image_compression.mode: unknown mode");
+  return {
+    enabled: settings.enabled,
+    mode: settings.mode as ImageCompressionMode,
+    quality: integer(settings.quality, 1, 100, "image_compression.quality"),
+  };
+}
+
 export function parseRoutingSettings(
   value: unknown,
   dimensions?: ClassifierDimension[],
@@ -485,11 +591,14 @@ export function parseRoutingSettings(
       "model_redirects",
       "model_routing_groups",
       "builtin_tools",
+      "image_compression",
       ...forwardingSwitchKeys,
       ...identityVersionKeys,
+      ...thinkingPromptKeys,
     ],
     "routing_settings",
   );
+  const imageCompression = parseImageCompression(settings.image_compression);
   const redirects = parseModelRedirects(settings.model_redirects);
   const modelRoutingGroups = parseModelRoutingGroups(
     settings.model_routing_groups,
@@ -505,6 +614,44 @@ export function parseRoutingSettings(
       throw Error(`${key}: expected a boolean`);
     }
   }
+  if (
+    Object.hasOwn(settings, "system_prompt_enabled") &&
+    typeof settings.system_prompt_enabled !== "boolean"
+  )
+    throw Error("system_prompt_enabled: expected a boolean");
+  for (const key of systemPromptTextKeys) {
+    if (!Object.hasOwn(settings, key)) continue;
+    const text = settings[key];
+    if (typeof text !== "string" || [...text].length > maxSystemPromptLength)
+      throw Error(
+        `${key}: expected text of at most ${maxSystemPromptLength} characters`,
+      );
+  }
+  if (
+    Object.hasOwn(settings, "reasoning_mode") &&
+    !reasoningModes.includes(settings.reasoning_mode as ReasoningMode)
+  )
+    throw Error("reasoning_mode: unknown mode");
+  for (const key of ["reasoning_level", "adaptive_min", "adaptive_max"]) {
+    if (
+      Object.hasOwn(settings, key) &&
+      !reasoningLevels.includes(settings[key] as ReasoningLevel)
+    )
+      throw Error(`${key}: unknown level`);
+  }
+  if (
+    Object.hasOwn(settings, "adaptive_preset") &&
+    !adaptivePresets.includes(settings.adaptive_preset as AdaptivePreset)
+  )
+    throw Error("adaptive_preset: unknown preset");
+  const adaptiveMin =
+    (settings.adaptive_min as ReasoningLevel | undefined) ?? "low";
+  const adaptiveMax =
+    (settings.adaptive_max as ReasoningLevel | undefined) ?? "max";
+  if (
+    reasoningLevels.indexOf(adaptiveMin) > reasoningLevels.indexOf(adaptiveMax)
+  )
+    throw Error("adaptive_min: must be at most adaptive_max");
   // An empty override is only meaningful in a patch, where it clears the value.
   const versions: Partial<Record<IdentityVersionKey, string>> = {};
   for (const key of identityVersionKeys) {
@@ -551,6 +698,22 @@ export function parseRoutingSettings(
       ]),
     ) as Record<(typeof forwardingSwitchKeys)[number], boolean>),
     ...versions,
+    // Older cores omit these; filling the defaults keeps draft comparisons stable.
+    system_prompt_enabled:
+      (settings.system_prompt_enabled as boolean | undefined) ?? false,
+    system_prompt_prefix:
+      (settings.system_prompt_prefix as string | undefined) ?? "",
+    system_prompt_suffix:
+      (settings.system_prompt_suffix as string | undefined) ?? "",
+    reasoning_mode:
+      (settings.reasoning_mode as ReasoningMode | undefined) ?? "passthrough",
+    reasoning_level:
+      (settings.reasoning_level as ReasoningLevel | undefined) ?? "medium",
+    adaptive_preset:
+      (settings.adaptive_preset as AdaptivePreset | undefined) ?? "everyday",
+    adaptive_min: adaptiveMin,
+    adaptive_max: adaptiveMax,
+    image_compression: imageCompression,
     model_redirects: redirects,
     model_routing_groups: modelRoutingGroups,
     ...(settings.builtin_tools !== undefined

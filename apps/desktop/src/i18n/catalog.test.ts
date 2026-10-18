@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import en from "./locales/en.json";
+import ja from "./locales/ja.json";
 import zhCN from "./locales/zh-CN.json";
 
 function flattenKeys(value: unknown, prefix = ""): string[] {
@@ -16,7 +17,9 @@ function flattenKeys(value: unknown, prefix = ""): string[] {
 }
 
 describe("i18n catalogs", () => {
-  it("keeps the same keys in en and zh-CN", () => {
-    expect(flattenKeys(zhCN).sort()).toEqual(flattenKeys(en).sort());
+  it("keeps the same keys in every catalog", () => {
+    const keys = flattenKeys(en).sort();
+    expect(flattenKeys(zhCN).sort()).toEqual(keys);
+    expect(flattenKeys(ja).sort()).toEqual(keys);
   });
 });

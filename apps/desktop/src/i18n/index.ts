@@ -2,11 +2,18 @@ import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import { useSyncExternalStore } from "react";
 
-import { DEFAULT_LOCALE, type Locale } from "./locale";
+import { DEFAULT_LOCALE, isLocale, type Locale } from "./locale";
 import en from "./locales/en.json";
+import ja from "./locales/ja.json";
 import zhCN from "./locales/zh-CN.json";
 
-export { DEFAULT_LOCALE, isLocale, LOCALES, type Locale } from "./locale";
+export {
+  DEFAULT_LOCALE,
+  isLocale,
+  LOCALE_NAMES,
+  LOCALES,
+  type Locale,
+} from "./locale";
 
 export function applyDocumentLocale(locale: Locale): void {
   if (typeof document === "undefined") return;
@@ -18,6 +25,7 @@ const i18nReady = i18n.use(initReactI18next).init({
   fallbackLng: DEFAULT_LOCALE,
   resources: {
     en: { translation: en },
+    ja: { translation: ja },
     "zh-CN": { translation: zhCN },
   },
   interpolation: {
@@ -49,6 +57,11 @@ function subscribeLanguage(onStoreChange: () => void): () => void {
 
 function languageSnapshot(): string {
   return i18n.language;
+}
+
+/** The active catalog, as a BCP 47 tag for `Intl` formatting and collation. */
+export function currentLocale(): Locale {
+  return isLocale(i18n.language) ? i18n.language : DEFAULT_LOCALE;
 }
 
 const translate = i18n.t.bind(i18n);

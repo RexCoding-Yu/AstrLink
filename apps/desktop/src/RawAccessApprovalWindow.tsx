@@ -17,7 +17,7 @@ import {
   listRawAccess,
   listenRawSealingChanged,
 } from "./bridge";
-import { i18n, useT } from "./i18n";
+import { currentLocale, useT } from "./i18n";
 import { notify } from "./notify";
 import {
   oldestPendingGrant,
@@ -60,7 +60,7 @@ interface RequestFacts {
 function formatTimestamp(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(i18n.language === "zh-CN" ? "zh-CN" : "en", {
+  return new Intl.DateTimeFormat(currentLocale(), {
     dateStyle: "medium",
     timeStyle: "medium",
   }).format(date);

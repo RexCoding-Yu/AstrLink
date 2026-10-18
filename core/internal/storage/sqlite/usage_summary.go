@@ -33,6 +33,11 @@ func (store *Store) GetUsageSummary(ctx context.Context, options storage.UsageSu
 	// and excludes them at the exclusive boundary, including legacy exact seconds.
 	// Models group by what was sent upstream, matching billing: the served
 	// model, then a routing redirect target, then the client's model.
+	// Pending calls have no outcome yet, the client abandoned cancelled ones,
+	// and a policy block never reached a provider, so none of them counts as a
+	// request or a failure. This matches the desktop, where a recorded
+	// "blocked" is its own outcome rather than a failure, and where a legacy
+	// row stored as succeeded with a 4xx/5xx counts as failed.
 	rows, err := store.db.QueryContext(ctx, `SELECT started_at, status, http_status,
     service_id, COALESCE(
         NULLIF(json_extract(NULLIF(recovery_json, ''), '$.upstream_model'), ''),
@@ -94,6 +99,10 @@ WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
 		}
 
 		result.ScannedRecords++
+		// The same definition the desktop shows per call: an explicit failure,
+		// or a call stored as succeeded that came back 4xx/5xx. A failure
+		// consumes no tokens and is not a request here, so it only ever adds to
+		// FailedRequests.
 		if status == "failed" || (httpStatus.Valid && httpStatus.Int64 >= 400) {
 			for _, target := range targets {
 				target.FailedRequests++

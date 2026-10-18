@@ -271,6 +271,7 @@ var withheldReasonDetails = map[string]string{
 	"privacy_restored":  "Placeholders in this response were restored to the original values.",
 	"privacy_fail_open": "Privacy inspection failed and the request went upstream uninspected.",
 	"privacy_pending":   "Privacy inspection had not finished when this was read.",
+	"privacy_trusted":   "The request went upstream uninspected to a provider the user trusts, so it holds the original values.",
 	"privacy_unknown":   "Captured before AstrLink recorded privacy decisions, or its inspection never finished.",
 	"raw_locked":        "Raw reading is locked in the desktop.",
 	"raw_not_kept":      "Captured before the user set a raw password in AstrLink, so the raw content was not kept.",

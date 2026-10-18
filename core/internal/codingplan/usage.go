@@ -36,6 +36,8 @@ var (
 	// ErrUsageUnavailable is the provider-neutral sentinel; messages carry the
 	// provider label ("kimi usage unavailable: status 401").
 	ErrUsageUnavailable = errors.New("usage unavailable")
+	// ErrRateLimited is what a RateLimitError unwraps to.
+	ErrRateLimited = errors.New("usage lookups are rate limited")
 )
 
 const (
@@ -48,10 +50,32 @@ const (
 	// New API rate-limits /api/usage to 20 requests per 20 minutes per IP by
 	// default, shared by every key on the site.
 	newAPICacheTTL = 5 * time.Minute
+	// An operator refresh still reuses a snapshot this young, so repeated
+	// clicks and a second open view cost the provider one lookup.
+	refreshFloor = 10 * time.Second
+	// A host that answers 429 is left alone for its Retry-After, or for
+	// rateLimitPause when it names none; New API sends none.
+	rateLimitPause    = 5 * time.Minute
+	maxRateLimitPause = 20 * time.Minute
+	// A site's quota per USD is an admin setting that rarely changes.
+	newAPIRateTTL = time.Hour
 	// defaultNewAPIQuotaPerUnit is New API's stock quota per USD. A site can
 	// change it and publishes the live value on /api/status.
 	defaultNewAPIQuotaPerUnit = 500_000
 )
+
+// RateLimitError reports a provider that answered 429, or a host still inside
+// the pause that answer started. RetryAfter is what is left of the pause.
+type RateLimitError struct {
+	label      string
+	RetryAfter time.Duration
+}
+
+func (err *RateLimitError) Error() string {
+	return fmt.Sprintf("%s %v; retry in %s", err.label, ErrRateLimited, err.RetryAfter.Round(time.Second))
+}
+
+func (err *RateLimitError) Unwrap() error { return ErrRateLimited }
 
 // Supports reports whether kind exposes a plan quota endpoint AstrLink knows.
 // OpenCode Zen (pay-as-you-go) and other API gateways deliberately return
@@ -86,50 +110,138 @@ func Label(kind contract.ServiceKind) string {
 }
 
 type cacheEntry struct {
-	usage contract.SubscriptionUsage
+	usage    contract.SubscriptionUsage
+	revision string
+	until    time.Time
+}
+
+// lookup is one provider call that concurrent readers of a service share.
+type lookup struct {
+	done     chan struct{}
+	revision string
+	usage    contract.SubscriptionUsage
+	err      error
+}
+
+type siteRate struct {
+	value float64
 	until time.Time
 }
 
 // Fetcher resolves the service API key and calls the provider quota route.
 type Fetcher struct {
-	secrets secretstore.SecretStore
-	client  *http.Client
-	now     func() time.Time
-	mu      sync.Mutex
-	cache   map[contract.ServiceID]cacheEntry
+	secrets  secretstore.SecretStore
+	client   *http.Client
+	now      func() time.Time
+	mu       sync.Mutex
+	cache    map[contract.ServiceID]cacheEntry
+	inflight map[contract.ServiceID]*lookup
+	// pausedUntil is keyed by usage origin: New API counts its limit per
+	// client IP, so one key's 429 speaks for every key on the site.
+	pausedUntil map[string]time.Time
+	rates       map[string]siteRate
 }
 
 func New(secrets secretstore.SecretStore, client *http.Client) *Fetcher {
 	if client == nil {
 		client = &http.Client{Timeout: requestTimeout}
 	}
-	return &Fetcher{secrets: secrets, client: networkproxy.WrapClient(client), now: time.Now, cache: make(map[contract.ServiceID]cacheEntry)}
-}
-
-// ForgetUsage drops the cached quota snapshot so the next Usage call goes to
-// the provider. A nil fetcher has nothing to forget.
-func (fetcher *Fetcher) ForgetUsage(id contract.ServiceID) {
-	if fetcher == nil {
-		return
+	return &Fetcher{
+		secrets:     secrets,
+		client:      networkproxy.WrapClient(client),
+		now:         time.Now,
+		cache:       make(map[contract.ServiceID]cacheEntry),
+		inflight:    make(map[contract.ServiceID]*lookup),
+		pausedUntil: make(map[string]time.Time),
+		rates:       make(map[string]siteRate),
 	}
-	fetcher.mu.Lock()
-	delete(fetcher.cache, id)
-	fetcher.mu.Unlock()
 }
 
-// Usage returns the sanitized quota snapshot for a coding plan service.
+// Usage returns the sanitized quota snapshot for a coding plan service,
+// served from cache while it is fresh for the service's current settings.
 func (fetcher *Fetcher) Usage(ctx context.Context, service contract.Service) (contract.SubscriptionUsage, error) {
+	return fetcher.usage(ctx, service, false)
+}
+
+// Refresh is an operator asking for the provider's current numbers. A
+// snapshot younger than refreshFloor still answers it, and a host paused by a
+// 429 is not called again until the pause ends.
+func (fetcher *Fetcher) Refresh(ctx context.Context, service contract.Service) (contract.SubscriptionUsage, error) {
+	return fetcher.usage(ctx, service, true)
+}
+
+func (fetcher *Fetcher) usage(ctx context.Context, service contract.Service, refresh bool) (contract.SubscriptionUsage, error) {
 	if fetcher == nil || !Supports(service.Kind) || service.HTTP == nil {
 		return contract.SubscriptionUsage{}, ErrUnsupported
 	}
+	endpoint, err := UsageURL(service.Kind, service.HTTP.BaseURL)
+	if err != nil {
+		return contract.SubscriptionUsage{}, fmt.Errorf("%s %w", Label(service.Kind), err)
+	}
+	origin := originOf(endpoint)
+	revision := revisionOf(service)
 	now := fetcher.now().UTC()
 	fetcher.mu.Lock()
-	if entry, ok := fetcher.cache[service.ID]; ok && now.Before(entry.until) {
+	if entry, ok := fetcher.cache[service.ID]; ok && entry.revision == revision {
+		reuse := now.Before(entry.until)
+		if refresh {
+			reuse = now.Sub(entry.usage.FetchedAt) < refreshFloor
+		}
+		if reuse {
+			fetcher.mu.Unlock()
+			return entry.usage, nil
+		}
+	}
+	if until := fetcher.pausedUntil[origin]; now.Before(until) {
 		fetcher.mu.Unlock()
-		return entry.usage, nil
+		return contract.SubscriptionUsage{}, &RateLimitError{label: Label(service.Kind), RetryAfter: until.Sub(now)}
+	}
+	call, joined := fetcher.inflight[service.ID]
+	if !joined || call.revision != revision {
+		call, joined = &lookup{done: make(chan struct{}), revision: revision}, false
+		fetcher.inflight[service.ID] = call
 	}
 	fetcher.mu.Unlock()
+	if joined {
+		select {
+		case <-call.done:
+			return call.usage, call.err
+		case <-ctx.Done():
+			return contract.SubscriptionUsage{}, ctx.Err()
+		}
+	}
 
+	call.usage, call.err = fetcher.lookup(ctx, service, endpoint, now)
+	fetcher.mu.Lock()
+	var limited *RateLimitError
+	paused := errors.As(call.err, &limited)
+	if paused {
+		fetcher.pausedUntil[origin] = fetcher.now().UTC().Add(limited.RetryAfter)
+	}
+	// A lookup overtaken by an edit to the service must not touch the
+	// snapshot of the new settings.
+	if fetcher.inflight[service.ID] == call {
+		delete(fetcher.inflight, service.ID)
+		switch {
+		case call.err == nil:
+			ttl := cacheTTL
+			if service.Kind == contract.ServiceKindNewAPI {
+				ttl = newAPICacheTTL
+			}
+			fetcher.cache[service.ID] = cacheEntry{usage: call.usage, revision: revision, until: now.Add(ttl)}
+		case !paused:
+			// A rejected or deleted key must not be reported with its last
+			// numbers to the next reader; a 429 says nothing about the key.
+			delete(fetcher.cache, service.ID)
+		}
+	}
+	fetcher.mu.Unlock()
+	close(call.done)
+	return call.usage, call.err
+}
+
+// lookup reads the service key and calls the provider once.
+func (fetcher *Fetcher) lookup(ctx context.Context, service contract.Service, endpoint string, now time.Time) (contract.SubscriptionUsage, error) {
 	ctx, err := networkproxy.Bind(ctx, service, fetcher.secrets)
 	if err != nil {
 		return contract.SubscriptionUsage{}, err
@@ -139,8 +251,13 @@ func (fetcher *Fetcher) Usage(ctx context.Context, service contract.Service) (co
 		return contract.SubscriptionUsage{}, err
 	}
 	defer clear(secret)
-	usage, err := fetcher.fetch(ctx, service.Kind, service.HTTP.BaseURL, string(secret))
+	usage, err := fetcher.fetch(ctx, service.Kind, endpoint, service.HTTP.BaseURL, string(secret))
 	if err != nil {
+		var limited *RateLimitError
+		if errors.As(err, &limited) {
+			limited.label = Label(service.Kind)
+			return contract.SubscriptionUsage{}, limited
+		}
 		if !errors.Is(err, ErrUsageUnavailable) {
 			err = fmt.Errorf("%w: %w", ErrUsageUnavailable, err)
 		}
@@ -151,14 +268,35 @@ func (fetcher *Fetcher) Usage(ctx context.Context, service contract.Service) (co
 	if err := usage.Validate(); err != nil {
 		return contract.SubscriptionUsage{}, fmt.Errorf("%s %w: invalid payload", Label(service.Kind), ErrUsageUnavailable)
 	}
-	ttl := cacheTTL
-	if service.Kind == contract.ServiceKindNewAPI {
-		ttl = newAPICacheTTL
-	}
-	fetcher.mu.Lock()
-	fetcher.cache[service.ID] = cacheEntry{usage: usage, until: now.Add(ttl)}
-	fetcher.mu.Unlock()
 	return usage, nil
+}
+
+// revisionOf names the stored settings a snapshot was read with. Every edit
+// bumps UpdatedAt, so a replaced key is never answered with the old key's
+// quota.
+func revisionOf(service contract.Service) string {
+	return service.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\x00" + service.HTTP.BaseURL + "\x00" + service.HTTP.CredentialRef
+}
+
+func originOf(endpoint string) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	return parsed.Scheme + "://" + strings.ToLower(parsed.Host)
+}
+
+// retryAfter reads a 429's Retry-After, in seconds or as an HTTP date, and
+// bounds the pause it asks for.
+func retryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	pause := rateLimitPause
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		pause = time.Duration(min(max(seconds, 0), int64(maxRateLimitPause/time.Second))) * time.Second
+	} else if at, err := http.ParseTime(value); err == nil {
+		pause = at.Sub(now)
+	}
+	return min(max(pause, refreshFloor), maxRateLimitPause)
 }
 
 func (fetcher *Fetcher) apiKey(ctx context.Context, connection contract.HTTPConnection) ([]byte, error) {
@@ -180,11 +318,7 @@ func (fetcher *Fetcher) apiKey(ctx context.Context, connection contract.HTTPConn
 	return []byte(value), nil
 }
 
-func (fetcher *Fetcher) fetch(ctx context.Context, kind contract.ServiceKind, baseURL, apiKey string) (contract.SubscriptionUsage, error) {
-	endpoint, err := UsageURL(kind, baseURL)
-	if err != nil {
-		return contract.SubscriptionUsage{}, err
-	}
+func (fetcher *Fetcher) fetch(ctx context.Context, kind contract.ServiceKind, endpoint, baseURL, apiKey string) (contract.SubscriptionUsage, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -202,11 +336,14 @@ func (fetcher *Fetcher) fetch(ctx context.Context, kind contract.ServiceKind, ba
 		// where the inference side uses x-api-key.
 		request.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	status, body, err := fetcher.read(request)
+	status, header, body, err := fetcher.read(request)
 	if err != nil {
 		return contract.SubscriptionUsage{}, err
 	}
 	if status != http.StatusOK {
+		if status == http.StatusTooManyRequests {
+			return contract.SubscriptionUsage{}, &RateLimitError{RetryAfter: retryAfter(header.Get("Retry-After"), fetcher.now())}
+		}
 		if kind == contract.ServiceKindOpenCodeGo && status == http.StatusForbidden {
 			return contract.SubscriptionUsage{}, fmt.Errorf("%w: key has no OpenCode Go subscription (status 403)", ErrUsageUnavailable)
 		}
@@ -219,33 +356,41 @@ func (fetcher *Fetcher) fetch(ctx context.Context, kind contract.ServiceKind, ba
 	return decode(kind, body, fetcher.now().UTC(), quotaPerUnit)
 }
 
-func (fetcher *Fetcher) read(request *http.Request) (int, []byte, error) {
+func (fetcher *Fetcher) read(request *http.Request) (int, http.Header, []byte, error) {
 	response, err := fetcher.client.Do(request)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %w", ErrUsageUnavailable, err)
+		return 0, nil, nil, fmt.Errorf("%w: %w", ErrUsageUnavailable, err)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes))
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %w", ErrUsageUnavailable, err)
+		return 0, nil, nil, fmt.Errorf("%w: %w", ErrUsageUnavailable, err)
 	}
-	return response.StatusCode, body, nil
+	return response.StatusCode, response.Header, body, nil
 }
 
 // newAPIQuotaPerUnit reads the site's quota per USD from the public
-// /api/status, which takes no key. The stock value covers a site that hides or
-// fails it.
+// /api/status, which takes no key, and keeps it for newAPIRateTTL. The stock
+// value covers a site that hides or fails it, and is not kept.
 func (fetcher *Fetcher) newAPIQuotaPerUnit(ctx context.Context, baseURL string) float64 {
 	base, err := baseOrigin(baseURL)
 	if err != nil {
 		return defaultNewAPIQuotaPerUnit
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String()+"/api/status", nil)
+	origin := base.String()
+	now := fetcher.now()
+	fetcher.mu.Lock()
+	cached, ok := fetcher.rates[origin]
+	fetcher.mu.Unlock()
+	if ok && now.Before(cached.until) {
+		return cached.value
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/api/status", nil)
 	if err != nil {
 		return defaultNewAPIQuotaPerUnit
 	}
 	request.Header.Set("Accept", "application/json")
-	status, body, err := fetcher.read(request)
+	status, _, body, err := fetcher.read(request)
 	if err != nil || status != http.StatusOK {
 		return defaultNewAPIQuotaPerUnit
 	}
@@ -261,6 +406,9 @@ func (fetcher *Fetcher) newAPIQuotaPerUnit(ctx context.Context, baseURL string) 
 	if !ok || value <= 0 || math.IsInf(value, 0) {
 		return defaultNewAPIQuotaPerUnit
 	}
+	fetcher.mu.Lock()
+	fetcher.rates[origin] = siteRate{value: value, until: now.Add(newAPIRateTTL)}
+	fetcher.mu.Unlock()
 	return value
 }
 

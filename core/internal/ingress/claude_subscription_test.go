@@ -278,3 +278,20 @@ func TestClaudeSubscriptionDropsBlankStringSystem(t *testing.T) {
 		t.Fatalf("system = %s, want only the banner", system)
 	}
 }
+
+func TestClaudeSubscriptionKeepsOneBannerWhenThePromptOpensWithIt(t *testing.T) {
+	banner := `{"text":"` + claudeCodeBanner + `","type":"text"}`
+	for _, test := range []struct{ system, want string }{
+		{`"` + claudeCodeBanner + `\n\nAnswer briefly.\n\nKeep my instructions"`, `[` + banner + `,{"text":"Answer briefly.\n\nKeep my instructions","type":"text"}]`},
+		{`[{"type":"text","text":"` + claudeCodeBanner + `\n\nAnswer briefly.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"Keep"}]`,
+			`[` + banner + `,{"cache_control":{"type":"ephemeral"},"text":"Answer briefly.","type":"text"},{"text":"Keep","type":"text"}]`},
+		{`[{"type":"text","text":"` + claudeCodeBanner + `\n"},{"type":"text","text":"Keep"}]`, `[` + banner + `,{"text":"Keep","type":"text"}]`},
+		// Text that merely starts like the banner is the client's own prompt.
+		{`"` + claudeCodeBanner + `Keep"`, `[` + banner + `,{"text":"` + claudeCodeBanner + `Keep","type":"text"}]`},
+	} {
+		fields, _ := prepareClaudeBody(t, `{"model":"claude-sonnet-4-5","max_tokens":64,"system":`+test.system+`,"messages":[{"role":"user","content":"hi"}]}`)
+		if system, _ := json.Marshal(fields["system"]); string(system) != test.want {
+			t.Fatalf("system = %s\nwant %s", system, test.want)
+		}
+	}
+}

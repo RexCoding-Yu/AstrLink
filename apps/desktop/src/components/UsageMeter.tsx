@@ -171,7 +171,8 @@ export function UsageMeterRow({
   /** Visible value when a column header already names the unit. */
   valueText?: string;
   warning?: string;
-  tone: "success" | "warning" | "destructive";
+  /** `default` is a plain share in brand ink, for counts that carry no status. */
+  tone: "default" | "success" | "warning" | "destructive";
   className?: string;
 }) {
   const percent = Number.isFinite(value) ? Math.max(0, value) : 0;

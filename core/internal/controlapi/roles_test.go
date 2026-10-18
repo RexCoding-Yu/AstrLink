@@ -37,6 +37,13 @@ var roleCallers = []roleCaller{
 		*request = *request.WithContext(ContextWithLocalSocketAuth(request.Context()))
 		request.Header.Set("Authorization", "Bearer "+testControlToken)
 	}},
+	{name: "console session", role: RoleOperator, set: func(request *http.Request) {
+		*request = *request.WithContext(ContextWithConsoleSession(request.Context()))
+	}},
+	{name: "console session with observer token", role: RoleOperator, set: func(request *http.Request) {
+		*request = *request.WithContext(ContextWithConsoleSession(request.Context()))
+		request.Header.Set("Authorization", "Bearer "+testObserverToken)
+	}},
 }
 
 func newRoleMatrixHandler(t *testing.T) *Handler {
@@ -90,6 +97,7 @@ func TestControlRoleMatrix(t *testing.T) {
 		{http.MethodGet, RequestsPath + "/req_missing/children", "", RoleObserver},
 		{http.MethodGet, RequestSessionsPath, "", RoleObserver},
 		{http.MethodGet, UsageSummaryPath, "", RoleObserver},
+		{http.MethodGet, PrivacySummaryPath, "", RoleObserver},
 		{http.MethodGet, AccessTokenUsagePath, "", RoleObserver},
 		{http.MethodGet, AuditSettingsPath, "", RoleObserver},
 		// Observers get the reduced raw_available view.

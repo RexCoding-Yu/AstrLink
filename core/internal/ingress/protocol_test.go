@@ -32,6 +32,14 @@ func TestClassifyAlphaProtocolRoutes(t *testing.T) {
 		{name: "gemini auto", method: http.MethodPost, path: "/v1beta/models/astrlink/auto:generateContent", body: `{"contents":[{"parts":[{"text":"hello"}]}]}`, protocol: contract.ProtocolGoogleGenerateContent, model: contract.AstrLinkAutoModelID},
 		{name: "gemini stream", method: http.MethodPost, path: "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", body: `{}`, protocol: contract.ProtocolGoogleGenerateContent, model: "gemini-2.5-flash", streaming: true},
 		{name: "google models", method: http.MethodGet, path: "/v1beta/models?pageSize=20", protocol: contract.ProtocolGoogleModels},
+		{name: "codex image", method: http.MethodPost, path: "/v1/images/generations", body: `{"model":"gpt-image-2","prompt":"fox"}`, protocol: contract.ProtocolOpenAIImages, model: "gpt-image-2"},
+		{name: "codex image edit", method: http.MethodPost, path: "/v1/images/edits", body: `{"model":"gpt-image-2","prompt":"fox"}`, protocol: contract.ProtocolOpenAIImages, model: "gpt-image-2"},
+		{name: "codex search", method: http.MethodPost, path: "/v1/alpha/search", body: `{"id":"session","model":"gpt-5","commands":{}}`, protocol: contract.ProtocolOpenAISearch, model: "gpt-5"},
+		{name: "embeddings", method: http.MethodPost, path: "/v1/embeddings", body: `{"model":"text-embedding-3-small","input":["a","b"]}`, protocol: contract.ProtocolOpenAIEmbeddings, model: "text-embedding-3-small"},
+		{name: "embeddings ignore stream", method: http.MethodPost, path: "/v1/embeddings", body: `{"model":"bge-m3","input":"a","stream":true}`, protocol: contract.ProtocolOpenAIEmbeddings, model: "bge-m3"},
+		{name: "rerank", method: http.MethodPost, path: "/v1/rerank", body: `{"model":"bge-reranker-v2-m3","query":"q","documents":["a"]}`, protocol: contract.ProtocolRerank, model: "bge-reranker-v2-m3"},
+		{name: "gemini embed", method: http.MethodPost, path: "/v1beta/models/gemini-embedding-001:embedContent", body: `{"content":{"parts":[{"text":"a"}]}}`, protocol: contract.ProtocolGoogleEmbeddings, model: "gemini-embedding-001"},
+		{name: "gemini batch embed", method: http.MethodPost, path: "/v1beta/models/gemini-embedding-001:batchEmbedContents", body: `{"requests":[{"model":"models/gemini-embedding-001","content":{"parts":[{"text":"a"}]}}]}`, protocol: contract.ProtocolGoogleEmbeddings, model: "gemini-embedding-001"},
 	}
 
 	for _, test := range tests {
@@ -72,15 +80,16 @@ func TestClassifyFromPathDoesNotReadTheBody(t *testing.T) {
 	if string(preserved) != `{"model":"gpt-5","stream":true}` {
 		t.Fatalf("body was consumed: %q", preserved)
 	}
-	if _, ok := classifyFromPath(httptest.NewRequest(http.MethodPost, "/v1/embeddings", nil)); ok {
+	if _, ok := classifyFromPath(httptest.NewRequest(http.MethodPost, "/v1/moderations", nil)); ok {
 		t.Fatal("unknown path should not classify")
 	}
 }
 
 func TestClassifyRejectsUnknownPathsAndWrongMethods(t *testing.T) {
 	for _, path := range []string{
-		"/v1/embeddings",
+		"/v1/moderations",
 		"/v1beta/models/:generateContent",
+		"/v1beta/models/:embedContent",
 		"/v1beta/models/publisher/model:generateContent",
 		"/v1beta/models/gemini:countTokens",
 	} {
@@ -95,6 +104,25 @@ func TestClassifyRejectsUnknownPathsAndWrongMethods(t *testing.T) {
 	methodErr, ok := err.(methodNotAllowedError)
 	if !ok || methodErr.allow != http.MethodPost {
 		t.Fatalf("wrong method error = %#v", err)
+	}
+}
+
+func TestClassifyDoesNotPreviewRetrievalInput(t *testing.T) {
+	// A preview without a conversation is stored as a gateway label, outside
+	// privacy masking, so retrieval text must not become one.
+	for _, test := range []struct{ path, body string }{
+		{path: "/v1/embeddings", body: `{"model":"m","input":"secret text"}`},
+		{path: "/v1/rerank", body: `{"model":"m","query":"secret text","documents":["a"]}`},
+		{path: "/v1beta/models/m:embedContent", body: `{"content":{"parts":[{"text":"secret text"}]}}`},
+	} {
+		request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+		got, err := classify(request, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.InputPreview != "" || got.Conversation.LastUserText != "" {
+			t.Fatalf("%s preview = %q last user = %q", test.path, got.InputPreview, got.Conversation.LastUserText)
+		}
 	}
 }
 

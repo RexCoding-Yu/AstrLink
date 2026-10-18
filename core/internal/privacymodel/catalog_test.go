@@ -10,10 +10,10 @@ import (
 
 func TestBuiltinCatalogRecommendsGuardAndRetainsLegacyProvenance(t *testing.T) {
 	catalog := BuiltinCatalog()
-	if len(catalog.Items) != 2 {
+	if len(catalog.Items) != 1 {
 		t.Fatalf("catalog item count = %d", len(catalog.Items))
 	}
-	guard, pplx := catalog.Items[0], catalog.Items[1]
+	guard, pplx := catalog.Items[0], legacyPPLXINT4CatalogEntry()
 	if guard.ID != CatalogAstrLinkGuard || !guard.Recommended ||
 		guard.Source != contract.PrivacyModelCatalogSourceOfficial ||
 		guard.Adapter != contract.PrivacyModelAdapterHFToken ||
@@ -109,7 +109,7 @@ func TestBuiltinCatalogRecommendsGuardAndRetainsLegacyProvenance(t *testing.T) {
 }
 
 func TestPPLXINT4ManifestIncludesLicenseAndDoesNotReplaceFP32Provenance(t *testing.T) {
-	item := BuiltinCatalog().Items[1]
+	item := legacyPPLXINT4CatalogEntry()
 	plan, exists := builtinVariantPlan(item.RepoID, item.Revision, "cpu_int4")
 	if !exists {
 		t.Fatal("INT4 plan missing")

@@ -175,6 +175,44 @@ func TestPlaceholdersAreStableAcrossInspections(t *testing.T) {
 	}
 }
 
+// TestPlaceholderSurvivesBeingQuotedInReasoning replays the turn that used to
+// rename a value: reasoning is never restored, so the client resends the
+// previous placeholder beside the original value it stands for.
+func TestPlaceholderSurvivesBeingQuotedInReasoning(t *testing.T) {
+	for name, policy := range map[string]Policy{
+		"token":   tokenPolicy(),
+		"natural": naturalPolicy(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			engine := mustTestEngine(t)
+			user := `{"role":"user","content":[{"type":"input_text","text":"mail alice@example.com"}]}`
+			first, err := engine.Inspect(
+				t.Context(), policy, contract.ProtocolOpenAIResponses,
+				[]byte(`{"input":[`+user+`]}`),
+			)
+			if err != nil || len(first.Redactions) != 1 {
+				t.Fatalf("first result=%#v error=%v", first, err)
+			}
+			placeholder := first.Redactions[0].Placeholder
+			reasoning := `{"type":"reasoning","id":"rs_1","summary":[],"content":[` +
+				`{"type":"reasoning_text","text":"The user gave ` + placeholder + `."}]}`
+			second, err := engine.Inspect(
+				t.Context(), policy, contract.ProtocolOpenAIResponses,
+				[]byte(`{"input":[`+user+`,`+reasoning+`]}`),
+			)
+			if err != nil || len(second.Redactions) != 1 {
+				t.Fatalf("second result=%#v error=%v", second, err)
+			}
+			if got := second.Redactions[0].Placeholder; got != placeholder {
+				t.Fatalf("placeholder changed from %q to %q once reasoning quoted it", placeholder, got)
+			}
+			if count := strings.Count(string(second.Body), placeholder); count != 2 {
+				t.Fatalf("placeholder occurs %d times, want 2: %s", count, second.Body)
+			}
+		})
+	}
+}
+
 // TestPlaceholdersDifferAcrossDerivationKeys shows the suffix is not a bare
 // digest of the value: without the key, an email or an IP placeholder would be
 // reversible by enumeration.

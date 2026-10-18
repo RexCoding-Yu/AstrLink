@@ -63,15 +63,6 @@ func (handler *Handler) ServeServiceTest(
 		}
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 	}()
-	// Service tests share the inference pipeline, so they share its single
-	// request-level privacy preflight too: fail-closed semantics must not
-	// depend on which entry point reached execution.
-	finishPrivacy, _, privacyErr := handler.applyPrivacyOnce(outWriter, request, classified)
-	defer finishPrivacy()
-	if privacyErr != nil {
-		handler.writePrivacyError(outWriter, request, privacyErr)
-		return nil
-	}
 	if request.Context().Err() != nil {
 		return request.Context().Err()
 	}

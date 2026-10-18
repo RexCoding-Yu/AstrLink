@@ -3,10 +3,12 @@ package codingplan_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -378,5 +380,252 @@ func TestFetcherUsesProviderRouteAuthAndNamesProviderOnFailure(t *testing.T) {
 	}
 	if badHeaders != 0 {
 		t.Fatalf("%d requests carried the wrong provider auth headers", badHeaders)
+	}
+}
+
+type testClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (clock *testClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.at
+}
+
+func (clock *testClock) Advance(step time.Duration) {
+	clock.mu.Lock()
+	clock.at = clock.at.Add(step)
+	clock.mu.Unlock()
+}
+
+func TestFetcherRefreshReusesAYoungSnapshotAndRereadsAnEditedService(t *testing.T) {
+	var mu sync.Mutex
+	var usageCalls, statusCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch request.URL.Path {
+		case "/api/usage/token/":
+			usageCalls++
+			_, _ = fmt.Fprintf(writer, `{"code":true,"data":{"total_used":%d,"total_available":1000,"unlimited_quota":false}}`, usageCalls*100)
+		case "/api/status":
+			statusCalls++
+			_, _ = writer.Write([]byte(`{"success":true,"data":{"quota_per_unit":100}}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	clock := &testClock{at: now}
+	secrets := &memorySecrets{items: map[secretstore.Ref][]byte{"local://service/service_newapi": []byte("sk-newapi")}}
+	fetcher := codingplan.New(secrets, upstream.Client())
+	fetcher.SetClock(clock.Now)
+	service := codingPlanService("service_newapi", contract.ServiceKindNewAPI, upstream.URL+"/v1")
+	used := func(step string, read func(context.Context, contract.Service) (contract.SubscriptionUsage, error), service contract.Service, want string) {
+		t.Helper()
+		usage, err := read(context.Background(), service)
+		if err != nil || usage.Quota == nil || usage.Quota.UsedUSD != want {
+			t.Fatalf("%s: usage = %#v err=%v, want $%s used", step, usage.Quota, err, want)
+		}
+	}
+
+	used("first read", fetcher.Usage, service, "1")
+	used("click right after", fetcher.Refresh, service, "1")
+	clock.Advance(11 * time.Second)
+	used("later click", fetcher.Refresh, service, "2")
+	used("scheduled read after the click", fetcher.Usage, service, "2")
+	// Saving a new key bumps UpdatedAt inside the 5-minute window.
+	edited := service
+	edited.UpdatedAt = now.Add(time.Minute)
+	used("read after an edit", fetcher.Usage, edited, "3")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if usageCalls != 3 || statusCalls != 1 {
+		t.Fatalf("usage calls=%d status calls=%d; want 3 and one site rate read", usageCalls, statusCalls)
+	}
+}
+
+func TestFetcherPausesASiteThatAnswers429(t *testing.T) {
+	var mu sync.Mutex
+	var usageCalls int
+	limited, retryAfter := true, ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch request.URL.Path {
+		case "/api/usage/token/":
+			usageCalls++
+			if limited {
+				if retryAfter != "" {
+					writer.Header().Set("Retry-After", retryAfter)
+				}
+				writer.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = writer.Write([]byte(`{"code":true,"data":{"total_used":0,"total_available":500000,"unlimited_quota":false}}`))
+		case "/api/status":
+			_, _ = writer.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	set := func(isLimited bool, header string) {
+		mu.Lock()
+		limited, retryAfter = isLimited, header
+		mu.Unlock()
+	}
+	calls := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return usageCalls
+	}
+
+	clock := &testClock{at: now}
+	secrets := &memorySecrets{items: map[secretstore.Ref][]byte{
+		"local://service/service_newapi_first":  []byte("sk-first"),
+		"local://service/service_newapi_second": []byte("sk-second"),
+	}}
+	fetcher := codingplan.New(secrets, upstream.Client())
+	fetcher.SetClock(clock.Now)
+	first := codingPlanService("service_newapi_first", contract.ServiceKindNewAPI, upstream.URL+"/v1")
+	second := codingPlanService("service_newapi_second", contract.ServiceKindNewAPI, upstream.URL)
+	ctx := context.Background()
+
+	var limit *codingplan.RateLimitError
+	_, err := fetcher.Usage(ctx, first)
+	if !errors.As(err, &limit) || !errors.Is(err, codingplan.ErrRateLimited) || limit.RetryAfter != 5*time.Minute ||
+		err.Error() != "new-api usage lookups are rate limited; retry in 5m0s" {
+		t.Fatalf("429 err = %v", err)
+	}
+	// New API counts the limit per client IP, so another key on the site
+	// waits out the same pause without asking.
+	clock.Advance(time.Minute)
+	if _, err := fetcher.Refresh(ctx, second); !errors.As(err, &limit) || limit.RetryAfter != 4*time.Minute || calls() != 1 {
+		t.Fatalf("paused refresh err = %v after %d calls", err, calls())
+	}
+
+	clock.Advance(4 * time.Minute)
+	set(false, "")
+	if usage, err := fetcher.Refresh(ctx, second); err != nil || usage.Quota == nil || usage.Quota.RemainingUSD != "1" {
+		t.Fatalf("refresh after the pause = %#v err=%v", usage.Quota, err)
+	}
+
+	set(true, "42")
+	if _, err := fetcher.Refresh(ctx, first); !errors.As(err, &limit) || limit.RetryAfter != 42*time.Second {
+		t.Fatalf("Retry-After err = %v", err)
+	}
+	if calls() != 3 {
+		t.Fatalf("usage calls = %d, want 3", calls())
+	}
+}
+
+func TestFetcherReaderJoinsALookupInFlight(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/coding/v1/usages" {
+			http.NotFound(writer, request)
+			return
+		}
+		if calls.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		_, _ = writer.Write([]byte(`{"usage":{"limit":100,"remaining":40}}`))
+	}))
+	t.Cleanup(upstream.Close)
+	releaseUpstream := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseUpstream)
+
+	secrets := &memorySecrets{items: map[secretstore.Ref][]byte{"local://service/service_kimi_plan": []byte("kimi-secret-key")}}
+	fetcher := codingplan.New(secrets, upstream.Client())
+	fetcher.SetClock(func() time.Time { return now })
+	service := codingPlanService("service_kimi_plan", contract.ServiceKindKimiCoding, upstream.URL+"/coding")
+
+	type result struct {
+		usage contract.SubscriptionUsage
+		err   error
+	}
+	leader := make(chan result, 1)
+	go func() {
+		usage, err := fetcher.Refresh(context.Background(), service)
+		leader <- result{usage, err}
+	}()
+	select {
+	case <-entered:
+	case early := <-leader:
+		t.Fatalf("lookup finished before reaching the provider: %#v", early)
+	}
+
+	// The provider is still answering the first click: a second one waits
+	// for that answer instead of asking again, and gives up with its context.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := fetcher.Refresh(cancelled, service); !errors.Is(err, context.Canceled) || errors.Is(err, codingplan.ErrUsageUnavailable) {
+		t.Fatalf("joined reader err = %v", err)
+	}
+
+	releaseUpstream()
+	answered := <-leader
+	if answered.err != nil || answered.usage.Secondary == nil || answered.usage.Secondary.UsedPercent != 60 {
+		t.Fatalf("lookup = %#v err=%v", answered.usage, answered.err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestFetcherForgetsTheSnapshotOfARejectedKey(t *testing.T) {
+	var mu sync.Mutex
+	var calls int
+	rejected := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if request.URL.Path != "/coding/v1/usages" {
+			http.NotFound(writer, request)
+			return
+		}
+		calls++
+		if rejected {
+			http.Error(writer, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		_, _ = writer.Write([]byte(`{"usage":{"limit":100,"remaining":40}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	clock := &testClock{at: now}
+	secrets := &memorySecrets{items: map[secretstore.Ref][]byte{"local://service/service_kimi_plan": []byte("kimi-secret-key")}}
+	fetcher := codingplan.New(secrets, upstream.Client())
+	fetcher.SetClock(clock.Now)
+	service := codingPlanService("service_kimi_plan", contract.ServiceKindKimiCoding, upstream.URL+"/coding")
+	ctx := context.Background()
+
+	if _, err := fetcher.Usage(ctx, service); err != nil {
+		t.Fatalf("Usage() = %v", err)
+	}
+	mu.Lock()
+	rejected = true
+	mu.Unlock()
+	clock.Advance(11 * time.Second)
+	if _, err := fetcher.Refresh(ctx, service); !errors.Is(err, codingplan.ErrUsageUnavailable) {
+		t.Fatalf("Refresh() err = %v", err)
+	}
+	// Still inside the 30s window, the next scheduled read asks again rather
+	// than reporting the rejected key's last numbers as current.
+	if _, err := fetcher.Usage(ctx, service); !errors.Is(err, codingplan.ErrUsageUnavailable) {
+		t.Fatalf("Usage() after rejection err = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 3 {
+		t.Fatalf("provider calls = %d, want 3", calls)
 	}
 }

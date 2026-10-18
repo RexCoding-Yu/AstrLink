@@ -96,7 +96,7 @@
   --accent: #e8f1fb;
   --accent-foreground: #2456a0;
 
-  /* The tide, flattened: navigation indicator and focus only */
+  /* The tide, flattened: highlights and focus only */
   --tide: #3b82f6;
   --tide-wash: #e8f1fe;
 
@@ -120,13 +120,13 @@
   --violet-foreground: #1f5cc4;
   --violet-wash: #eaf2fc;
 
-  /* Navigation */
-  --sidebar: #ffffff;
+  /* Navigation: the window ground behind the sidebar and the workspace card */
+  --sidebar: #fafbfc;
   --sidebar-foreground: #1a2a3d;
   --sidebar-primary: #1d4d87;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e8f1fb;
-  --sidebar-accent-foreground: #2456a0;
+  --sidebar-accent: #eef0f4;
+  --sidebar-accent-foreground: #1a2a3d;
   --sidebar-border: #e5e7f0;
   --sidebar-ring: #3b82f6;
 
@@ -202,13 +202,13 @@
   --violet-foreground: #aebed8;
   --violet-wash: #2b3240;
 
-  --sidebar: #181a1e;
+  --sidebar: #131518;
   --sidebar-foreground: var(--foreground);
   --sidebar-primary: var(--primary-fill);
   --sidebar-primary-foreground: var(--primary-fill-foreground);
-  --sidebar-accent: var(--accent);
-  --sidebar-accent-foreground: var(--accent-foreground);
-  --sidebar-border: #30353d;
+  --sidebar-accent: #24272d;
+  --sidebar-accent-foreground: var(--foreground);
+  --sidebar-border: #2a2e35;
   --sidebar-ring: var(--ring);
   --text-secondary: #adb5c0;
   --overlay: rgb(8 10 13 / 65%);
@@ -413,6 +413,34 @@
 
 :root[data-window-fullscreen="true"] {
   --window-chrome-height: 0px;
+}
+
+/* Where the sidebar brand, the workspace card and the page header start; the
+   header offset is measured inside the card, below its 1px border. macOS draws
+   its traffic lights at the top-left, over the sidebar, so the card rises to
+   the same 8px inset as its other edges, and both columns' content starts
+   below the title bar. */
+:root {
+  --sidebar-top: calc(var(--window-chrome-height) + 16px);
+  --workspace-card-top: 8px;
+  --workspace-top: calc(var(--window-chrome-height) + 11px);
+}
+
+@media (max-height: 680px) {
+  :root {
+    --workspace-top: calc(var(--window-chrome-height) + 5px);
+  }
+}
+
+/* Windows, and Linux with the GTK buttons on the right, draw every control at
+   the end of the title bar, so the card starts under the bar and the controls
+   stay on the window ground. The page header starts 8px into the card, and
+   the 32px brand sits level with the header's title (1px card border, 8px
+   workspace padding, 8px header padding, and half of its 20px line). */
+:root[data-window-controls="end"]:not([data-window-fullscreen="true"]) {
+  --sidebar-top: calc(var(--window-chrome-height) + 11px);
+  --workspace-card-top: var(--window-chrome-height);
+  --workspace-top: 8px;
 }
 
 /* The tray popover is a transparent window; the panel draws its own surface. */

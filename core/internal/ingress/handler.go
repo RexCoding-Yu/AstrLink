@@ -27,6 +27,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/autoclassifier"
 	"github.com/QuantumNous/astrlink/core/internal/builtintools"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
+	"github.com/QuantumNous/astrlink/core/internal/imagecompress"
 	"github.com/QuantumNous/astrlink/core/internal/planner"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
@@ -113,22 +114,24 @@ func (function ClassifierFunc) Classify(ctx context.Context, text string) autocl
 	return function(ctx, text)
 }
 
+// PolicyWarningReporter learns of every request the warn action lets through.
+// The warning names kinds, counts and keyed fingerprints, never a value.
 type PolicyWarningReporter interface {
-	ReportPolicyWarning(contract.ProtocolID, contract.ServiceID, string)
+	ReportPolicyWarning(privacy.Warning)
 }
 
-type PolicyWarningReporterFunc func(contract.ProtocolID, contract.ServiceID, string)
+type PolicyWarningReporterFunc func(privacy.Warning)
 
-func (function PolicyWarningReporterFunc) ReportPolicyWarning(
-	protocol contract.ProtocolID,
-	endpointID contract.ServiceID,
-	summary string,
-) {
-	function(protocol, endpointID, summary)
+func (function PolicyWarningReporterFunc) ReportPolicyWarning(warning privacy.Warning) {
+	function(warning)
 }
 
 type Handler struct {
 	builtinStates            builtintools.Store
+	searchRefs               searchRefStore
+	codexTurns               codexTurnStore
+	codexModels              codexCatalogModels
+	images                   imagecompress.Compressor
 	proxyCredentials         secretstore.SecretStore
 	affinities               responseAffinities
 	routingVersions          modelRoutingVersions
@@ -143,6 +146,7 @@ type Handler struct {
 	auditBlobs               AuditBlobPersister
 	recordLogger             func(string, ...any)
 	allowedHosts             []string
+	networkExposed           bool
 	responseStartTimeout     time.Duration
 	metadataSlots            chan struct{}
 	maxRequestBodyBytes      int64
@@ -220,11 +224,8 @@ func New() *Handler {
 // NewProduction requires the complete minimum loopback gate before a resolver
 // backed by stored upstream credentials can be installed.
 func NewProduction(dependencies Dependencies) (*Handler, error) {
-	if dependencies.Resolver == nil || dependencies.Authorizer == nil {
-		return nil, fmt.Errorf("production resolver and authorizer are required")
-	}
-	if dependencies.AccessTokenAuthenticator == nil {
-		return nil, fmt.Errorf("production access token authenticator is required")
+	if err := validateProductionDependencies(dependencies); err != nil {
+		return nil, err
 	}
 	host, port, err := net.SplitHostPort(dependencies.AllowedHost)
 	portNumber, portErr := strconv.ParseUint(port, 10, 16)
@@ -232,6 +233,33 @@ func NewProduction(dependencies Dependencies) (*Handler, error) {
 		return nil, fmt.Errorf("production allowed host must be a fixed 127.0.0.1 authority")
 	}
 	return NewWithDependencies(dependencies), nil
+}
+
+// NewNetworkProduction is the server edition's inference gate. Its listener
+// is reached from other machines by IP, hostname or container name, so any
+// Host is accepted; the access token stays mandatory and browser origins
+// stay refused. Requests rejected before their token is accepted are not
+// recorded, so whoever can reach the port cannot fill the request records.
+func NewNetworkProduction(dependencies Dependencies) (*Handler, error) {
+	if err := validateProductionDependencies(dependencies); err != nil {
+		return nil, err
+	}
+	if dependencies.AllowedHost != "" {
+		return nil, fmt.Errorf("network production accepts any Host; allowed host must be empty")
+	}
+	handler := NewWithDependencies(dependencies)
+	handler.networkExposed = true
+	return handler, nil
+}
+
+func validateProductionDependencies(dependencies Dependencies) error {
+	if dependencies.Resolver == nil || dependencies.Authorizer == nil {
+		return fmt.Errorf("production resolver and authorizer are required")
+	}
+	if dependencies.AccessTokenAuthenticator == nil {
+		return fmt.Errorf("production access token authenticator is required")
+	}
+	return nil
 }
 
 // NewWithDependencies is the composition seam used by deterministic tests and
@@ -352,6 +380,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		if request.Context().Err() != nil {
 			session.noteCancelled()
 		}
+		if mode := builtinInternalFrom(request.Context()); mode == nil || !mode.Native {
+			// A tool executor's own model call does not serve the turn.
+			handler.noteCodexTurn(classified, session)
+		}
 		if mode := builtinInternalFrom(request.Context()); mode != nil && mode.SharedSession != nil {
 			return
 		}
@@ -377,27 +409,15 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if routingSettingsLoaded && err == nil {
 		session.routingSettings = &routingSettings
 	}
-	// One request-level privacy preflight, before routing and every candidate:
-	// the classifier that feeds task_type facts and all failover upstreams must
-	// see the same sanitized bytes (A4). Block and failure stay fail-closed.
-	// A classification sub-call is exempt: its input is the already-inspected
-	// sanitized text, and the parent's preflight remains the one inspection.
-	var finishPrivacy func()
-	var plan privacyPlan
-	var privacyErr error
-	if classifierInternalFrom(request.Context()) != nil {
-		finishPrivacy = func() {}
-	} else {
-		finishPrivacy, plan, privacyErr = handler.applyPrivacyOnce(outWriter, request, classified)
-	}
-	defer finishPrivacy()
-	if privacyErr != nil {
-		session.captureUnreadRequestBody(request)
-		handler.writePrivacyError(outWriter, request, privacyErr)
+	// Codex's own image and search requests skip routing: the built-in tools
+	// answer them, or the provider that served the turn.
+	switch classified.Protocol {
+	case contract.ProtocolOpenAIImages:
+		handler.serveImages(outWriter, request, classified, routingSettings)
 		return
-	}
-	if sanitized := plan.sanitizedBody; sanitized != nil {
-		classified = classifiedWithSanitizedText(classified, sanitized)
+	case contract.ProtocolOpenAISearch:
+		handler.serveSearch(outWriter, request, classified, routingSettings)
+		return
 	}
 	// A classification sub-call names a concrete member model and skips model
 	// routing entirely: routing it again would recurse into classification.
@@ -519,101 +539,74 @@ type privacyOutcome struct {
 	toolArguments bool
 }
 
+// applyPrivacy runs the privacy policy on a request bound for service. A
+// backend that is not a configured provider passes an empty service, which is
+// never trusted.
 func (handler *Handler) applyPrivacy(
 	writer http.ResponseWriter,
 	request *http.Request,
 	classified Request,
-	endpointID contract.ServiceID,
+	service contract.Service,
 ) (func(), privacyOutcome, error) {
-	finish, outcome, sanitized, _, err := handler.inspectPrivacy(writer, request, classified, endpointID)
-	_ = sanitized
-	return finish, outcome, err
-}
-
-// privacyPlan is the request-level result of the single privacy preflight. It
-// carries the sanitized body so classification facts can be rebuilt from the
-// same bytes every failover upstream will receive, and the resolved policy so
-// derived bodies (recovery repairs) can be re-inspected under the same rules.
-type privacyPlan struct {
-	outcome       privacyOutcome
-	sanitizedBody []byte
-	policy        privacy.Policy
-}
-
-// applyPrivacyOnce runs the one request-level privacy preflight. It replaces the
-// per-candidate gate: block, policy, and inspection failures stay fail-closed,
-// and a redact decision rewrites request.Body/GetBody/ContentLength so the
-// classifier and every candidate share the same sanitized bytes.
-func (handler *Handler) applyPrivacyOnce(
-	writer http.ResponseWriter,
-	request *http.Request,
-	classified Request,
-) (func(), privacyPlan, error) {
-	finish, outcome, sanitized, policy, err := handler.inspectPrivacy(writer, request, classified, "")
-	plan := privacyPlan{outcome: outcome, sanitizedBody: sanitized, policy: policy}
-	if err == nil {
-		if session := recordSessionFromContext(request.Context()); session != nil {
-			session.privacy = &plan
-		}
+	if classifierInternalFrom(request.Context()) != nil {
+		// A classification sub-call carries text model routing already passed
+		// through the policy, and it shares the parent's record: inspecting it
+		// here would report the classifier's call as the parent's attempt.
+		return func() {}, privacyOutcome{}, nil
 	}
-	return finish, plan, err
-}
-
-// inspectPrivacy resolves and applies the privacy policy once. sanitized is
-// non-nil only for a redact decision; the caller decides what to derive from it.
-// The resolved policy returns alongside so derived bodies stay under the same
-// rules without a second policy lookup.
-func (handler *Handler) inspectPrivacy(
-	writer http.ResponseWriter,
-	request *http.Request,
-	classified Request,
-	endpointID contract.ServiceID,
-) (func(), privacyOutcome, []byte, privacy.Policy, error) {
 	session := recordSessionFromContext(request.Context())
 	privacyStarted := time.Now()
 	routingPrivacy := contract.ModelRoutingPrivacyUnknown
 	routingFindings := 0
 	routingError := ""
 	defer func() {
-		if session != nil {
-			session.noteModelRoutingPrivacyAttempt(endpointID, routingPrivacy, routingFindings, int(time.Since(privacyStarted).Milliseconds()), routingError)
-		}
+		session.noteModelRoutingPrivacyAttempt(service.ID, routingPrivacy, routingFindings, int(time.Since(privacyStarted).Milliseconds()), routingError)
 	}()
 	session.beginPrivacyAttempt()
 	if handler.privacyFilter == nil {
 		routingPrivacy = contract.ModelRoutingPrivacyNone
 		session.notePrivacyDecision("allow", contract.RequestStatusSucceeded)
-		session.notePrivacyOutcome(contract.PrivacyDecisionNone, nil)
-		return func() {}, privacyOutcome{}, nil, privacy.Policy{}, nil
+		session.notePrivacyOutcome(contract.PrivacyDecisionNone, nil, nil, nil)
+		return func() {}, privacyOutcome{}, nil
 	}
 	accessTokenID, _ := AccessTokenIDFromContext(request.Context())
 	policy, err := handler.privacyFilter.ResolvePolicy(request.Context(), privacy.Scope{
 		Protocol:      classified.Protocol,
 		Model:         classified.Model,
-		ServiceID:     endpointID,
+		ServiceID:     service.ID,
 		AccessTokenID: accessTokenID,
 	})
 	if err != nil {
-		routingError = "privacy_policy_unavailable"
-		return func() {}, privacyOutcome{}, nil, privacy.Policy{}, err
+		routingError = privacyErrorCode(err)
+		return func() {}, privacyOutcome{}, err
 	}
 	if !policy.Enabled {
-		routingPrivacy = contract.ModelRoutingPrivacyAllow
+		routingPrivacy = contract.ModelRoutingPrivacyNone
 		// This branch deliberately does not read, replace, or otherwise touch
 		// request.Body. Disabled policy preserves the original byte path.
 		session.notePrivacyDecision("allow", contract.RequestStatusSucceeded)
-		session.notePrivacyOutcome(contract.PrivacyDecisionNone, nil)
-		return func() {}, privacyOutcome{}, nil, privacy.Policy{}, nil
+		session.notePrivacyOutcome(contract.PrivacyDecisionNone, nil, nil, nil)
+		return func() {}, privacyOutcome{}, nil
+	}
+	if service.PrivacyTrusted {
+		routingPrivacy = contract.ModelRoutingPrivacyNone
+		// A trusted provider gets the original byte path, as with a
+		// disabled policy, and its attempt keeps no restore mapping.
+		session.notePrivacyTrusted()
+		session.notePrivacyDecision("allow · trusted", contract.RequestStatusSucceeded)
+		session.notePrivacyOutcome(contract.PrivacyDecisionTrusted, nil, nil, nil)
+		return func() {}, privacyOutcome{}, nil
 	}
 	encoding := strings.ToLower(strings.TrimSpace(request.Header.Get("Content-Encoding")))
 	if encoding != "" && encoding != "identity" {
-		return func() {}, privacyOutcome{}, nil, privacy.Policy{}, errUnsupportedContentEncoding
+		routingError = privacyErrorCode(errUnsupportedContentEncoding)
+		return func() {}, privacyOutcome{}, errUnsupportedContentEncoding
 	}
 
 	body, buffered, err := handler.bufferPrivacyBody(request)
 	if err != nil {
-		routingError = "privacy_body_unavailable"
-		return func() {}, privacyOutcome{}, nil, privacy.Policy{}, err
+		routingError = privacyErrorCode(err)
+		return func() {}, privacyOutcome{}, err
 	}
 	finish := func() {}
 	if buffered != nil {
@@ -632,6 +625,9 @@ func (handler *Handler) inspectPrivacy(
 			privacyBatchProgress(progress),
 		)
 	})
+	if session != nil {
+		inspectCtx = privacy.WithConversation(inspectCtx, string(session.sessionID))
+	}
 	result, err := handler.privacyFilter.Inspect(
 		inspectCtx,
 		policy,
@@ -639,49 +635,55 @@ func (handler *Handler) inspectPrivacy(
 		body,
 	)
 	if err != nil {
-		routingError = "privacy_inspection_failed"
-		return finish, privacyOutcome{}, nil, privacy.Policy{}, err
+		routingError = privacyErrorCode(err)
+		return finish, privacyOutcome{}, err
 	}
+	threshold := privacyThreshold(policy)
 	switch result.Decision {
 	case privacy.DecisionAllow:
 		routingPrivacy = contract.ModelRoutingPrivacyAllow
 		session.notePrivacyDecision("allow", contract.RequestStatusSucceeded)
-		session.notePrivacyOutcome(contract.PrivacyDecisionAllow, nil)
-		return finish, privacyOutcome{}, nil, policy, nil
+		session.notePrivacyOutcome(contract.PrivacyDecisionAllow, nil, result.SuppressedFindings, threshold)
+		return finish, privacyOutcome{}, nil
 	case privacy.DecisionWarn:
 		routingPrivacy = contract.ModelRoutingPrivacyAllow
 		// This is a response-only signal. Never add it to request.Header, where
 		// it could cross the upstream boundary.
-		summary := privacy.WarningSummary(result.Findings)
-		writer.Header().Set(PolicyWarningHeader, summary)
+		writer.Header().Set(PolicyWarningHeader, privacy.WarningSummary(result.Findings))
 		if handler.policyWarningReporter != nil {
-			handler.policyWarningReporter.ReportPolicyWarning(
-				classified.Protocol,
-				endpointID,
-				summary,
-			)
+			handler.policyWarningReporter.ReportPolicyWarning(privacy.Warning{
+				RequestID:    session.requestID(),
+				ClientType:   session.inboundClientType(),
+				Protocol:     classified.Protocol,
+				ServiceID:    service.ID,
+				Findings:     result.Findings,
+				Notified:     result.Notified,
+				Fingerprints: result.Fingerprints,
+			})
 		}
 		session.notePrivacyDecision("warn", contract.RequestStatusSucceeded)
-		session.notePrivacyOutcome(contract.PrivacyDecisionWarn, nil)
-		return finish, privacyOutcome{}, nil, policy, nil
+		session.notePrivacyOutcome(contract.PrivacyDecisionWarn, result.Findings, result.SuppressedFindings, threshold)
+		return finish, privacyOutcome{}, nil
 	case privacy.DecisionBlock:
 		routingPrivacy = contract.ModelRoutingPrivacyReject
 		routingFindings = len(result.Findings)
 		session.notePrivacyDecision("block", contract.RequestStatusBlocked)
-		session.notePrivacyOutcome(contract.PrivacyDecisionBlock, result.Findings)
+		session.notePrivacyOutcome(contract.PrivacyDecisionBlock, result.Findings, result.SuppressedFindings, threshold)
 		session.noteProtectedValues(result.Protected)
-		return finish, privacyOutcome{}, nil, privacy.Policy{}, errPrivacyBlocked
+		return finish, privacyOutcome{}, errPrivacyBlocked
 	case privacy.DecisionRedact:
-		routingPrivacy = contract.ModelRoutingPrivacyAllow
 		routingFindings = len(result.Findings)
 		if buffered == nil {
-			return finish, privacyOutcome{}, nil, policy, privacy.ErrUnsafeRewrite
+			routingError = privacyErrorCode(privacy.ErrUnsafeRewrite)
+			return finish, privacyOutcome{}, privacy.ErrUnsafeRewrite
 		}
 		if handler.maxRequestBodyBytes > 0 && int64(len(result.Body)) > handler.maxRequestBodyBytes {
-			return finish, privacyOutcome{}, nil, privacy.Policy{}, errMetadataTooLarge
+			routingError = privacyErrorCode(errMetadataTooLarge)
+			return finish, privacyOutcome{}, errMetadataTooLarge
 		}
+		routingPrivacy = contract.ModelRoutingPrivacyAllow
 		buffered.Replace(result.Body)
-		session.notePrivacyOutcome(contract.PrivacyDecisionRedact, result.Findings)
+		session.notePrivacyOutcome(contract.PrivacyDecisionRedact, result.Findings, result.SuppressedFindings, threshold)
 		session.noteProtectedValues(result.Protected)
 		mappingCount := uniqueRedactionMappingCount(result.Redactions)
 		session.notePrivacyMapping(
@@ -694,41 +696,15 @@ func (handler *Handler) inspectPrivacy(
 			contract.RequestStatusSucceeded,
 		)
 		if !policy.ResponseRestore || len(result.Redactions) == 0 {
-			return finish, privacyOutcome{}, result.Body, policy, nil
+			return finish, privacyOutcome{}, nil
 		}
 		return finish, privacyOutcome{
 			redactions:    result.Redactions,
 			toolArguments: policy.RestoreToolArguments,
-		}, result.Body, policy, nil
+		}, nil
 	default:
-		routingError = "privacy_policy_unavailable"
-		return finish, privacyOutcome{}, nil, privacy.Policy{}, privacy.ErrPolicyUnavailable
-	}
-}
-
-// sanitizeRepairedBody re-inspects a recovery-repaired request body under the
-// request-level policy. The repaired bytes derive from the sanitized source,
-// but JSON reshaping can move text into positions the detector scores
-// differently, so the derived body crosses the same boundary check. unusable
-// means the repair must be dropped, never that the request fails.
-func (handler *Handler) sanitizeRepairedBody(ctx context.Context, session *recordSession, protocol contract.ProtocolID, body []byte) ([]byte, []privacy.Redaction, bool) {
-	if handler.privacyFilter == nil || session == nil || session.privacy == nil || !session.privacy.policy.Enabled {
-		return body, nil, true
-	}
-	result, err := handler.privacyFilter.Inspect(ctx, session.privacy.policy, protocol, body)
-	if err != nil {
-		return nil, nil, false
-	}
-	switch result.Decision {
-	case privacy.DecisionBlock:
-		return nil, nil, false
-	case privacy.DecisionRedact:
-		if handler.maxRequestBodyBytes > 0 && int64(len(result.Body)) > handler.maxRequestBodyBytes {
-			return nil, nil, false
-		}
-		return result.Body, result.Redactions, true
-	default:
-		return body, nil, true
+		routingError = privacyErrorCode(privacy.ErrPolicyUnavailable)
+		return finish, privacyOutcome{}, privacy.ErrPolicyUnavailable
 	}
 }
 
@@ -843,6 +819,27 @@ func (handler *Handler) writePrivacyError(writer http.ResponseWriter, request *h
 	}
 }
 
+// privacyErrorCode is the code writePrivacyError answers err with, so the
+// privacy attempt a routing record lists names the failure the client saw.
+func privacyErrorCode(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, errMetadataTooLarge):
+		return "request_too_large"
+	case errors.Is(err, errUnsupportedContentEncoding):
+		return "unsupported_content_encoding"
+	case errors.Is(err, privacy.ErrPolicyUnavailable):
+		return "privacy_policy_unavailable"
+	case errors.Is(err, privacy.ErrUnsafeInput):
+		return "privacy_inspection_failed"
+	case errors.Is(err, privacy.ErrUnsafeRewrite):
+		return "privacy_redaction_failed"
+	default:
+		return "safety_engine_unavailable"
+	}
+}
+
 type privacyBufferedBody struct {
 	request *http.Request
 	current *metadataPermitBody
@@ -947,11 +944,11 @@ func (handler *Handler) hostAllowed(host string) bool {
 
 func (handler *Handler) allowLocalCaller(writer http.ResponseWriter, request *http.Request) bool {
 	if hasBrowserOrigin(request.Header) {
-		handler.writeRecordedInferenceError(writer, request, http.StatusForbidden, "origin_forbidden", "browser origins cannot call the inference plane", false, nil)
+		handler.writeBoundaryError(writer, request, http.StatusForbidden, "origin_forbidden", "browser origins cannot call the inference plane")
 		return false
 	}
 	if !handler.hostAllowed(request.Host) {
-		handler.writeRecordedInferenceError(writer, request, http.StatusMisdirectedRequest, "host_forbidden", "request Host does not match the inference listener", false, nil)
+		handler.writeBoundaryError(writer, request, http.StatusMisdirectedRequest, "host_forbidden", "request Host does not match the inference listener")
 		return false
 	}
 	return true
@@ -977,19 +974,19 @@ func (handler *Handler) allowInferenceBoundary(writer http.ResponseWriter, reque
 	}
 	if handler.accessTokenAuthenticator != nil {
 		if request.URL.Query().Has("key") || request.URL.Query().Has("api_key") || request.URL.Query().Has("access_token") {
-			handler.writeRecordedInferenceError(writer, request, http.StatusUnauthorized, "token_query_forbidden", "local access tokens are not accepted in query parameters", false, nil)
+			handler.writeBoundaryError(writer, request, http.StatusUnauthorized, "token_query_forbidden", "local access tokens are not accepted in query parameters")
 			return false
 		}
 		token, ok := localClientCredential(request.Header)
 		if !ok {
 			writer.Header().Set("WWW-Authenticate", `Bearer realm="astrlink-inference"`)
-			handler.writeRecordedInferenceError(writer, request, http.StatusUnauthorized, "invalid_access_token", "a valid local access token is required", false, nil)
+			handler.writeBoundaryError(writer, request, http.StatusUnauthorized, "invalid_access_token", "a valid local access token is required")
 			return false
 		}
 		tokenID, err := handler.accessTokenAuthenticator.AuthenticateAccessToken(request.Context(), token)
 		if err != nil || tokenID == "" {
 			writer.Header().Set("WWW-Authenticate", `Bearer realm="astrlink-inference"`)
-			handler.writeRecordedInferenceError(writer, request, http.StatusUnauthorized, "invalid_access_token", "a valid local access token is required", false, nil)
+			handler.writeBoundaryError(writer, request, http.StatusUnauthorized, "invalid_access_token", "a valid local access token is required")
 			return false
 		}
 		*request = *request.WithContext(context.WithValue(request.Context(), accessTokenIDContextKey{}, tokenID))
@@ -1040,6 +1037,18 @@ func (handler *Handler) startRecordSession(request *http.Request, classified Req
 	session.captureHTTPRequestMeta(request)
 	session.attachRequestCapture(request)
 	return session
+}
+
+// writeBoundaryError rejects a request before its access token is accepted.
+// The loopback listener records it like any inference error; a
+// network-exposed listener does not, since anyone who reaches the port could
+// otherwise fill the request records.
+func (handler *Handler) writeBoundaryError(writer http.ResponseWriter, request *http.Request, status int, code, message string) {
+	if handler.networkExposed {
+		writeInferenceError(writer, status, code, message, false, nil)
+		return
+	}
+	handler.writeRecordedInferenceError(writer, request, status, code, message, false, nil)
 }
 
 // writeRecordedInferenceError writes a local inference-plane error and, when

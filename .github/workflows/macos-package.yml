@@ -6,13 +6,23 @@ on:
       release_tag:
         type: string
         required: true
+      arch:
+        description: arm64 or x86_64
+        type: string
+        required: true
   workflow_dispatch:
+    inputs:
+      arch:
+        type: choice
+        options: [arm64, x86_64]
+        default: arm64
 
 permissions:
   contents: read
 
 concurrency:
-  group: macos-package-${{ github.event_name }}-${{ github.ref }}
+  # Release and Release macOS x86_64 each call this for the same tag.
+  group: macos-package-${{ github.event_name }}-${{ github.ref }}-${{ inputs.arch }}
   cancel-in-progress: true
 
 env:
@@ -25,16 +35,8 @@ env:
 
 jobs:
   package:
-    name: Build and verify macOS ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            arch: arm64
-          - os: macos-15-intel
-            arch: x86_64
-    runs-on: ${{ matrix.os }}
+    name: Build and verify macOS ${{ inputs.arch }}
+    runs-on: ${{ inputs.arch == 'x86_64' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 90
     env:
       APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
@@ -45,7 +47,7 @@ jobs:
         shell: bash
         working-directory: apps/desktop
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Import Developer ID certificate and validate notarization credentials
@@ -95,7 +97,7 @@ jobs:
             --keychain "$APPLE_NOTARY_KEYCHAIN" --key "$api_key_path" \
             --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
           echo "Developer ID private key and Apple notarization API credentials verified."
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: core/go.mod
           cache-dependency-path: |
@@ -111,7 +113,7 @@ jobs:
           no-cache: true
       - name: Configure Bun cache
         run: echo "BUN_INSTALL_CACHE_DIR=$RUNNER_TEMP/bun-cache" >> "$GITHUB_ENV"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bun-cache
           key: bun-packages-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/bun.lock') }}
@@ -133,7 +135,7 @@ jobs:
           cache-directories: apps/privacy-worker/target/onnxruntime
       - name: Check runner architecture
         env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_ARCH: ${{ inputs.arch }}
         run: test "$(uname -m)" = "$EXPECTED_ARCH"
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
@@ -147,16 +149,6 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: bun scripts/release-updates.mjs preflight
-      - name: Check frontend and Core in parallel
-        run: |
-          (bun run branding:sync && bun run typecheck && bun run test) &
-          frontend_pid=$!
-          (cd ../../core && go test ./...) &
-          core_pid=$!
-          check_status=0
-          wait "$frontend_pid" || check_status=1
-          wait "$core_pid" || check_status=1
-          exit "$check_status"
       - name: Reject production model artifacts
         run: bun ../../scripts/check-no-production-models.mjs
       - name: Stage Core and worker sidecars
@@ -190,7 +182,7 @@ jobs:
         run: bun run macos:notarize
       - name: Mount DMG and verify packaged application
         env:
-          PACKAGE_ARCH: ${{ matrix.arch }}
+          PACKAGE_ARCH: ${{ inputs.arch }}
         run: |
           shopt -s nullglob
           images=(src-tauri/target/release/bundle/dmg/*.dmg)
@@ -207,7 +199,7 @@ jobs:
             --logs "$RUNNER_TEMP/astrlink-smoke"
       - name: Prepare downloads and checksums
         env:
-          PACKAGE_ARCH: ${{ matrix.arch }}
+          PACKAGE_ARCH: ${{ inputs.arch }}
         run: |
           mkdir -p package
           cp src-tauri/target/release/bundle/dmg/*.dmg package/
@@ -219,7 +211,7 @@ jobs:
         if: inputs.release_tag != ''
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          PACKAGE_ARCH: ${{ matrix.arch }}
+          PACKAGE_ARCH: ${{ inputs.arch }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -229,7 +221,7 @@ jobs:
       - name: Upload checked macOS package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: AstrLink-macOS-${{ matrix.arch }}
+          name: AstrLink-macOS-${{ inputs.arch }}
           path: apps/desktop/package/*
           if-no-files-found: error
           retention-days: 14
@@ -237,7 +229,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macOS-${{ matrix.arch }}-smoke-diagnostics
+          name: macOS-${{ inputs.arch }}-smoke-diagnostics
           path: ${{ runner.temp }}/astrlink-smoke/*
           if-no-files-found: ignore
           retention-days: 7
@@ -245,7 +237,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macOS-${{ matrix.arch }}-notarization
+          name: macOS-${{ inputs.arch }}-notarization
           path: apps/desktop/src-tauri/target/release/bundle/notarization/*
           if-no-files-found: ignore
           retention-days: 7

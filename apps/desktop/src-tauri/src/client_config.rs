@@ -7,7 +7,7 @@
 //! 0.159.2, and Pi 0.99.2.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
 use crate::{
+    agent_home::{Home, OwnedHome},
     control_session::astrlink_home,
     host_files::{self, WriteOptions},
     sidecar::{CoreManager, CorePhase},
@@ -36,6 +37,22 @@ const PI_PROVIDER_PREFIX: &str = "providers.astrlink.";
 const PI_MODELS_KEY: &str = "providers.astrlink.models";
 /// The model Pi starts with, which its `/model` picker can save over.
 const PI_STARTUP_KEYS: [&str; 2] = ["defaultProvider", "defaultModel"];
+/// Codex shows its own image generation and web search tools only for a
+/// provider whose `http_headers` set this header. The gateway answers both
+/// tools and strips the header before forwarding; any non-empty value works.
+/// AstrLink owns this one header, and other headers in the table stay the
+/// user's.
+const CODEX_HEADERS_KEY: &str = "model_providers.astrlink.http_headers";
+const CODEX_TOOLS_HEADER: &str = "x-openai-actor-authorization";
+const CODEX_TOOLS_HEADER_VALUE: &str = "codex-imagegen";
+/// Claude Code's model settings, by the `Models` field each comes from.
+const CLAUDE_MODEL_KEYS: [(&str, &str); 5] = [
+    ("model", "env.ANTHROPIC_MODEL"),
+    ("haikuModel", "env.ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+    ("sonnetModel", "env.ANTHROPIC_DEFAULT_SONNET_MODEL"),
+    ("opusModel", "env.ANTHROPIC_DEFAULT_OPUS_MODEL"),
+    ("fableModel", "env.ANTHROPIC_DEFAULT_FABLE_MODEL"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -71,11 +88,11 @@ impl Client {
         }
     }
 
-    fn detected(self, home: &Path) -> bool {
+    fn detected(self, home: Home) -> bool {
         match self {
-            Self::Claude => home.join(".claude").is_dir() || home.join(".claude.json").is_file(),
-            Self::Codex => home.join(".codex").is_dir(),
-            Self::Pi => home.join(".pi").is_dir(),
+            Self::Claude => home.claude_detected(),
+            Self::Codex => home.codex_dir().is_dir(),
+            Self::Pi => home.pi_detected(),
             Self::Gemini | Self::Opencode | Self::Openclaw => false,
         }
     }
@@ -89,7 +106,7 @@ impl Client {
         }
     }
 
-    fn config_paths(self, home: &Path) -> Vec<PathBuf> {
+    fn config_paths(self, home: Home) -> Vec<PathBuf> {
         self.files().iter().map(|file| file.path(home)).collect()
     }
 
@@ -129,6 +146,15 @@ impl Client {
             _ => &["env.ANTHROPIC_BASE_URL", "env.ANTHROPIC_AUTH_TOKEN"],
         }
     }
+
+    /// Keys newer versions write that configs from released builds lack. A
+    /// sync adds each one once to a config nobody changed.
+    fn added_keys(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Codex => &[(CODEX_HEADERS_KEY, CODEX_TOOLS_HEADER_VALUE)],
+            _ => &[],
+        }
+    }
 }
 
 /// One file a client reads its connection from.
@@ -143,11 +169,11 @@ enum ConfigFile {
 }
 
 impl ConfigFile {
-    fn path(self, home: &Path) -> PathBuf {
-        let pi = home.join(".pi").join("agent");
+    fn path(self, home: Home) -> PathBuf {
+        let pi = home.pi_agent_dir();
         match self {
-            Self::Claude => home.join(".claude").join("settings.json"),
-            Self::Codex => home.join(".codex").join("config.toml"),
+            Self::Claude => home.claude_dir().join("settings.json"),
+            Self::Codex => home.codex_dir().join("config.toml"),
             Self::PiModels => pi.join("models.json"),
             Self::PiSettings => pi.join("settings.json"),
         }
@@ -205,7 +231,7 @@ impl Models {
             let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
                 continue;
             };
-            if value.chars().count() > 256 || value.chars().any(char::is_control) {
+            if !valid_model(value) {
                 return Err(format!("invalid {key}"));
             }
             values.push((key, value.to_string()));
@@ -215,6 +241,11 @@ impl Models {
         }
         Ok(values)
     }
+}
+
+/// Whether a trimmed, non-empty model name fits in a client config.
+fn valid_model(value: &str) -> bool {
+    value.chars().count() <= 256 && !value.chars().any(char::is_control)
 }
 
 /// `http://127.0.0.1:<port>` or `http://localhost:<port>` for the gateway's
@@ -280,6 +311,34 @@ pub async fn token_summary(
         .ok_or_else(|| "access token not found".to_string())
 }
 
+/// The ids of the gateway's access tokens. Every AstrLink on this computer
+/// writes the same client configs, and one written with a token the gateway
+/// lacks belongs to another AstrLink, such as the instance `make dev` runs
+/// beside an installed one. Token ids are random, so no two gateways share
+/// one.
+#[derive(Debug)]
+pub struct Tokens(BTreeSet<String>);
+
+impl Tokens {
+    pub async fn of(manager: &CoreManager) -> Result<Self, String> {
+        let page = manager.list_access_tokens().await?;
+        let items = page["items"]
+            .as_array()
+            .ok_or_else(|| "access token list is invalid".to_string())?;
+        Ok(Self(
+            items
+                .iter()
+                .filter_map(|item| item["id"].as_str())
+                .map(str::to_string)
+                .collect(),
+        ))
+    }
+
+    fn own(&self, record: &ClientRecord) -> bool {
+        self.0.contains(&record.token_id)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientState {
@@ -287,8 +346,12 @@ pub enum ClientState {
     Configured,
     /// Still AstrLink's, pointing at a port the gateway no longer uses.
     Outdated,
+    /// Another AstrLink's, pointing at its own address.
+    Elsewhere,
     /// A connection key changed since AstrLink wrote it.
     Modified,
+    /// Moved to CC Switch, and the connection is not the one AstrLink wrote.
+    CcSwitch,
     /// The config file cannot be parsed.
     Invalid,
 }
@@ -296,19 +359,45 @@ pub enum ClientState {
 #[derive(Debug, Serialize)]
 pub struct ClientStatus {
     pub client: Client,
+    /// The WSL distribution the client runs in; `None` for the desktop user's.
+    pub wsl: Option<String>,
     pub detected: bool,
     pub paths: Vec<String>,
     pub state: ClientState,
     pub token_id: Option<String>,
+    /// The models a config AstrLink wrote holds now, by `Models` field.
+    pub models: BTreeMap<&'static str, String>,
+}
+
+/// Client configs across the desktop user's home and WSL homes.
+#[derive(Debug, Serialize)]
+pub struct ClientOverview {
+    pub clients: Vec<ClientStatus>,
+    /// WSL distributions whose clients were not checked.
+    pub wsl_unchecked: Vec<String>,
+    /// Whether WSL clients reach the gateway at `localhost`.
+    pub wsl_localhost: bool,
+    /// Where CC Switch's import writes Claude Code and Codex.
+    pub cc_switch_wsl: CcSwitchWsl,
+}
+
+/// The WSL distribution whose config CC Switch writes, by client; `None` for
+/// the desktop user's.
+#[derive(Debug, Serialize)]
+pub struct CcSwitchWsl {
+    pub claude: Option<String>,
+    pub codex: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ApplyOutcome {
     Applied,
-    /// Nothing was written: these keys hold values AstrLink did not write.
+    /// Nothing was written: `keys` hold values AstrLink did not write, or
+    /// the config connects to another AstrLink at the `gateway` base URL.
     NeedsConfirmation {
         keys: Vec<String>,
+        gateway: Option<String>,
     },
 }
 
@@ -335,9 +424,55 @@ struct Records {
     codex: Option<ClientRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pi: Option<ClientRecord>,
+    /// Clients the user moved to CC Switch since AstrLink last wrote them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cc_switch: Vec<Client>,
 }
 
 impl Records {
+    fn is_empty(&self) -> bool {
+        self.claude.is_none()
+            && self.codex.is_none()
+            && self.pi.is_none()
+            && self.cc_switch.is_empty()
+    }
+
+    fn handed_over(&self, client: Client) -> bool {
+        self.cc_switch.contains(&client)
+    }
+
+    fn set_handed_over(&mut self, client: Client, handed_over: bool) {
+        self.cc_switch.retain(|item| *item != client);
+        if handed_over {
+            self.cc_switch.push(client);
+        }
+    }
+
+    /// Once the user moved a client to CC Switch, a connection AstrLink did
+    /// not write is CC Switch's, not a change to its own config. Without the
+    /// gateway's `tokens`, another AstrLink's config reads as outdated.
+    fn state(
+        &self,
+        client: Client,
+        existing: &[Option<&str>],
+        origin: Option<&str>,
+        tokens: Option<&Tokens>,
+    ) -> ClientState {
+        match inspect(client, existing, self.get(client), origin) {
+            ClientState::NotConfigured | ClientState::Modified if self.handed_over(client) => {
+                ClientState::CcSwitch
+            }
+            ClientState::Outdated
+                if tokens
+                    .zip(self.get(client))
+                    .is_some_and(|(tokens, record)| !tokens.own(record)) =>
+            {
+                ClientState::Elsewhere
+            }
+            state => state,
+        }
+    }
+
     fn slot(&mut self, client: Client) -> &mut Option<ClientRecord> {
         match client {
             Client::Codex => &mut self.codex,
@@ -375,7 +510,7 @@ fn read_records(home: &Path) -> Result<Records, String> {
 
 fn write_records(home: &Path, records: &mut Records) -> Result<(), String> {
     let path = records_path(home);
-    if records.claude.is_none() && records.codex.is_none() && records.pi.is_none() {
+    if records.is_empty() {
         return host_files::remove_path(&path);
     }
     records.version = RECORDS_VERSION;
@@ -532,6 +667,40 @@ fn set_toml_string(table: &mut dyn TableLike, key: &str, value: &str) {
     }
 }
 
+/// AstrLink's entry in Codex's `http_headers`, matched case-insensitively as
+/// Codex matches it.
+fn codex_tools_header(headers: &dyn TableLike) -> Option<(String, &Item)> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(CODEX_TOOLS_HEADER))
+        .map(|(name, item)| (name.to_string(), item))
+}
+
+/// Adds AstrLink's header to the provider's `http_headers` next to any
+/// other header there. A value that is not a table is replaced.
+fn set_codex_tools_header(provider: &mut dyn TableLike, value: &str) {
+    if provider
+        .get("http_headers")
+        .and_then(Item::as_table_like)
+        .is_none()
+    {
+        provider.insert(
+            "http_headers",
+            Item::Value(Value::InlineTable(InlineTable::new())),
+        );
+    }
+    let Some(headers) = provider
+        .get_mut("http_headers")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    let name = codex_tools_header(&*headers)
+        .map(|(name, _)| name)
+        .unwrap_or_else(|| CODEX_TOOLS_HEADER.to_string());
+    set_toml_string(headers, &name, value);
+}
+
 /// Removes a root key but keeps the comment above it, handing it to the
 /// neighbouring key: a file's header note often sits above `model`.
 fn remove_toml_root_key(document: &mut DocumentMut, key: &str) {
@@ -615,13 +784,19 @@ impl Document {
                 let Some(key) = path.strip_prefix(CODEX_PROVIDER_PREFIX) else {
                     return document.get(path).map(toml_string);
                 };
-                document
+                let item = document
                     .get("model_providers")?
                     .as_table_like()?
                     .get(CODEX_PROVIDER)?
                     .as_table_like()?
-                    .get(key)
-                    .map(toml_string)
+                    .get(key)?;
+                if path != CODEX_HEADERS_KEY {
+                    return Some(toml_string(item));
+                }
+                match item.as_table_like() {
+                    Some(headers) => codex_tools_header(headers).map(|(_, item)| toml_string(item)),
+                    None => Some(None),
+                }
             }
         }
     }
@@ -694,8 +869,12 @@ impl Document {
                     .and_then(|providers| providers.get(CODEX_PROVIDER));
                 match provider.map(|item| item.as_table_like()) {
                     Some(Some(table)) => {
-                        for (key, item) in table.iter() {
-                            keys.push((format!("{CODEX_PROVIDER_PREFIX}{key}"), toml_string(item)));
+                        for (key, _) in table.iter() {
+                            let path = format!("{CODEX_PROVIDER_PREFIX}{key}");
+                            // Headers without AstrLink's own are the user's.
+                            if let Some(value) = self.get(&path) {
+                                keys.push((path, value));
+                            }
                         }
                     }
                     Some(None) => keys.push(("model_providers.astrlink".into(), None)),
@@ -763,7 +942,11 @@ impl Document {
                     .get_mut(CODEX_PROVIDER)
                     .and_then(Item::as_table_like_mut)
                     .ok_or("unable to create model_providers.astrlink")?;
-                set_toml_string(provider, key, value);
+                if path == CODEX_HEADERS_KEY {
+                    set_codex_tools_header(provider, value);
+                } else {
+                    set_toml_string(provider, key, value);
+                }
             }
         }
         Ok(())
@@ -792,7 +975,20 @@ impl Document {
                         .and_then(|providers| providers.get_mut(CODEX_PROVIDER))
                         .and_then(Item::as_table_like_mut)
                     {
-                        provider.remove(key);
+                        let headers = provider
+                            .get_mut("http_headers")
+                            .and_then(Item::as_table_like_mut)
+                            .filter(|_| path == CODEX_HEADERS_KEY);
+                        match headers {
+                            Some(headers) => {
+                                if let Some((name, _)) = codex_tools_header(&*headers) {
+                                    headers.remove(&name);
+                                }
+                            }
+                            None => {
+                                provider.remove(key);
+                            }
+                        }
                     }
                 } else {
                     remove_toml_root_key(document, path);
@@ -831,6 +1027,14 @@ impl Document {
                     .get_mut("model_providers")
                     .and_then(Item::as_table_like_mut)
                 {
+                    if let Some(provider) = providers
+                        .get_mut(CODEX_PROVIDER)
+                        .and_then(Item::as_table_like_mut)
+                    {
+                        if empty(provider.get("http_headers")) {
+                            provider.remove("http_headers");
+                        }
+                    }
                     if empty(providers.get(CODEX_PROVIDER)) {
                         providers.remove(CODEX_PROVIDER);
                     }
@@ -993,6 +1197,7 @@ fn desired_keys(client: Client, connection: &Connection) -> Vec<(String, String)
             ] {
                 keys.push((format!("{CODEX_PROVIDER_PREFIX}{key}"), value.into()));
             }
+            keys.push((CODEX_HEADERS_KEY.into(), CODEX_TOOLS_HEADER_VALUE.into()));
         }
         Client::Pi => {
             // The display name is local UI in Pi's model picker.
@@ -1015,15 +1220,9 @@ fn desired_keys(client: Client, connection: &Connection) -> Vec<(String, String)
             // AUTH_TOKEN, not API_KEY: an API key asks for approval in the
             // interactive client and conflicts with a login.
             keys.push(("env.ANTHROPIC_AUTH_TOKEN".into(), connection.token.into()));
-            for (field, key) in [
-                ("model", "ANTHROPIC_MODEL"),
-                ("haikuModel", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-                ("sonnetModel", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
-                ("opusModel", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
-                ("fableModel", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
-            ] {
+            for (field, path) in CLAUDE_MODEL_KEYS {
                 if let Some(model) = model(field) {
-                    keys.push((format!("env.{key}"), model));
+                    keys.push((path.into(), model));
                 }
             }
         }
@@ -1156,24 +1355,78 @@ pub fn inspect(
     }
 }
 
-/// Points an untouched config at the gateway's new port. The token stays
-/// as written, so the sync never needs to reveal it.
+/// The models a client's config holds now, by the `Models` field each would
+/// be written from. The client may have picked them itself since, like with
+/// Codex's `/model`. Names AstrLink could not write back are left out.
+fn current_models(client: Client, existing: &[Option<&str>]) -> BTreeMap<&'static str, String> {
+    let Ok(config) = Config::parse(client, existing) else {
+        return BTreeMap::new();
+    };
+    let read = |path: &str| {
+        config
+            .get(path)
+            .flatten()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && valid_model(value))
+    };
+    let models = match client {
+        Client::Codex => vec![("model", read("model"))],
+        // The model Pi starts with on AstrLink, else the one AstrLink's list
+        // offers.
+        Client::Pi => {
+            let starts_here =
+                config.get("defaultProvider").flatten().as_deref() == Some(PI_PROVIDER);
+            let startup = starts_here.then(|| read("defaultModel")).flatten();
+            vec![("model", startup.or_else(|| read(PI_MODELS_KEY)))]
+        }
+        _ => CLAUDE_MODEL_KEYS
+            .iter()
+            .map(|(field, path)| (*field, read(path)))
+            .collect(),
+    };
+    models
+        .into_iter()
+        .filter_map(|(field, model)| Some((field, model?)))
+        .collect()
+}
+
+/// Points an untouched config at the gateway's new port, and adds the keys
+/// a released build did not write yet. The token stays as written, so the
+/// sync never needs to reveal it.
 pub fn plan_sync(
     client: Client,
     existing: &[Option<&str>],
     record: &ClientRecord,
     origin: &str,
 ) -> Result<Option<(Vec<String>, ClientRecord)>, FileError> {
-    if inspect(client, existing, Some(record), Some(origin)) != ClientState::Outdated {
+    let state = inspect(client, existing, Some(record), Some(origin));
+    if !matches!(state, ClientState::Outdated | ClientState::Configured) {
         return Ok(None);
     }
     let mut config = Config::parse(client, existing)?;
-    let base_url = client.base_url(origin);
-    config.set(client.base_url_key(), &base_url)?;
     let mut next = record.clone();
-    next.keys
-        .insert(client.base_url_key().into(), sha256_hex(&base_url));
-    next.base_url = base_url;
+    let mut changed = false;
+    if state == ClientState::Outdated {
+        let base_url = client.base_url(origin);
+        config.set(client.base_url_key(), &base_url)?;
+        next.keys
+            .insert(client.base_url_key().into(), sha256_hex(&base_url));
+        next.base_url = base_url;
+        changed = true;
+    }
+    for (path, value) in client.added_keys() {
+        // A key AstrLink wrote before and the user removed stays removed, and
+        // a value the user set stays theirs.
+        if record.keys.contains_key(*path) || config.get(path).is_some() {
+            continue;
+        }
+        config.set(path, value)?;
+        next.keys.insert((*path).into(), sha256_hex(value));
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
     next.written_at_unix = unix_now();
     Ok(Some((config.render(existing), next)))
 }
@@ -1247,27 +1500,39 @@ fn write_files(
     Ok(())
 }
 
-pub fn status(home: &Path, inference_url: Option<&str>) -> Result<Vec<ClientStatus>, String> {
+pub fn status(
+    home: Home,
+    inference_url: Option<&str>,
+    tokens: Option<&Tokens>,
+) -> Result<Vec<ClientStatus>, String> {
     let origin = inference_url.map(local_origin).transpose()?;
     let _lock = host_files::lock();
-    let records = read_records(home)?;
+    let records = read_records(&home)?;
     let mut statuses = Vec::new();
     for client in Client::WRITABLE {
         let paths = client.config_paths(home);
         let existing = read_files(&paths)?;
         let record = records.get(client);
-        let state = inspect(client, &texts(&existing), record, origin.as_deref());
+        let state = records.state(client, &texts(&existing), origin.as_deref(), tokens);
+        // Only a config AstrLink wrote names its token and models.
+        let token_id = record
+            .filter(|_| !matches!(state, ClientState::NotConfigured | ClientState::CcSwitch))
+            .map(|record| record.token_id.clone());
         statuses.push(ClientStatus {
             client,
+            wsl: home.distribution().map(str::to_string),
             detected: client.detected(home),
             paths: paths
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect(),
             state,
-            token_id: record
-                .filter(|_| state != ClientState::NotConfigured)
-                .map(|record| record.token_id.clone()),
+            models: if token_id.is_some() {
+                current_models(client, &texts(&existing))
+            } else {
+                BTreeMap::new()
+            },
+            token_id,
         });
     }
     Ok(statuses)
@@ -1275,7 +1540,7 @@ pub fn status(home: &Path, inference_url: Option<&str>) -> Result<Vec<ClientStat
 
 pub async fn apply(
     manager: &CoreManager,
-    home: PathBuf,
+    target: OwnedHome,
     token_id: String,
     client: Client,
     models: &Models,
@@ -1285,13 +1550,14 @@ pub async fn apply(
     let client = client.writable()?;
     let origin = local_origin(&inference_url)?;
     let models = models.fields(client)?;
-    if !client.detected(&home) {
+    if !client.detected(target.home()) {
         return Err("this client is not installed for the current user".into());
     }
     let token = reveal_access_token(manager, &token_id, &inference_url).await?;
+    let tokens = Tokens::of(manager).await?;
     tauri::async_runtime::spawn_blocking(move || {
         write(
-            &home,
+            target.home(),
             client,
             &Connection {
                 token_id: &token_id,
@@ -1299,6 +1565,7 @@ pub async fn apply(
                 origin: &origin,
                 models: &models,
             },
+            &tokens,
             replace,
         )
     })
@@ -1306,45 +1573,74 @@ pub async fn apply(
     .map_err(|error| error.to_string())?
 }
 
+/// `tokens` are the gateway's, so a config another AstrLink wrote moves here
+/// only once the user confirms.
 pub fn write(
-    home: &Path,
+    home: Home,
     client: Client,
     connection: &Connection,
+    tokens: &Tokens,
     replace: bool,
 ) -> Result<ApplyOutcome, String> {
     let client = client.writable()?;
     let _lock = host_files::lock();
-    let mut records = read_records(home)?;
+    let mut records = read_records(&home)?;
     let paths = client.config_paths(home);
     let existing = read_files(&paths)?;
     let plan = plan_write(client, &texts(&existing), connection, records.get(client))
         .map_err(|error| error.at(&paths))?;
-    if !plan.conflicts.is_empty() && !replace {
+    let gateway = records
+        .get(client)
+        .filter(|_| {
+            records.state(
+                client,
+                &texts(&existing),
+                Some(connection.origin),
+                Some(tokens),
+            ) == ClientState::Elsewhere
+        })
+        .map(|record| record.base_url.clone());
+    if (!plan.conflicts.is_empty() || gateway.is_some()) && !replace {
         return Ok(ApplyOutcome::NeedsConfirmation {
             keys: plan.conflicts,
+            gateway,
         });
     }
     let previous = records.slot(client).replace(plan.record);
-    write_records(home, &mut records)?;
+    // Writing takes the client back from CC Switch.
+    let handed_over = records.handed_over(client);
+    records.set_handed_over(client, false);
+    write_records(&home, &mut records)?;
     if let Err(error) = write_files(&paths, &existing, &plan.contents) {
         *records.slot(client) = previous;
-        let _ = write_records(home, &mut records);
+        records.set_handed_over(client, handed_over);
+        let _ = write_records(&home, &mut records);
         return Err(error);
     }
     Ok(ApplyOutcome::Applied)
 }
 
-pub fn remove(home: &Path, client: Client) -> Result<(), String> {
+pub fn remove(home: Home, client: Client) -> Result<(), String> {
     let client = client.writable()?;
     let _lock = host_files::lock();
-    let mut records = read_records(home)?;
+    let mut records = read_records(&home)?;
     let Some(record) = records.get(client).cloned() else {
+        if records.handed_over(client) {
+            records.set_handed_over(client, false);
+            write_records(&home, &mut records)?;
+        }
         return Ok(());
     };
     let paths = client.config_paths(home);
     let existing = read_files(&paths)?;
-    let removals =
-        plan_remove(client, &texts(&existing), &record).map_err(|error| error.at(&paths))?;
+    // CC Switch rewrites some keys with the values AstrLink wrote, so the
+    // files of a client it holds are left to it.
+    let removals = if records.state(client, &texts(&existing), None, None) == ClientState::CcSwitch
+    {
+        Vec::new()
+    } else {
+        plan_remove(client, &texts(&existing), &record).map_err(|error| error.at(&paths))?
+    };
     for ((path, existing), removal) in paths.iter().zip(&existing).zip(removals) {
         match removal {
             Removal::Unchanged => {}
@@ -1368,17 +1664,39 @@ pub fn remove(home: &Path, client: Client) -> Result<(), String> {
         }
     }
     *records.slot(client) = None;
-    write_records(home, &mut records)
+    records.set_handed_over(client, false);
+    write_records(&home, &mut records)
 }
 
-/// Moves every untouched config to the gateway's current address.
-pub fn sync(home: &Path, inference_url: &str) -> Result<(), String> {
+/// Records whether the user moved a client AstrLink writes to CC Switch, and
+/// returns whether the record changed. Other clients have no record.
+pub fn set_cc_switch(home: Home, client: Client, handed_over: bool) -> Result<bool, String> {
+    if !Client::WRITABLE.contains(&client) {
+        return Ok(false);
+    }
+    let _lock = host_files::lock();
+    let mut records = read_records(&home)?;
+    if records.handed_over(client) == handed_over {
+        return Ok(false);
+    }
+    records.set_handed_over(client, handed_over);
+    write_records(&home, &mut records)?;
+    Ok(true)
+}
+
+/// Moves every untouched config the gateway wrote with one of its `tokens`
+/// to its current address. Another AstrLink's configs stay pointed at it.
+pub fn sync(home: Home, inference_url: &str, tokens: &Tokens) -> Result<(), String> {
     let origin = local_origin(inference_url)?;
     let _lock = host_files::lock();
-    let mut records = read_records(home)?;
+    let mut records = read_records(&home)?;
     let mut errors = Vec::new();
     for client in Client::WRITABLE {
-        let Some(record) = records.get(client).cloned() else {
+        let Some(record) = records
+            .get(client)
+            .filter(|record| tokens.own(record))
+            .cloned()
+        else {
             continue;
         };
         let paths = client.config_paths(home);
@@ -1390,11 +1708,11 @@ pub fn sync(home: &Path, inference_url: &str) -> Result<(), String> {
                 return Ok(());
             };
             *records.slot(client) = Some(next);
-            write_records(home, &mut records)?;
+            write_records(&home, &mut records)?;
             let written = write_files(&paths, &existing, &contents);
             if written.is_err() {
                 *records.slot(client) = Some(record.clone());
-                let _ = write_records(home, &mut records);
+                let _ = write_records(&home, &mut records);
             }
             written
         })();
@@ -1441,6 +1759,11 @@ mod tests {
             origin: ORIGIN,
             models,
         }
+    }
+
+    /// The tokens of the gateway `connection` writes for.
+    fn tokens() -> Tokens {
+        Tokens(BTreeSet::from(["token_01".to_string()]))
     }
 
     fn codex_models() -> Vec<(&'static str, String)> {
@@ -1611,7 +1934,7 @@ mod tests {
         assert_eq!(plan.conflicts, ["model"]);
         assert_eq!(
             plan.contents[0],
-            "# user settings\nmodel = \"gpt-route\" # mine\napproval_policy = \"never\"\nmodel_provider = \"astrlink\"\n\n[profiles.fast]\nmodel = \"o3\"\n\n[model_providers.other]\nname = \"Other\"\n\n[model_providers.astrlink]\nname = \"AstrLink\"\nbase_url = \"http://127.0.0.1:18317/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"astr_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0\"\n"
+            "# user settings\nmodel = \"gpt-route\" # mine\napproval_policy = \"never\"\nmodel_provider = \"astrlink\"\n\n[profiles.fast]\nmodel = \"o3\"\n\n[model_providers.other]\nname = \"Other\"\n\n[model_providers.astrlink]\nname = \"AstrLink\"\nbase_url = \"http://127.0.0.1:18317/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"astr_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0\"\nhttp_headers = { x-openai-actor-authorization = \"codex-imagegen\" }\n"
         );
         assert_eq!(plan.record.base_url, "http://127.0.0.1:18317/v1");
         let [Removal::Write(removed)] =
@@ -1630,15 +1953,122 @@ mod tests {
         let plan = plan_write(Client::Codex, &[None], &connection(&codex_models()), None).unwrap();
         assert_eq!(
             plan.contents[0],
-            "model_provider = \"astrlink\"\nmodel = \"gpt-route\"\n\n[model_providers.astrlink]\nname = \"AstrLink\"\nbase_url = \"http://127.0.0.1:18317/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"astr_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0\"\n"
+            "model_provider = \"astrlink\"\nmodel = \"gpt-route\"\n\n[model_providers.astrlink]\nname = \"AstrLink\"\nbase_url = \"http://127.0.0.1:18317/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"astr_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0\"\nhttp_headers = { x-openai-actor-authorization = \"codex-imagegen\" }\n"
         );
-        for forbidden in ["env_key", "requires_openai_auth", "\"OpenAI\"", "openai"] {
+        // The reserved provider ID or the name "OpenAI" would make Codex
+        // treat this as its built-in provider.
+        for forbidden in [
+            "env_key",
+            "requires_openai_auth",
+            "\"OpenAI\"",
+            "\"openai\"",
+            "model_providers.openai",
+        ] {
             assert!(!plan.contents[0].contains(forbidden));
         }
         assert_eq!(
             plan_remove(Client::Codex, &[Some(&plan.contents[0])], &plan.record).unwrap(),
             [Removal::Delete]
         );
+    }
+
+    #[test]
+    fn codex_tools_header_sits_beside_the_users_own_headers() {
+        let existing = "[model_providers.astrlink.http_headers]\nx-team = \"blue\"\n";
+        let plan = plan_write(
+            Client::Codex,
+            &[Some(existing)],
+            &connection(&codex_models()),
+            None,
+        )
+        .unwrap();
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        assert!(plan.contents[0].contains("x-team = \"blue\""));
+        assert!(plan.contents[0].contains("x-openai-actor-authorization = \"codex-imagegen\""));
+        let [Removal::Write(removed)] =
+            &plan_remove(Client::Codex, &[Some(&plan.contents[0])], &plan.record).unwrap()[..]
+        else {
+            panic!("expected a rewrite");
+        };
+        assert!(removed.contains("x-team = \"blue\""), "{removed}");
+        for gone in [
+            "x-openai-actor-authorization",
+            "experimental_bearer_token",
+            "model_provider =",
+        ] {
+            assert!(!removed.contains(gone), "{removed}");
+        }
+
+        // A value the user gave the header is theirs until they confirm.
+        let existing = "[model_providers.astrlink]\nhttp_headers = { X-OpenAI-Actor-Authorization = \"mine\", x-team = \"blue\" }\n";
+        let plan = plan_write(
+            Client::Codex,
+            &[Some(existing)],
+            &connection(&codex_models()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.conflicts, [CODEX_HEADERS_KEY]);
+        assert!(plan.contents[0].contains(
+            "http_headers = { X-OpenAI-Actor-Authorization = \"codex-imagegen\", x-team = \"blue\" }"
+        ));
+    }
+
+    #[test]
+    fn sync_adds_the_codex_tools_header_to_released_configs_once() {
+        let plan = plan_write(Client::Codex, &[None], &connection(&codex_models()), None).unwrap();
+        // Released builds wrote no header and kept no fingerprint for it.
+        let released = plan.contents[0].replace(
+            "http_headers = { x-openai-actor-authorization = \"codex-imagegen\" }\n",
+            "",
+        );
+        let mut record = plan.record.clone();
+        record.keys.remove(CODEX_HEADERS_KEY);
+        assert_eq!(
+            inspect(
+                Client::Codex,
+                &[Some(&released)],
+                Some(&record),
+                Some(ORIGIN)
+            ),
+            ClientState::Configured
+        );
+        let (contents, next) = plan_sync(Client::Codex, &[Some(&released)], &record, ORIGIN)
+            .unwrap()
+            .expect("the header is added");
+        assert_eq!(contents[0], plan.contents[0]);
+        assert_eq!(next.keys, plan.record.keys);
+        assert!(
+            plan_sync(Client::Codex, &[Some(&contents[0])], &next, ORIGIN)
+                .unwrap()
+                .is_none()
+        );
+
+        // A header the user removed after AstrLink wrote it stays removed.
+        assert!(
+            plan_sync(Client::Codex, &[Some(&released)], &plan.record, ORIGIN)
+                .unwrap()
+                .is_none()
+        );
+        // A changed connection is left alone.
+        let modified = released.replace("wire_api = \"responses\"", "wire_api = \"chat\"");
+        assert!(
+            plan_sync(Client::Codex, &[Some(&modified)], &record, ORIGIN)
+                .unwrap()
+                .is_none()
+        );
+        // A new port and the header arrive in one write.
+        let (contents, next) = plan_sync(
+            Client::Codex,
+            &[Some(&released)],
+            &record,
+            "http://127.0.0.1:9000",
+        )
+        .unwrap()
+        .expect("synced");
+        assert!(contents[0].contains("base_url = \"http://127.0.0.1:9000/v1\""));
+        assert!(contents[0].contains("x-openai-actor-authorization = \"codex-imagegen\""));
+        assert_eq!(next.base_url, "http://127.0.0.1:9000/v1");
     }
 
     #[test]
@@ -1822,18 +2252,108 @@ mod tests {
     fn only_claude_codex_and_pi_are_written_directly() {
         let home = unique_home("unsupported");
         for client in [Client::Gemini, Client::Opencode, Client::Openclaw] {
-            let error = write(&home, client, &connection(&codex_models()), true).unwrap_err();
+            let error = write(
+                Home::local(&home),
+                client,
+                &connection(&codex_models()),
+                &tokens(),
+                true,
+            )
+            .unwrap_err();
             assert!(!error.contains(TOKEN));
-            assert!(remove(&home, client).is_err());
+            assert!(remove(Home::local(&home), client).is_err());
             assert!(snippet(client, &connection(&codex_models())).is_err());
         }
-        let clients = status(&home, Some("http://127.0.0.1:18317/"))
-            .unwrap()
-            .into_iter()
-            .map(|status| status.client)
-            .collect::<Vec<_>>();
+        let clients = status(
+            Home::local(&home),
+            Some("http://127.0.0.1:18317/"),
+            Some(&tokens()),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|status| status.client)
+        .collect::<Vec<_>>();
         assert_eq!(clients, [Client::Claude, Client::Codex, Client::Pi]);
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn moved_dirs_and_wsl_homes_hold_their_own_configs() {
+        use crate::{agent_home::ToolDirs, wsl::WslHome};
+
+        let host = unique_home("moved-host");
+        let claude = host.join("work").join("claude");
+        let pi = host.join("work").join("pi-agent");
+        fs::create_dir_all(&claude).unwrap();
+        fs::create_dir_all(&pi).unwrap();
+        let dirs = ToolDirs {
+            claude: Some(claude.clone()),
+            pi: Some(pi.clone()),
+            ..Default::default()
+        };
+        let local = crate::agent_home::homes(&host, &dirs, &[]).next().unwrap();
+        assert!(Client::Pi.detected(local));
+        write(local, Client::Claude, &connection(&[]), &tokens(), false).unwrap();
+        write(
+            local,
+            Client::Pi,
+            &connection(&pi_models()),
+            &tokens(),
+            false,
+        )
+        .unwrap();
+        assert!(claude.join("settings.json").is_file());
+        assert!(pi.join("models.json").is_file() && pi.join("settings.json").is_file());
+        assert!(!host.join(".claude").join("settings.json").exists());
+        assert!(!host.join(".pi").exists());
+
+        let share = unique_home("moved-share");
+        let wsl = WslHome {
+            distribution: "Ubuntu".to_string(),
+            share: share.clone(),
+            mount_root: "/mnt".to_string(),
+            dirs: ToolDirs::default(),
+        };
+        let statuses = status(
+            Home::in_wsl(&host, &wsl),
+            Some("http://127.0.0.1:8317/"),
+            Some(&tokens()),
+        )
+        .unwrap();
+        assert!(statuses
+            .iter()
+            .all(|status| status.wsl.as_deref() == Some("Ubuntu")
+                && status.state == ClientState::NotConfigured));
+        let claude_status = statuses
+            .iter()
+            .find(|status| status.client == Client::Claude)
+            .unwrap();
+        assert!(claude_status.detected);
+        assert_eq!(
+            claude_status.paths,
+            [share
+                .join(".claude")
+                .join("settings.json")
+                .display()
+                .to_string()]
+        );
+        // Each home keeps its own records.
+        write(
+            Home::in_wsl(&host, &wsl),
+            Client::Claude,
+            &connection(&[]),
+            &tokens(),
+            false,
+        )
+        .unwrap();
+        assert!(records_path(&share).is_file());
+        assert!(share.join(".claude").join("settings.json").is_file());
+        remove(Home::in_wsl(&host, &wsl), Client::Claude).unwrap();
+        assert!(!share.join(".claude").join("settings.json").exists());
+        assert!(read_records(&host).unwrap().claude.is_some());
+        assert!(claude.join("settings.json").is_file());
+        fs::remove_dir_all(host).unwrap();
+        fs::remove_dir_all(share).unwrap();
     }
 
     fn pi_models() -> Vec<(&'static str, String)> {
@@ -1995,7 +2515,14 @@ mod tests {
         let settings = agent.join("settings.json");
         fs::write(&settings, "{\n  \"theme\": \"dark\"\n}\n").unwrap();
         assert_eq!(
-            write(&home, Client::Pi, &connection(&pi_models()), false).unwrap(),
+            write(
+                Home::local(&home),
+                Client::Pi,
+                &connection(&pi_models()),
+                &tokens(),
+                false
+            )
+            .unwrap(),
             ApplyOutcome::Applied
         );
         let models = agent.join("models.json");
@@ -2003,17 +2530,22 @@ mod tests {
         assert!(fs::read_to_string(&settings)
             .unwrap()
             .contains("\"defaultModel\": \"pi-route\""));
-        let statuses = status(&home, Some("http://127.0.0.1:9000/")).unwrap();
+        let statuses = status(
+            Home::local(&home),
+            Some("http://127.0.0.1:9000/"),
+            Some(&tokens()),
+        )
+        .unwrap();
         assert_eq!(statuses[2].state, ClientState::Outdated);
         assert_eq!(
             statuses[2].paths,
             [models.display().to_string(), settings.display().to_string()]
         );
-        sync(&home, "http://127.0.0.1:9000/").unwrap();
+        sync(Home::local(&home), "http://127.0.0.1:9000/", &tokens()).unwrap();
         assert!(fs::read_to_string(&models)
             .unwrap()
             .contains("http://127.0.0.1:9000/v1"));
-        remove(&home, Client::Pi).unwrap();
+        remove(Home::local(&home), Client::Pi).unwrap();
         assert!(!models.exists());
         assert_eq!(
             json(&fs::read_to_string(&settings).unwrap()),
@@ -2034,7 +2566,14 @@ mod tests {
             home.join(".pi/agent/settings.json"),
         )
         .unwrap();
-        assert!(write(&home, Client::Pi, &connection(&pi_models()), false).is_err());
+        assert!(write(
+            Home::local(&home),
+            Client::Pi,
+            &connection(&pi_models()),
+            &tokens(),
+            false
+        )
+        .is_err());
         assert!(!home.join(".pi/agent/models.json").exists());
         assert!(!records_path(&home).exists());
         fs::remove_dir_all(home).unwrap();
@@ -2046,17 +2585,32 @@ mod tests {
         let settings = home.join(".claude/settings.json");
         let foreign = "{\n  \"env\": {\n    \"ANTHROPIC_API_KEY\": \"sk-secret\"\n  }\n}\n";
         fs::write(&settings, foreign).unwrap();
-        let outcome = write(&home, Client::Claude, &connection(&[]), false).unwrap();
+        let outcome = write(
+            Home::local(&home),
+            Client::Claude,
+            &connection(&[]),
+            &tokens(),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             outcome,
             ApplyOutcome::NeedsConfirmation {
-                keys: vec!["env.ANTHROPIC_API_KEY".into()]
+                keys: vec!["env.ANTHROPIC_API_KEY".into()],
+                gateway: None,
             }
         );
         assert_eq!(fs::read_to_string(&settings).unwrap(), foreign);
         assert!(!records_path(&home).exists());
 
-        let outcome = write(&home, Client::Claude, &connection(&[]), true).unwrap();
+        let outcome = write(
+            Home::local(&home),
+            Client::Claude,
+            &connection(&[]),
+            &tokens(),
+            true,
+        )
+        .unwrap();
         assert_eq!(outcome, ApplyOutcome::Applied);
         let written = fs::read_to_string(&settings).unwrap();
         assert!(!written.contains("sk-secret"));
@@ -2071,14 +2625,94 @@ mod tests {
                 assert_eq!(mode, 0o600);
             }
         }
-        let statuses = status(&home, Some("http://127.0.0.1:18317/")).unwrap();
+        let statuses = status(
+            Home::local(&home),
+            Some("http://127.0.0.1:18317/"),
+            Some(&tokens()),
+        )
+        .unwrap();
         assert_eq!(statuses[0].state, ClientState::Configured);
         assert_eq!(statuses[0].token_id.as_deref(), Some("token_01"));
         assert_eq!(statuses[1].state, ClientState::NotConfigured);
 
-        remove(&home, Client::Claude).unwrap();
+        remove(Home::local(&home), Client::Claude).unwrap();
         assert_eq!(fs::read_to_string(&settings).unwrap(), "{}\n");
         assert!(!records_path(&home).exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn status_names_the_models_written_configs_hold_now() {
+        let home = unique_home("models");
+        fs::create_dir_all(home.join(".pi/agent")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        // A model in a config AstrLink did not write is not its to show.
+        fs::write(&settings, "{\"env\": {\"ANTHROPIC_MODEL\": \"own\"}}\n").unwrap();
+        let models = || {
+            status(Home::local(&home), None, None)
+                .unwrap()
+                .into_iter()
+                .map(|status| status.models)
+                .collect::<Vec<_>>()
+        };
+        assert!(models().iter().all(BTreeMap::is_empty));
+
+        let claude = [
+            ("model", "main-route".to_string()),
+            ("opusModel", "opus-route".to_string()),
+        ];
+        for (client, models) in [
+            (Client::Claude, &claude[..]),
+            (Client::Codex, &codex_models()[..]),
+            (Client::Pi, &pi_models()[..]),
+        ] {
+            write(
+                Home::local(&home),
+                client,
+                &connection(models),
+                &tokens(),
+                true,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            models(),
+            [
+                BTreeMap::from([
+                    ("model", "main-route".into()),
+                    ("opusModel", "opus-route".into())
+                ]),
+                BTreeMap::from([("model", "gpt-route".into())]),
+                BTreeMap::from([("model", "pi-route".into())]),
+            ]
+        );
+
+        // Models the clients picked since are the current ones, and a name
+        // AstrLink could not write back is left out.
+        let edit = |path: PathBuf, from: &str, to: &str| {
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains(from));
+            fs::write(&path, text.replace(from, to)).unwrap();
+        };
+        edit(settings, "opus-route", &"x".repeat(257));
+        edit(
+            home.join(".codex/config.toml"),
+            "gpt-route",
+            "picked-in-tui",
+        );
+        let pi_settings = home.join(".pi/agent/settings.json");
+        edit(pi_settings.clone(), "\"pi-route\"", "\"pi-mini\"");
+        assert_eq!(
+            models(),
+            [
+                BTreeMap::from([("model", "main-route".into())]),
+                BTreeMap::from([("model", "picked-in-tui".into())]),
+                BTreeMap::from([("model", "pi-mini".into())]),
+            ]
+        );
+        // Pi starting on another provider still lists AstrLink's model.
+        edit(pi_settings, "\"astrlink\"", "\"anthropic\"");
+        assert_eq!(models()[2], BTreeMap::from([("model", "pi-route".into())]));
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -2088,11 +2722,18 @@ mod tests {
         let auth = home.join(".codex/auth.json");
         let login = "{\"auth_mode\": \"chatgpt\", \"tokens\": {}}\n";
         fs::write(&auth, login).unwrap();
-        write(&home, Client::Codex, &connection(&codex_models()), false).unwrap();
-        sync(&home, "http://127.0.0.1:9000/").unwrap();
+        write(
+            Home::local(&home),
+            Client::Codex,
+            &connection(&codex_models()),
+            &tokens(),
+            false,
+        )
+        .unwrap();
+        sync(Home::local(&home), "http://127.0.0.1:9000/", &tokens()).unwrap();
         let config = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
         assert!(config.contains("base_url = \"http://127.0.0.1:9000/v1\""));
-        remove(&home, Client::Codex).unwrap();
+        remove(Home::local(&home), Client::Codex).unwrap();
         assert!(!home.join(".codex/config.toml").exists());
         assert_eq!(fs::read_to_string(&auth).unwrap(), login);
         let entries = fs::read_dir(home.join(".codex"))
@@ -2106,8 +2747,22 @@ mod tests {
     #[test]
     fn sync_leaves_modified_and_unreadable_configs_alone() {
         let home = unique_home("sync");
-        write(&home, Client::Claude, &connection(&[]), false).unwrap();
-        write(&home, Client::Codex, &connection(&codex_models()), false).unwrap();
+        write(
+            Home::local(&home),
+            Client::Claude,
+            &connection(&[]),
+            &tokens(),
+            false,
+        )
+        .unwrap();
+        write(
+            Home::local(&home),
+            Client::Codex,
+            &connection(&codex_models()),
+            &tokens(),
+            false,
+        )
+        .unwrap();
         let settings = home.join(".claude/settings.json");
         let edited = fs::read_to_string(&settings)
             .unwrap()
@@ -2115,18 +2770,238 @@ mod tests {
         fs::write(&settings, &edited).unwrap();
         let broken = "token = \"astr_x\n";
         fs::write(home.join(".codex/config.toml"), broken).unwrap();
-        sync(&home, "http://127.0.0.1:9000/").unwrap();
+        sync(Home::local(&home), "http://127.0.0.1:9000/", &tokens()).unwrap();
         assert_eq!(fs::read_to_string(&settings).unwrap(), edited);
         assert_eq!(
             fs::read_to_string(home.join(".codex/config.toml")).unwrap(),
             broken
         );
-        let statuses = status(&home, Some("http://127.0.0.1:9000/")).unwrap();
+        let statuses = status(
+            Home::local(&home),
+            Some("http://127.0.0.1:9000/"),
+            Some(&tokens()),
+        )
+        .unwrap();
         assert_eq!(statuses[0].state, ClientState::Modified);
         assert_eq!(statuses[1].state, ClientState::Invalid);
-        let error = remove(&home, Client::Codex).unwrap_err();
+        let error = remove(Home::local(&home), Client::Codex).unwrap_err();
         assert!(error.contains("config.toml") && error.contains("TOML"));
         assert!(!error.contains("astr_x"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn another_astrlinks_config_moves_here_only_once_confirmed() {
+        let home = unique_home("elsewhere");
+        let config = home.join(".codex/config.toml");
+        let models = codex_models();
+        let other = Tokens(BTreeSet::from(["token_02".to_string()]));
+        let theirs = Connection {
+            token_id: "token_02",
+            token: OTHER_TOKEN,
+            origin: "http://127.0.0.1:8317",
+            models: &models,
+        };
+        write(Home::local(&home), Client::Codex, &theirs, &other, false).unwrap();
+        let written = fs::read_to_string(&config).unwrap();
+        let codex = |tokens: Option<&Tokens>| {
+            status(Home::local(&home), Some("http://127.0.0.1:18317/"), tokens)
+                .unwrap()
+                .remove(1)
+        };
+        let elsewhere = codex(Some(&tokens()));
+        assert_eq!(elsewhere.state, ClientState::Elsewhere);
+        assert_eq!(elsewhere.token_id.as_deref(), Some("token_02"));
+        assert_eq!(codex(None).state, ClientState::Outdated);
+        sync(Home::local(&home), "http://127.0.0.1:18317/", &tokens()).unwrap();
+        assert_eq!(fs::read_to_string(&config).unwrap(), written);
+
+        assert_eq!(
+            write(
+                Home::local(&home),
+                Client::Codex,
+                &connection(&models),
+                &tokens(),
+                false
+            )
+            .unwrap(),
+            ApplyOutcome::NeedsConfirmation {
+                keys: Vec::new(),
+                gateway: Some("http://127.0.0.1:8317/v1".into()),
+            }
+        );
+        assert_eq!(fs::read_to_string(&config).unwrap(), written);
+        write(
+            Home::local(&home),
+            Client::Codex,
+            &connection(&models),
+            &tokens(),
+            true,
+        )
+        .unwrap();
+        let switched = fs::read_to_string(&config).unwrap();
+        assert!(switched.contains(&format!("base_url = \"{ORIGIN}/v1\"")));
+        assert!(switched.contains(TOKEN));
+        assert_eq!(codex(Some(&tokens())).state, ClientState::Configured);
+        // The other AstrLink leaves it here in turn.
+        sync(Home::local(&home), "http://127.0.0.1:8317/", &other).unwrap();
+        assert_eq!(fs::read_to_string(&config).unwrap(), switched);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_client_moved_to_cc_switch_is_left_to_it_once_cc_switch_switches() {
+        let home = unique_home("cc-switch");
+        let config = home.join(".codex/config.toml");
+        write(
+            Home::local(&home),
+            Client::Codex,
+            &connection(&codex_models()),
+            &tokens(),
+            false,
+        )
+        .unwrap();
+        let written = fs::read_to_string(&config).unwrap();
+        // CC Switch's switch takes over the route and model keys and adds its
+        // own provider table; AstrLink's table stays behind.
+        let switched = written
+            .replace("model_provider = \"astrlink\"", "model_provider = \"custom\"")
+            .replace(
+                "model = \"gpt-route\"\n",
+                "model = \"gpt-route\"\nmodel_reasoning_effort = \"high\"\n",
+            )
+            + &format!(
+                "\n[model_providers.custom]\nname = \"AstrLink · VS Code\"\nbase_url = \"{ORIGIN}/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"{TOKEN}\"\n"
+            );
+        let codex = |home: &Path| {
+            status(
+                Home::local(home),
+                Some("http://127.0.0.1:18317/"),
+                Some(&tokens()),
+            )
+            .unwrap()
+            .remove(1)
+        };
+        fs::write(&config, &switched).unwrap();
+        assert_eq!(codex(&home).state, ClientState::Modified);
+
+        // The move counts once CC Switch replaces AstrLink's connection.
+        fs::write(&config, &written).unwrap();
+        assert!(set_cc_switch(Home::local(&home), Client::Codex, true).unwrap());
+        assert!(!set_cc_switch(Home::local(&home), Client::Codex, true).unwrap());
+        assert_eq!(codex(&home).state, ClientState::Configured);
+        fs::write(&config, &switched).unwrap();
+        let moved = codex(&home);
+        assert_eq!(moved.state, ClientState::CcSwitch);
+        assert_eq!(moved.token_id, None);
+        sync(Home::local(&home), "http://127.0.0.1:9000/", &tokens()).unwrap();
+        assert_eq!(fs::read_to_string(&config).unwrap(), switched);
+
+        // Writing takes it back, asking only about the route CC Switch chose.
+        assert_eq!(
+            write(
+                Home::local(&home),
+                Client::Codex,
+                &connection(&codex_models()),
+                &tokens(),
+                false
+            )
+            .unwrap(),
+            ApplyOutcome::NeedsConfirmation {
+                keys: vec!["model_provider".into()],
+                gateway: None,
+            }
+        );
+        write(
+            Home::local(&home),
+            Client::Codex,
+            &connection(&codex_models()),
+            &tokens(),
+            true,
+        )
+        .unwrap();
+        let rewritten = fs::read_to_string(&config).unwrap();
+        assert!(rewritten.contains("model_provider = \"astrlink\""));
+        assert!(rewritten.contains("model_reasoning_effort = \"high\""));
+        assert!(rewritten.contains("[model_providers.custom]"));
+        assert_eq!(codex(&home).state, ClientState::Configured);
+        assert!(!fs::read_to_string(records_path(&home))
+            .unwrap()
+            .contains("cc_switch"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn removing_a_client_cc_switch_holds_leaves_its_files_alone() {
+        let home = unique_home("cc-switch-remove");
+        let settings = home.join(".claude/settings.json");
+        let models = vec![("model", "main-route".to_string())];
+        write(
+            Home::local(&home),
+            Client::Claude,
+            &connection(&models),
+            &tokens(),
+            false,
+        )
+        .unwrap();
+        set_cc_switch(Home::local(&home), Client::Claude, true).unwrap();
+        // A CC Switch provider with another token keeps the address and model
+        // AstrLink wrote, which removal would otherwise take for its own.
+        let switched = fs::read_to_string(&settings)
+            .unwrap()
+            .replace(TOKEN, OTHER_TOKEN);
+        fs::write(&settings, &switched).unwrap();
+        assert_eq!(
+            status(Home::local(&home), None, None).unwrap()[0].state,
+            ClientState::CcSwitch
+        );
+        remove(Home::local(&home), Client::Claude).unwrap();
+        assert_eq!(fs::read_to_string(&settings).unwrap(), switched);
+        assert!(!records_path(&home).exists());
+        assert_eq!(
+            status(Home::local(&home), None, None).unwrap()[0].state,
+            ClientState::NotConfigured
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn moves_are_noted_only_for_clients_astrlink_writes() {
+        let home = unique_home("cc-switch-only");
+        assert!(!set_cc_switch(Home::local(&home), Client::Gemini, true).unwrap());
+        assert!(!records_path(&home).exists());
+        assert!(set_cc_switch(Home::local(&home), Client::Codex, true).unwrap());
+        let statuses = status(Home::local(&home), None, None).unwrap();
+        assert_eq!(statuses[0].state, ClientState::NotConfigured);
+        assert_eq!(statuses[1].state, ClientState::CcSwitch);
+        assert_eq!(statuses[1].token_id, None);
+        remove(Home::local(&home), Client::Codex).unwrap();
+        assert!(!records_path(&home).exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn records_from_released_builds_still_load() {
+        let home = unique_home("released-records");
+        let plan = plan_write(Client::Codex, &[None], &connection(&codex_models()), None).unwrap();
+        fs::write(home.join(".codex/config.toml"), &plan.contents[0]).unwrap();
+        // Released builds wrote one object per client and nothing else.
+        fs::create_dir_all(astrlink_home(&home)).unwrap();
+        fs::write(
+            records_path(&home),
+            serde_json::json!({"version": 1, "codex": plan.record}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            status(
+                Home::local(&home),
+                Some("http://127.0.0.1:18317/"),
+                Some(&tokens())
+            )
+            .unwrap()[1]
+                .state,
+            ClientState::Configured
+        );
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -2158,7 +3033,14 @@ mod tests {
         let target = home.join("dotfiles-settings.json");
         fs::write(&target, "{}\n").unwrap();
         std::os::unix::fs::symlink(&target, home.join(".claude/settings.json")).unwrap();
-        write(&home, Client::Claude, &connection(&[]), false).unwrap();
+        write(
+            Home::local(&home),
+            Client::Claude,
+            &connection(&[]),
+            &tokens(),
+            false,
+        )
+        .unwrap();
         assert!(fs::symlink_metadata(home.join(".claude/settings.json"))
             .unwrap()
             .file_type()

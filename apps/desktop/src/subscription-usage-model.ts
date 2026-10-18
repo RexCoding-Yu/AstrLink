@@ -446,6 +446,15 @@ export function parseSubscriptionUsageReset(
 
 const planTypeLabels: Record<SubscriptionProvider, Record<string, string>> = {
   antigravity: {},
+  factory_droid: {
+    free: "Free",
+    starter: "Starter",
+    pro: "Pro",
+    plus: "Plus",
+    max: "Max",
+    team: "Team",
+    enterprise: "Enterprise",
+  },
   github_copilot: {
     free: "Free",
     individual: "Individual",
@@ -627,14 +636,39 @@ export function resetOutcomeMessage(outcome: UsageResetOutcome): string {
   }
 }
 
+export function formatUsageReadTime(fetchedAt: string): string {
+  const date = new Date(fetchedAt);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleTimeString(i18n.language, {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+const USAGE_RATE_LIMITED = "subscription_usage_rate_limited";
+
+function rateLimitedMessage(retryAfterSeconds: unknown): string {
+  return typeof retryAfterSeconds === "number" && retryAfterSeconds > 0
+    ? i18n.t("usage.rateLimitedFor", {
+        count: Math.ceil(retryAfterSeconds / 60),
+      })
+    : i18n.t("usage.rateLimited");
+}
+
 export function formatSubscriptionUsageError(error: unknown): string {
   const raw = rawErrorText(error);
   if (!raw) return i18n.t("usage.readFailed");
+  // The web console throws the bare code with the parsed Retry-After.
+  if (raw === USAGE_RATE_LIMITED)
+    return rateLimitedMessage(
+      (error as { retryAfter?: unknown } | null)?.retryAfter,
+    );
   const jsonStart = raw.indexOf("{");
   if (jsonStart >= 0) {
     try {
       const parsed = JSON.parse(raw.slice(jsonStart)) as {
-        error?: { code?: unknown; message?: unknown };
+        error?: { code?: unknown; message?: unknown; details?: unknown };
       };
       const message =
         typeof parsed.error?.message === "string"
@@ -642,6 +676,15 @@ export function formatSubscriptionUsageError(error: unknown): string {
           : "";
       const code =
         typeof parsed.error?.code === "string" ? parsed.error.code.trim() : "";
+      if (code === USAGE_RATE_LIMITED) {
+        const details = Array.isArray(parsed.error?.details)
+          ? (parsed.error.details as { retry_after_seconds?: unknown }[])
+          : [];
+        return rateLimitedMessage(
+          details.find((detail) => detail?.retry_after_seconds)
+            ?.retry_after_seconds,
+        );
+      }
       if (message && code) return `${code}: ${message}`;
       if (message) return message;
     } catch {

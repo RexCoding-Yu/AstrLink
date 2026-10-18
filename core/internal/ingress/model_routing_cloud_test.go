@@ -355,8 +355,8 @@ func TestModelRoutingCloudCustomLabelsRoundTrip(t *testing.T) {
 	}
 }
 
-// Retry attempts all read the same sanitized bytes: the classifier saw them,
-// and every upstream attempt forwards identical placeholders.
+// The cloud classifier reads the redacted text, and every upstream attempt,
+// retries included, forwards the same placeholders.
 func TestModelRoutingSanitizedBytesSharedWithFailover(t *testing.T) {
 	var cloudBodies []string
 	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -416,6 +416,55 @@ func TestModelRoutingSanitizedBytesSharedWithFailover(t *testing.T) {
 	}
 	if !strings.Contains(upstreamBodies[0], "<PRIVATE_EMAIL_") {
 		t.Fatalf("upstream body missing placeholder: %q", upstreamBodies[0])
+	}
+}
+
+// A body the policy blocks is never classified: routing falls back without
+// calling the classifier, and the provider attempt is blocked as without
+// routing, which the routing record lists.
+func TestModelRoutingBlockedBodySkipsClassification(t *testing.T) {
+	cloudCalls := 0
+	cloudServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		cloudCalls++
+		_, _ = writer.Write([]byte(`{"answers":{"task_type":{"choice":"coding","confidence":0.99}}}`))
+	}))
+	defer cloudServer.Close()
+	store := newRedirectSettingsStore()
+	settings := enabledClassifierSettings(cloudServer.URL, contract.ClassifierProtocolJev)
+	upstreamCalls := 0
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(_ context.Context, request endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false), UpstreamModel: request.Model}, nil
+		}),
+		RequestRecords:     store,
+		ClassifierSettings: ClassifierSettingsProviderFunc(func(context.Context) (contract.ClassifierSettings, error) { return settings, nil }),
+		ProxyCredentials:   memorySecretStore{ref: contract.ClassifierCredentialRef, secret: []byte("cloud-key")},
+		PrivacyFilter:      testPrivacyEngine(t, privacy.Policy{Enabled: true, Mode: privacy.ModeRegex, Action: privacy.ActionBlock}, nil),
+		Forwarder: forwarderFunc(func(writer http.ResponseWriter, request *http.Request, _ transport.Target) error {
+			upstreamCalls++
+			_, _ = writer.Write([]byte(`{"model":"fast-model"}`))
+			return nil
+		}),
+	})
+	store.settings.ModelRoutingGroups = []contract.ModelRoutingGroup{cloudTestGroup(nil)}
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"email alice@example.com about coding"}`)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if cloudCalls != 0 || upstreamCalls != 0 {
+		t.Fatalf("classifier calls=%d upstream calls=%d, want none", cloudCalls, upstreamCalls)
+	}
+	decision := store.root(t).ModelRouting
+	if decision == nil || !decision.UsedDefault || decision.FallbackReason != autoclassifier.FallbackUnavailable {
+		t.Fatalf("decision = %+v, want the default member without classification", decision)
+	}
+	if len(decision.PrivacyAttempts) != 1 {
+		t.Fatalf("privacy attempts = %+v, want the blocked attempt", decision.PrivacyAttempts)
+	}
+	attempt := decision.PrivacyAttempts[0]
+	if attempt.AttemptIndex != 1 || attempt.ServiceID != "endpoint_test" ||
+		attempt.Decision != contract.ModelRoutingPrivacyReject || attempt.FindingCount != 1 {
+		t.Fatalf("privacy attempt = %+v", attempt)
 	}
 }
 

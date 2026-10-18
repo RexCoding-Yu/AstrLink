@@ -33,6 +33,7 @@ type requestRecordPageResponse struct {
 
 func (handler *Handler) registerRequestRecordRoutes() {
 	handler.mux.HandleFunc(UsageSummaryPath, handler.authenticated(handler.getUsageSummary, RoleObserver))
+	handler.mux.HandleFunc(PrivacySummaryPath, handler.authenticated(handler.getPrivacySummary, RoleObserver))
 	handler.mux.HandleFunc(AccessTokenUsagePath, handler.authenticated(handler.listAccessTokenUsage, RoleObserver))
 	handler.mux.HandleFunc(RequestsPurgePath, handler.authenticated(handler.purgeRequestRecords, RoleOperator))
 	handler.mux.HandleFunc(RequestSessionsPath, handler.authenticated(handler.requestSessionCollection, RoleObserver))
@@ -633,8 +634,14 @@ func privacyWithheldReason(record contract.RequestRecord, blob storage.AuditBlob
 				return contract.AuditWithheldPrivacyBlocked
 			case contract.PrivacyDecisionFailOpen:
 				return contract.AuditWithheldPrivacyFailOpen
+			case contract.PrivacyDecisionTrusted:
+				return contract.AuditWithheldPrivacyTrusted
 			}
 		}
+	case storage.AuditDirectionUpstreamRequest:
+		// Only a request sent to a trusted provider withholds its upstream
+		// copy.
+		return contract.AuditWithheldPrivacyTrusted
 	}
 	return contract.AuditWithheldPrivacyUnknown
 }

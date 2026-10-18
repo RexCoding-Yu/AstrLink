@@ -1,8 +1,16 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use reqwest::Url;
+use serde_json::Value;
 
 use crate::{
+    agent_home::{Homes, OwnedHome, ToolDirs},
     client_config::{self, Client, Models},
     sidecar::CoreManager,
+    wsl::{self, Reach},
 };
 
 fn import_url(
@@ -136,6 +144,7 @@ pub fn installed() -> bool {
 
 pub async fn open_import(
     manager: &CoreManager,
+    home: PathBuf,
     token_id: &str,
     client: Client,
     models: &Models,
@@ -143,22 +152,183 @@ pub async fn open_import(
 ) -> Result<(), String> {
     let (token_name, _) = client_config::token_summary(manager, token_id).await?;
     let token = client_config::reveal_access_token(manager, token_id, inference_url).await?;
+    // The isolated instance's name keeps its provider apart from the other
+    // AstrLink's, so switching between them in CC Switch is unambiguous.
     let url = import_url(
         client,
         inference_url,
-        &format!("AstrLink · {token_name}"),
+        &format!("{} · {token_name}", crate::instance::product_name()),
         models,
         &token,
     )?;
+    // Note the move before CC Switch can act on it, so the config CC Switch
+    // writes is not reported as a change. The import goes ahead without it.
+    let marked = set_cc_switch(home.clone(), client, true)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("unable to note the move to CC Switch: {error}");
+            false
+        });
     // The URL contains a credential: keep it out of frontend state and errors.
-    tauri_plugin_opener::open_url(url.as_str(), None::<&str>)
-        .map_err(|_| "unable to open CC Switch; check that it is installed".to_string())
+    if tauri_plugin_opener::open_url(url.as_str(), None::<&str>).is_err() {
+        if marked {
+            if let Err(error) = set_cc_switch(home, client, false).await {
+                eprintln!("unable to undo the move to CC Switch: {error}");
+            }
+        }
+        return Err("unable to open CC Switch; check that it is installed".into());
+    }
+    Ok(())
+}
+
+async fn set_cc_switch(home: PathBuf, client: Client, handed_over: bool) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || match managed_home(home, client)? {
+        Some(target) => client_config::set_cc_switch(target.home(), client, handed_over),
+        None => Ok(false),
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The home whose config CC Switch writes for `client`: the WSL home its
+/// directory setting points into, or else the desktop user's. `None` when
+/// that distribution is no longer registered.
+fn managed_home(home: PathBuf, client: Client) -> Result<Option<OwnedHome>, String> {
+    let distribution = managed_distribution(config_dirs(&home), client);
+    let names = distribution.iter().cloned().collect::<Vec<_>>();
+    Ok(Homes::find(home, Reach::Named(&names))?.take(distribution.as_deref()))
+}
+
+/// The WSL distribution whose config CC Switch writes for `client`, as its
+/// directory settings `dirs` place it; `None` for the desktop user's. Only
+/// Claude Code and Codex move into WSL.
+pub fn managed_distribution(dirs: ToolDirs, client: Client) -> Option<String> {
+    let (_, wsl_dirs) = wsl::split_dirs(dirs);
+    wsl_dirs
+        .into_iter()
+        .find(|entry| match client {
+            Client::Claude => entry.dirs.claude.is_some(),
+            Client::Codex => entry.dirs.codex.is_some(),
+            _ => false,
+        })
+        .map(|entry| entry.distribution)
+}
+
+/// The configuration directories CC Switch's settings move each app to, so
+/// agent installs reach the same Claude Code or Codex, inside WSL included.
+/// Missing or unreadable settings move nothing.
+pub fn config_dirs(home: &Path) -> ToolDirs {
+    let settings = fs::read_to_string(home.join(".cc-switch").join("settings.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_default();
+    let dir = |key: &str| {
+        settings
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(|raw| resolve_dir(home, raw))
+    };
+    ToolDirs {
+        claude: dir("claudeConfigDir"),
+        codex: dir("codexConfigDir"),
+        grok: dir("grokConfigDir"),
+        pi: dir("piConfigDir"),
+    }
+}
+
+/// Resolves a directory setting the way CC Switch does: `~` is the home, and
+/// anything still relative is ignored.
+fn resolve_dir(home: &Path, raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    let path = if raw == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        rest.split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .fold(home.to_path_buf(), |path, part| path.join(part))
+    } else {
+        PathBuf::from(raw)
+    };
+    path.is_absolute().then_some(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn config_dirs_follow_cc_switch_settings() {
+        let home = std::env::temp_dir().join(format!("astrlink-ccs-dirs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        assert_eq!(config_dirs(&home), ToolDirs::default());
+        fs::create_dir_all(home.join(".cc-switch")).unwrap();
+        fs::write(
+            home.join(".cc-switch").join("settings.json"),
+            r#"{"claudeConfigDir":"~/work/.claude","codexConfigDir":"  ","grokConfigDir":"relative/grok","piConfigDir":"/opt/pi/agent","showInTray":true}"#,
+        )
+        .unwrap();
+        let absolute = if cfg!(windows) {
+            None
+        } else {
+            Some(PathBuf::from("/opt/pi/agent"))
+        };
+        assert_eq!(
+            config_dirs(&home),
+            ToolDirs {
+                claude: Some(home.join("work").join(".claude")),
+                codex: None,
+                grok: None,
+                pi: absolute,
+            }
+        );
+        fs::write(home.join(".cc-switch").join("settings.json"), "not json").unwrap();
+        assert_eq!(config_dirs(&home), ToolDirs::default());
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn cc_switch_writes_claude_and_codex_where_their_dirs_point() {
+        let all = [
+            Client::Claude,
+            Client::Codex,
+            Client::Gemini,
+            Client::Opencode,
+            Client::Openclaw,
+            Client::Pi,
+        ];
+        // Default settings write every client in the desktop user's home.
+        for client in all {
+            assert_eq!(managed_distribution(ToolDirs::default(), client), None);
+        }
+        let dirs = ToolDirs {
+            claude: Some(PathBuf::from(r"D:\claude")),
+            codex: Some(PathBuf::from(r"\\wsl$\ubuntu-24.04\home\codbitz\.codex")),
+            grok: Some(PathBuf::from(r"\\wsl$\Debian\home\ada\.grok")),
+            pi: Some(PathBuf::from(r"\\wsl.localhost\Debian\home\ada\.pi\agent")),
+        };
+        for client in all {
+            let expected = (client == Client::Codex).then_some("ubuntu-24.04");
+            assert_eq!(
+                managed_distribution(dirs.clone(), client).as_deref(),
+                expected,
+                "{client:?}"
+            );
+        }
+        // Both directories in one distribution name it once, however spelled.
+        let both = ToolDirs {
+            claude: Some(PathBuf::from(
+                r"\\wsl.localhost\Ubuntu-24.04\home\codbitz\.claude",
+            )),
+            ..dirs
+        };
+        for client in [Client::Claude, Client::Codex] {
+            assert_eq!(
+                managed_distribution(both.clone(), client).as_deref(),
+                Some("Ubuntu-24.04")
+            );
+        }
+    }
 
     #[test]
     fn exports_client_endpoints_and_preserves_encoded_values() {

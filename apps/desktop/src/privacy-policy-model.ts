@@ -94,6 +94,8 @@ export interface PrivacyKindRule {
   kind: CanonicalPrivacyKind;
   enabled: boolean;
   style: PlaceholderStyle;
+  /** Under the warn action, false records the kind without notifying. */
+  notify: boolean;
 }
 
 export type PrivacyAllowlistType = "literal" | "domain_suffix" | "cidr";
@@ -715,9 +717,6 @@ export function parsePrivacyPolicy(value: unknown, path = "$"): PrivacyPolicy {
   if (id !== "policy_privacy_default") {
     invalid(`${path}.id`, "unexpected singleton policy ID");
   }
-  if (name !== "隐私保护") {
-    invalid(`${path}.name`, "unexpected singleton policy name");
-  }
   const priority = safeIntegerAt(policy.priority, `${path}.priority`);
   if (priority !== 0) {
     invalid(`${path}.priority`, "unexpected singleton policy priority");
@@ -838,15 +837,73 @@ export function parsePrivacyPolicy(value: unknown, path = "$"): PrivacyPolicy {
 
 /**
  * Mirrors core/contract.DefaultPrivacyKindRules for responses that predate the
- * field. url and ip_address are off because they were the dominant
- * false-positive source for coding agents.
+ * field. url, ip_address, and private_date are off because they were the
+ * dominant false-positive sources for coding agents.
  */
 export function defaultPrivacyKindRules(): PrivacyKindRule[] {
   return PRIVACY_KINDS.map((kind) => ({
     kind,
-    enabled: kind !== "url" && kind !== "ip_address",
+    enabled: kind !== "url" && kind !== "ip_address" && kind !== "private_date",
     style: PLACEHOLDER_STYLE_LOCKED_KINDS.has(kind) ? "token" : "natural",
+    notify: true,
   }));
+}
+
+export function privacyKindRulesAreDefault(
+  rules: readonly PrivacyKindRule[],
+): boolean {
+  return defaultPrivacyKindRules().every((fallback) => {
+    const rule = rules.find((candidate) => candidate.kind === fallback.kind);
+    return (
+      rule?.enabled === fallback.enabled &&
+      rule.style === fallback.style &&
+      rule.notify === fallback.notify
+    );
+  });
+}
+
+/** Mirrors the request and response fields of core/contract.DefaultPrivacyPolicy. */
+export const DEFAULT_PRIVACY_RESTORE_SETTINGS = {
+  response_restore: true,
+  restore_tool_arguments: true,
+  placeholder_notice: true,
+  skip_tool_declarations: false,
+  inspect_additional_tools: false,
+} as const satisfies PrivacyPolicyPatch;
+
+export function privacyRestoreSettingsAreDefault(
+  policy: PrivacyPolicy,
+): boolean {
+  return Object.entries(DEFAULT_PRIVACY_RESTORE_SETTINGS).every(
+    ([key, value]) =>
+      policy[key as keyof typeof DEFAULT_PRIVACY_RESTORE_SETTINGS] === value,
+  );
+}
+
+/** Mirrors core/contract.DefaultPrivacyAllowlistRules. */
+export function defaultPrivacyAllowlistRules(): PrivacyAllowlistRule[] {
+  return [
+    { type: "domain_suffix", value: "localhost" },
+    { type: "domain_suffix", value: "github.com" },
+    { type: "domain_suffix", value: "githubusercontent.com" },
+    { type: "cidr", value: "127.0.0.0/8" },
+    { type: "cidr", value: "::1/128" },
+    { type: "cidr", value: "10.0.0.0/8" },
+    { type: "cidr", value: "172.16.0.0/12" },
+    { type: "cidr", value: "192.168.0.0/16" },
+    { type: "cidr", value: "169.254.0.0/16" },
+  ];
+}
+
+export function missingDefaultPrivacyAllowlistRules(
+  rules: readonly PrivacyAllowlistRule[],
+): PrivacyAllowlistRule[] {
+  const present = new Set(
+    rules.map((rule) => `${rule.type}:${rule.value.toLowerCase()}`),
+  );
+  return defaultPrivacyAllowlistRules().filter(
+    (rule) => !present.has(`${rule.type}:${rule.value}`),
+  );
 }
 
 /**
@@ -934,7 +991,7 @@ function parsePrivacyKindRules(
 
 function parsePrivacyKindRule(value: unknown, path: string): PrivacyKindRule {
   const object = objectAt(value, path);
-  keysAt(object, ["kind", "enabled", "style"], [], path);
+  keysAt(object, ["kind", "enabled", "style"], ["notify"], path);
   const kind = canonicalKindAt(object.kind, `${path}.kind`);
   if (
     typeof object.style !== "string" ||
@@ -950,6 +1007,10 @@ function parsePrivacyKindRule(value: unknown, path: string): PrivacyKindRule {
     kind,
     enabled: booleanAt(object.enabled, `${path}.enabled`),
     style,
+    // A Core predating notify notified about every kind.
+    notify: Object.hasOwn(object, "notify")
+      ? booleanAt(object.notify, `${path}.notify`)
+      : true,
   };
 }
 
@@ -1075,17 +1136,14 @@ export function parsePrivacyDryRunResult(value: unknown): PrivacyDryRunResult {
   ) {
     invalid("$.decision", "unknown action");
   }
-  if (!Array.isArray(result.findings) || result.findings.length > 4_096) {
-    invalid("$.findings", "expected at most 4096 findings");
+  if (!Array.isArray(result.findings)) {
+    invalid("$.findings", "expected an array");
   }
   const findings = result.findings.map((finding, index) =>
     parsePrivacyDryRunFinding(finding, `$.findings[${index}]`),
   );
-  if (
-    !Array.isArray(result.suppressed_findings) ||
-    result.suppressed_findings.length > 4_096
-  ) {
-    invalid("$.suppressed_findings", "expected at most 4096 findings");
+  if (!Array.isArray(result.suppressed_findings)) {
+    invalid("$.suppressed_findings", "expected an array");
   }
   const suppressedFindings = result.suppressed_findings.map((finding, index) =>
     parsePrivacyDryRunFinding(finding, `$.suppressed_findings[${index}]`),
@@ -1108,8 +1166,8 @@ export function parsePrivacyDryRunResult(value: unknown): PrivacyDryRunResult {
     ),
   };
   if (Object.hasOwn(result, "redactions")) {
-    if (!Array.isArray(result.redactions) || result.redactions.length > 4_096) {
-      invalid("$.redactions", "expected at most 4096 redactions");
+    if (!Array.isArray(result.redactions)) {
+      invalid("$.redactions", "expected an array");
     }
     parsed.redactions = result.redactions.map((item, index) => {
       const path = `$.redactions[${index}]`;

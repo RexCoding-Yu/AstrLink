@@ -8,7 +8,10 @@ import {
   type ReactNode,
 } from "react";
 
+import { ActionGroup } from "@/components/ActionGroup";
 import { ChoiceCard } from "@/components/ChoiceCard";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { CopyableValue } from "@/components/CopyableValue";
 import { DataRow } from "@/components/DataRow";
 import { Field } from "@/components/Field";
 import { FormMessage } from "@/components/FormMessage";
@@ -23,20 +26,36 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Menu, SlidersHorizontal } from "@/components/icons";
+import { Menu, RefreshCw, SlidersHorizontal } from "@/components/icons";
 import { cn } from "@/lib/utils";
+import { SyncSettings } from "./SyncSettings";
 
 import {
+  getCoreStatus,
   getPreferences,
   getTrayState,
+  listNetworkAddresses,
   restartCore,
   startCore,
   stopCore,
   trayAction,
   updatePreferences,
 } from "./bridge";
-import { phaseLabel, phaseTone, type AppSnapshot } from "./core-model";
-import { applyLocale, i18n, useT, type Locale } from "./i18n";
+import {
+  phaseLabel,
+  phaseTone,
+  type AppSnapshot,
+  type NetworkAddress,
+} from "./core-model";
+import {
+  applyLocale,
+  currentLocale,
+  i18n,
+  LOCALE_NAMES,
+  LOCALES,
+  useT,
+  type Locale,
+} from "./i18n";
 import {
   MAX_MAX_CONCURRENT_INSPECTIONS,
   MAX_REQUEST_BODY_MIB,
@@ -45,6 +64,7 @@ import {
   TRAY_MENUBAR_TEXTS,
   TRAY_USAGE_KEYS,
   type DataBackupFile,
+  type InferenceListen,
   type Preferences,
   type SettingsSnapshot,
   type TrayMenubarText,
@@ -66,11 +86,12 @@ const TRAY_PREVIEW_REFRESH_MS = 30_000;
 /** Time for a requested usage collection to land before the preview re-reads. */
 const TRAY_PREVIEW_SETTLE_MS = 2_500;
 
-type SettingsTab = "general" | "tray";
+type SettingsTab = "general" | "tray" | "sync";
 
 type InstantPatch = Omit<
   Preferences,
   | "inference_port"
+  | "inference_listen"
   | "max_concurrent_inspections"
   | "response_start_timeout_seconds"
   | "max_request_body_mib"
@@ -78,6 +99,11 @@ type InstantPatch = Omit<
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : i18n.t("settings.failed");
+}
+
+/** The URL a client on another device types for one of this machine's addresses. */
+function networkClientURL(ip: string, port: number): string {
+  return ip.includes(":") ? `http://[${ip}]:${port}` : `http://${ip}:${port}`;
 }
 
 function activePort(snapshot: AppSnapshot | null): number | null {
@@ -157,7 +183,7 @@ function DataBackupNotice({ files }: { files: DataBackupFile[] }) {
   const date =
     newest === null
       ? "—"
-      : new Intl.DateTimeFormat(i18n.language === "zh-CN" ? "zh-CN" : "en", {
+      : new Intl.DateTimeFormat(currentLocale(), {
           dateStyle: "medium",
         }).format(new Date(newest * 1000));
   return (
@@ -227,6 +253,12 @@ export function SettingsCenter({
   const [portDraft, setPortDraft] = useState<number | null>(
     settings?.values.inference_port ?? null,
   );
+  const [listenDraft, setListenDraft] = useState<InferenceListen | null>(
+    settings?.values.inference_listen ?? null,
+  );
+  const [listenConfirmOpen, setListenConfirmOpen] = useState(false);
+  const [addresses, setAddresses] = useState<NetworkAddress[] | null>(null);
+  const [addressesError, setAddressesError] = useState<string | null>(null);
   const [concurrencyDraft, setConcurrencyDraft] = useState<number | null>(
     settings?.values.max_concurrent_inspections ?? null,
   );
@@ -239,9 +271,10 @@ export function SettingsCenter({
   const [loadingError, setLoadingError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<
-    "prefs" | "port" | "start" | "stop" | "restart" | null
+    "prefs" | "port" | "listen" | "start" | "stop" | "restart" | null
   >(null);
   const [tab, setTab] = useState<SettingsTab>("general");
+  const [syncDirty, setSyncDirty] = useState(false);
   const [trayState, setTrayState] = useState<TrayState | null>(null);
   const [trayStateError, setTrayStateError] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
@@ -313,6 +346,7 @@ export function SettingsCenter({
           setSettings(next);
           if (!entryDirtyRef.current) {
             setPortDraft(next.values.inference_port);
+            setListenDraft(next.values.inference_listen);
             setConcurrencyDraft(next.values.max_concurrent_inspections);
             setTimeoutDraft(next.values.response_start_timeout_seconds);
             setBodyLimitDraft(next.values.max_request_body_mib);
@@ -329,7 +363,37 @@ export function SettingsCenter({
     };
   }, []);
 
+  // The running Core answers other devices only when it was started that
+  // way; a saved preference waits for the next restart.
+  const exposedActive =
+    snapshot?.phase === "ready" &&
+    snapshot.inference_listen_active === "all_interfaces";
+  useEffect(() => {
+    if (!exposedActive) {
+      setAddresses(null);
+      setAddressesError(null);
+      return;
+    }
+    let cancelled = false;
+    listNetworkAddresses()
+      .then((response) => {
+        if (cancelled) return;
+        setAddresses(response.addresses);
+        setAddressesError(null);
+      })
+      .catch((error) => {
+        if (!cancelled) setAddressesError(messageOf(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [exposedActive]);
+
   const active = activePort(snapshot);
+  const listenDirty =
+    settings !== null &&
+    listenDraft !== null &&
+    listenDraft !== settings.values.inference_listen;
   const portDirty = useMemo(
     () =>
       settings !== null &&
@@ -361,12 +425,35 @@ export function SettingsCenter({
     bodyLimitDraft >= 0 &&
     bodyLimitDraft <= MAX_REQUEST_BODY_MIB;
   const entryDirty =
-    portDirty || concurrencyDirty || timeoutDirty || bodyLimitDirty;
+    portDirty ||
+    listenDirty ||
+    concurrencyDirty ||
+    timeoutDirty ||
+    bodyLimitDirty;
   entryDirtyRef.current = entryDirty;
+  const editorDirty = entryDirty || syncDirty;
   useEffect(() => {
-    onDirtyChange(entryDirty);
+    onDirtyChange(editorDirty);
     return () => onDirtyChange(false);
-  }, [entryDirty, onDirtyChange]);
+  }, [editorDirty, onDirtyChange]);
+
+  const gatewayRunning =
+    snapshot != null &&
+    !["stopped", "exited", "error", "unavailable"].includes(snapshot.phase);
+
+  /** Says when a saved launch setting applies, and offers the restart it needs. */
+  const notifyLaunchSaved = (): void => {
+    if (!gatewayRunning) {
+      notify.success(i18n.t("settings.notifySavedNextStart"));
+      return;
+    }
+    notify.success(i18n.t("settings.notifySavedRestart"), {
+      label: i18n.t("settings.restartNow"),
+      onClick: () => void runCoreAction("restart"),
+    });
+    // Show the pending restart now instead of at the next status poll.
+    getCoreStatus().then(onCoreSnapshot, () => undefined);
+  };
 
   const applyInstant = async (patch: Partial<InstantPatch>): Promise<void> => {
     if (!settings || busy !== null) return;
@@ -375,6 +462,7 @@ export function SettingsCenter({
       ...settings.values,
       ...patch,
       inference_port: settings.values.inference_port,
+      inference_listen: settings.values.inference_listen,
       max_concurrent_inspections: settings.values.max_concurrent_inspections,
       response_start_timeout_seconds:
         settings.values.response_start_timeout_seconds,
@@ -391,9 +479,7 @@ export function SettingsCenter({
       if (patch.quota_display_mode !== undefined)
         applyQuotaDisplayMode(next.values.quota_display_mode);
       if (patch.theme !== undefined) applyTheme(next.values.theme);
-      if (patch.use_system_proxy !== undefined) {
-        notify.success(i18n.t("settings.notifyProxySaved"));
-      }
+      if (patch.use_system_proxy !== undefined) notifyLaunchSaved();
       if (patch.locale && patch.locale !== previous.values.locale) {
         await applyLocale(patch.locale);
       }
@@ -432,25 +518,40 @@ export function SettingsCenter({
     }
   };
 
-  const savePort = async (): Promise<void> => {
+  /** Opening to every interface is confirmed first; everything else applies to the draft. */
+  const selectListen = (value: InferenceListen): void => {
+    const current = listenDraft ?? settings?.values.inference_listen;
+    if (value === "all_interfaces" && current !== "all_interfaces") {
+      setListenConfirmOpen(true);
+      return;
+    }
+    setListenDraft(value);
+  };
+
+  /** Saves the entry drafts; `revert` saves loopback right away, dirty or not. */
+  const saveEntry = async (
+    revert?: Pick<Preferences, "inference_listen">,
+  ): Promise<void> => {
     if (
       !settings ||
       portDraft === null ||
+      listenDraft === null ||
       concurrencyDraft === null ||
       timeoutDraft === null ||
       bodyLimitDraft === null ||
       !bodyLimitValid ||
-      !entryDirty
+      (!entryDirty && !revert)
     ) {
       return;
     }
     mutationVersion.current += 1;
-    setBusy("port");
+    setBusy(revert ? "listen" : "port");
     setActionError(null);
     try {
       const next = await updatePreferences({
         ...settings.values,
         inference_port: portDraft,
+        inference_listen: revert?.inference_listen ?? listenDraft,
         max_concurrent_inspections: concurrencyDraft,
         response_start_timeout_seconds: timeoutDraft,
         max_request_body_mib: bodyLimitDraft,
@@ -458,17 +559,11 @@ export function SettingsCenter({
       cacheSettings(next);
       setSettings(next);
       setPortDraft(next.values.inference_port);
+      setListenDraft(next.values.inference_listen);
       setConcurrencyDraft(next.values.max_concurrent_inspections);
       setTimeoutDraft(next.values.response_start_timeout_seconds);
       setBodyLimitDraft(next.values.max_request_body_mib);
-      const gatewayRunning =
-        snapshot != null &&
-        !["stopped", "exited", "error", "unavailable"].includes(snapshot.phase);
-      notify.success(
-        gatewayRunning
-          ? i18n.t("settings.notifyPortSavedRestart")
-          : i18n.t("settings.notifyPortSaved"),
-      );
+      notifyLaunchSaved();
     } catch (error) {
       setActionError(messageOf(error));
     } finally {
@@ -519,9 +614,7 @@ export function SettingsCenter({
   const phase = snapshot?.phase ?? "unavailable";
   const tone = phaseTone(phase);
   const canStart = ["stopped", "exited", "error"].includes(phase);
-  const canStop = !["stopped", "exited", "error", "unavailable"].includes(
-    phase,
-  );
+  const canStop = gatewayRunning;
   const recoveryHint =
     snapshot?.recovery_scheduled_in_ms !== null &&
     snapshot?.recovery_scheduled_in_ms !== undefined
@@ -534,11 +627,9 @@ export function SettingsCenter({
             attempt: snapshot.recovery_attempt,
           })
         : null;
-  const portNeedsRestart =
-    active !== null &&
-    active !== settings.values.inference_port &&
-    snapshot?.inference_port_fallback?.requested_port !==
-      settings.values.inference_port;
+  const restartPending = snapshot?.restart_pending === true;
+  const listenValue = listenDraft ?? settings.values.inference_listen;
+  const exposedPort = active ?? settings.values.inference_port;
 
   return (
     <section className="gutter-frame flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
@@ -576,7 +667,11 @@ export function SettingsCenter({
           onValueChange={(value) => setTab(value as SettingsTab)}
           value={tab}
         >
-          <TabsList aria-label={t("settings.tabsLabel")} className="shrink-0">
+          <TabsList
+            aria-label={t("settings.tabsLabel")}
+            className="shrink-0"
+            scrollable
+          >
             <TabsTrigger value="general">
               <SlidersHorizontal aria-hidden="true" />
               {t("settings.tabs.general")}
@@ -584,6 +679,10 @@ export function SettingsCenter({
             <TabsTrigger value="tray">
               <Menu aria-hidden="true" />
               {t("settings.tabs.tray")}
+            </TabsTrigger>
+            <TabsTrigger value="sync">
+              <RefreshCw aria-hidden="true" />
+              {t("settings.tabs.sync")}
             </TabsTrigger>
           </TabsList>
 
@@ -661,7 +760,7 @@ export function SettingsCenter({
                   </span>
                   <RadioGroup
                     className={cn(
-                      "grid grid-cols-2 gap-2 max-[560px]:grid-cols-1",
+                      "grid grid-cols-3 gap-2 max-[560px]:grid-cols-1",
                       prefsBusy && "pointer-events-none opacity-60",
                     )}
                     aria-label={t("settings.language")}
@@ -671,19 +770,18 @@ export function SettingsCenter({
                     }
                     value={prefs.locale}
                   >
-                    <ChoiceCard
-                      description={t("settings.languageHint")}
-                      label="English"
-                      selected={prefs.locale === "en"}
-                      value="en"
-                    />
-                    <ChoiceCard
-                      description={t("settings.languageHint")}
-                      label="简体中文"
-                      selected={prefs.locale === "zh-CN"}
-                      value="zh-CN"
-                    />
+                    {LOCALES.map((locale) => (
+                      <ChoiceCard
+                        key={locale}
+                        label={LOCALE_NAMES[locale]}
+                        selected={prefs.locale === locale}
+                        value={locale}
+                      />
+                    ))}
                   </RadioGroup>
+                  <p className="text-xs text-muted-foreground">
+                    {t("settings.languageHint")}
+                  </p>
                 </div>
 
                 <div className="grid gap-2 border-b px-4 py-3">
@@ -781,7 +879,9 @@ export function SettingsCenter({
                         {phaseLabel(phase)}
                       </strong>
                       <span className="truncate text-xs text-text-secondary">
-                        {t("settings.currentStatus", { phase })}
+                        {t("settings.currentStatus", {
+                          phase: phaseLabel(phase),
+                        })}
                         {recoveryHint ? ` · ${recoveryHint}` : ""}
                       </span>
                     </div>
@@ -862,6 +962,94 @@ export function SettingsCenter({
                       {settings.values.inference_port}
                     </span>
                   </Field>
+                </div>
+
+                <div className="grid gap-2 border-b px-4 py-3">
+                  <span className="text-xs font-medium text-text-secondary">
+                    {t("settings.listenField")}
+                  </span>
+                  <RadioGroup
+                    aria-label={t("settings.listenField")}
+                    className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1"
+                    disabled={busy !== null}
+                    onValueChange={(value) =>
+                      selectListen(value as InferenceListen)
+                    }
+                    value={listenValue}
+                  >
+                    <ChoiceCard
+                      description={t("settings.listenHints.loopback")}
+                      disabled={busy !== null}
+                      label={t("settings.listenOptions.loopback")}
+                      selected={listenValue === "loopback"}
+                      value="loopback"
+                    />
+                    <ChoiceCard
+                      description={t("settings.listenHints.all_interfaces")}
+                      disabled={busy !== null}
+                      label={t("settings.listenOptions.all_interfaces")}
+                      selected={listenValue === "all_interfaces"}
+                      value="all_interfaces"
+                    />
+                  </RadioGroup>
+                  {exposedActive ? (
+                    <FormMessage tone="warning">
+                      <div className="grid gap-2">
+                        <p>
+                          {t("settings.listenExposedNotice", {
+                            port: exposedPort,
+                          })}
+                        </p>
+                        {addressesError ? (
+                          <p>
+                            {t("settings.listenExposedAddressesFailed", {
+                              error: addressesError,
+                            })}
+                          </p>
+                        ) : addresses === null ? null : addresses.length ===
+                          0 ? (
+                          <p>{t("settings.listenExposedNoAddresses")}</p>
+                        ) : (
+                          <ul className="grid gap-1">
+                            {addresses.map((address) => (
+                              <li key={`${address.interface}-${address.ip}`}>
+                                <CopyableValue
+                                  copyLabel={t("settings.listenAddressCopy")}
+                                  label={networkClientURL(
+                                    address.ip,
+                                    exposedPort,
+                                  )}
+                                  placeholder=""
+                                  value={networkClientURL(
+                                    address.ip,
+                                    exposedPort,
+                                  )}
+                                />
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <div>
+                          <Button
+                            disabled={
+                              busy !== null ||
+                              settings.values.inference_listen === "loopback"
+                            }
+                            onClick={() =>
+                              void saveEntry({ inference_listen: "loopback" })
+                            }
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                          >
+                            {busy === "listen"
+                              ? t("settings.listenReverting")
+                              : t("settings.listenRevert")}
+                          </Button>
+                        </div>
+                      </div>
+                    </FormMessage>
+                  ) : null}
                 </div>
 
                 <div className="grid grid-cols-3 gap-3 border-b px-4 py-3 max-[560px]:grid-cols-1">
@@ -945,27 +1133,58 @@ export function SettingsCenter({
                     <p className="min-w-0 flex-1 text-xs text-warning-foreground">
                       {t("settings.portDirty")}
                     </p>
-                  ) : portNeedsRestart ? (
+                  ) : restartPending ? (
                     <p className="min-w-0 flex-1 text-xs text-warning-foreground">
-                      {t("settings.portNeedsRestart")}
+                      {t("settings.restartPending")}
                     </p>
                   ) : (
                     <p className="min-w-0 flex-1 text-xs text-muted-foreground">
                       {t("settings.portControlHint")}
                     </p>
                   )}
-                  <Button
-                    className="shrink-0 max-[560px]:w-full"
-                    disabled={!entryDirty || !bodyLimitValid || busy !== null}
-                    onClick={() => void savePort()}
-                    type="button"
-                  >
-                    {busy === "port"
-                      ? t("settings.savingPort")
-                      : t("settings.savePort")}
-                  </Button>
+                  <ActionGroup className="shrink-0 max-[560px]:ml-0 max-[560px]:[&>*]:flex-1">
+                    {restartPending && !entryDirty ? (
+                      <Button
+                        disabled={busy !== null}
+                        onClick={() => void runCoreAction("restart")}
+                        type="button"
+                        variant="outline"
+                      >
+                        {busy === "restart"
+                          ? t("settings.restarting")
+                          : t("settings.restartNow")}
+                      </Button>
+                    ) : null}
+                    <Button
+                      disabled={!entryDirty || !bodyLimitValid || busy !== null}
+                      onClick={() => void saveEntry()}
+                      type="button"
+                    >
+                      {busy === "port"
+                        ? t("settings.savingPort")
+                        : t("settings.savePort")}
+                    </Button>
+                  </ActionGroup>
                 </div>
               </Panel>
+              <ConfirmDialog
+                cancelLabel={t("settings.listenKeepLoopback")}
+                confirmLabel={t("settings.listenConfirm")}
+                description={
+                  <p>
+                    {t("settings.listenConfirmBody", {
+                      port: portDraft ?? settings.values.inference_port,
+                    })}
+                  </p>
+                }
+                onCancel={() => setListenConfirmOpen(false)}
+                onConfirm={() => {
+                  setListenDraft("all_interfaces");
+                  setListenConfirmOpen(false);
+                }}
+                open={listenConfirmOpen}
+                title={t("settings.listenConfirmTitle")}
+              />
             </div>
           </TabsContent>
 
@@ -1081,6 +1300,14 @@ export function SettingsCenter({
                 </div>
               </Panel>
             </div>
+          </TabsContent>
+
+          <TabsContent
+            className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain"
+            data-tab-scroller
+            value="sync"
+          >
+            <SyncSettings onDirtyChange={setSyncDirty} />
           </TabsContent>
         </Tabs>
       </div>

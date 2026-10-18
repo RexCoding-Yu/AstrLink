@@ -571,6 +571,75 @@ describe("ServiceManager", () => {
     expect(onServiceSaved).toHaveBeenCalledWith(saved);
   });
 
+  it("trusts a provider with privacy and badges it in the list", async () => {
+    const trusted = { ...gatewayService, privacy_trusted: true };
+    bridgeMocks.getService.mockResolvedValue({ service: gatewayService, etag });
+    bridgeMocks.updateService.mockResolvedValue({ service: trusted, etag });
+    const onServiceSaved = vi.fn();
+    const props = {
+      isReady: true,
+      protocols: [],
+      catalogStatus: "ready" as const,
+      catalogError: null,
+      onRefresh: vi.fn(),
+      onViewChange: vi.fn(),
+      onServiceSaved,
+      onServiceRemoved: vi.fn(),
+      onDirtyChange: vi.fn(),
+    };
+    await act(async () =>
+      root.render(
+        <ServiceManager
+          {...props}
+          services={[codexService, gatewayService]}
+          view={{ kind: "edit", serviceId: gatewayService.id }}
+        />,
+      ),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="信任此提供商"]',
+    )!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(container.textContent).toContain(
+      "隐私保护不会改动发往此提供商的请求。",
+    );
+    await act(async () =>
+      container
+        .querySelector("form")!
+        .dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        ),
+    );
+    expect(bridgeMocks.updateService).toHaveBeenCalledWith(
+      gatewayService.id,
+      etag,
+      expect.objectContaining({ privacy_trusted: true }),
+    );
+    expect(onServiceSaved).toHaveBeenCalledWith(trusted);
+
+    await act(async () =>
+      root.render(
+        <ServiceManager
+          {...props}
+          services={[codexService, trusted]}
+          view={{ kind: "list" }}
+        />,
+      ),
+    );
+    const badges = container.querySelectorAll(
+      '[data-testid="privacy-trusted-badge"]',
+    );
+    expect(badges).toHaveLength(1);
+    expect(
+      badges[0]
+        ?.closest('[data-testid="service-card"]')
+        ?.getAttribute("aria-label"),
+    ).toBe(trusted.name);
+    expect(badges[0]?.textContent).toBe("信任");
+  });
+
   it("waits for saved priority before showing rows on every page entry", async () => {
     for (let entry = 0; entry < 2; entry++) {
       let resolveOrder!: (value: unknown) => void;
@@ -1288,7 +1357,7 @@ describe("ServiceManager", () => {
   function copilotRiskDialog(): Element | null {
     return (
       [...document.querySelectorAll('[role="alertdialog"]')].find((dialog) =>
-        dialog.textContent?.includes("连接 GitHub Copilot 前先了解风险"),
+        dialog.textContent?.includes("连接 GitHub Copilot 有封号风险"),
       ) ?? null
     );
   }
@@ -1426,6 +1495,167 @@ describe("ServiceManager", () => {
     expect(dialog?.textContent).toContain("GitHub 设备授权页");
     expect(dialog?.textContent).toContain("OpenCode");
     expect(dialog?.textContent).not.toContain("OpenAI");
+  });
+
+  it("confirms the Droid account risk before creating and signing in", async () => {
+    const droidService: Service = {
+      ...copilotService,
+      id: "service_droid",
+      name: "Droid",
+      kind: "droid_subscription",
+      subscription: { provider: "factory_droid", status: "disconnected" },
+    };
+    const droidSession = {
+      ...copilotSession,
+      id: "authorization_droid",
+      provider: "factory_droid",
+      device_code: {
+        verification_url: "https://auth.factory.ai/device?user_code=DROI-D001",
+        user_code: "DROI-D001",
+      },
+      service_id: "service_droid",
+    };
+    bridgeMocks.createService.mockResolvedValue({
+      service: droidService,
+      etag,
+    });
+    bridgeMocks.beginServiceAuthorization.mockResolvedValue({
+      kind: "session",
+      session: droidSession,
+    });
+    bridgeMocks.getServiceAuthorization.mockResolvedValue(droidSession);
+    await act(async () =>
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[]}
+          view={{ kind: "create", serviceKind: "codex_subscription" }}
+        />,
+      ),
+    );
+    await chooseServiceKind("Droid 订阅");
+    expect(
+      container.querySelector<HTMLInputElement>("#service-name")?.value,
+    ).toBe("Droid");
+    expect(
+      container.querySelector('[role="radio"][aria-label="Device Code"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("以 Droid CLI 的身份");
+    const submit = () =>
+      act(async () =>
+        container
+          .querySelector("form")!
+          .dispatchEvent(
+            new Event("submit", { bubbles: true, cancelable: true }),
+          ),
+      );
+    await submit();
+    const riskDialog = () =>
+      [...document.querySelectorAll('[role="alertdialog"]')].find((dialog) =>
+        dialog.textContent?.includes("连接 Droid 有封号风险"),
+      ) ?? null;
+    expect(riskDialog()?.textContent).toContain("Droid 的自我介绍");
+    expect(riskDialog()?.textContent).not.toContain("GitHub");
+    expect(bridgeMocks.createService).not.toHaveBeenCalled();
+    const confirm = [...(riskDialog()?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "我已了解风险，继续",
+    );
+    await act(async () => confirm!.click());
+    expect(bridgeMocks.createService).toHaveBeenCalledWith({
+      name: "Droid",
+      kind: "droid_subscription",
+      enabled: true,
+      responses_websocket_enabled: false,
+      models: [],
+    });
+    expect(bridgeMocks.beginServiceAuthorization).toHaveBeenCalledWith(
+      "service_droid",
+      "device_code",
+    );
+  });
+
+  it("signs a Droid subscription in with a Factory device dialog after the risk confirmation", async () => {
+    const droidService: Service = {
+      ...copilotService,
+      id: "service_droid",
+      name: "Droid",
+      kind: "droid_subscription",
+      subscription: { provider: "factory_droid", status: "disconnected" },
+    };
+    const droidSession = {
+      ...copilotSession,
+      id: "authorization_droid",
+      provider: "factory_droid",
+      device_code: {
+        verification_url: "https://auth.factory.ai/device?user_code=DROI-D001",
+        user_code: "DROI-D001",
+      },
+      service_id: "service_droid",
+    };
+    bridgeMocks.beginServiceAuthorization.mockResolvedValue({
+      kind: "session",
+      session: droidSession,
+    });
+    bridgeMocks.getServiceAuthorization.mockResolvedValue(droidSession);
+    await act(async () =>
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[droidService]}
+          view={{ kind: "list" }}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Factory Droid OAuth");
+    await openServiceOverflow("Droid");
+    await chooseMenuItem("登录");
+    const choice = document.querySelector('[role="dialog"]');
+    expect(
+      choice?.querySelector('[role="radio"][aria-label="Device Code"]'),
+    ).not.toBeNull();
+    expect(
+      choice?.querySelector('[role="radio"][aria-label="浏览器 OAuth"]'),
+    ).toBeNull();
+    expect(choice?.textContent).toContain("Factory 登录页");
+    const start = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "开始登录",
+    );
+    await act(async () => start!.click());
+    const riskDialog = [
+      ...document.querySelectorAll('[role="alertdialog"]'),
+    ].find((dialog) => dialog.textContent?.includes("连接 Droid 有封号风险"));
+    expect(riskDialog).not.toBeUndefined();
+    expect(bridgeMocks.beginServiceAuthorization).not.toHaveBeenCalled();
+    const confirm = [...(riskDialog?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "我已了解风险，继续",
+    );
+    await act(async () => confirm!.click());
+    expect(bridgeMocks.beginServiceAuthorization).toHaveBeenCalledWith(
+      "service_droid",
+      "device_code",
+    );
+    const dialog = [...document.querySelectorAll('[role="dialog"]')].find(
+      (candidate) => candidate.textContent?.includes("DROI-D001"),
+    );
+    expect(dialog?.textContent).toContain("Factory 登录页面");
+    expect(dialog?.textContent).not.toContain("OpenAI");
+    expect(dialog?.textContent).not.toContain("GitHub");
   });
 
   it("lists Copilot's built-in redirects with its own rules and saves a turned-off row", async () => {
@@ -2305,6 +2535,83 @@ describe("ServiceManager", () => {
     ).toBeNull();
   });
 
+  it("flags a failed toolbar refresh instead of passing the last key quota off as current", async () => {
+    bridgeMocks.getServiceUsage.mockResolvedValueOnce({
+      service_id: gatewayService.id,
+      fetched_at: timestamp,
+      limit_reached: false,
+      quota: {
+        unlimited: false,
+        used_usd: "0",
+        remaining_usd: "300",
+        total_usd: "300",
+      },
+    });
+    await act(async () => {
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[gatewayService]}
+          view={{ kind: "list" }}
+        />,
+      );
+    });
+    const usage = container.querySelector('[data-testid="subscription-usage"]');
+    expect(usage?.textContent).toContain("剩余 $300.00 / $300.00");
+    const toolbarRefresh = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="刷新列表"]',
+    )!;
+    expect(toolbarRefresh.querySelector(".animate-spin")).toBeNull();
+
+    let reject!: (cause: Error) => void;
+    bridgeMocks.getServiceUsage.mockImplementationOnce(
+      () =>
+        new Promise((_, fail) => {
+          reject = fail;
+        }),
+    );
+    await act(async () => toolbarRefresh.click());
+    expect(bridgeMocks.getServiceUsage).toHaveBeenLastCalledWith(
+      gatewayService.id,
+      { fresh: true },
+    );
+    // The row keeps its numbers while the lookup runs; the toolbar shows it.
+    expect(toolbarRefresh.querySelector(".animate-spin")).not.toBeNull();
+    expect(usage?.textContent).not.toContain("额度刷新失败");
+
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await act(async () =>
+        reject(
+          new Error(
+            `GET /control/v1/services/service_gateway/usage?refresh=1 returned 502 Bad Gateway: {"error":{"code":"subscription_usage_failed","message":"new-api usage unavailable: status 401"}}`,
+          ),
+        ),
+      );
+    } finally {
+      log.mockRestore();
+    }
+    expect(toolbarRefresh.querySelector(".animate-spin")).toBeNull();
+    const quota = container.querySelector(
+      '[data-testid="subscription-usage-quota"]',
+    );
+    expect(quota?.closest(".opacity-60")).not.toBeNull();
+    expect(usage?.textContent).toContain("额度刷新失败");
+    expect(usage?.textContent).toContain(
+      "subscription_usage_failed: new-api usage unavailable: status 401",
+    );
+    expect(usage?.textContent).toContain("仍显示");
+    expect(usage?.querySelector('button[aria-label="刷新"]')).not.toBeNull();
+  });
+
   it.each([
     ["codex_subscription", "openai_codex", "pro", "Pro 20×", false],
     ["claude_subscription", "claude_code", "pro", "Pro", false],
@@ -3019,6 +3326,13 @@ describe("ServiceManager", () => {
     expect(dialog?.textContent).toContain("选择 API 提供商类型");
     expect(dialog?.querySelector('[aria-current="true"]')).toBeNull();
     expect(changed).not.toHaveBeenCalled();
+    expect(
+      [
+        ...document.querySelectorAll(
+          '[role="dialog"] [data-slot="dialog-picker-label"]',
+        ),
+      ].map((label) => label.textContent),
+    ).toEqual(expect.arrayContaining(["New API", "Magpie"]));
     const card = [
       ...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'),
     ].find(
@@ -3214,7 +3528,31 @@ describe("ServiceManager", () => {
     );
     expect(applySelectedButton().textContent).toBe("应用所选模型（1）");
 
+    // The checklist is the filtered result, so search opens no suggestion list.
+    const search = document.querySelector<HTMLInputElement>(
+      'input[aria-label="搜索上游模型"]',
+    );
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (!search || !setter) throw new Error("Missing upstream model search");
+    await act(async () => {
+      setter.call(search, "4.1");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(previewModelIds()).toEqual(["gpt-4.1"]);
+    expect(search.getAttribute("role")).toBeNull();
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
     await togglePreviewModel("gpt-4.1");
+    const clear = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="清除搜索"]',
+    );
+    if (!clear) throw new Error("Missing clear search");
+    await act(async () => clear.click());
+    expect(search.value).toBe("");
+    expect(previewModelIds()).toEqual(["gpt-4.1", "gpt-5"]);
+
     const apply = applySelectedButton();
     expect(apply.textContent).toBe("应用所选模型（2）");
     await act(async () => apply.click());
@@ -3918,6 +4256,7 @@ describe("ServiceManager", () => {
         name: customService.name,
         enabled: true,
         responses_websocket_enabled: false,
+        privacy_trusted: false,
         failure_policy: null,
         models: ["gpt-5"],
         http: {
@@ -4360,7 +4699,9 @@ describe("ServiceManager", () => {
     );
     expect(saved).toHaveBeenCalledWith(disabledService);
     expect(changed).not.toHaveBeenCalled();
-    expect(notifyMocks.success).toHaveBeenCalledWith("API 提供商已停用。");
+    expect(notifyMocks.success).toHaveBeenCalledWith(
+      "API 提供商已停用，新请求立即生效。",
+    );
   });
 
   it("reenables a stopped service from the list", async () => {
@@ -4407,7 +4748,9 @@ describe("ServiceManager", () => {
       etag,
       { enabled: true },
     );
-    expect(notifyMocks.success).toHaveBeenCalledWith("API 提供商已启用。");
+    expect(notifyMocks.success).toHaveBeenCalledWith(
+      "API 提供商已启用，新请求立即生效。",
+    );
   });
 
   it("uses an in-app confirmation before deleting a service", async () => {

@@ -21,16 +21,17 @@ const (
 	placeholderDerivationTrials = 64
 )
 
-// derivationKey is the process-lifetime HMAC key behind every placeholder
-// suffix. Deriving suffixes from the plaintext instead of drawing fresh entropy
-// makes a given value map to the same placeholder on every turn, which keeps a
-// multi-turn conversation internally coherent and keeps the upstream prefix
-// cache alive past the first redacted span.
+// derivationKey is the HMAC key behind every placeholder suffix for an engine
+// without PersistPlaceholders. Deriving suffixes from the plaintext instead of
+// drawing fresh entropy makes a given value map to the same placeholder on
+// every turn, which keeps a multi-turn conversation internally coherent and
+// keeps the upstream prefix cache alive past the first redacted span.
 //
 // The value is HMAC'd rather than hashed bare because a bare digest of an email
-// address or an IP is trivially reversed by enumeration. The key stays in
+// address or an IP is trivially reversed by enumeration. This key stays in
 // memory for the life of the process: it is never persisted, never logged, and
-// never leaves the machine. A restart rotates it, costing one cache miss.
+// never leaves the machine, so a restart renames every value once. Core with
+// storage derives its key from the audit data key instead.
 var derivationKey = sync.OnceValue(func() []byte {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
@@ -47,18 +48,27 @@ var errNamespaceExhausted = errors.New("privacy: reserved placeholder namespace 
 //
 //   - Two different plaintexts deriving the same suffix. Resolved by re-deriving
 //     with an incrementing counter folded into the HMAC input.
-//   - A candidate that already occurs in the request, literally or in any
-//     spelling the response restorer recognises. Restoring would then rewrite
-//     genuine content, so the candidate is rejected and re-derived.
+//   - A candidate that already occurs in the request. Every candidate except
+//     an IPv4 stand-in spells out its whole derived suffix, so the occurrence
+//     can only be this value's placeholder from an earlier turn that came back
+//     unrestored, typically quoted in reasoning. It is reused: re-deriving
+//     would give one value a new name on every such turn and break the
+//     upstream prefix cache. The IPv4 pool is small enough for the occurrence
+//     to be another value's stand-in or documentation text, which restoring
+//     would rewrite, so the conversation's ledger decides; without one, the
+//     candidate is rejected and re-derived.
 //   - A kind whose reserved namespace is finite (the IPv4 test ranges)
 //     running dry. The affected value falls back to a token placeholder
 //     rather than reusing a stand-in, because two originals sharing one
 //     placeholder cannot both be restored.
 type placeholderAllocator struct {
-	key       []byte
-	resolve   func(Kind) KindRule
-	body      []byte
-	bodyText  string
+	key      []byte
+	resolve  func(Kind) KindRule
+	body     []byte
+	bodyText string
+	// ledger is the conversation's record of IPv4 stand-ins; nil when the
+	// request names no conversation or its record cannot be read.
+	ledger    *standInLedger
 	used      map[string]struct{}
 	exhausted map[Kind]bool
 }
@@ -126,7 +136,7 @@ func (allocator *placeholderAllocator) allocateToken(kind Kind, value string) (s
 	for trial := range placeholderDerivationTrials {
 		suffix := allocator.derive(kind, value, trial, placeholderTokenHexLength)
 		candidate := withPlaceholderSuffix(replacementFor(kind), suffix)
-		if allocator.reserve(candidate) {
+		if allocator.reserve(candidate, "") {
 			return candidate, nil
 		}
 	}
@@ -138,31 +148,50 @@ func (allocator *placeholderAllocator) allocateNatural(kind Kind, value string) 
 	if !supported {
 		return "", errNamespaceExhausted
 	}
+	owner := ""
+	if allocator.ledger != nil && kind == KindIPAddress {
+		owner = allocator.derive(kind, value, 0, 2*sha256.Size)
+		if standIn, issued := allocator.ledger.standInOf(owner); issued &&
+			allocator.reserve(standIn, owner) {
+			return standIn, nil
+		}
+	}
 	for trial := range placeholderDerivationTrials {
 		suffix := allocator.derive(kind, value, trial, placeholderNaturalHexLength)
 		candidate, ok := builder(value, suffix, trial)
 		if !ok {
 			return "", errNamespaceExhausted
 		}
-		if allocator.reserve(candidate) {
+		if allocator.reserve(candidate, owner) {
 			return candidate, nil
 		}
 	}
 	return "", errNamespaceExhausted
 }
 
-// reserve accepts a candidate only if no earlier value in this request took it
-// and no spelling the response restorer recognises already appears in the
-// request body.
-func (allocator *placeholderAllocator) reserve(candidate string) bool {
+// reserve accepts a candidate unless another value in this request took it. An
+// IPv4 stand-in must also be granted by the conversation's ledger to owner or,
+// without a ledger, must not occur in the body in a spelling the response
+// restorer recognises.
+func (allocator *placeholderAllocator) reserve(candidate, owner string) bool {
 	if _, exists := allocator.used[candidate]; exists {
 		return false
 	}
-	if len(allocator.body) > 0 {
-		if allocator.bodyText == "" {
-			allocator.bodyText = string(allocator.body)
+	if address := net.ParseIP(candidate); address != nil && address.To4() != nil {
+		held := func() bool {
+			if len(allocator.body) == 0 {
+				return false
+			}
+			if allocator.bodyText == "" {
+				allocator.bodyText = string(allocator.body)
+			}
+			return restorableSpellingIn(candidate, allocator.bodyText)
 		}
-		if restorableSpellingIn(candidate, allocator.bodyText) {
+		if owner != "" {
+			if !allocator.ledger.claim(candidate, owner, held) {
+				return false
+			}
+		} else if held() {
 			return false
 		}
 	}

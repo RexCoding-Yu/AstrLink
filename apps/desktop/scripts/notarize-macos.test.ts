@@ -19,6 +19,11 @@ const signature = [
   "CodeDirectory v=20500 size=100 flags=0x10000(runtime) hashes=1+7 location=embedded",
 ].join("\n");
 const directories: string[] = [];
+const droppedConnection = [
+  "xcrun failed (68):",
+  'error is Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."',
+  "The staple and validate action failed! Error 68.",
+].join("\n");
 
 function fixture(status = "Accepted") {
   const bundleDirectory = mkdtempSync(
@@ -146,5 +151,63 @@ describe("macOS release signing gates", () => {
     expect(() => notarizeMacOS({ ...options, submissionID })).toThrow(
       "DMG has changed",
     );
+  });
+
+  it("retries stapler when Apple's ticket service drops the connection", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const options = fixture();
+    const normal = options.runCommand.getMockImplementation()!;
+    const dropOnce = new Set(["staple", "validate"]);
+    options.runCommand.mockImplementation((command, args) => {
+      if (args[0] === "stapler" && dropOnce.delete(args[1]))
+        throw new Error(droppedConnection);
+      return normal(command, args);
+    });
+    notarizeMacOS({ ...options, retryDelaysMs: [0, 0] });
+    expect(
+      options.runCommand.mock.calls
+        .filter(([, args]) => args[0] === "stapler")
+        .map(([, args]) => `${args[1]} ${path.basename(args[2])}`),
+    ).toEqual([
+      "staple AstrLink.app",
+      "staple AstrLink.app",
+      "validate AstrLink.app",
+      "validate AstrLink.app",
+      "staple AstrLink.dmg",
+      "validate AstrLink.dmg",
+    ]);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(
+      options.runCommand.mock.calls.filter(([command]) => command === "spctl"),
+    ).toHaveLength(2);
+  });
+
+  it("fails after the last stapler retry and at once on other stapler errors", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const options = fixture();
+    const normal = options.runCommand.getMockImplementation()!;
+    let failure = droppedConnection;
+    options.runCommand.mockImplementation((command, args) => {
+      if (args[0] === "stapler") throw new Error(failure);
+      return normal(command, args);
+    });
+    const attempts = () =>
+      options.runCommand.mock.calls.filter(([, args]) => args[0] === "stapler")
+        .length;
+    expect(() => notarizeMacOS({ ...options, retryDelaysMs: [0, 0] })).toThrow(
+      "network connection was lost",
+    );
+    expect(attempts()).toBe(3);
+
+    failure =
+      "xcrun failed (65):\nAstrLink.app does not have a ticket stapled to it.";
+    options.runCommand.mockClear();
+    expect(() => notarizeMacOS({ ...options, retryDelaysMs: [0, 0] })).toThrow(
+      "does not have a ticket",
+    );
+    expect(attempts()).toBe(1);
+    expect(
+      options.runCommand.mock.calls.some(([command]) => command === "spctl"),
+    ).toBe(false);
   });
 });

@@ -233,6 +233,29 @@ describe("buildRecordBundle", () => {
     expect(bundle).toMatch(/重定向 · 完成 · .* · gpt-4\.1 → claude-sonnet-4-5/);
   });
 
+  it("lists image compression in the trajectory", () => {
+    const bundle = buildRecordBundle(
+      {
+        ...record,
+        events: [
+          {
+            kind: "image_compression",
+            started_at: record.started_at,
+            ended_at: record.started_at,
+            status: "succeeded",
+            summary: "lossless · 1/1 images · 75301 → 37406 bytes",
+            attempt_index: 1,
+          },
+        ],
+      },
+      content,
+      { format: "txt" },
+    );
+    expect(bundle).toContain(
+      "压缩 · 完成 · 0 ms · 1/1 张图片 · 无损 WebP · 73.5 KB → 36.5 KB · 减小 50%",
+    );
+  });
+
   it("leaves the redirect line out when the model was not redirected", () => {
     const bundle = buildRecordBundle(record, content, { format: "txt" });
     expect(bundle).not.toContain("模型重定向");

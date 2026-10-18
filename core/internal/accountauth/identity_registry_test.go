@@ -331,16 +331,23 @@ func TestIdentityRegistryResolutionLayers(t *testing.T) {
 		t.Fatalf("configured Codex baseline = %+v", got)
 	}
 
-	// Learned: a learned version below the baseline still wins, because it is
-	// what a real client on this machine sends.
+	// Learned: a Claude Code release older than the baseline is skipped; a
+	// newer one replaces it. A Codex version below the baseline still wins,
+	// because it is what a real client on this machine sends.
 	if _, err := registry.LearnClaude(ctx, claudeClientHeaders("2.1.100")); err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.ClaudeIdentity(settings(true, "", "")); !reflect.DeepEqual(got, DefaultClaudeIdentity()) {
+		t.Fatalf("older learned Claude replaced the baseline: %+v", got)
+	}
+	if _, err := registry.LearnClaude(ctx, claudeClientHeaders("2.1.300")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := registry.LearnCodex(ctx, codexClientHeaders("0.150.0")); err != nil {
 		t.Fatal(err)
 	}
 	learnedClaude := registry.ClaudeIdentity(settings(true, "", ""))
-	if learnedClaude.Version != "2.1.100" || learnedClaude.UserAgent != "claude-cli/2.1.100 (external, sdk-cli)" {
+	if learnedClaude.Version != "2.1.300" || learnedClaude.UserAgent != "claude-cli/2.1.300 (external, sdk-cli)" {
 		t.Fatalf("learned Claude = %+v", learnedClaude)
 	}
 	learnedCodex := registry.CodexIdentity(settings(true, "", ""), "")
@@ -393,6 +400,37 @@ func TestIdentityRegistryResolutionLayers(t *testing.T) {
 	learnedClaude.Headers["X-App"] = "mutated"
 	if got := registry.ClaudeIdentity(settings(true, "", "")).Headers["X-App"]; got != "cli" {
 		t.Fatalf("resolved copy aliased learned headers: %q", got)
+	}
+}
+
+// A learned Claude Code identity is used or skipped as one tuple: an older
+// release never lends the baseline its version or SDK headers.
+func TestClaudeLearnedIdentityNeverOlderThanBaseline(t *testing.T) {
+	baseline := DefaultClaudeIdentity()
+	for _, test := range []struct {
+		name, version string
+		learned       bool
+	}{
+		{"older release", "2.1.258", false},
+		{"baseline release", baseline.Version, true},
+		{"newer release", "2.1.400", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := NewIdentityRegistry(nil, nil)
+			if changed, err := registry.LearnClaude(context.Background(), claudeClientHeaders(test.version)); !changed || err != nil {
+				t.Fatalf("LearnClaude = %t, %v", changed, err)
+			}
+			want := baseline
+			if test.learned {
+				want, _ = registry.learnedIdentity(contract.SubscriptionProviderClaudeCode)
+			}
+			if got := registry.ClaudeIdentity(learnedSettings()); !reflect.DeepEqual(got, want) {
+				t.Fatalf("resolved %+v, want %+v", got, want)
+			}
+			if got := registry.ClientIdentities().Claude; got.LearnedVersion != test.version || got.BuiltinVersion != baseline.Version {
+				t.Fatalf("reported %+v", got)
+			}
+		})
 	}
 }
 
@@ -539,7 +577,7 @@ func TestIdentityRegistryConcurrentLearningKeepsNewest(t *testing.T) {
 	store := &memoryIdentityStore{}
 	registry := NewIdentityRegistry(nil, store)
 	var group sync.WaitGroup
-	for patch := 100; patch < 140; patch++ {
+	for patch := 300; patch < 340; patch++ {
 		group.Add(1)
 		go func(version string) {
 			defer group.Done()
@@ -548,15 +586,15 @@ func TestIdentityRegistryConcurrentLearningKeepsNewest(t *testing.T) {
 		}(fmt.Sprintf("2.1.%d", patch))
 	}
 	group.Wait()
-	if got := registry.ClaudeIdentity(contract.DefaultRoutingSettings()); got.Version != "2.1.139" {
-		t.Fatalf("learned %s, want the newest 2.1.139", got.Version)
+	if got := registry.ClaudeIdentity(contract.DefaultRoutingSettings()); got.Version != "2.1.339" {
+		t.Fatalf("learned %s, want the newest 2.1.339", got.Version)
 	}
 	restarted := NewIdentityRegistry(nil, store)
 	if err := restarted.Hydrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := restarted.ClaudeIdentity(contract.DefaultRoutingSettings()); got.Version != "2.1.139" {
-		t.Fatalf("persisted %s, want the newest 2.1.139", got.Version)
+	if got := restarted.ClaudeIdentity(contract.DefaultRoutingSettings()); got.Version != "2.1.339" {
+		t.Fatalf("persisted %s, want the newest 2.1.339", got.Version)
 	}
 }
 

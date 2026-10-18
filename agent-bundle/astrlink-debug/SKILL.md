@@ -101,6 +101,13 @@ Metadata is always present. Treat these fields as the source of truth:
   present; credentials are redacted; no bodies or header maps)
 - `input_preview` (short, secrets stripped)
 - `privacy_restore` (hit counts only)
+- `privacy_ignored` `{kind, reason, count}[]`: matches the privacy policy left
+  in the request because they were `allowlisted`, `low_confidence`, or of a
+  `kind_disabled`. Use it to explain why a value was not replaced; it never
+  carries the value. Absent on older records
+- `confidence` `{min, max, threshold}` on `privacy_findings` and
+  `privacy_ignored` entries: the local model's confidence range and the
+  threshold applied. Absent under the regex detector
 - `events[]` trajectory — see
   [references/trajectory.md](references/trajectory.md)
 

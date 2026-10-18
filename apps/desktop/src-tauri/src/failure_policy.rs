@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 const MAX_MODEL_REDIRECTS: usize = 200;
 const MAX_REDIRECT_MODEL_CHARS: usize = 256;
 const ASTRLINK_AUTO_MODEL_ID: &str = "astrlink/auto";
+const MAX_SYSTEM_PROMPT_CHARS: usize = 20000;
 
 // Mirrors contract/model_routing.go so the host rejects a malformed group
 // before Core sees it, and accepts every group Core accepts.
@@ -898,6 +899,7 @@ pub(crate) fn validate_routing_settings(
                 }
             }
             "builtin_tools" => validate_builtin_tools(value)?,
+            "image_compression" => validate_image_compression(value)?,
             "model_redirects" => validate_model_redirects(value)?,
             "model_routing_groups" => validate_model_routing_groups(
                 value,
@@ -917,14 +919,42 @@ pub(crate) fn validate_routing_settings(
             | "claude_identity_auto_learn"
             | "codex_identity_auto_learn"
             | "grok_identity_auto_learn"
+            | "system_prompt_enabled"
                 if value.is_boolean() => {}
             "claude_identity_version" | "codex_identity_version" | "grok_identity_version" => {
                 validate_identity_version(value)?
             }
+            "system_prompt_prefix" | "system_prompt_suffix" => validate_system_prompt(value)?,
+            "reasoning_mode" => validate_reasoning_mode(value)?,
+            "reasoning_level" | "adaptive_min" | "adaptive_max" => validate_reasoning_level(value)?,
+            "adaptive_preset" => validate_adaptive_preset(value)?,
             "strategy" => validate_strategy(value)?,
             "max_attempts" => validate_attempts(value)?,
             _ => return Err("invalid routing settings field".into()),
         }
+    }
+    validate_adaptive_range(object)
+}
+
+/// Mirrors contract.ImageCompression: every field is required.
+fn validate_image_compression(value: &serde_json::Value) -> Result<(), String> {
+    let settings = value
+        .as_object()
+        .ok_or("invalid image compression settings")?;
+    if settings.len() != 3
+        || !settings
+            .get("enabled")
+            .is_some_and(serde_json::Value::is_boolean)
+        || !matches!(
+            settings.get("mode").and_then(serde_json::Value::as_str),
+            Some("lossless" | "lossy")
+        )
+        || !settings
+            .get("quality")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|quality| (1..=100).contains(&quality))
+    {
+        return Err("invalid image compression settings".into());
     }
     Ok(())
 }
@@ -945,6 +975,64 @@ fn validate_identity_version(value: &serde_json::Value) -> Result<(), String> {
         return Err("invalid client identity version".into());
     }
     Ok(())
+}
+
+// validate_system_prompt mirrors the core's limit on the global prompt prefix
+// and suffix, counted in code points like Go runes.
+fn validate_system_prompt(value: &serde_json::Value) -> Result<(), String> {
+    match value.as_str() {
+        Some(text) if text.chars().count() <= MAX_SYSTEM_PROMPT_CHARS => Ok(()),
+        _ => Err("global prompt text must be at most 20000 characters".into()),
+    }
+}
+
+// validate_reasoning_mode accepts how the core sets thinking: passthrough
+// leaves it to each client, fixed sends every request at the level, and
+// adaptive moves inside the preset's range as requests grow.
+fn validate_reasoning_mode(value: &serde_json::Value) -> Result<(), String> {
+    match value.as_str() {
+        Some("passthrough" | "fixed" | "adaptive") => Ok(()),
+        _ => Err("invalid reasoning mode".into()),
+    }
+}
+
+const REASONING_LEVELS: [&str; 5] = ["off", "low", "medium", "high", "max"];
+
+// validate_reasoning_level accepts the thinking levels the fixed mode sends
+// and the custom adaptive range takes for its ends.
+fn validate_reasoning_level(value: &serde_json::Value) -> Result<(), String> {
+    match value.as_str() {
+        Some(level) if REASONING_LEVELS.contains(&level) => Ok(()),
+        _ => Err("invalid reasoning level".into()),
+    }
+}
+
+// validate_adaptive_preset accepts the adaptive ranges: everyday is low through
+// max, research medium through max, and custom adaptive_min through
+// adaptive_max.
+fn validate_adaptive_preset(value: &serde_json::Value) -> Result<(), String> {
+    match value.as_str() {
+        Some("everyday" | "research" | "custom") => Ok(()),
+        _ => Err("invalid adaptive preset".into()),
+    }
+}
+
+// validate_adaptive_range checks the custom range when the object carries both
+// ends. A patch with one end is checked by the core against the stored other
+// end.
+fn validate_adaptive_range(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let rank = |key: &str| {
+        let level = object.get(key)?.as_str()?;
+        REASONING_LEVELS.iter().position(|known| *known == level)
+    };
+    match (rank("adaptive_min"), rank("adaptive_max")) {
+        (Some(low), Some(high)) if low > high => {
+            Err("the adaptive range must start at or below its upper end".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn validate_builtin_tools(value: &serde_json::Value) -> Result<(), String> {
@@ -1150,12 +1238,156 @@ mod tests {
             "codex_identity_auto_learn": false,
             "claude_identity_version": "2.1.300",
             "codex_identity_version": "0.160.0",
+            "system_prompt_enabled": true,
+            "system_prompt_prefix": "Answer in English.\n",
+            "system_prompt_suffix": "",
+            "reasoning_mode": "adaptive",
+            "reasoning_level": "max",
+            "image_compression": {"enabled": true, "mode": "lossy", "quality": 80},
             "builtin_tools": {
                 "web_search": {"enabled": true, "backend": "upstream", "service_id": "service_test", "model": "search-model"},
                 "image_generation": {"enabled": false, "backend": "upstream"}
             }
         });
         assert_eq!(validate_routing_settings(&settings, false, &[]), Ok(()));
+    }
+    #[test]
+    fn validates_global_prompt_and_thinking_settings() {
+        let longest = "提".repeat(20000);
+        let mut valid = vec![
+            json!({"system_prompt_enabled": true}),
+            json!({"system_prompt_enabled": false}),
+            json!({"system_prompt_prefix": ""}),
+            json!({"system_prompt_prefix": "  Answer in English.\n\nBe brief.  "}),
+            json!({"system_prompt_suffix": longest}),
+        ];
+        let modes = ["passthrough", "fixed", "adaptive"];
+        let levels = ["off", "low", "medium", "high", "max"];
+        valid.extend(modes.map(|mode| json!({ "reasoning_mode": mode })));
+        valid.extend(levels.map(|level| json!({ "reasoning_level": level })));
+        for mode in modes {
+            for level in levels {
+                valid.push(json!({"reasoning_mode": mode, "reasoning_level": level}));
+            }
+        }
+        valid.extend(
+            ["everyday", "research", "custom"].map(|preset| json!({ "adaptive_preset": preset })),
+        );
+        for (index, low) in levels.iter().enumerate() {
+            // One end alone is checked by the core against the stored other end.
+            valid.push(json!({ "adaptive_min": low }));
+            valid.push(json!({ "adaptive_max": low }));
+            for high in &levels[index..] {
+                valid.push(json!({"adaptive_min": low, "adaptive_max": high}));
+            }
+        }
+        for patch in valid {
+            assert_eq!(validate_routing_settings(&patch, true), Ok(()), "{patch}");
+        }
+        for invalid in [
+            json!({"system_prompt_enabled": null}),
+            json!({"system_prompt_enabled": "true"}),
+            json!({"system_prompt_enabled": 1}),
+            json!({"system_prompt_prefix": null}),
+            json!({"system_prompt_prefix": 1}),
+            json!({"system_prompt_prefix": ["text"]}),
+            json!({"system_prompt_suffix": "提".repeat(20001)}),
+            json!({"reasoning_mode": ""}),
+            json!({"reasoning_mode": null}),
+            json!({"reasoning_mode": "Fixed"}),
+            json!({"reasoning_mode": "manual"}),
+            // The modes were renamed before release.
+            json!({"reasoning_mode": "follow"}),
+            json!({"reasoning_mode": "auto"}),
+            json!({"reasoning_mode": 1}),
+            json!({"reasoning_mode": ["adaptive"]}),
+            json!({"reasoning_level": ""}),
+            json!({"reasoning_level": null}),
+            json!({"reasoning_level": "High"}),
+            json!({"reasoning_level": "xhigh"}),
+            json!({"reasoning_level": "minimal"}),
+            json!({"reasoning_level": "none"}),
+            json!({"reasoning_level": 3}),
+            json!({"reasoning_level": false}),
+            json!({"reasoning_mode": "fixed", "reasoning_level": "auto"}),
+            // The single override key was replaced by the mode and level.
+            json!({"reasoning_override": ""}),
+            json!({"reasoning_override": "high"}),
+            json!({"adaptive_preset": ""}),
+            json!({"adaptive_preset": null}),
+            json!({"adaptive_preset": "daily"}),
+            json!({"adaptive_preset": "Everyday"}),
+            json!({"adaptive_preset": 1}),
+            json!({"adaptive_min": "xhigh"}),
+            json!({"adaptive_min": null}),
+            json!({"adaptive_max": "none"}),
+            json!({"adaptive_max": ""}),
+            json!({"adaptive_min": "low", "adaptive_max": "off"}),
+            json!({"adaptive_min": "max", "adaptive_max": "high"}),
+            json!({"adaptive_preset": "everyday", "adaptive_min": "high", "adaptive_max": "medium"}),
+        ] {
+            assert!(
+                validate_routing_settings(&invalid, true).is_err(),
+                "{invalid}"
+            );
+        }
+        let mut settings = json!({
+            "default_failure_policy": policy(),
+            "allow_unmatched_failover": false,
+            "strategy": "retry_first",
+            "max_attempts": 6,
+        });
+        // Every key above is optional in a full document too.
+        assert_eq!(validate_routing_settings(&settings, false), Ok(()));
+        settings["reasoning_mode"] = json!("fixed");
+        settings["reasoning_level"] = json!("off");
+        assert_eq!(validate_routing_settings(&settings, false), Ok(()));
+        settings["adaptive_preset"] = json!("custom");
+        settings["adaptive_min"] = json!("medium");
+        settings["adaptive_max"] = json!("medium");
+        assert_eq!(validate_routing_settings(&settings, false), Ok(()));
+        settings["adaptive_min"] = json!("high");
+        assert!(validate_routing_settings(&settings, false).is_err());
+        settings["adaptive_min"] = json!("low");
+        settings["reasoning_override"] = json!("");
+        assert!(validate_routing_settings(&settings, false).is_err());
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoning_override");
+        settings["system_prompt_prefix"] = json!(format!("{}x", "提".repeat(20000)));
+        assert!(validate_routing_settings(&settings, false).is_err());
+    }
+    #[test]
+    fn validates_image_compression_settings() {
+        for valid in [
+            json!({"enabled": false, "mode": "lossless", "quality": 85}),
+            json!({"enabled": true, "mode": "lossy", "quality": 1}),
+            json!({"enabled": true, "mode": "lossy", "quality": 100}),
+        ] {
+            assert_eq!(
+                validate_routing_settings(&json!({ "image_compression": valid }), true),
+                Ok(()),
+                "{valid}"
+            );
+        }
+        for invalid in [
+            json!(null),
+            json!(true),
+            json!({"enabled": true}),
+            json!({"enabled": true, "mode": "lossless"}),
+            json!({"enabled": "true", "mode": "lossless", "quality": 85}),
+            json!({"enabled": true, "mode": "webp", "quality": 85}),
+            json!({"enabled": true, "mode": "lossy", "quality": 0}),
+            json!({"enabled": true, "mode": "lossy", "quality": 101}),
+            json!({"enabled": true, "mode": "lossy", "quality": 80.5}),
+            json!({"enabled": true, "mode": "lossy", "quality": 80, "max_side": 2048}),
+        ] {
+            assert!(
+                validate_routing_settings(&json!({ "image_compression": invalid }), true).is_err(),
+                "{invalid}"
+            );
+        }
     }
     fn redirect(from: &str, to: &str) -> serde_json::Value {
         json!({"from":from,"to":to,"enabled":true})

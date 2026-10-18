@@ -17,6 +17,9 @@ func TestWrapSampleTextBuildsInspectableBodies(t *testing.T) {
 		contract.ProtocolOpenAIResponses,
 		contract.ProtocolOpenAIResponsesCompact,
 		contract.ProtocolGoogleGenerateContent,
+		contract.ProtocolOpenAIEmbeddings,
+		contract.ProtocolGoogleEmbeddings,
+		contract.ProtocolRerank,
 	} {
 		body, err := WrapSampleText(protocol, sample)
 		if err != nil {
@@ -35,6 +38,47 @@ func TestWrapSampleTextBuildsInspectableBodies(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("%s did not embed sample: %s", protocol, body)
+		}
+	}
+}
+
+func TestExtractDocumentInspectsRetrievalText(t *testing.T) {
+	for _, test := range []struct {
+		protocol contract.ProtocolID
+		body     string
+		want     []string
+	}{
+		{
+			protocol: contract.ProtocolOpenAIEmbeddings,
+			body:     `{"model":"m","input":["first","second"],"encoding_format":"float"}`,
+			want:     []string{"first", "second"},
+		},
+		{
+			protocol: contract.ProtocolRerank,
+			body:     `{"model":"m","query":"which","documents":["first",{"text":"second"}],"top_n":1}`,
+			want:     []string{"which", "first", "second"},
+		},
+		{
+			protocol: contract.ProtocolGoogleEmbeddings,
+			body:     `{"title":"first","content":{"parts":[{"text":"second"}]},"taskType":"RETRIEVAL_DOCUMENT"}`,
+			want:     []string{"first", "second"},
+		},
+		{
+			protocol: contract.ProtocolGoogleEmbeddings,
+			body:     `{"requests":[{"model":"models/m","content":{"parts":[{"text":"first"}]}},{"model":"models/m","content":{"parts":[{"text":"second"}]}}]}`,
+			want:     []string{"first", "second"},
+		},
+	} {
+		_, extracted, err := extractDocument(test.protocol, []byte(test.body), InspectionOptions{})
+		if err != nil {
+			t.Fatalf("%s: %v", test.protocol, err)
+		}
+		var got []string
+		for _, segment := range extracted {
+			got = append(got, segment.Value)
+		}
+		if strings.Join(got, "|") != strings.Join(test.want, "|") {
+			t.Fatalf("%s extracted %q, want %q", test.protocol, got, test.want)
 		}
 	}
 }

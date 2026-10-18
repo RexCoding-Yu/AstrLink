@@ -42,6 +42,7 @@ import {
   Plus,
   RefreshCw,
   Route,
+  ShieldCheck,
   SlidersHorizontal,
 } from "@/components/icons";
 
@@ -82,6 +83,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ModelSelect } from "@/components/ModelSelect";
+import { SearchInput } from "@/components/SearchInput";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -251,6 +253,7 @@ type Draft = {
   name: string;
   enabled: boolean;
   responsesWebSocket: boolean;
+  privacyTrusted: boolean;
   baseURL: string;
   authScheme: ServiceAuthScheme;
   headerName: string;
@@ -289,6 +292,7 @@ function serviceTypeOptionLabel(kind: ServiceKind): string {
 function serviceKindPickerHint(kind: ServiceKind): string {
   if (isSubscriptionKind(kind)) return subscriptionOauthLabel(kind);
   if (kind === "newapi") return i18n.t("services.kindPickerNewapiHint");
+  if (kind === "magpie") return i18n.t("services.kindPickerMagpieHint");
   if (kind === "openai_compatible") return "Chat · Completions · Models";
   if (kind === "custom") return i18n.t("services.kindPickerCustomHint");
   return httpServicePreset(kind)
@@ -312,6 +316,9 @@ const subscriptionPlanKinds: ServiceKind[] = [
   ...codingPlanPresetIDs,
 ];
 
+/** Gateways that front other providers' accounts behind one address. */
+const gatewayKinds: ServiceKind[] = ["newapi", "magpie"];
+
 /**
  * Subscriptions whose logo is shared with a pay-as-you-go kind (GLM Coding
  * Plan and GLM API, for example) need a tag to tell them apart.
@@ -328,7 +335,7 @@ function serviceKindPickerGroups(): DialogPickerGroup<ServiceKind>[] {
     },
     {
       label: i18n.t("services.groupGateway"),
-      options: [serviceKindPickerOption("newapi")],
+      options: gatewayKinds.map(serviceKindPickerOption),
     },
     {
       label: i18n.t("services.groupPayAsYouGo"),
@@ -339,7 +346,7 @@ function serviceKindPickerGroups(): DialogPickerGroup<ServiceKind>[] {
       options: httpServicePresetIDs
         .filter(
           (kind) =>
-            kind !== "newapi" &&
+            !gatewayKinds.includes(kind) &&
             !codingPlanPresetIDs.includes(kind) &&
             !payAsYouGoPresetIDs.includes(kind),
         )
@@ -383,6 +390,7 @@ function subscriptionDefaultName(kind: SubscriptionServiceKind): string {
   if (kind === "claude_subscription") return "Claude Code";
   if (kind === "grok_subscription") return i18n.t("services.grokName");
   if (kind === "copilot_subscription") return i18n.t("services.copilotName");
+  if (kind === "droid_subscription") return i18n.t("services.droidName");
   return i18n.t("services.codexName");
 }
 
@@ -392,6 +400,7 @@ function subscriptionKindHint(kind: SubscriptionServiceKind): string {
   if (kind === "claude_subscription") return i18n.t("services.claudeOauthHint");
   if (kind === "grok_subscription") return i18n.t("services.grokHint");
   if (kind === "copilot_subscription") return i18n.t("services.copilotHint");
+  if (kind === "droid_subscription") return i18n.t("services.droidHint");
   return i18n.t("services.codexHint");
 }
 
@@ -400,6 +409,7 @@ function subscriptionOauthLabel(kind: ServiceKind): string {
   if (kind === "claude_subscription") return "Claude Code OAuth";
   if (kind === "grok_subscription") return i18n.t("services.xaiGrokOauth");
   if (kind === "copilot_subscription") return i18n.t("services.copilotOauth");
+  if (kind === "droid_subscription") return i18n.t("services.droidOauth");
   return i18n.t("services.openaiCodexOauth");
 }
 
@@ -434,6 +444,8 @@ function subscriptionAccountLabel(kind: ServiceKind, hint: string): string {
     return i18n.t("services.xaiAccount", { hint });
   if (kind === "copilot_subscription")
     return i18n.t("services.githubAccount", { hint });
+  if (kind === "droid_subscription")
+    return i18n.t("services.factoryAccount", { hint });
   return i18n.t("services.openaiAccount", { hint });
 }
 
@@ -442,16 +454,70 @@ function deviceCodeDescription(
 ): string {
   if (provider === "github_copilot")
     return i18n.t("services.copilotDeviceCodeDescription");
+  if (provider === "factory_droid")
+    return i18n.t("services.droidDeviceCodeDescription");
   return provider === "xai_grok"
     ? i18n.t("services.grokDeviceCodeDescription")
     : i18n.t("services.deviceCodeDescription");
 }
 
-/** Copilot sign-ins wait for the risk confirmation; null when none is pending. */
-type CopilotRiskStart =
-  | { kind: "create" }
+/** Kinds whose sign-in waits for a risk confirmation. */
+const riskNoticeKinds: ReadonlySet<ServiceKind> = new Set<ServiceKind>([
+  "copilot_subscription",
+  "droid_subscription",
+]);
+
+/** A sign-in to a kind with a risk notice; null when none is pending. */
+type RiskStart =
+  | { kind: "create"; serviceKind: ServiceKind }
   | { kind: "login"; service: Service; flow: AuthorizationFlow }
   | null;
+
+/** The notice for a kind: the consequence first, why, then the rest. */
+function riskNoticeCopy(kind: ServiceKind | undefined): {
+  title: string;
+  consequence: string;
+  why: string;
+  notes: string[];
+  confirm: string;
+} {
+  if (kind === "droid_subscription") {
+    return {
+      title: i18n.t("services.droidRiskTitle"),
+      consequence: i18n.t("services.droidRiskConsequence"),
+      why: i18n.t("services.droidRiskWhy"),
+      notes: [
+        i18n.t("services.droidRiskOwnAccount"),
+        i18n.t("services.droidRiskPrompt"),
+      ],
+      confirm: i18n.t("services.droidRiskConfirm"),
+    };
+  }
+  return {
+    title: i18n.t("services.copilotRiskTitle"),
+    consequence: i18n.t("services.copilotRiskConsequence"),
+    why: i18n.t("services.copilotRiskWhy"),
+    notes: [i18n.t("services.copilotRiskOwnAccount")],
+    confirm: i18n.t("services.copilotRiskConfirm"),
+  };
+}
+
+/** Device-code hint for the kinds that sign in only that way. */
+function deviceCodeKindHint(kind: ServiceKind | undefined): string {
+  if (kind === "copilot_subscription")
+    return i18n.t("services.copilotDeviceCodeHint");
+  if (kind === "droid_subscription")
+    return i18n.t("services.droidDeviceCodeHint");
+  return i18n.t("services.grokDeviceCodeHint");
+}
+
+function deviceCodeOnlyKind(kind: ServiceKind | undefined): boolean {
+  return (
+    kind === "grok_subscription" ||
+    kind === "copilot_subscription" ||
+    kind === "droid_subscription"
+  );
+}
 
 function mergeDiscoveredServiceModels(
   current: { models: readonly string[] },
@@ -510,6 +576,7 @@ function draftForKind(
       name: subscriptionDefaultName(kind),
       enabled: true,
       responsesWebSocket: kind === "codex_subscription",
+      privacyTrusted: false,
       baseURL: "",
       authScheme: "none",
       headerName: "",
@@ -535,6 +602,7 @@ function draftForKind(
     name: preset.defaultName,
     enabled: true,
     responsesWebSocket: false,
+    privacyTrusted: false,
     baseURL: preset.baseURL,
     authScheme: preset.authScheme,
     headerName: preset.headerName,
@@ -559,6 +627,7 @@ function draftFromRecord(record: ServiceRecord): Draft {
       failurePolicy: service.failure_policy,
       enabled: service.enabled,
       responsesWebSocket: responsesWebSocketEnabled(service),
+      privacyTrusted: service.privacy_trusted === true,
       models: [...service.models],
       modelRedirects: (service.model_redirects ?? []).map((redirect) => ({
         ...redirect,
@@ -576,6 +645,7 @@ function draftFromRecord(record: ServiceRecord): Draft {
     failurePolicy: service.failure_policy,
     enabled: service.enabled,
     responsesWebSocket: responsesWebSocketEnabled(service),
+    privacyTrusted: service.privacy_trusted === true,
     baseURL: service.http.base_url,
     authScheme: service.http.auth.scheme,
     headerName: service.http.auth.header_name ?? "",
@@ -808,13 +878,13 @@ function ModelPreviewDialog({
         ) : null}
         {preview.models.length > 0 ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <ModelSelect
-              options={source}
-              className="min-w-0 flex-[1_1_160px]"
-              aria-label={t("services.searchUpstream")}
+            <SearchInput
+              className="flex-[1_1_160px]"
+              clearLabel={t("common.clearSearch")}
+              label={t("services.searchUpstream")}
+              onValueChange={onQueryChange}
               placeholder={t("services.searchModels")}
               value={query}
-              onValueChange={onQueryChange}
             />
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <Button
@@ -972,8 +1042,7 @@ export function ServiceManager({
   const [error, setError] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [loginChoice, setLoginChoice] = useState<Service | null>(null);
-  const [copilotRiskStart, setCopilotRiskStart] =
-    useState<CopilotRiskStart>(null);
+  const [riskStart, setRiskStart] = useState<RiskStart>(null);
   const [loginChoiceFlow, setLoginChoiceFlow] =
     useState<AuthorizationFlow | null>(null);
   // Closing clears the choice; keep the exit animation on the last one.
@@ -1631,7 +1700,7 @@ export function ServiceManager({
     void save(false);
   };
 
-  const save = async (copilotRiskAccepted: boolean) => {
+  const save = async (riskAccepted: boolean) => {
     try {
       if (draft.failurePolicy) parseFailurePolicy(draft.failurePolicy);
     } catch {
@@ -1643,14 +1712,10 @@ export function ServiceManager({
       setError(issue);
       return;
     }
-    // A new Copilot service signs in right after it is created, so the risk
-    // is confirmed before anything is saved.
-    if (
-      !editing &&
-      draft.kind === "copilot_subscription" &&
-      !copilotRiskAccepted
-    ) {
-      setCopilotRiskStart({ kind: "create" });
+    // A new service of these kinds signs in right after it is created, so
+    // the risk is confirmed before anything is saved.
+    if (!editing && riskNoticeKinds.has(draft.kind) && !riskAccepted) {
+      setRiskStart({ kind: "create", serviceKind: draft.kind });
       return;
     }
     setSaving(true);
@@ -1665,6 +1730,7 @@ export function ServiceManager({
           name: draft.name.trim(),
           enabled: draft.enabled,
           responses_websocket_enabled: draft.responsesWebSocket,
+          privacy_trusted: draft.privacyTrusted,
           models: draft.models,
           ...redirectPatchFields(draft, editing.service),
           failure_policy: draft.failurePolicy ?? null,
@@ -1699,6 +1765,7 @@ export function ServiceManager({
             kind: draft.kind,
             enabled: draft.enabled,
             responses_websocket_enabled: draft.responsesWebSocket,
+            ...(draft.privacyTrusted ? { privacy_trusted: true } : {}),
             models: draft.models,
             ...redirectCreateFields(draft),
             ...(draft.failurePolicy
@@ -1722,6 +1789,7 @@ export function ServiceManager({
             kind: draft.kind as HTTPServiceKind,
             enabled: draft.enabled,
             responses_websocket_enabled: draft.responsesWebSocket,
+            ...(draft.privacyTrusted ? { privacy_trusted: true } : {}),
             models: draft.models,
             ...redirectCreateFields(draft),
             ...(draft.failurePolicy
@@ -1778,12 +1846,12 @@ export function ServiceManager({
   const authorize = async (
     service: Service,
     flow: AuthorizationFlow,
-    copilotRiskAccepted = false,
+    riskAccepted = false,
   ) => {
     setLoginChoice(null);
     setLoginChoiceFlow(null);
-    if (service.kind === "copilot_subscription" && !copilotRiskAccepted) {
-      setCopilotRiskStart({ kind: "login", service, flow });
+    if (riskNoticeKinds.has(service.kind) && !riskAccepted) {
+      setRiskStart({ kind: "login", service, flow });
       return;
     }
     setActionID(service.id);
@@ -1930,27 +1998,41 @@ export function ServiceManager({
   };
 
   // Both the editor ("Add and sign in") and the list ("Sign in") start a
-  // Copilot sign-in, so either view can show the risk confirmation.
-  const copilotRiskConfirm = (
+  // sign-in, so either view can show the risk confirmation.
+  const riskNotice = riskNoticeCopy(
+    riskStart?.kind === "create"
+      ? riskStart.serviceKind
+      : riskStart?.service.kind,
+  );
+  const riskConfirm = (
     <ConfirmDialog
-      confirmLabel={t("services.copilotRiskConfirm")}
+      confirmLabel={riskNotice.confirm}
       description={
-        <ul className="list-disc space-y-2 pl-5">
-          <li>{t("services.copilotRiskUnofficial")}</li>
-          <li>{t("services.copilotRiskOwnAccount")}</li>
-          <li>{t("services.copilotRiskBilling")}</li>
-        </ul>
+        <>
+          <FormMessage asChild tone="warning">
+            <div className="space-y-1 p-3">
+              <p className="text-sm font-semibold">{riskNotice.consequence}</p>
+              <p>{riskNotice.why}</p>
+            </div>
+          </FormMessage>
+          <ul className="list-disc space-y-1 pl-4">
+            {riskNotice.notes.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+        </>
       }
-      onCancel={() => setCopilotRiskStart(null)}
+      onCancel={() => setRiskStart(null)}
       onConfirm={() => {
-        const start = copilotRiskStart;
-        setCopilotRiskStart(null);
+        const start = riskStart;
+        setRiskStart(null);
         if (start?.kind === "create") void save(true);
         else if (start?.kind === "login")
           void authorize(start.service, start.flow, true);
       }}
-      open={copilotRiskStart !== null}
-      title={t("services.copilotRiskTitle")}
+      open={riskStart !== null}
+      title={riskNotice.title}
+      tone="warning"
     />
   );
 
@@ -2062,7 +2144,10 @@ export function ServiceManager({
                   aria-hidden="true"
                   className={cn(
                     "motion-reduce:animate-none",
-                    busy && "animate-spin motion-reduce:animate-none",
+                    // Rows keep their settled quota while it reloads, so the
+                    // toolbar is where a refresh in flight shows.
+                    (busy || refreshingUsageIDs.size > 0) &&
+                      "animate-spin motion-reduce:animate-none",
                   )}
                 />
               </IconButton>
@@ -2289,7 +2374,7 @@ export function ServiceManager({
                               {needsSubscriptionTag(service.kind) ? (
                                 <Badge
                                   aria-hidden="true"
-                                  className="absolute -bottom-2.5 left-1/2 h-4 -translate-x-1/2 bg-background px-1 py-0 leading-none text-text-secondary"
+                                  className="absolute -bottom-2.5 left-1/2 z-10 h-4 w-max -translate-x-1/2 bg-background px-1 py-0 leading-none text-text-secondary"
                                   data-testid="subscription-kind-tag"
                                   variant="outline"
                                 >
@@ -2340,13 +2425,32 @@ export function ServiceManager({
                                   />
                                 ) : null}
                               </div>
-                              {detail ? (
-                                <span
-                                  className="block truncate text-xs text-text-secondary"
-                                  title={detail}
-                                >
-                                  {detail}
-                                </span>
+                              {service.privacy_trusted || detail ? (
+                                <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                  {service.privacy_trusted ? (
+                                    <Badge
+                                      className="min-w-0 shrink [&>svg]:shrink-0"
+                                      data-testid="privacy-trusted-badge"
+                                      title={t(
+                                        "services.privacyTrustedBadgeHint",
+                                      )}
+                                      variant="outline"
+                                    >
+                                      <ShieldCheck aria-hidden="true" />
+                                      <span className="truncate">
+                                        {t("services.privacyTrustedBadge")}
+                                      </span>
+                                    </Badge>
+                                  ) : null}
+                                  {detail ? (
+                                    <span
+                                      className="block min-w-0 grow basis-10 truncate text-xs text-text-secondary"
+                                      title={detail}
+                                    >
+                                      {detail}
+                                    </span>
+                                  ) : null}
+                                </div>
                               ) : null}
                             </div>
                           </div>
@@ -2643,7 +2747,7 @@ export function ServiceManager({
                 : t("services.confirmLogout")
           }
         />
-        {copilotRiskConfirm}
+        {riskConfirm}
         <Dialog
           open={loginChoice !== null}
           onOpenChange={(open) => {
@@ -2661,15 +2765,13 @@ export function ServiceManager({
                 })}
               </DialogTitle>
               <DialogDescription>
-                {shownLoginChoice?.kind === "grok_subscription"
-                  ? t("services.grokDeviceCodeHint")
-                  : shownLoginChoice?.kind === "copilot_subscription"
-                    ? t("services.copilotDeviceCodeHint")
-                    : shownLoginChoice?.kind === "claude_subscription"
-                      ? t("services.claudeOauthHint")
-                      : shownLoginChoice?.kind === "antigravity_subscription"
-                        ? t("services.antigravityHint")
-                        : t("services.chooseOauthHint")}
+                {deviceCodeOnlyKind(shownLoginChoice?.kind)
+                  ? deviceCodeKindHint(shownLoginChoice?.kind)
+                  : shownLoginChoice?.kind === "claude_subscription"
+                    ? t("services.claudeOauthHint")
+                    : shownLoginChoice?.kind === "antigravity_subscription"
+                      ? t("services.antigravityHint")
+                      : t("services.chooseOauthHint")}
               </DialogDescription>
             </DialogHeader>
             <RadioGroup
@@ -2687,15 +2789,10 @@ export function ServiceManager({
                   selected={shownLoginChoiceFlow === "authorization_code"}
                   value="authorization_code"
                 />
-              ) : shownLoginChoice?.kind === "grok_subscription" ||
-                shownLoginChoice?.kind === "copilot_subscription" ? (
+              ) : deviceCodeOnlyKind(shownLoginChoice?.kind) ? (
                 <ChoiceCard
                   label="Device Code"
-                  description={
-                    shownLoginChoice.kind === "copilot_subscription"
-                      ? t("services.copilotDeviceCodeHint")
-                      : t("services.grokDeviceCodeHint")
-                  }
+                  description={deviceCodeKindHint(shownLoginChoice?.kind)}
                   selected={shownLoginChoiceFlow === "device_code"}
                   value="device_code"
                 />
@@ -2814,7 +2911,6 @@ export function ServiceManager({
                       aria-label={t("services.authorizationCode")}
                       type="password"
                       autoComplete="off"
-                      spellCheck={false}
                       placeholder="code#state"
                       value={authorizationCode}
                       maxLength={8192}
@@ -2864,7 +2960,10 @@ export function ServiceManager({
                       : authorizationDialog.session.provider ===
                           "github_copilot"
                         ? t("services.copilotEnterDeviceCode")
-                        : t("services.enterDeviceCode")}
+                        : authorizationDialog.session.provider ===
+                            "factory_droid"
+                          ? t("services.droidEnterDeviceCode")
+                          : t("services.enterDeviceCode")}
                   </p>
                   <div className="flex items-center justify-between gap-3 rounded-md border border-primary/20 bg-accent p-3">
                     <code className="font-mono text-xl font-semibold tracking-[0.08em] text-accent-foreground select-all">
@@ -2894,7 +2993,10 @@ export function ServiceManager({
                       : authorizationDialog.session.provider ===
                           "github_copilot"
                         ? t("services.copilotDeviceHint")
-                        : t("services.deviceDisabledHint")}
+                        : authorizationDialog.session.provider ===
+                            "factory_droid"
+                          ? t("services.droidDeviceHint")
+                          : t("services.deviceDisabledHint")}
                   </small>
                   <DialogFooter>
                     <Button
@@ -2922,8 +3024,11 @@ export function ServiceManager({
                       ? authorizationDialog.session.error?.code ===
                         "copilot_not_entitled"
                         ? t("services.copilotNotEntitled")
-                        : (authorizationDialog.session.error?.message ??
-                          t("services.deviceFailed"))
+                        : authorizationDialog.session.error?.code ===
+                            "factory_no_organization"
+                          ? t("services.droidNoOrganization")
+                          : (authorizationDialog.session.error?.message ??
+                            t("services.deviceFailed"))
                       : authorizationDialog.session.status === "expired"
                         ? t("services.deviceExpired")
                         : authorizationDialog.session.status === "cancelled"
@@ -3214,7 +3319,9 @@ export function ServiceManager({
             ? "https://daily-cloudcode-pa.googleapis.com"
             : draft.kind === "copilot_subscription"
               ? "https://api.githubcopilot.com"
-              : draft.baseURL.trim();
+              : draft.kind === "droid_subscription"
+                ? "https://api.factory.ai"
+                : draft.baseURL.trim();
   const connectionFields = (
     <div className="grid min-w-0 gap-4 pb-2 @[760px]:grid-cols-2">
       <Panel>
@@ -3263,11 +3370,13 @@ export function ServiceManager({
                   ? t("services.namePlaceholderGrok")
                   : draft.kind === "copilot_subscription"
                     ? t("services.namePlaceholderCopilot")
-                    : draft.kind === "antigravity_subscription"
-                      ? "Antigravity"
-                      : isSubscriptionKind(draft.kind)
-                        ? t("services.namePlaceholderCodex")
-                        : t("services.namePlaceholderHttp")
+                    : draft.kind === "droid_subscription"
+                      ? t("services.namePlaceholderDroid")
+                      : draft.kind === "antigravity_subscription"
+                        ? "Antigravity"
+                        : isSubscriptionKind(draft.kind)
+                          ? t("services.namePlaceholderCodex")
+                          : t("services.namePlaceholderHttp")
               }
               required
               value={draft.name}
@@ -3306,6 +3415,24 @@ export function ServiceManager({
               />
             </div>
           ) : null}
+          <div className="border-t pt-4">
+            <CapabilityToggle
+              label={t("services.privacyTrusted")}
+              description={t("services.privacyTrustedHint")}
+              status={
+                draft.privacyTrusted
+                  ? t("services.privacyTrustedOn")
+                  : undefined
+              }
+              checked={draft.privacyTrusted}
+              onCheckedChange={(checked) =>
+                setDraft((current) => ({
+                  ...current,
+                  privacyTrusted: checked,
+                }))
+              }
+            />
+          </div>
         </div>
       </Panel>
       <Panel>
@@ -3348,15 +3475,10 @@ export function ServiceManager({
                         selected
                         value="authorization_code"
                       />
-                    ) : draft.kind === "grok_subscription" ||
-                      draft.kind === "copilot_subscription" ? (
+                    ) : deviceCodeOnlyKind(draft.kind) ? (
                       <ChoiceCard
                         label="Device Code"
-                        description={
-                          draft.kind === "copilot_subscription"
-                            ? t("services.copilotDeviceCodeHint")
-                            : t("services.grokDeviceCodeHint")
-                        }
+                        description={deviceCodeKindHint(draft.kind)}
                         selected
                         value="device_code"
                       />
@@ -3611,7 +3733,7 @@ export function ServiceManager({
         titleId="service-editor-heading"
         variant="compact"
       />
-      {copilotRiskConfirm}
+      {riskConfirm}
       {!isReady ? (
         <FormMessage className="mb-3 shrink-0" tone="notice">
           {t("services.gatewayNotReady")}

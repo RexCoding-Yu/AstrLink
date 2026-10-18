@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -530,4 +531,176 @@ func TestRoutingSettingsPatchAcceptsDesktopModelRoutingGroupShape(t *testing.T) 
 	if invalidResponse.Code != http.StatusUnprocessableEntity || !strings.Contains(invalidResponse.Body.String(), "allowed labels") {
 		t.Fatalf("invalid custom task_type label response: %d %s", invalidResponse.Code, invalidResponse.Body.String())
 	}
+}
+
+func TestRoutingSettingsThinkingAndPromptRoundTrip(t *testing.T) {
+	store, handler := newRouteHandler(t)
+	response := controlRequest(t, handler, http.MethodGet, RoutingSettingsPath, "", "", "")
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"system_prompt_enabled":false,"system_prompt_prefix":"","system_prompt_suffix":"",`+
+			`"reasoning_mode":"passthrough","reasoning_level":"medium","adaptive_preset":"everyday","adaptive_min":"low","adaptive_max":"max"`) {
+		t.Fatalf("GET defaults: %d %s", response.Code, response.Body.String())
+	}
+	prefix := "Answer in English.\n\n  Keep it short.  "
+	patch, _ := json.Marshal(map[string]any{
+		"system_prompt_enabled": true, "system_prompt_prefix": prefix, "system_prompt_suffix": "Check twice.",
+		"reasoning_mode": "adaptive", "reasoning_level": "max",
+	})
+	response = controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json", string(patch), "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("PATCH: %d %s", response.Code, response.Body.String())
+	}
+	stored, err := store.GetRoutingSettings(context.Background())
+	if err != nil || !stored.SystemPromptEnabled || stored.SystemPromptPrefix != prefix ||
+		stored.SystemPromptSuffix != "Check twice." || stored.ReasoningMode != contract.ReasoningModeAdaptive ||
+		stored.ReasoningLevel != contract.ReasoningLevelMax {
+		t.Fatalf("stored = %+v %v", stored, err)
+	}
+	// Other keys leave the prompt and level as they are.
+	response = controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json", `{"reasoning_mode":"fixed"}`, "")
+	var patched contract.RoutingSettings
+	decode(t, response, &patched)
+	if response.Code != http.StatusOK || patched.ReasoningMode != contract.ReasoningModeFixed || patched.ReasoningLevel != contract.ReasoningLevelMax ||
+		patched.SystemPromptPrefix != prefix || !patched.SystemPromptEnabled {
+		t.Fatalf("fixed mode: %d %+v", response.Code, patched)
+	}
+	response = controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json", `{"reasoning_level":"off"}`, "")
+	decode(t, response, &patched)
+	if response.Code != http.StatusOK || patched.ReasoningMode != contract.ReasoningModeFixed || patched.ReasoningLevel != contract.ReasoningLevelOff {
+		t.Fatalf("level off: %d %+v", response.Code, patched)
+	}
+	for _, invalid := range []string{
+		`{"reasoning_override":"max"}`,
+		`{"reasoning_mode":""}`,
+		// The modes were renamed before release.
+		`{"reasoning_mode":"follow"}`,
+		`{"reasoning_mode":"auto"}`,
+		`{"reasoning_mode":null}`,
+		`{"reasoning_level":"xhigh"}`,
+		`{"reasoning_level":""}`,
+		`{"reasoning_level":"none"}`,
+		`{"reasoning_level":null}`,
+		`{"system_prompt_enabled":"yes"}`,
+		`{"system_prompt_prefix":` + string(must(json.Marshal(strings.Repeat("字", contract.MaxSystemPromptRunes+1)))) + `}`,
+		`{"adaptive_preset":"daily"}`,
+		`{"adaptive_preset":""}`,
+		`{"adaptive_preset":null}`,
+		`{"adaptive_preset":"Everyday"}`,
+		`{"adaptive_min":"xhigh"}`,
+		`{"adaptive_min":""}`,
+		`{"adaptive_min":null}`,
+		`{"adaptive_max":"none"}`,
+		`{"adaptive_max":1}`,
+	} {
+		response := controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json", invalid, "")
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%.60s accepted: %d %s", invalid, response.Code, response.Body.String())
+		}
+	}
+	atLimit, _ := json.Marshal(map[string]string{"system_prompt_suffix": strings.Repeat("字", contract.MaxSystemPromptRunes)})
+	if response := controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json", string(atLimit), ""); response.Code != http.StatusOK {
+		t.Fatalf("prompt at the limit: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRoutingSettingsImageCompressionRoundTrip(t *testing.T) {
+	store, handler := newRouteHandler(t)
+	response := controlRequest(t, handler, http.MethodGet, RoutingSettingsPath, "", "", "")
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"image_compression":{"enabled":false,"mode":"lossless","quality":85}`) {
+		t.Fatalf("GET defaults: %d %s", response.Code, response.Body.String())
+	}
+	response = controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json",
+		`{"image_compression":{"enabled":true,"mode":"lossy","quality":70}}`, "")
+	want := contract.ImageCompression{Enabled: true, Mode: contract.ImageCompressionLossy, Quality: 70}
+	var patched contract.RoutingSettings
+	decode(t, response, &patched)
+	if response.Code != http.StatusOK || patched.ImageCompression != want {
+		t.Fatalf("PATCH: %d %+v", response.Code, patched.ImageCompression)
+	}
+	for _, invalid := range []string{
+		`{"image_compression":null}`,
+		`{"image_compression":true}`,
+		`{"image_compression":{"enabled":true}}`,
+		`{"image_compression":{"enabled":true,"mode":"lossless"}}`,
+		`{"image_compression":{"enabled":true,"mode":"lossless","quality":85,"max_side":2048}}`,
+		`{"image_compression":{"enabled":null,"mode":"lossless","quality":85}}`,
+		`{"image_compression":{"enabled":true,"mode":"webp","quality":85}}`,
+		`{"image_compression":{"enabled":true,"mode":"","quality":85}}`,
+		`{"image_compression":{"enabled":true,"mode":"lossy","quality":0}}`,
+		`{"image_compression":{"enabled":true,"mode":"lossy","quality":101}}`,
+		`{"image_compression":{"enabled":true,"mode":"lossy","quality":"80"}}`,
+		`{"image_compression":{"enabled":true,"mode":"lossy","quality":80.5}}`,
+	} {
+		response := controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json", invalid, "")
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s accepted: %d %s", invalid, response.Code, response.Body.String())
+		}
+	}
+	if stored, err := store.GetRoutingSettings(context.Background()); err != nil || stored.ImageCompression != want {
+		t.Fatalf("stored after rejected patches = %+v %v", stored.ImageCompression, err)
+	}
+}
+
+func TestRoutingSettingsAdaptiveRangeRoundTrip(t *testing.T) {
+	store, handler := newRouteHandler(t)
+	patch := func(body string) (*httptest.ResponseRecorder, contract.RoutingSettings) {
+		t.Helper()
+		response := controlRequest(t, handler, http.MethodPatch, RoutingSettingsPath, "application/merge-patch+json", body, "")
+		var patched contract.RoutingSettings
+		if response.Code == http.StatusOK {
+			decode(t, response, &patched)
+		}
+		return response, patched
+	}
+	response, patched := patch(`{"reasoning_mode":"adaptive","adaptive_preset":"custom","adaptive_min":"medium","adaptive_max":"high"}`)
+	if response.Code != http.StatusOK || patched.ReasoningMode != contract.ReasoningModeAdaptive || patched.AdaptivePreset != contract.AdaptivePresetCustom ||
+		patched.AdaptiveMin != contract.ReasoningLevelMedium || patched.AdaptiveMax != contract.ReasoningLevelHigh {
+		t.Fatalf("custom range: %d %+v", response.Code, patched)
+	}
+	// Each end is checked against the stored other end, and a rejected
+	// patch changes nothing.
+	for _, invalid := range []string{
+		`{"adaptive_min":"max"}`,
+		`{"adaptive_max":"low"}`,
+		`{"adaptive_min":"high","adaptive_max":"low"}`,
+		`{"adaptive_max":"off","reasoning_mode":"fixed"}`,
+		// The range is kept, and checked, under the other presets too.
+		`{"adaptive_preset":"everyday","adaptive_min":"max","adaptive_max":"low"}`,
+	} {
+		if response, _ := patch(invalid); response.Code != http.StatusUnprocessableEntity ||
+			!strings.Contains(response.Body.String(), "adaptive_min must be at most adaptive_max") {
+			t.Fatalf("%s accepted: %d %s", invalid, response.Code, response.Body.String())
+		}
+	}
+	if stored, err := store.GetRoutingSettings(context.Background()); err != nil || stored.ReasoningMode != contract.ReasoningModeAdaptive ||
+		stored.AdaptiveMin != contract.ReasoningLevelMedium || stored.AdaptiveMax != contract.ReasoningLevelHigh {
+		t.Fatalf("stored after rejected patches = %+v %v", stored, err)
+	}
+	// Moving both ends in one patch passes through an order the ends alone
+	// would reject.
+	if response, patched := patch(`{"adaptive_min":"max","adaptive_max":"max"}`); response.Code != http.StatusOK ||
+		patched.AdaptiveMin != contract.ReasoningLevelMax || patched.AdaptiveMax != contract.ReasoningLevelMax {
+		t.Fatalf("one-level range: %d %+v", response.Code, patched)
+	}
+	// The preset and the range survive a switch to fixed and back.
+	if response, patched := patch(`{"reasoning_mode":"fixed","reasoning_level":"low"}`); response.Code != http.StatusOK ||
+		patched.AdaptivePreset != contract.AdaptivePresetCustom || patched.AdaptiveMin != contract.ReasoningLevelMax {
+		t.Fatalf("fixed: %d %+v", response.Code, patched)
+	}
+	if response, patched := patch(`{"reasoning_mode":"adaptive"}`); response.Code != http.StatusOK || patched.ReasoningLevel != contract.ReasoningLevelLow ||
+		patched.AdaptivePreset != contract.AdaptivePresetCustom || patched.AdaptiveMin != contract.ReasoningLevelMax || patched.AdaptiveMax != contract.ReasoningLevelMax {
+		t.Fatalf("back to adaptive: %d %+v", response.Code, patched)
+	}
+	if response, patched := patch(`{"adaptive_preset":"research"}`); response.Code != http.StatusOK || patched.AdaptivePreset != contract.AdaptivePresetResearch ||
+		patched.AdaptiveMin != contract.ReasoningLevelMax {
+		t.Fatalf("research: %d %+v", response.Code, patched)
+	}
+}
+
+func must[T any](value T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return value
 }

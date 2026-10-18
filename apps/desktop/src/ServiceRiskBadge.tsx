@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/popover";
 
 import { listServiceRiskEvents } from "./bridge";
-import { i18n, useT } from "./i18n";
+import { currentLocale, i18n, useT } from "./i18n";
 import {
   subscriptionRiskLabel,
   type SubscriptionRisk,
@@ -63,7 +63,7 @@ export function riskBadgeLabel(risk: SubscriptionRisk, now: Date): string {
 function formatRiskTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(i18n.language === "zh-CN" ? "zh-CN" : "en", {
+  return new Intl.DateTimeFormat(currentLocale(), {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

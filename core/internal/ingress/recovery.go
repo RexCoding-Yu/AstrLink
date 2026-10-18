@@ -128,8 +128,18 @@ func (schedule *recoverySchedule) repair(index int) bool {
 // excludeService removes every remaining route of a paused account from this
 // request, including routes for other protocols or models.
 func (schedule *recoverySchedule) excludeService(id contract.ServiceID) {
+	schedule.exclude(func(service contract.Service) bool { return service.ID == id })
+}
+
+// excludeKind removes every remaining route of one service kind from this
+// request, the failed route included.
+func (schedule *recoverySchedule) excludeKind(kind contract.ServiceKind) {
+	schedule.exclude(func(service contract.Service) bool { return service.Kind == kind })
+}
+
+func (schedule *recoverySchedule) exclude(match func(contract.Service) bool) {
 	for index, candidate := range schedule.candidates {
-		if candidate.CanonicalService().ID == id {
+		if match(candidate.CanonicalService()) {
 			schedule.selected[index] = true
 			schedule.retryable[index] = false
 			schedule.excluded[index] = true

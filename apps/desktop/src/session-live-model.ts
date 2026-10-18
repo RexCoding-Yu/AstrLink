@@ -1,5 +1,9 @@
-import { i18n } from "./i18n";
-import type { RequestSession, RequestStatus } from "./request-record-model";
+import { currentLocale, i18n } from "./i18n";
+import type {
+  RequestSession,
+  RequestSessionDetail,
+  RequestStatus,
+} from "./request-record-model";
 import type { RecordFilters } from "./request-live-model";
 
 export function sessionMatchesFilters(
@@ -127,6 +131,41 @@ export function applyQueuedSessions(
   return sortSessionsNewestFirst([...queued, ...items]);
 }
 
+/** `items` without the sessions in `ids`; `items` itself when none was there. */
+export function removeSessions(
+  items: RequestSession[],
+  ids: ReadonlySet<string>,
+): RequestSession[] {
+  const kept = items.filter((session) => !ids.has(session.id));
+  return kept.length === items.length ? items : kept;
+}
+
+/** `items` with `session` in place of the entry that shares its id. */
+export function replaceSession(
+  items: RequestSession[],
+  session: RequestSession,
+): RequestSession[] {
+  const index = items.findIndex((item) => item.id === session.id);
+  if (index < 0) return items;
+  const next = [...items];
+  next[index] = session;
+  return next;
+}
+
+/** The list row's share of a detail, so the list does not hold every turn. */
+export function sessionSummary(detail: RequestSessionDetail): RequestSession {
+  const summary: RequestSession & { turns?: unknown } = { ...detail };
+  delete summary.turns;
+  return summary;
+}
+
+/** A conversation with a call still running keeps its records until it ends. */
+export function sessionRunning(session: RequestSession): boolean {
+  return (
+    session.status === "pending" || session.active_request_starts.length > 0
+  );
+}
+
 export function sortSessionsNewestFirst(
   sessions: RequestSession[],
 ): RequestSession[] {
@@ -183,7 +222,7 @@ function localDateKey(date: Date): string {
 function formatDateLabel(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(i18n.language === "zh-CN" ? "zh-CN" : "en", {
+  return new Intl.DateTimeFormat(currentLocale(), {
     year: "numeric",
     month: "long",
     day: "numeric",

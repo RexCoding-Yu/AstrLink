@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -280,6 +281,44 @@ func TestRequestRecordValidation(t *testing.T) {
 			},
 			wantErr: "at most",
 		},
+		{name: "accepts ignored matches", mutate: func(record *RequestRecord) {
+			record.PrivacyIgnored = []PrivacyIgnored{
+				{Kind: CanonicalKindEmail, Reason: PrivacyIgnoreAllowlisted, Count: 2},
+				{Kind: CanonicalKindEmail, Reason: PrivacyIgnoreLowConfidence, Count: 1},
+			}
+		}},
+		{name: "rejects placeholder as an ignore reason", mutate: func(record *RequestRecord) {
+			record.PrivacyIgnored = []PrivacyIgnored{{Kind: CanonicalKindEmail, Reason: "placeholder", Count: 1}}
+		}, wantErr: "privacy ignored kind or reason"},
+		{name: "rejects duplicate ignored kind and reason", mutate: func(record *RequestRecord) {
+			entry := PrivacyIgnored{Kind: CanonicalKindURL, Reason: PrivacyIgnoreKindDisabled, Count: 1}
+			record.PrivacyIgnored = []PrivacyIgnored{entry, entry}
+		}, wantErr: "unique"},
+		{name: "rejects empty ignored count", mutate: func(record *RequestRecord) {
+			record.PrivacyIgnored = []PrivacyIgnored{{Kind: CanonicalKindURL, Reason: PrivacyIgnoreKindDisabled}}
+		}, wantErr: "positive"},
+		{name: "accepts model confidence ranges", mutate: func(record *RequestRecord) {
+			record.PrivacyFindings = []PrivacyFinding{{
+				Kind: CanonicalKindEmail, JSONPath: "/messages/0/content", Count: 2,
+				Confidence: &PrivacyConfidence{Min: 0.81, Max: 0.99, Threshold: 0.7},
+			}}
+			record.PrivacyIgnored = []PrivacyIgnored{{
+				Kind: CanonicalKindPerson, Reason: PrivacyIgnoreLowConfidence, Count: 1,
+				Confidence: &PrivacyConfidence{Min: 0.41, Max: 0.41, Threshold: 0.7},
+			}}
+		}},
+		{name: "rejects an inverted confidence range", mutate: func(record *RequestRecord) {
+			record.PrivacyFindings = []PrivacyFinding{{
+				Kind: CanonicalKindEmail, JSONPath: "/messages/0/content", Count: 1,
+				Confidence: &PrivacyConfidence{Min: 0.9, Max: 0.8, Threshold: 0.7},
+			}}
+		}, wantErr: "min must not exceed max"},
+		{name: "rejects confidence outside 0 to 1", mutate: func(record *RequestRecord) {
+			record.PrivacyIgnored = []PrivacyIgnored{{
+				Kind: CanonicalKindPerson, Reason: PrivacyIgnoreLowConfidence, Count: 1,
+				Confidence: &PrivacyConfidence{Min: 0.4, Max: 0.4, Threshold: 1.5},
+			}}
+		}, wantErr: "between 0 and 1"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -330,6 +369,46 @@ func TestPurgeRequestValidation(t *testing.T) {
 			name:    "rejects all scope with before",
 			request: PurgeRequest{Scope: PurgeScopeAll, Confirm: true, Before: &before},
 			wantErr: "before must be omitted",
+		},
+		{
+			name:    "sessions names the conversations",
+			request: PurgeRequest{Scope: PurgeScopeSessions, Confirm: true, SessionIDs: []SessionID{"session_a", "request_b"}},
+		},
+		{
+			name:    "rejects sessions scope without ids",
+			request: PurgeRequest{Scope: PurgeScopeSessions, Confirm: true},
+			wantErr: "session_ids is required",
+		},
+		{
+			name:    "rejects sessions scope with before",
+			request: PurgeRequest{Scope: PurgeScopeSessions, Confirm: true, Before: &before, SessionIDs: []SessionID{"session_a"}},
+			wantErr: "before must be omitted when scope is sessions",
+		},
+		{
+			name:    "rejects session ids on another scope",
+			request: PurgeRequest{Scope: PurgeScopeAll, Confirm: true, SessionIDs: []SessionID{"session_a"}},
+			wantErr: "session_ids must be omitted",
+		},
+		{
+			name:    "rejects a repeated session id",
+			request: PurgeRequest{Scope: PurgeScopeSessions, Confirm: true, SessionIDs: []SessionID{"session_a", "session_a"}},
+			wantErr: "must not repeat",
+		},
+		{
+			name:    "rejects an invalid session id",
+			request: PurgeRequest{Scope: PurgeScopeSessions, Confirm: true, SessionIDs: []SessionID{"x"}},
+			wantErr: "invalid session id",
+		},
+		{
+			name: "rejects too many session ids",
+			request: func() PurgeRequest {
+				ids := make([]SessionID, MaxPurgeSessionIDs+1)
+				for index := range ids {
+					ids[index] = SessionID(fmt.Sprintf("session_%04d", index))
+				}
+				return PurgeRequest{Scope: PurgeScopeSessions, Confirm: true, SessionIDs: ids}
+			}(),
+			wantErr: "at most",
 		},
 	}
 	for _, test := range tests {

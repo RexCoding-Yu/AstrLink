@@ -6,10 +6,28 @@ export const TRAY_POPOVER_LABEL = "tray-popover";
 /** Emitted by the host with a fresh `TrayState` whenever it changes. */
 export const TRAY_STATE_EVENT = "tray:state";
 
-/** Emitted to the main window with the `WorkspacePage.kind` to open. */
+/**
+ * Emitted to the main window with the `WorkspacePage.kind` to open, or a named
+ * view of one such as {@link TRAY_FAILED_TODAY_PAGE}.
+ */
 export const TRAY_NAVIGATE_EVENT = "tray:navigate";
 
-/** Logical width of the popover window, fixed by the host. */
+/**
+ * Request records narrowed to the calls behind today's failure count. Must
+ * match `NAVIGATION_KINDS` in `src-tauri/src/tray.rs`.
+ */
+export const TRAY_FAILED_TODAY_PAGE = "failedToday";
+
+/**
+ * The safety page opened on its privacy statistics. Must match
+ * `NAVIGATION_KINDS` in `src-tauri/src/tray.rs`.
+ */
+export const TRAY_PRIVACY_OVERVIEW_PAGE = "privacyOverview";
+
+/**
+ * Width of the popover page in CSS pixels. The host sizes the window to fit
+ * it at the pixel ratio the page reports.
+ */
 export const TRAY_POPOVER_WIDTH = 360;
 
 export function isTrayPopoverWindow(): boolean {

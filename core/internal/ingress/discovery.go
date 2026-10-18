@@ -52,10 +52,12 @@ const (
 )
 
 type discoveryResult struct {
-	outcome   discoveryOutcome
-	entries   []discoveryEntry
-	failure   executionFailure
-	rateLimit *endpoint.RateLimitedCandidate
+	outcome    discoveryOutcome
+	entries    []discoveryEntry
+	warning    string
+	failure    executionFailure
+	privacyErr error
+	rateLimit  *endpoint.RateLimitedCandidate
 }
 
 // discoveryEntry keeps the upstream's original entry bytes together with the
@@ -105,9 +107,27 @@ func (handler *Handler) aggregateModelDiscovery(
 	if request.Context().Err() != nil {
 		return
 	}
-	// Privacy was decided by the single request-level preflight before the
-	// candidates were resolved; a blocking or unavailable policy never reaches
-	// this aggregation. Nothing per-service remains here.
+	// Privacy stays fail closed for the whole request, matching the execution
+	// path: an unavailable or blocking policy must not be silently narrowed
+	// into skipping one endpoint's contribution.
+	for _, result := range results {
+		if result.privacyErr != nil {
+			handler.writePrivacyError(writer, request, result.privacyErr)
+			return
+		}
+	}
+	if session := recordSessionFromContext(request.Context()); session != nil {
+		decision := "allow"
+		outcome := contract.PrivacyDecisionAllow
+		for _, result := range results {
+			if result.warning != "" {
+				decision = "warn"
+				outcome = contract.PrivacyDecisionWarn
+			}
+		}
+		session.notePrivacyDecision(decision, contract.RequestStatusSucceeded)
+		session.notePrivacyOutcome(outcome, nil, nil, nil)
+	}
 	merged, succeeded := mergeDiscoveryEntries(results)
 	if succeeded == 0 {
 		handler.writeDiscoveryFailure(writer, request, classified, results)
@@ -145,6 +165,11 @@ func (handler *Handler) aggregateModelDiscovery(
 		return
 	}
 	header := writer.Header()
+	for _, result := range results {
+		if result.outcome == discoveryOutcomeFetched && result.warning != "" {
+			header.Set(PolicyWarningHeader, result.warning)
+		}
+	}
 	header.Set("Cache-Control", "no-store")
 	header.Set("Content-Type", "application/json")
 	header.Set("X-Content-Type-Options", "nosniff")
@@ -200,11 +225,23 @@ func (handler *Handler) fetchModelDiscovery(
 		}}
 	}
 
+	if candidate.Service.Kind == contract.ServiceKindDroidSubscription {
+		// Factory publishes no model endpoint: the list is the configured one.
+		entries, synthesizeErr := synthesizeDiscoveryEntries(classified.Protocol, candidate.Service.Models)
+		if synthesizeErr != nil {
+			return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
+				kind:       executionFailureUpstream,
+				err:        synthesizeErr,
+				endpointID: candidate.Service.ID,
+			}}
+		}
+		return discoveryResult{outcome: discoveryOutcomeFetched, entries: entries}
+	}
+
 	fetchContext, cancelFetch := context.WithTimeout(request.Context(), defaultDiscoveryTimeout)
 	defer cancelFetch()
 	// Discovery fans out concurrently; only the aggregator may mutate the
-	// client request record. Privacy is the request-level preflight in
-	// ServeHTTP; the fetch below has no body to inspect.
+	// client request record. Policy evaluation still runs for each service.
 	fetchRequest := request.Clone(withRecordSession(fetchContext, nil))
 	fetchRequest.Body = http.NoBody
 	fetchRequest.GetBody = nil
@@ -217,6 +254,20 @@ func (handler *Handler) fetchModelDiscovery(
 	fetchRequest.Header.Set("Accept-Encoding", transport.SupportedResponseEncodings)
 
 	recorder := newDiscoveryResponseRecorder(maxResponseInspectionBytes)
+	finishPrivacy, _, privacyErr := handler.applyPrivacy(
+		recorder,
+		fetchRequest,
+		classified,
+		candidate.Service,
+	)
+	finishPrivacy()
+	if request.Context().Err() != nil {
+		return discoveryResult{outcome: discoveryOutcomeAborted}
+	}
+	if privacyErr != nil {
+		return discoveryResult{outcome: discoveryOutcomeExcluded, privacyErr: privacyErr}
+	}
+
 	authorizationEndpoint, authorizeErr := candidate.AuthorizationEndpoint()
 	proxyContext := request.Context()
 	if authorizeErr == nil {
@@ -328,6 +379,9 @@ func (handler *Handler) fetchModelDiscovery(
 	} else {
 		entries, entriesErr = parseDiscoveryEntries(classified.Protocol, discoveryBody)
 	}
+	if entriesErr == nil {
+		handler.codexModels.remember(entries)
+	}
 	if entriesErr != nil {
 		return discoveryResult{outcome: discoveryOutcomeFailed, failure: executionFailure{
 			kind:       executionFailureUpstream,
@@ -350,6 +404,7 @@ func (handler *Handler) fetchModelDiscovery(
 	return discoveryResult{
 		outcome: discoveryOutcomeFetched,
 		entries: entries,
+		warning: recorder.Header().Get(PolicyWarningHeader),
 	}
 }
 
@@ -501,11 +556,6 @@ func encodeDiscoveryList(protocol contract.ProtocolID, entries []discoveryEntry)
 	return json.Marshal(envelope)
 }
 
-// appendRedirectDiscoveryEntries lists each enabled redirect source whose
-// target is already listed, so clients can select the source name. A source
-// that is already listed keeps its entry, and targets are never hidden. The
-// retired astrlink/auto stays unlisted, and Gemini skips sources containing
-// "/" because they cannot form a models/<id> path segment.
 func settingsGroupsFromSession(ctx context.Context) []contract.ModelRoutingGroup {
 	session := recordSessionFromContext(ctx)
 	if session == nil || session.routingSettings == nil {
@@ -561,6 +611,11 @@ func appendModelRoutingDiscoveryEntries(protocol contract.ProtocolID, entries []
 	return entries, nil
 }
 
+// appendRedirectDiscoveryEntries lists each enabled redirect source whose
+// target is already listed, so clients can select the source name. A source
+// that is already listed keeps its entry, and targets are never hidden. The
+// retired astrlink/auto stays unlisted, and Gemini skips sources containing
+// "/" because they cannot form a models/<id> path segment.
 func appendRedirectDiscoveryEntries(
 	protocol contract.ProtocolID,
 	entries []discoveryEntry,

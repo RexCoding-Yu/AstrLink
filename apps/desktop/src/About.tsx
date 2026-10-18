@@ -1,6 +1,6 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import { Panel, PanelBody, PanelHeader } from "@/components/Panel";
+import { Panel, PanelHeader } from "@/components/Panel";
 import { DataField, DataRow } from "@/components/DataRow";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -38,10 +38,11 @@ import {
 } from "./update-bridge";
 import {
   updateBusy,
+  updateRetryWait,
   type UpdatePreferences,
   type UpdateSnapshot,
 } from "./update-model";
-import { useT } from "./i18n";
+import { i18n, useT } from "./i18n";
 import logo from "./assets/astrlink-logo.svg";
 
 export function About({
@@ -61,8 +62,21 @@ export function About({
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState<boolean | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const native = isTauri();
   const working = busy || updateBusy(snapshot);
+  const retryWait = updateRetryWait(snapshot, now);
+  const retryAt = snapshot.retry_at;
+  useEffect(() => {
+    if (!retryAt) return;
+    setNow(Date.now());
+    const timer = setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= Date.parse(retryAt)) clearInterval(timer);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [retryAt]);
   const expanded = preferencesOpen ?? false;
   const preferencesDisabled =
     !native || busy || snapshot.phase === "installing";
@@ -83,6 +97,15 @@ export function About({
     void run(() =>
       saveUpdatePreferences({ ...snapshot.preferences, ...patch }),
     );
+  }
+  function switchToMirror() {
+    void run(async () => {
+      await saveUpdatePreferences({
+        ...snapshot.preferences,
+        official_mirror: true,
+      });
+      return checkAppUpdate();
+    });
   }
   async function open(url: string) {
     try {
@@ -143,7 +166,7 @@ export function About({
       size={snapshot.release ? "icon" : "default"}
       aria-label={t("about.check")}
       title={t("about.check")}
-      disabled={!native || working}
+      disabled={!native || working || retryWait > 0}
       onClick={() => void run(checkAppUpdate)}
     >
       <RefreshCw
@@ -167,15 +190,9 @@ export function About({
         {/* Center the column inside the full-width scrollport, so its scrollbar
             stays at the workspace edge like every other page. */}
         <div className="mx-auto flex w-full max-w-5xl flex-col gap-3">
-          <Panel
-            className={cn(
-              "flex flex-col",
-              snapshot.release ? "min-h-64 flex-1" : "shrink-0",
-            )}
-            data-slot="about-update-panel"
-          >
+          <Panel data-slot="about-update-panel">
             <PanelHeader
-              className="shrink-0 flex-wrap items-center gap-3 px-5 py-4"
+              className="flex-wrap items-center gap-3 px-5 py-4"
               actions={
                 <>
                   <Button
@@ -214,12 +231,10 @@ export function About({
                 </div>
               </div>
             </PanelHeader>
-            <PanelBody
-              className={cn(
-                "space-y-3 px-5 pt-3",
-                snapshot.release ? "pb-4" : "pb-0",
-                !snapshot.release && "flex-none",
-              )}
+            {/* Not PanelBody: its contained overscroll keeps the wheel from
+                reaching the page scrollport even when it has nothing to scroll. */}
+            <div
+              className={cn("space-y-3 px-5 pt-3", snapshot.release && "pb-4")}
               data-slot="about-update-content"
             >
               <div
@@ -270,6 +285,23 @@ export function About({
               {snapshot.error_code ? (
                 <FormMessage tone="error">
                   <p>{t(`about.errors.${snapshot.error_code}`)}</p>
+                  {retryWait > 0 ? (
+                    <p>
+                      {t("about.retryAt", { time: formatRetryWait(retryWait) })}
+                    </p>
+                  ) : null}
+                  {snapshot.error_code === "rate_limit" &&
+                  !snapshot.preferences.official_mirror ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="my-1.5"
+                      disabled={!native || working}
+                      onClick={switchToMirror}
+                    >
+                      {t("about.useOfficialMirror")}
+                    </Button>
+                  ) : null}
                   {snapshot.error_detail ? (
                     <details className="mt-1 text-xs">
                       <summary className="cursor-pointer">
@@ -294,6 +326,15 @@ export function About({
                       ? ` / ${(snapshot.total_bytes / 1024 / 1024).toFixed(1)} MB`
                       : ""}
                   </p>
+                  {snapshot.download_source ? (
+                    <p className="text-xs text-muted-foreground">
+                      {t("about.downloadSource.current", {
+                        source: t(
+                          `about.downloadSource.${snapshot.download_source}`,
+                        ),
+                      })}
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
               {snapshot.release ? (
@@ -305,7 +346,7 @@ export function About({
                   ) : null}
                   {hasDownload ? (
                     <Button
-                      disabled={working}
+                      disabled={working || retryWait > 0}
                       onClick={() =>
                         void run(
                           [
@@ -428,6 +469,27 @@ export function About({
                         </SelectContent>
                       </Select>
                     </DataRow>
+                    <DataRow>
+                      <div className="min-w-0 flex-1">
+                        <Label
+                          htmlFor={`${id}-official-mirror`}
+                          className="text-sm font-normal"
+                        >
+                          {t("about.officialMirror")}
+                        </Label>
+                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          {t("about.preferenceHint.official_mirror")}
+                        </p>
+                      </div>
+                      <Switch
+                        id={`${id}-official-mirror`}
+                        checked={snapshot.preferences.official_mirror}
+                        disabled={preferencesDisabled}
+                        onCheckedChange={(official_mirror) =>
+                          save({ official_mirror })
+                        }
+                      />
+                    </DataRow>
                     {(["auto_check", "auto_download"] as const).map((key) => (
                       <DataRow key={key}>
                         <div className="min-w-0 flex-1">
@@ -462,7 +524,7 @@ export function About({
                   />
                 </div>
               ) : null}
-            </PanelBody>
+            </div>
           </Panel>
           <LocalClientUpdates compact={Boolean(snapshot.release)} />
         </div>
@@ -487,4 +549,14 @@ export function About({
       />
     </>
   );
+}
+
+function formatRetryWait(seconds: number) {
+  const [value, unit] =
+    seconds < 60
+      ? [seconds, "second" as const]
+      : seconds < 3600
+        ? [Math.ceil(seconds / 60), "minute" as const]
+        : [Math.ceil(seconds / 3600), "hour" as const];
+  return new Intl.RelativeTimeFormat(i18n.language).format(value, unit);
 }

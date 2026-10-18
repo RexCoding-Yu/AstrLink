@@ -190,6 +190,38 @@ func TestPolicyPatchesToolDeclarationSettings(t *testing.T) {
 	}
 }
 
+func TestPolicyPatchesKindRuleNotify(t *testing.T) {
+	_, handler, _ := newPolicyHandler(t)
+	path := PoliciesPath + "/" + string(contract.DefaultPrivacyPolicyID)
+	get := policyRequest(t, handler, http.MethodGet, path, "", "", "")
+	var initial contract.Policy
+	decode(t, get, &initial)
+	for _, rule := range initial.KindRules {
+		if !rule.Notify {
+			t.Fatalf("kind %q does not notify by default", rule.Kind)
+		}
+	}
+
+	// A client predating notify sends phone without it; phone keeps notifying.
+	response := policyRequest(t, handler, http.MethodPatch, path, "application/merge-patch+json",
+		`{"kind_rules":[{"kind":"email","enabled":true,"style":"natural","notify":false},`+
+			`{"kind":"phone","enabled":true,"style":"token"}]}`,
+		get.Header().Get("ETag"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("patch status=%d body=%s", response.Code, response.Body.String())
+	}
+	get = policyRequest(t, handler, http.MethodGet, path, "", "", "")
+	var patched contract.Policy
+	decode(t, get, &patched)
+	notify := make(map[string]bool, len(patched.KindRules))
+	for _, rule := range patched.KindRules {
+		notify[rule.Kind] = rule.Notify
+	}
+	if notify["email"] || !notify["phone"] || !notify["common_secret"] {
+		t.Fatalf("patched kind rules = %#v", patched.KindRules)
+	}
+}
+
 func TestPolicyAndPrivacyModelRoutesRequireAuthenticationAndNoStore(t *testing.T) {
 	_, handler, _ := newPolicyHandler(t)
 	for _, operation := range []struct {

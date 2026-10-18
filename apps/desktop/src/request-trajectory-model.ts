@@ -1,8 +1,16 @@
+import { compactTitle } from "./file-path-spans";
 import { findMatches } from "./find-model";
 import { formatExactNumber } from "./format-compact-number";
 import { i18n } from "./i18n";
 import {
+  PRIVACY_KIND_ORDER,
+  privacyKindLabel,
+  sortPrivacyKinds,
+  type PrivacyKind,
+} from "./privacy-kind";
+import {
   statusLabel,
+  type PrivacyIgnoreReason,
   type RequestEvent,
   type RequestModelRedirect,
   type RequestRecord,
@@ -15,6 +23,7 @@ export type TrajectoryChip =
   | "CLIENT"
   | "REDIRECT"
   | "POLICY"
+  | "COMPRESS"
   | "ROUTE"
   | "UPSTREAM"
   | "RETRY"
@@ -34,7 +43,8 @@ export type InspectorPart =
   | "upstream_response_content"
   | "response_content"
   | "route"
-  | "redirect";
+  | "redirect"
+  | "compression";
 
 export function inspectorPart(chip: TrajectoryChip): InspectorPart {
   switch (chip) {
@@ -45,6 +55,8 @@ export function inspectorPart(chip: TrajectoryChip): InspectorPart {
       return "redirect";
     case "POLICY":
       return "upstream_request_body";
+    case "COMPRESS":
+      return "compression";
     case "ROUTE":
       return "route";
     case "UPSTREAM":
@@ -66,6 +78,8 @@ export function inspectorTitle(chip: TrajectoryChip): string {
       return i18n.t("trajectory.modelRedirect");
     case "POLICY":
       return i18n.t("trajectory.hit");
+    case "COMPRESS":
+      return i18n.t("trajectory.imageCompression");
     case "ROUTE":
       return i18n.t("trajectory.route");
     case "UPSTREAM":
@@ -89,9 +103,7 @@ const privacyPlaceholderPattern =
  * Core no longer mints phone, card, or account stand-ins, but requests recorded
  * by earlier builds still carry them.
  */
-const naturalPlaceholderPatterns: ReadonlyArray<
-  [(typeof privacyKindOrder)[number], RegExp]
-> = [
+const naturalPlaceholderPatterns: ReadonlyArray<[PrivacyKind, RegExp]> = [
   ["email", /\bredacted-[0-9a-f]{12}@private\.invalid\b/gi],
   ["url", /\bhttps:\/\/private\.invalid\/r\/[0-9a-f]{12}\b/gi],
   ["phone", /\+1-555-555-01\d{2}\b/g],
@@ -101,25 +113,7 @@ const naturalPlaceholderPatterns: ReadonlyArray<
   ["ip_address", /\b2001:db8::[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*\b/gi],
 ];
 
-const privacyKindOrder = [
-  "email",
-  "phone",
-  "account",
-  "payment_card",
-  "ip_address",
-  "url",
-  "common_secret",
-  "private_address",
-  "private_date",
-  "private_person",
-  "unknown",
-] as const;
-
-function privacyKindLabel(kind: (typeof privacyKindOrder)[number]): string {
-  return i18n.t(`privacy.${kind}`);
-}
-
-const privacyTokenKinds: Array<[string, (typeof privacyKindOrder)[number]]> = [
+const privacyTokenKinds: Array<[string, PrivacyKind]> = [
   ["ACCOUNT_NUMBER", "account"],
   ["PAYMENT_CARD", "payment_card"],
   ["IP_ADDRESS", "ip_address"],
@@ -144,9 +138,7 @@ export interface PrivacyHighlightSpan {
 }
 
 export function privacyHitLabel(kind: string): string {
-  return privacyKindOrder.includes(kind as (typeof privacyKindOrder)[number])
-    ? privacyKindLabel(kind as (typeof privacyKindOrder)[number])
-    : kind;
+  return privacyKindLabel(kind);
 }
 
 export function recordedPrivacyHits(
@@ -162,7 +154,172 @@ export function recordedPrivacyHits(
 }
 
 /**
- * What the privacy policy did to the request. `unfinished` covers an
+ * What the policy found when it replaced nothing (a warning or a block), by
+ * kind. A finding is one kind at one path, so counts add up across paths.
+ */
+export function recordedPrivacyFindings(
+  findings: RequestRecord["privacy_findings"],
+): PrivacyHitGroup[] {
+  const counts = new Map<string, number>();
+  for (const finding of findings ?? []) {
+    counts.set(finding.kind, (counts.get(finding.kind) ?? 0) + finding.count);
+  }
+  return sortPrivacyKinds([...counts.keys()]).map((kind) => ({
+    kind,
+    label: privacyHitLabel(kind),
+    count: counts.get(kind) ?? 0,
+    placeholders: [],
+  }));
+}
+
+/** A 0–1 confidence written the way the dry run writes it: "99.53%". */
+export function confidencePercent(value: number): string {
+  return `${Number((value * 100).toFixed(2))}%`;
+}
+
+/** "81%–99.53%", or one value when both ends read the same. */
+export function confidenceRange(min: number, max: number): string {
+  const low = confidencePercent(min);
+  const high = confidencePercent(max);
+  return low === high ? low : `${low}–${high}`;
+}
+
+export interface PrivacyConfidenceGroup {
+  kind: string;
+  label: string;
+  min: number;
+  max: number;
+}
+
+/**
+ * The local model's confidence in the accepted matches, by kind, and the
+ * threshold they met. Null when no finding carries confidence: the regex
+ * detector decided, or the record predates confidence.
+ */
+export function recordedPrivacyConfidence(
+  findings: RequestRecord["privacy_findings"],
+): { groups: PrivacyConfidenceGroup[]; threshold: number } | null {
+  const groups = new Map<string, PrivacyConfidenceGroup>();
+  let threshold: number | null = null;
+  for (const { kind, confidence } of findings ?? []) {
+    if (!confidence) continue;
+    threshold ??= confidence.threshold;
+    const group = groups.get(kind);
+    groups.set(kind, {
+      kind,
+      label: privacyHitLabel(kind),
+      min: Math.min(group?.min ?? confidence.min, confidence.min),
+      max: Math.max(group?.max ?? confidence.max, confidence.max),
+    });
+  }
+  if (threshold === null) return null;
+  return {
+    groups: sortPrivacyKinds([...groups.keys()]).flatMap(
+      (kind) => groups.get(kind) ?? [],
+    ),
+    threshold,
+  };
+}
+
+export interface ConfidenceSpan {
+  min: number;
+  max: number;
+}
+
+/** Matches of one kind the policy left in the request for one reason. */
+export interface PolicyKindIgnored {
+  count: number;
+  confidence: ConfidenceSpan | null;
+}
+
+export interface PolicyKindRow {
+  kind: string;
+  label: string;
+  /** Matches the policy acted on; 0 when it left every match in place. */
+  count: number;
+  confidence: ConfidenceSpan | null;
+  ignored: Partial<Record<PrivacyIgnoreReason, PolicyKindIgnored>>;
+}
+
+export const policyIgnoreReasons: readonly PrivacyIgnoreReason[] = [
+  "low_confidence",
+  "allowlisted",
+  "kind_disabled",
+];
+
+/**
+ * The policy step by kind, so a kind's matches, the model's confidence in
+ * them, and the matches left in place read across one row. Kinds the policy
+ * acted on come first. The threshold is null when no match carries model
+ * confidence.
+ */
+export function policyKindTable(
+  hits: PrivacyHitGroup[],
+  findings: RequestRecord["privacy_findings"],
+  ignored: RequestRecord["privacy_ignored"],
+): { rows: PolicyKindRow[]; threshold: number | null } {
+  const rows = new Map<string, PolicyKindRow>();
+  const rowFor = (kind: string): PolicyKindRow => {
+    const existing = rows.get(kind);
+    if (existing) return existing;
+    const created: PolicyKindRow = {
+      kind,
+      label: privacyHitLabel(kind),
+      count: 0,
+      confidence: null,
+      ignored: {},
+    };
+    rows.set(kind, created);
+    return created;
+  };
+  for (const hit of hits) rowFor(hit.kind).count += hit.count;
+  const confidence = recordedPrivacyConfidence(findings);
+  for (const { kind, min, max } of confidence?.groups ?? []) {
+    rowFor(kind).confidence = { min, max };
+  }
+  let threshold = confidence?.threshold ?? null;
+  for (const entry of ignored ?? []) {
+    const row = rowFor(entry.kind);
+    const previous = row.ignored[entry.reason];
+    row.ignored[entry.reason] = {
+      count: (previous?.count ?? 0) + entry.count,
+      confidence: widenConfidence(
+        previous?.confidence ?? null,
+        entry.confidence ?? null,
+      ),
+    };
+    threshold ??= entry.confidence?.threshold ?? null;
+  }
+  return {
+    rows: sortPrivacyKinds([...rows.keys()])
+      .flatMap((kind) => rows.get(kind) ?? [])
+      .sort((left, right) => Number(right.count > 0) - Number(left.count > 0)),
+    threshold,
+  };
+}
+
+/** Without confidence or ignored matches, each kind is just a count. */
+export function policyKindsNeedTable(rows: PolicyKindRow[]): boolean {
+  return rows.some(
+    (row) => row.confidence !== null || Object.keys(row.ignored).length > 0,
+  );
+}
+
+function widenConfidence(
+  span: ConfidenceSpan | null,
+  next: ConfidenceSpan | null,
+): ConfidenceSpan | null {
+  if (!next) return span;
+  if (!span) return { min: next.min, max: next.max };
+  return {
+    min: Math.min(span.min, next.min),
+    max: Math.max(span.max, next.max),
+  };
+}
+
+/**
+ * What the privacy policy did to the request. `trusted` covers a request the
+ * policy let through uninspected to a trusted provider; `unfinished` covers an
  * inspection that failed or was cut off before it decided.
  */
 export type PolicyDecision =
@@ -170,24 +327,106 @@ export type PolicyDecision =
   | "warn"
   | "block"
   | "allow"
+  | "trusted"
   | "inspecting"
   | "unfinished";
 
+type PolicyAction = "allow" | "warn" | "block" | "redact";
+
+/** How the model learned what the placeholders are. */
+export type PlaceholderExplanation = "notice" | "skill";
+
+/** A decision Core wrote as the POLICY summary. */
+export interface PolicySummary {
+  action: PolicyAction;
+  /** Distinct values replaced; null when the summary names none. */
+  replaced: number | null;
+  /**
+   * `notice`: Core added its placeholder notice. `skill`: the client already
+   * listed the placeholder skill, so no notice was added.
+   */
+  explainedBy: PlaceholderExplanation | null;
+  /** The request went uninspected to a provider the user trusts. */
+  trusted: boolean;
+}
+
+const policyActions = new Set<string>(["allow", "warn", "block", "redact"]);
+
 /**
- * Core writes the decision as the first segment of the POLICY summary
- * ("allow", "warn", "block", "redact · 3"). A recorded mapping means values
- * were replaced whatever the summary says, which also covers records
- * synthesized without events.
+ * Core writes "allow", "allow · trusted", "warn", "block", or "redact · 3"
+ * with an optional "notice" or "skill" segment. Anything else is an inspection
+ * still running or a failure code, which stays in Core's own words.
+ */
+export function parsePolicySummary(summary: string): PolicySummary | null {
+  const [action, ...rest] = summary.split(" · ");
+  if (!policyActions.has(action)) return null;
+  const count = rest.find((part) => /^\d+$/.test(part));
+  return {
+    action: action as PolicyAction,
+    replaced: count === undefined ? null : Number(count),
+    explainedBy: rest.includes("notice")
+      ? "notice"
+      : rest.includes("skill")
+        ? "skill"
+        : null,
+    trusted: action === "allow" && rest.includes("trusted"),
+  };
+}
+
+export function placeholderExplanationText(
+  explainedBy: PlaceholderExplanation,
+): string {
+  return i18n.t(
+    explainedBy === "notice"
+      ? "trajectory.policyNotice"
+      : "trajectory.policySkill",
+  );
+}
+
+// How placeholders were explained is the same on nearly every call, so the
+// chain row leaves it to the policy inspector.
+function policySummaryText(policy: PolicySummary): string {
+  const parts = [
+    i18n.t(
+      `trajectory.policyDecisions.${policy.trusted ? "trusted" : policy.action}`,
+    ),
+  ];
+  if (policy.replaced !== null) {
+    parts.push(i18n.t("trajectory.policyReplaced", { count: policy.replaced }));
+  }
+  return parts.join(" · ");
+}
+
+/** "还原 4 处", naming the tool-argument share when there is one. */
+export function restoredText(count: number, tools: number): string {
+  return tools > 0
+    ? i18n.t("trajectory.restoredCountWithTools", { count, tools })
+    : i18n.t("trajectory.restoredCount", { count });
+}
+
+// Core writes the restore event as "restore · restored/mapped · tool n".
+const RESTORE_SUMMARY = /^restore · (\d+)\/\d+(?: · tool (\d+))?$/;
+
+function restoreSummaryText(summary: string): string | null {
+  const match = RESTORE_SUMMARY.exec(summary);
+  if (!match) return null;
+  return restoredText(Number(match[1]), Number(match[2] ?? 0));
+}
+
+/**
+ * A recorded mapping means values were replaced whatever the summary says,
+ * which also covers records synthesized without events.
  */
 export function policyDecision(
-  row: Pick<TrajectoryRow, "summary" | "status">,
+  row: Pick<TrajectoryRow, "policy" | "status">,
   restore: RequestRecord["privacy_restore"],
 ): PolicyDecision {
-  const action = row.summary.split(" · ")[0];
+  const action = row.policy?.action;
   if (action === "redact" || (restore?.mapping_count ?? 0) > 0) {
     return "redact";
   }
   if (action === "warn") return "warn";
+  if (row.policy?.trusted) return "trusted";
   if (action === "block" || row.status === "blocked") return "block";
   if (row.status === "pending") return "inspecting";
   if (row.status === "failed" || row.status === "cancelled") {
@@ -248,20 +487,18 @@ export function extractPrivacyHits(text: string): PrivacyHitGroup[] {
       record(kind, match[0]);
     }
   }
-  return privacyKindOrder
-    .filter((kind) => grouped.has(kind))
-    .map((kind) => {
-      const placeholders = [...(grouped.get(kind) ?? [])];
-      return {
-        kind,
-        label: privacyKindLabel(kind),
-        count: placeholders.length,
-        placeholders,
-      };
-    });
+  return PRIVACY_KIND_ORDER.filter((kind) => grouped.has(kind)).map((kind) => {
+    const placeholders = [...(grouped.get(kind) ?? [])];
+    return {
+      kind,
+      label: privacyKindLabel(kind),
+      count: placeholders.length,
+      placeholders,
+    };
+  });
 }
 
-function kindFromPlaceholder(token: string): (typeof privacyKindOrder)[number] {
+function kindFromPlaceholder(token: string): PrivacyKind {
   const inner = token.slice(1, -1);
   if (inner === "SECRET" || inner.startsWith("SECRET_")) {
     return "common_secret";
@@ -293,6 +530,10 @@ export interface TrajectoryRow {
   conversationContinued?: boolean;
   /** Set on REDIRECT rows: the client model and the model routed with. */
   redirect?: RequestModelRedirect;
+  /** Set on COMPRESS rows whose summary Core wrote in its usual shape. */
+  compression?: ImageCompression;
+  /** Set on POLICY rows that record a decision. */
+  policy?: PolicySummary;
 }
 
 export const TIMELINE_GAP_COLLAPSE_MS = 2000;
@@ -348,6 +589,7 @@ const chipByKind: Record<RequestEvent["kind"], TrajectoryChip> = {
   accepted: "CLIENT",
   model_redirect: "REDIRECT",
   privacy: "POLICY",
+  image_compression: "COMPRESS",
   routed: "ROUTE",
   upstream: "UPSTREAM",
   restore: "RESTORE",
@@ -359,6 +601,7 @@ const laneByChip: Record<TrajectoryChip, TrajectoryLane> = {
   CLIENT: "client",
   REDIRECT: "gateway",
   POLICY: "gateway",
+  COMPRESS: "gateway",
   ROUTE: "gateway",
   UPSTREAM: "upstream",
   RETRY: "upstream",
@@ -473,6 +716,79 @@ function rowRedirect(
   const parts = event.summary.split(REDIRECT_SEPARATOR);
   if (parts.length !== 2 || !parts[0] || !parts[1]) return undefined;
   return { from: parts[0], to: parts[1] };
+}
+
+/** What request image compression did to one attempt. */
+export interface ImageCompression {
+  mode: "lossless" | "lossy";
+  /** The lossy quality; null in lossless mode. */
+  quality: number | null;
+  /** Inline images found, and how many of them were replaced. */
+  images: number;
+  compressed: number;
+  /** Decoded bytes of every inline image, before and after. */
+  beforeBytes: number;
+  afterBytes: number;
+}
+
+// Core writes "lossless · 1/2 images · 75301 → 37406 bytes", or "lossy q80 · …".
+const IMAGE_COMPRESSION_SUMMARY =
+  /^(lossless|lossy)(?: q(\d+))? · (\d+)\/(\d+) images · (\d+) → (\d+) bytes$/;
+
+export function parseImageCompression(
+  summary: string,
+): ImageCompression | null {
+  const match = IMAGE_COMPRESSION_SUMMARY.exec(summary);
+  if (!match) return null;
+  return {
+    mode: match[1] === "lossy" ? "lossy" : "lossless",
+    quality: match[2] ? Number(match[2]) : null,
+    compressed: Number(match[3]),
+    images: Number(match[4]),
+    beforeBytes: Number(match[5]),
+    afterBytes: Number(match[6]),
+  };
+}
+
+export function formatImageBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function imageCompressionModeLabel(value: ImageCompression): string {
+  return value.mode === "lossy" && value.quality !== null
+    ? i18n.t("trajectory.imageCompressionModes.lossyQuality", {
+        quality: value.quality,
+      })
+    : i18n.t(`trajectory.imageCompressionModes.${value.mode}`);
+}
+
+/** How much smaller the images got, in whole percent; null when they did not. */
+export function imageCompressionSavedPercent(
+  value: ImageCompression,
+): number | null {
+  if (value.beforeBytes <= 0 || value.afterBytes >= value.beforeBytes) {
+    return null;
+  }
+  return Math.round((1 - value.afterBytes / value.beforeBytes) * 100);
+}
+
+/** The COMPRESS row text: "1/1 张图片 · 无损 WebP · 73.5 KB → 36.5 KB · 减小 50%". */
+export function imageCompressionText(value: ImageCompression): string {
+  const saved = imageCompressionSavedPercent(value);
+  const parts = [
+    i18n.t("trajectory.imageCompressionImages", {
+      count: value.images,
+      compressed: value.compressed,
+    }),
+    imageCompressionModeLabel(value),
+    `${formatImageBytes(value.beforeBytes)} → ${formatImageBytes(value.afterBytes)}`,
+  ];
+  if (saved !== null) {
+    parts.push(i18n.t("trajectory.imageCompressionSaved", { percent: saved }));
+  }
+  return parts.join(" · ");
 }
 
 /**
@@ -662,7 +978,7 @@ function turnHeaderRow(group: TrajectoryTurnGroup): TrajectoryRow {
     id: `${first.id}:turn`,
     requestId: first.id,
     chip: "TURN",
-    summary: preview ? `${label} · ${preview}` : label,
+    summary: preview ? `${label} · ${compactTitle(preview)}` : label,
     result: i18n.t("trajectory.turnCalls", { count: group.records.length }),
     status,
     tone: statusTone(status),
@@ -838,11 +1154,14 @@ function rowFromEvent(
   const event = settledEvent(record, rawEvent);
   const chip =
     child && event.kind === "upstream" ? "RETRY" : chipByKind[event.kind];
-  const summary =
-    event.kind === "upstream" || event.kind === "completed"
-      ? readableUsageSummary(event.summary)
-      : event.summary;
   const redirect = rowRedirect(record, event);
+  const compression =
+    event.kind === "image_compression"
+      ? parseImageCompression(event.summary)
+      : null;
+  const policy =
+    event.kind === "privacy" ? parsePolicySummary(event.summary) : null;
+  const summary = rowSummary(event, compression, policy);
   return {
     id: `${record.id}:${event.kind}:${event.started_at}:${event.attempt_index}`,
     requestId: record.id,
@@ -858,7 +1177,25 @@ function rowFromEvent(
     child,
     turnIndex: null,
     ...(redirect ? { redirect } : {}),
+    ...(compression ? { compression } : {}),
+    ...(policy ? { policy } : {}),
   };
+}
+
+function rowSummary(
+  event: RequestEvent,
+  compression: ImageCompression | null,
+  policy: PolicySummary | null,
+): string {
+  if (event.kind === "upstream" || event.kind === "completed") {
+    return readableUsageSummary(event.summary);
+  }
+  if (compression) return imageCompressionText(compression);
+  if (policy) return policySummaryText(policy);
+  if (event.kind === "restore") {
+    return restoreSummaryText(event.summary) ?? event.summary;
+  }
+  return event.summary;
 }
 
 /**

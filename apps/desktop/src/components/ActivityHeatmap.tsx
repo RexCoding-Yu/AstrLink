@@ -31,7 +31,7 @@ const LEVELS = [
 const AXIS_WIDTH = 28;
 const GAP = 3;
 const MIN_CELL = 14;
-const MAX_CELL = 18;
+const MAX_ROW_HEIGHT = 22;
 const SHORT_RANGE_CELL_SIZE = 14;
 
 /** Consecutive days, Monday-first. Narrow calendars scroll to recent weeks. */
@@ -104,14 +104,14 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
   const offset = cells.length ? (dateOf(cells[0].date).getDay() + 6) % 7 : 0;
   const columns = Math.max(1, Math.ceil((cells.length + offset) / 7));
   const availableCellSize = (width - AXIS_WIDTH - columns * GAP) / columns;
-  const cellSize = Math.max(
-    MIN_CELL,
-    // Keep a single calendar with readable cells; overflow scrolls locally.
-    Math.min(
-      cells.length > 90 ? MAX_CELL : SHORT_RANGE_CELL_SIZE,
-      availableCellSize,
-    ),
-  );
+  // A long range fills the panel width and scrolls below readable cells. Rows
+  // stop growing so wide windows widen the cells instead of the panel height.
+  const cellWidth =
+    cells.length > 90
+      ? Math.max(MIN_CELL, availableCellSize)
+      : SHORT_RANGE_CELL_SIZE;
+  const cellHeight = Math.min(cellWidth, MAX_ROW_HEIGHT);
+  const calendarWidth = columns * cellWidth + (columns - 1) * GAP;
   const monthFormat = useMemo(
     () => new Intl.DateTimeFormat(locale, { month: "short" }),
     [locale],
@@ -170,7 +170,9 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
       <div
         className="grid min-w-0 py-1"
         style={{
-          gridTemplateColumns: `${AXIS_WIDTH}px minmax(0, 1fr)`,
+          // Short ranges keep compact cells; split their spare width evenly.
+          gridTemplateColumns: `${AXIS_WIDTH}px minmax(0, ${calendarWidth}px)`,
+          justifyContent: "center",
           gap: GAP,
         }}
         role="group"
@@ -181,7 +183,7 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
           className="grid"
           style={{
             gap: GAP,
-            gridTemplateRows: `20px repeat(7, ${cellSize}px)`,
+            gridTemplateRows: `20px repeat(7, ${cellHeight}px)`,
           }}
         >
           {Array.from({ length: 7 }, (_, day) => (
@@ -210,8 +212,8 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
             className="grid w-max pb-3"
             style={{
               gap: GAP,
-              gridTemplateColumns: `repeat(${columns}, ${cellSize}px)`,
-              gridTemplateRows: `20px repeat(7, ${cellSize}px)`,
+              gridTemplateColumns: `repeat(${columns}, ${cellWidth}px)`,
+              gridTemplateRows: `20px repeat(7, ${cellHeight}px)`,
             }}
           >
             {[...monthLabels].map(([column, month]) => (

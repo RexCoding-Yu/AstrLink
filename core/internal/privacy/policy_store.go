@@ -37,6 +37,7 @@ func FromContractPolicy(policy contract.Policy) (Policy, error) {
 		kindRules[Kind(rule.Kind)] = KindRule{
 			Enabled: rule.Enabled,
 			Style:   rule.Style.Effective(),
+			Notify:  rule.Notify,
 		}
 	}
 	result := Policy{

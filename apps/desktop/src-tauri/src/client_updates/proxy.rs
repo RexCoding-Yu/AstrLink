@@ -142,6 +142,7 @@ mod tests {
             path: "/usr/bin:/bin".into(),
             use_system_proxy: true,
             proxy_env: Some(proxy_env),
+            wsl: None,
         };
         let command = CommandSpec::new(
             "/bin/sh",

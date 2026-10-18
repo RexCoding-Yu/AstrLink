@@ -17,6 +17,8 @@ export function SegmentedControl<T extends string>({
     label: string;
     count?: number;
     icon?: ReactNode;
+    /** Trailing status, such as a `StatusBadge`, read with the label. */
+    badge?: ReactNode;
   }[];
   value: T;
   onValueChange: (value: T) => void;
@@ -59,6 +61,7 @@ export function SegmentedControl<T extends string>({
             </span>
           ) : null}
           {option.label}
+          {option.badge}
           {option.count !== undefined ? (
             <span className="min-w-3 text-micro text-muted-foreground tabular-nums">
               {option.count}

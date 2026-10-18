@@ -211,6 +211,9 @@ const (
 	AuditWithheldPrivacyRestored AuditWithheldReason = "privacy_restored"
 	AuditWithheldPrivacyFailOpen AuditWithheldReason = "privacy_fail_open"
 	AuditWithheldPrivacyPending  AuditWithheldReason = "privacy_pending"
+	// AuditWithheldPrivacyTrusted covers requests that went uninspected to a
+	// trusted provider, upstream copy included.
+	AuditWithheldPrivacyTrusted AuditWithheldReason = "privacy_trusted"
 	// AuditWithheldPrivacyUnknown covers parts captured before decisions
 	// were recorded, or whose inspection never finished.
 	AuditWithheldPrivacyUnknown AuditWithheldReason = "privacy_unknown"
@@ -225,8 +228,8 @@ const (
 func (reason AuditWithheldReason) Valid() bool {
 	switch reason {
 	case AuditWithheldPrivacyRedacted, AuditWithheldPrivacyBlocked, AuditWithheldPrivacyRestored,
-		AuditWithheldPrivacyFailOpen, AuditWithheldPrivacyPending, AuditWithheldPrivacyUnknown,
-		AuditWithheldRawLocked, AuditWithheldRawNotKept:
+		AuditWithheldPrivacyFailOpen, AuditWithheldPrivacyPending, AuditWithheldPrivacyTrusted,
+		AuditWithheldPrivacyUnknown, AuditWithheldRawLocked, AuditWithheldRawNotKept:
 		return true
 	default:
 		return false

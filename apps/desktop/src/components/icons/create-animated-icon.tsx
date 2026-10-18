@@ -1,3 +1,4 @@
+import { isWebEdition } from "../../edition";
 import { useAnimation, type AnimationDefinition } from "motion/react";
 import {
   forwardRef,
@@ -49,7 +50,13 @@ export function createAnimatedIcon(
       useEffect(() => {
         const svg = svgRef.current;
         if (!svg || !animateOnHover) return;
+        // Chromium needs an explicit starting value for animated SVG attributes.
+        // Keep the native edition's animation initialization unchanged.
+        if (isWebEdition) controls.set(normal);
         const trigger = svg.closest(interactiveSelector) ?? svg;
+        // Chromium makes an SVG with focus listeners mouse-focusable, so a
+        // clicked standalone icon would keep a focus ring and its hover pose.
+        const tracksFocus = trigger !== svg;
         const reducedMotion = window.matchMedia(
           "(prefers-reduced-motion: reduce)",
         );
@@ -102,8 +109,10 @@ export function createAnimatedIcon(
 
         trigger.addEventListener("mouseenter", enter);
         trigger.addEventListener("mouseleave", leave);
-        trigger.addEventListener("focusin", focus);
-        trigger.addEventListener("focusout", blur);
+        if (tracksFocus) {
+          trigger.addEventListener("focusin", focus);
+          trigger.addEventListener("focusout", blur);
+        }
         reducedMotion.addEventListener("change", update);
         return () => {
           ++generation;

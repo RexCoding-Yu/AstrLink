@@ -48,6 +48,24 @@
       "phase": "alpha",
       "primary": false,
       "streaming": false
+    },
+    {
+      "id": "openai.embeddings",
+      "phase": "alpha",
+      "primary": false,
+      "streaming": false
+    },
+    {
+      "id": "google.embeddings",
+      "phase": "alpha",
+      "primary": false,
+      "streaming": false
+    },
+    {
+      "id": "rerank",
+      "phase": "alpha",
+      "primary": false,
+      "streaming": false
     }
   ],
   "plan_types": [

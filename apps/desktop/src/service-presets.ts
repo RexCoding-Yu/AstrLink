@@ -37,8 +37,11 @@ export interface ProtocolDescriptor {
   streaming: boolean;
 }
 
-/** Where a preset account lives; "official" marks a single-site vendor. */
-export type ServiceSiteID = "cn" | "global" | "official";
+/**
+ * Where a preset account lives; "official" marks a single-site vendor and
+ * "local" a gateway running on this computer.
+ */
+export type ServiceSiteID = "cn" | "global" | "official" | "local";
 
 export interface ServiceSite {
   id: ServiceSiteID;
@@ -170,6 +173,19 @@ export const alphaProtocolDescriptors: readonly ProtocolDescriptor[] = [
   },
   { id: "openai.models", phase: "alpha", primary: false, streaming: false },
   { id: "google.models", phase: "alpha", primary: false, streaming: false },
+  {
+    id: "openai.embeddings",
+    phase: "alpha",
+    primary: false,
+    streaming: false,
+  },
+  {
+    id: "google.embeddings",
+    phase: "alpha",
+    primary: false,
+    streaming: false,
+  },
+  { id: "rerank", phase: "alpha", primary: false, streaming: false },
 ];
 
 export const protocolLabels: Readonly<Record<string, string>> = {
@@ -181,6 +197,9 @@ export const protocolLabels: Readonly<Record<string, string>> = {
   "openai.completions": "OpenAI Legacy Completions",
   "openai.models": "OpenAI Models",
   "google.models": "Gemini Models",
+  "openai.embeddings": "OpenAI Embeddings",
+  "google.embeddings": "Gemini Embeddings",
+  rerank: "Rerank",
 };
 
 export const protocolClients: Readonly<Record<string, string>> = {
@@ -210,6 +229,9 @@ export const protocolEntryPaths: Readonly<Record<string, string>> = {
   "openai.completions": "/v1/completions",
   "openai.models": "/v1/models",
   "google.models": "/v1beta/models",
+  "openai.embeddings": "/v1/embeddings",
+  "google.embeddings": "/v1beta/models/:model:embedContent",
+  rerank: "/v1/rerank",
 };
 
 export function protocolEntryPath(
@@ -227,7 +249,10 @@ const allProtocolIDs = alphaProtocolDescriptors.map(({ id }) => id);
 const profileDefinitions: Readonly<
   Record<
     HTTPServicePresetID,
-    Omit<HTTPServicePreset, "capabilities" | "sites"> & {
+    Omit<
+      HTTPServicePreset,
+      "capabilities" | "sites" | "label" | "description" | "defaultName"
+    > & {
       sites?: readonly ServiceSite[];
       capabilityIDs: readonly string[];
       convertTo?: Readonly<Record<string, string>>;
@@ -236,9 +261,6 @@ const profileDefinitions: Readonly<
 > = {
   opencode_go: {
     id: "opencode_go",
-    label: "OpenCode Go",
-    description: "",
-    defaultName: "OpenCode Go",
     kind: "opencode_go",
     baseURL: "https://opencode.ai/zen/go/v1",
     baseURLPlaceholder: "https://opencode.ai/zen/go/v1",
@@ -254,9 +276,6 @@ const profileDefinitions: Readonly<
   },
   opencode_zen: {
     id: "opencode_zen",
-    label: "OpenCode Zen",
-    description: "",
-    defaultName: "OpenCode Zen",
     kind: "opencode_zen",
     baseURL: "https://opencode.ai/zen/v1",
     baseURLPlaceholder: "https://opencode.ai/zen/v1",
@@ -272,9 +291,6 @@ const profileDefinitions: Readonly<
   },
   kimi_coding: {
     id: "kimi_coding",
-    label: "Kimi Coding",
-    description: "",
-    defaultName: "Kimi Coding",
     kind: "kimi_coding",
     baseURL: "https://api.kimi.ai/coding",
     baseURLPlaceholder: "https://api.kimi.ai/coding",
@@ -299,9 +315,6 @@ const profileDefinitions: Readonly<
   },
   glm_coding: {
     id: "glm_coding",
-    label: "GLM Coding Plan",
-    description: "",
-    defaultName: "GLM Coding Plan",
     kind: "glm_coding",
     baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
     baseURLPlaceholder: "https://open.bigmodel.cn/api/coding/paas/v4",
@@ -317,9 +330,6 @@ const profileDefinitions: Readonly<
   },
   minimax_coding: {
     id: "minimax_coding",
-    label: "MiniMax Coding Plan",
-    description: "",
-    defaultName: "MiniMax Coding Plan",
     kind: "minimax_coding",
     baseURL: "https://api.minimax.cn/v1",
     baseURLPlaceholder: "https://api.minimax.cn/v1",
@@ -344,10 +354,6 @@ const profileDefinitions: Readonly<
   },
   newapi: {
     id: "newapi",
-    label: "New API",
-    description:
-      "外部网关首选。适用于 New API 生态面板，自动启用全部兼容协议。",
-    defaultName: "New API",
     kind: "newapi",
     baseURL: "",
     baseURLPlaceholder: "https://api.example.com",
@@ -356,25 +362,43 @@ const profileDefinitions: Readonly<
     capabilityIDs: allProtocolIDs,
     advancedOnStart: false,
   },
+  magpie: {
+    id: "magpie",
+    kind: "magpie",
+    baseURL: "http://127.0.0.1:3425",
+    baseURLPlaceholder: "http://127.0.0.1:3425",
+    sites: [{ id: "local", baseURL: "http://127.0.0.1:3425" }],
+    authScheme: "bearer",
+    headerName: "",
+    // Magpie documents Chat, Responses, Messages, Gemini and both catalogs;
+    // Responses Compact and legacy Completions are not on its surface.
+    capabilityIDs: [
+      "openai.responses",
+      "anthropic.messages",
+      "google.generate_content",
+      "openai.chat",
+      "openai.models",
+      "google.models",
+    ],
+    advancedOnStart: false,
+  },
   openai_compatible: {
     id: "openai_compatible",
-    label: "OpenAI 兼容（Chat / Completions）",
-    description:
-      "适用于提供标准 OpenAI Chat、Completions 与 Models 接口的 API 提供商。",
-    defaultName: "OpenAI 兼容 API 提供商",
     kind: "openai_compatible",
     baseURL: "",
     baseURLPlaceholder: "https://api.example.com/v1",
     authScheme: "bearer",
     headerName: "",
-    capabilityIDs: ["openai.chat", "openai.completions", "openai.models"],
+    capabilityIDs: [
+      "openai.chat",
+      "openai.completions",
+      "openai.models",
+      "openai.embeddings",
+    ],
     advancedOnStart: false,
   },
   openai: {
     id: "openai",
-    label: "OpenAI 官方 API",
-    description: "直连 OpenAI 官方 API。",
-    defaultName: "OpenAI API",
     kind: "openai",
     baseURL: "https://api.openai.com/v1",
     baseURLPlaceholder: "https://api.openai.com/v1",
@@ -386,14 +410,12 @@ const profileDefinitions: Readonly<
       "openai.chat",
       "openai.completions",
       "openai.models",
+      "openai.embeddings",
     ],
     advancedOnStart: false,
   },
   anthropic: {
     id: "anthropic",
-    label: "Anthropic 官方 API",
-    description: "直连 Anthropic Messages API。",
-    defaultName: "Anthropic API",
     kind: "anthropic",
     baseURL: "https://api.anthropic.com",
     baseURLPlaceholder: "https://api.anthropic.com",
@@ -404,23 +426,22 @@ const profileDefinitions: Readonly<
   },
   gemini: {
     id: "gemini",
-    label: "Google Gemini 官方 API",
-    description: "直连 Gemini Generate Content 与 Models API。",
-    defaultName: "Gemini API",
     kind: "gemini",
     baseURL: "https://generativelanguage.googleapis.com",
     baseURLPlaceholder: "https://generativelanguage.googleapis.com",
     authScheme: "google_api_key",
     headerName: "",
-    capabilityIDs: ["google.generate_content", "google.models", "openai.chat"],
+    capabilityIDs: [
+      "google.generate_content",
+      "google.models",
+      "google.embeddings",
+      "openai.chat",
+    ],
     convertTo: { "openai.chat": "google.generate_content" },
     advancedOnStart: false,
   },
   deepseek: {
     id: "deepseek",
-    label: "DeepSeek",
-    description: "",
-    defaultName: "DeepSeek API",
     kind: "deepseek",
     baseURL: "https://api.deepseek.com/v1",
     baseURLPlaceholder: "https://api.deepseek.com/v1",
@@ -436,9 +457,6 @@ const profileDefinitions: Readonly<
   },
   qwen: {
     id: "qwen",
-    label: "通义千问（百炼）",
-    description: "",
-    defaultName: "通义千问（百炼） API",
     kind: "qwen",
     baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     baseURLPlaceholder: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -459,9 +477,6 @@ const profileDefinitions: Readonly<
   },
   moonshot: {
     id: "moonshot",
-    label: "Kimi（Moonshot）",
-    description: "",
-    defaultName: "Kimi（Moonshot） API",
     kind: "moonshot",
     baseURL: "https://api.moonshot.cn/v1",
     baseURLPlaceholder: "https://api.moonshot.cn/v1",
@@ -481,9 +496,6 @@ const profileDefinitions: Readonly<
   },
   glm: {
     id: "glm",
-    label: "智谱 GLM",
-    description: "",
-    defaultName: "智谱 GLM API",
     kind: "glm",
     baseURL: "https://open.bigmodel.cn/api/paas/v4",
     baseURLPlaceholder: "https://open.bigmodel.cn/api/paas/v4",
@@ -498,9 +510,6 @@ const profileDefinitions: Readonly<
   },
   minimax: {
     id: "minimax",
-    label: "MiniMax",
-    description: "",
-    defaultName: "MiniMax API",
     kind: "minimax",
     baseURL: "https://api.minimax.cn/v1",
     baseURLPlaceholder: "https://api.minimax.cn/v1",
@@ -524,9 +533,6 @@ const profileDefinitions: Readonly<
   },
   doubao: {
     id: "doubao",
-    label: "豆包（火山方舟）",
-    description: "",
-    defaultName: "豆包（火山方舟） API",
     kind: "doubao",
     baseURL: "https://ark.cn-beijing.volces.com/api/v3",
     baseURLPlaceholder: "https://ark.cn-beijing.volces.com/api/v3",
@@ -537,9 +543,6 @@ const profileDefinitions: Readonly<
   },
   xai: {
     id: "xai",
-    label: "xAI（Grok）",
-    description: "",
-    defaultName: "xAI（Grok） API",
     kind: "xai",
     baseURL: "https://api.x.ai/v1",
     baseURLPlaceholder: "https://api.x.ai/v1",
@@ -557,10 +560,6 @@ const profileDefinitions: Readonly<
   },
   custom: {
     id: "custom",
-    label: "自定义",
-    description:
-      "仅在 API 提供商不符合上述类型时使用；需要在高级配置中声明能力。",
-    defaultName: "自定义 API 提供商",
     kind: "custom",
     baseURL: "",
     baseURLPlaceholder: "https://api.example.com",
@@ -634,13 +633,14 @@ export function httpServicePreset(
     sites,
     ...preset
   } = definition;
-  return localizeHttpPreset({
+  return {
     ...preset,
+    ...presetText(profileID),
     sites:
       sites ??
       (preset.baseURL ? [{ id: "official", baseURL: preset.baseURL }] : []),
     capabilities,
-  });
+  };
 }
 
 /** The preset site an address belongs to, or null for a custom address. */
@@ -662,67 +662,48 @@ export function serviceSiteForBaseURL(
   );
 }
 
-function localizeHttpPreset(preset: HTTPServicePreset): HTTPServicePreset {
-  switch (preset.id) {
-    case "deepseek":
-    case "qwen":
-    case "moonshot":
-    case "glm":
-    case "minimax":
-    case "doubao":
-    case "xai":
-      return {
-        ...preset,
-        label: i18n.t(`kind.${preset.id}`),
-        defaultName: i18n.t(`kind.${preset.id}`),
-        description: i18n.t(`presets.${preset.id}Description`),
-      };
-    case "opencode_go":
-    case "opencode_zen":
-    case "kimi_coding":
-    case "glm_coding":
-    case "minimax_coding":
-      return {
-        ...preset,
-        description: i18n.t(`presets.${preset.id}Description`),
-      };
-    case "newapi":
-      return {
-        ...preset,
-        description: i18n.t("presets.newapiDescription"),
-      };
+function presetText(
+  id: HTTPServicePresetID,
+): Pick<HTTPServicePreset, "label" | "description" | "defaultName"> {
+  switch (id) {
     case "openai_compatible":
       return {
-        ...preset,
         label: i18n.t("presets.openaiCompatible"),
         description: i18n.t("presets.openaiCompatibleDescription"),
         defaultName: i18n.t("presets.openaiCompatibleName"),
       };
-    case "openai":
-      return {
-        ...preset,
-        label: i18n.t("presets.openaiOfficial"),
-        description: i18n.t("presets.openaiOfficialDescription"),
-      };
-    case "anthropic":
-      return {
-        ...preset,
-        label: i18n.t("presets.anthropicOfficial"),
-        description: i18n.t("presets.anthropicOfficialDescription"),
-      };
-    case "gemini":
-      return {
-        ...preset,
-        label: i18n.t("presets.geminiOfficial"),
-        description: i18n.t("presets.geminiOfficialDescription"),
-      };
     case "custom":
       return {
-        ...preset,
         label: i18n.t("presets.custom"),
         description: i18n.t("presets.customDescription"),
         defaultName: i18n.t("presets.customName"),
       };
+    case "openai":
+      return {
+        label: i18n.t("presets.openaiOfficial"),
+        description: i18n.t("presets.openaiOfficialDescription"),
+        defaultName: "OpenAI API",
+      };
+    case "anthropic":
+      return {
+        label: i18n.t("presets.anthropicOfficial"),
+        description: i18n.t("presets.anthropicOfficialDescription"),
+        defaultName: "Anthropic API",
+      };
+    case "gemini":
+      return {
+        label: i18n.t("presets.geminiOfficial"),
+        description: i18n.t("presets.geminiOfficialDescription"),
+        defaultName: "Gemini API",
+      };
+    default: {
+      const label = httpServiceKindLabel(id);
+      return {
+        label,
+        description: i18n.t(`presets.${id}Description`),
+        defaultName: label,
+      };
+    }
   }
 }
 
@@ -752,6 +733,7 @@ export function httpServiceKindLabel(kind: HTTPServiceKind): string {
   return (
     {
       newapi: "New API",
+      magpie: "Magpie",
       openai: "OpenAI",
       anthropic: "Anthropic",
       gemini: "Gemini",

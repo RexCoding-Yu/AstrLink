@@ -35,7 +35,8 @@ use crate::{
 pub const TRAY_ID: &str = "main";
 /// The popover webview. Must match `TRAY_POPOVER_LABEL` in the frontend.
 pub const POPOVER_LABEL: &str = "tray-popover";
-/// Emitted to the main window with the `WorkspacePage.kind` to open.
+/// Emitted to the main window with the `WorkspacePage.kind` to open, or a
+/// named view of one such as `failedToday`.
 pub const NAVIGATE_EVENT: &str = "tray:navigate";
 /// Emitted to the popover with a fresh [`TrayStateSnapshot`].
 pub const STATE_EVENT: &str = "tray:state";
@@ -65,9 +66,15 @@ const MAX_SUBSCRIPTION_SERVICES: usize = 8;
 /// Primary, secondary and a handful of named limits per plan.
 const MAX_WINDOWS_PER_SUBSCRIPTION: usize = 6;
 const MAX_WINDOW_LABEL_CHARS: usize = 40;
+/// Core names ten kinds today; the bound leaves room for newer ones.
+const MAX_PRIVACY_KINDS: usize = 16;
 
+/// Width of the popover page in CSS pixels; `TRAY_POPOVER_WIDTH` in the
+/// frontend.
 pub const POPOVER_WIDTH: f64 = 360.0;
 const POPOVER_INITIAL_HEIGHT: f64 = 320.0;
+/// Windows text size tops out at 225%; anything beyond is a bogus report.
+const POPOVER_MAX_ZOOM: f64 = 3.0;
 const POPOVER_MIN_HEIGHT: f64 = 96.0;
 /// Upper bound before the work area itself clamps the window; a folded
 /// subscription list of ten rows plus today's numbers fits under this.
@@ -90,24 +97,29 @@ const POPOVER_BLUR_GUARD: Duration = Duration::from_millis(150);
 /// resulting blur; past this it hides regardless.
 const POPOVER_HANDOFF_TIMEOUT: Duration = Duration::from_millis(400);
 
-const SUBSCRIPTION_KINDS: [&str; 9] = [
+const SUBSCRIPTION_KINDS: [&str; 10] = [
     "codex_subscription",
     "claude_subscription",
     "grok_subscription",
     "antigravity_subscription",
     "copilot_subscription",
+    "droid_subscription",
     "kimi_coding",
     "glm_coding",
     "minimax_coding",
     "opencode_go",
 ];
 
-const NAVIGATION_KINDS: [&str; 8] = [
+const NAVIGATION_KINDS: [&str; 10] = [
     "overview",
     "list",
     "tokens",
     "safety",
     "records",
+    // Request records narrowed to the calls behind today's failure count.
+    "failedToday",
+    // The safety page opened on its privacy statistics.
+    "privacyOverview",
     "routing",
     "agentTools",
     "settings",
@@ -194,6 +206,32 @@ pub struct SubscriptionDigest {
     pub windows: Vec<WindowDigest>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PrivacyKindCount {
+    pub kind: String,
+    pub count: i64,
+}
+
+/// What the privacy policy did to today's calls. Values and placeholders
+/// never reach the host; these are counts only.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PrivacyDigest {
+    /// The policy switch right now; None when it could not be read.
+    pub enabled: Option<bool>,
+    /// Calls the policy finished checking.
+    pub checked: i64,
+    pub redacted: i64,
+    pub warned: i64,
+    pub blocked: i64,
+    /// Calls that went upstream unchecked because the check failed.
+    pub unchecked: i64,
+    pub replaced: i64,
+    pub restored: i64,
+    pub unrestored: i64,
+    /// Kinds found, the most frequent first.
+    pub kinds: Vec<PrivacyKindCount>,
+}
+
 /// Everything the popover's usage cards need, collected in one pass. Each
 /// field is independent: a failed lookup hides its card, not the whole panel.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -204,6 +242,7 @@ pub struct UsageDigest {
     pub yesterday_tokens: Option<i64>,
     pub top_model: Option<Share>,
     pub cost_today: Option<CostDigest>,
+    pub privacy: Option<PrivacyDigest>,
     pub top_client: Option<Share>,
     pub last_request: Option<LastRequest>,
     pub month_tokens: Option<i64>,
@@ -553,6 +592,38 @@ fn cost_from(value: &serde_json::Value) -> Option<CostDigest> {
     })
 }
 
+fn privacy_from(summary: &serde_json::Value, enabled: Option<bool>) -> Option<PrivacyDigest> {
+    let totals = summary.get("totals")?;
+    let count = |key: &str| totals.get(key).and_then(|value| value.as_i64());
+    let redacted = count("redacted")?;
+    let warned = count("warned")?;
+    let blocked = count("blocked")?;
+    let kinds = summary
+        .get("by_kind")?
+        .as_array()?
+        .iter()
+        .filter_map(|kind| {
+            Some(PrivacyKindCount {
+                kind: kind.get("kind")?.as_str()?.to_string(),
+                count: kind.get("count")?.as_i64()?,
+            })
+        })
+        .take(MAX_PRIVACY_KINDS)
+        .collect();
+    Some(PrivacyDigest {
+        enabled,
+        checked: count("allowed")? + count("ignored")? + warned + redacted + blocked,
+        redacted,
+        warned,
+        blocked,
+        unchecked: count("fail_open")?,
+        replaced: count("replaced")?,
+        restored: count("restored")?,
+        unrestored: count("unrestored")?,
+        kinds,
+    })
+}
+
 fn top_client_from(tokens: &serde_json::Value, usage: &serde_json::Value) -> Option<Share> {
     let names: std::collections::HashMap<&str, &str> = tokens
         .get("items")?
@@ -811,6 +882,27 @@ async fn collect_digest(
             .and_then(|summary| cost_from(&summary));
     }
 
+    if prefs.privacy {
+        if let Ok(summary) = manager
+            .get_privacy_summary(
+                &windows.today_from,
+                &windows.today_to,
+                &windows.time_zone,
+                "day",
+            )
+            .await
+        {
+            // Read beside the counts, so the card can say protection is off
+            // instead of showing zeros that look like a clean day.
+            let enabled = manager
+                .get_privacy_policy()
+                .await
+                .ok()
+                .and_then(|record| record.policy.get("enabled")?.as_bool());
+            digest.privacy = privacy_from(&summary, enabled);
+        }
+    }
+
     if prefs.top_client {
         if let (Ok(tokens), Ok(usage)) = (
             manager.list_access_tokens().await,
@@ -982,7 +1074,8 @@ struct TrayRuntime {
     last_click_refresh: Option<Instant>,
     refresh_in_flight: bool,
     anchor: Option<PopoverAnchor>,
-    popover_height: f64,
+    /// Logical window size the popover page last asked for.
+    popover_size: (f64, f64),
     popover_shown_at: Option<Instant>,
     popover_hidden_at: Option<Instant>,
     /// The app the popover took the foreground from, if not AstrLink.
@@ -1001,7 +1094,7 @@ impl Default for TrayState {
     fn default() -> Self {
         Self {
             inner: Mutex::new(TrayRuntime {
-                popover_height: POPOVER_INITIAL_HEIGHT,
+                popover_size: (POPOVER_WIDTH, POPOVER_INITIAL_HEIGHT),
                 ..TrayRuntime::default()
             }),
         }
@@ -1294,9 +1387,7 @@ pub fn perform(app: &AppHandle, action: TrayAction) -> Result<(), String> {
             crate::show_main_window(app);
         }
         TrayAction::Navigate { page } => {
-            if !NAVIGATION_KINDS.contains(&page.as_str()) {
-                return Err("unknown tray navigation target".to_string());
-            }
+            check_navigation(&page)?;
             hide_popover(app);
             navigate(app, &page);
         }
@@ -1360,6 +1451,15 @@ fn run_core(app: &AppHandle, op: CoreOp) {
     }
 }
 
+/// The main window follows only the pages it knows; anything else is refused.
+fn check_navigation(page: &str) -> Result<(), String> {
+    if NAVIGATION_KINDS.contains(&page) {
+        Ok(())
+    } else {
+        Err("unknown tray navigation target".to_string())
+    }
+}
+
 fn navigate(app: &AppHandle, kind: &str) {
     crate::show_main_window(app);
     if let Err(error) = app.emit_to("main", NAVIGATE_EVENT, kind) {
@@ -1407,10 +1507,15 @@ fn copy_address(app: &AppHandle) -> Result<(), String> {
 // Popover window
 // ---------------------------------------------------------------------------
 
-fn build_popover_window(app: &AppHandle, x: f64, y: f64, height: f64) -> Result<(), String> {
+fn build_popover_window(
+    app: &AppHandle,
+    x: f64,
+    y: f64,
+    (width, height): (f64, f64),
+) -> Result<(), String> {
     let mut builder = WebviewWindowBuilder::new(app, POPOVER_LABEL, WebviewUrl::default())
         .title("AstrLink")
-        .inner_size(POPOVER_WIDTH, height)
+        .inner_size(width, height)
         .position(x, y)
         .decorations(false)
         .transparent(true)
@@ -1437,14 +1542,18 @@ fn build_popover_window(app: &AppHandle, x: f64, y: f64, height: f64) -> Result<
     Ok(())
 }
 
-fn place_popover(app: &AppHandle, anchor: PopoverAnchor, height: f64) -> Option<(f64, f64)> {
+fn place_popover(
+    app: &AppHandle,
+    anchor: PopoverAnchor,
+    (width, height): (f64, f64),
+) -> Option<(f64, f64)> {
     let window = app.get_webview_window(POPOVER_LABEL)?;
     // Never taller than the work area it hangs in; the panel scrolls inside.
     let height = height
         .min(anchor.work.height - 2.0 * POPOVER_MARGIN_Y)
         .max(POPOVER_MIN_HEIGHT);
-    let (x, y) = popover_placement(anchor.icon, anchor.work, (POPOVER_WIDTH, height));
-    let _ = window.set_size(LogicalSize::new(POPOVER_WIDTH, height));
+    let (x, y) = popover_placement(anchor.icon, anchor.work, (width, height));
+    let _ = window.set_size(LogicalSize::new(width, height));
     let _ = window.set_position(LogicalPosition::new(x, y));
     Some((x, y))
 }
@@ -1464,7 +1573,7 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
         crate::show_main_window(app);
         return;
     };
-    let height = {
+    let size = {
         let mut runtime = state.lock();
         if runtime
             .popover_hidden_at
@@ -1474,22 +1583,22 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
             return;
         }
         runtime.anchor = Some(anchor);
-        runtime.popover_height
+        runtime.popover_size
     };
     if app.get_webview_window(POPOVER_LABEL).is_some() {
-        place_popover(app, anchor, height);
+        place_popover(app, anchor, size);
         present_popover(app);
         return;
     }
     // First open: the webview does not exist yet. Native window creation
     // stays off the event loop (WebView2 deadlocks when a callback creates a
     // webview) and off the async workers, exactly like the inspector windows.
-    let (x, y) = popover_placement(anchor.icon, anchor.work, (POPOVER_WIDTH, height));
+    let (x, y) = popover_placement(anchor.icon, anchor.work, size);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let build_app = app.clone();
         let built = tauri::async_runtime::spawn_blocking(move || {
-            build_popover_window(&build_app, x, y, height)
+            build_popover_window(&build_app, x, y, size)
         })
         .await
         .map_err(|error| format!("popover build task failed: {error}"))
@@ -1628,9 +1737,9 @@ fn return_foreground(_pid: i32) -> bool {
     false
 }
 
-/// The popover reports its content height; the window follows it and stays
-/// anchored to the tray icon.
-pub fn resize_popover(app: &AppHandle, height: f64) -> Result<(), String> {
+/// The popover reports its content height and the pixel ratio it draws at;
+/// the window follows them and stays anchored to the tray icon.
+pub fn resize_popover(app: &AppHandle, height: f64, device_pixel_ratio: f64) -> Result<(), String> {
     if !height.is_finite() {
         return Err("popover height must be finite".to_string());
     }
@@ -1638,15 +1747,37 @@ pub fn resize_popover(app: &AppHandle, height: f64) -> Result<(), String> {
     let Some(state) = app.try_state::<TrayState>() else {
         return Ok(());
     };
+    let scale_factor = app
+        .get_webview_window(POPOVER_LABEL)
+        .and_then(|window| window.scale_factor().ok())
+        .unwrap_or(device_pixel_ratio);
+    let size = popover_size(height, device_pixel_ratio, scale_factor);
     let anchor = {
         let mut runtime = state.lock();
-        runtime.popover_height = height;
+        runtime.popover_size = size;
         runtime.anchor
     };
     if let Some(anchor) = anchor {
-        place_popover(app, anchor, height);
+        place_popover(app, anchor, size);
     }
     Ok(())
+}
+
+/// The logical window size for popover content `height` CSS pixels tall,
+/// drawn at `device_pixel_ratio` in a window with `scale_factor`. Windows
+/// folds its Text size accessibility setting into the page's pixel ratio but
+/// not into the window's scale factor, so at 110% the page lays out 10%
+/// larger than its window and loses its right and bottom edges.
+fn popover_size(height: f64, device_pixel_ratio: f64, scale_factor: f64) -> (f64, f64) {
+    let zoom = device_pixel_ratio / scale_factor;
+    // A ratio read just before a move to a sharper monitor must not shrink
+    // the window below its content.
+    let zoom = if zoom.is_finite() {
+        zoom.clamp(1.0, POPOVER_MAX_ZOOM)
+    } else {
+        1.0
+    };
+    (POPOVER_WIDTH * zoom, height * zoom)
 }
 
 // ---------------------------------------------------------------------------
@@ -1785,6 +1916,13 @@ fn popover_visible(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Request records were deleted. Today's figures are counted from them, so the
+/// local numbers are read again now instead of at the next scheduled pass.
+/// Plan quotas are unaffected and stay cached.
+pub fn records_changed(app: &AppHandle) {
+    request_usage_refresh(app, true, PlanRefresh::Reuse);
+}
+
 /// Schedules a usage refresh. Clicks are debounced; state transitions are not.
 pub fn request_usage_refresh(app: &AppHandle, immediate: bool, plans: PlanRefresh) {
     if let Some(state) = app.try_state::<TrayState>() {
@@ -1871,9 +2009,12 @@ pub fn start(app: &AppHandle) {
     });
 
     // Agent-side reads are short bursts; a tight local poll keeps the
-    // "being watched" icon honest without any push channel from Core.
+    // "being watched" icon honest without any push channel from Core. The
+    // same tick reads the requests the privacy policy warned about.
     let observer_manager = Arc::clone(manager.inner());
+    let notifier = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut warnings = crate::privacy_warnings::WarningCursor::default();
         loop {
             tokio::time::sleep(OBSERVER_POLL_INTERVAL).await;
             if observer_manager.view().phase != CorePhase::Ready {
@@ -1881,6 +2022,7 @@ pub fn start(app: &AppHandle) {
             }
             // Errors are transient (Core restarting); the next tick retries.
             let _ = observer_manager.poll_observers().await;
+            crate::privacy_warnings::poll(&notifier, &observer_manager, &mut warnings).await;
         }
     });
 }
@@ -1927,6 +2069,21 @@ mod tests {
             cost_today: Some(CostDigest {
                 amount_usd: 0.834,
                 unpriced: 0,
+            }),
+            privacy: Some(PrivacyDigest {
+                enabled: Some(true),
+                checked: 120,
+                redacted: 9,
+                warned: 0,
+                blocked: 1,
+                unchecked: 0,
+                replaced: 23,
+                restored: 17,
+                unrestored: 0,
+                kinds: vec![PrivacyKindCount {
+                    kind: "email".to_string(),
+                    count: 14,
+                }],
             }),
             top_client: None,
             last_request: None,
@@ -2338,6 +2495,27 @@ mod tests {
         let idle = serde_json::json!({"items": [{"token_id": "tok_a", "today_tokens": 0, "total_tokens": 1}]});
         assert!(top_client_from(&tokens, &idle).is_none());
 
+        let privacy = serde_json::json!({
+            "totals": {"requests": 40, "allowed": 27, "ignored": 3, "warned": 1, "redacted": 6,
+                       "blocked": 2, "fail_open": 1, "replaced": 11, "restored": 7,
+                       "restored_visible": 5, "restored_tool_arguments": 2, "unrestored": 1,
+                       "ignored_allowlisted": 4, "ignored_low_confidence": 0},
+            "by_day": [], "by_hour": [],
+            "by_kind": [{"kind": "email", "count": 8}, {"kind": "phone", "count": 3}]
+        });
+        let digest = privacy_from(&privacy, Some(false)).unwrap();
+        assert_eq!(digest.enabled, Some(false));
+        // Off and failed checks are calls, not checks; ignored calls were checked.
+        assert_eq!(digest.checked, 39);
+        assert_eq!(digest.unchecked, 1);
+        assert_eq!(
+            (digest.replaced, digest.restored, digest.unrestored),
+            (11, 7, 1)
+        );
+        assert_eq!(digest.kinds[0].kind, "email");
+        assert_eq!(digest.kinds.len(), 2);
+        assert!(privacy_from(&serde_json::json!({"totals": {}}), None).is_none());
+
         let records = serde_json::json!({"items": [{
             "started_at": "2026-09-22T10:00:00Z", "requested_model": "gpt-5",
             "latency_ms": 2100, "status": "failed"
@@ -2446,6 +2624,9 @@ mod tests {
         assert_eq!(value["popover_below"], true);
         assert_eq!(value["view"]["inference_url"], "http://127.0.0.1:8317");
         assert_eq!(value["digest"]["today"]["requests"], 128);
+        assert_eq!(value["digest"]["privacy"]["enabled"], true);
+        assert_eq!(value["digest"]["privacy"]["replaced"], 23);
+        assert_eq!(value["digest"]["privacy"]["kinds"][0]["kind"], "email");
         assert_eq!(
             value["digest"]["hourly_tokens"].as_array().unwrap().len(),
             24
@@ -2478,11 +2659,36 @@ mod tests {
             }
         );
         let action: TrayAction =
+            serde_json::from_value(serde_json::json!({"kind": "navigate", "page": "failedToday"}))
+                .unwrap();
+        assert_eq!(
+            action,
+            TrayAction::Navigate {
+                page: "failedToday".to_string()
+            }
+        );
+        let action: TrayAction =
             serde_json::from_value(serde_json::json!({"kind": "raw_access"})).unwrap();
         assert_eq!(action, TrayAction::RawAccess);
         assert!(
             serde_json::from_value::<TrayAction>(serde_json::json!({"kind": "explode"})).is_err()
         );
+    }
+
+    #[test]
+    fn navigation_accepts_only_known_pages() {
+        for page in [
+            "records",
+            "failedToday",
+            "privacyOverview",
+            "settings",
+            "agentTools",
+        ] {
+            assert_eq!(check_navigation(page), Ok(()), "{page}");
+        }
+        for page in ["", "explode", "Records", "records?status=failed"] {
+            assert!(check_navigation(page).is_err(), "{page}");
+        }
     }
 
     #[test]
@@ -2560,6 +2766,23 @@ mod tests {
         assert_eq!(y, 1032.0 - 480.0 - POPOVER_MARGIN_Y);
         assert_eq!(x, 1700.0 + 12.0 - POPOVER_WIDTH / 2.0);
         assert!(!anchor_below(icon, work));
+    }
+
+    #[test]
+    fn popover_grows_with_the_windows_text_size() {
+        // 150% display scale and 110% text size: WebView2 draws at 1.65.
+        let (width, height) = popover_size(400.0, 1.65, 1.5);
+        assert!((width - POPOVER_WIDTH * 1.1).abs() < 1e-9);
+        assert!((height - 440.0).abs() < 1e-9);
+        // Elsewhere CSS pixels are the window's logical pixels.
+        assert_eq!(popover_size(400.0, 2.0, 2.0), (POPOVER_WIDTH, 400.0));
+        assert_eq!(popover_size(400.0, 1.0, 2.0), (POPOVER_WIDTH, 400.0));
+        assert_eq!(popover_size(400.0, f64::NAN, 1.0), (POPOVER_WIDTH, 400.0));
+        assert_eq!(popover_size(400.0, 1.0, 0.0), (POPOVER_WIDTH, 400.0));
+        assert_eq!(
+            popover_size(400.0, 10.0, 1.0),
+            (POPOVER_WIDTH * POPOVER_MAX_ZOOM, 400.0 * POPOVER_MAX_ZOOM)
+        );
     }
 
     #[test]

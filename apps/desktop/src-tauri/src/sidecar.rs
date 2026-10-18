@@ -89,6 +89,8 @@ const PLACEHOLDER_STYLE_LOCKED_KINDS: &[&str] = &[
 ];
 const MAX_PRIVACY_ALLOWLIST_RULES: usize = 128;
 const MAX_PRIVACY_ALLOWLIST_VALUE_CHARS: usize = 256;
+// Core's contract.MaxPurgeSessionIDs: one sessions purge names at most this many.
+const MAX_PURGE_SESSION_IDS: usize = 1000;
 #[cfg(target_os = "linux")]
 const LINUX_ONNX_RUNTIME_PATH_ENV: &str = "ASTRLINK_ONNX_RUNTIME_PATH";
 #[cfg(target_os = "linux")]
@@ -225,10 +227,34 @@ fn start_allowed(state: &LifecycleState, has_child: bool) -> bool {
         )
 }
 
+/// Where the inference plane listens: the saved scope and port together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InferenceBind {
+    listen: crate::preferences::InferenceListen,
+    port: u16,
+}
+
+impl InferenceBind {
+    fn address(self) -> String {
+        format!("{}:{}", self.listen.host(), self.port)
+    }
+}
+
+/// The saved preferences Core reads from its command line. Changing any of
+/// them takes a gateway restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LaunchSettings {
+    inference: InferenceBind,
+    max_concurrent_inspections: u16,
+    response_start_timeout_seconds: u32,
+    max_request_body_mib: u32,
+    use_system_proxy: bool,
+}
+
 fn sidecar_args(
     parent_pid: u32,
     data_directory: &Path,
-    inference_port: u16,
+    inference: InferenceBind,
     max_concurrent_inspections: u16,
     response_start_timeout_seconds: u32,
     max_request_body_mib: u32,
@@ -237,14 +263,20 @@ fn sidecar_args(
     let data_directory = data_directory
         .to_str()
         .ok_or_else(|| "AstrLink data directory is not valid UTF-8".to_string())?;
-    Ok(vec![
+    let mut arguments = vec![
         "--parent-pid".to_string(),
         parent_pid.to_string(),
         "--data-dir".to_string(),
         data_directory.to_string(),
         "--inference-listen".to_string(),
-        format!("127.0.0.1:{inference_port}"),
-        "--inference-port-fallback".to_string(),
+        inference.address(),
+    ];
+    // Other devices are configured with the saved port, so an exposed
+    // gateway never moves to a random one; Core reports the occupied port.
+    if inference.listen == crate::preferences::InferenceListen::Loopback {
+        arguments.push("--inference-port-fallback".to_string());
+    }
+    arguments.extend([
         "--control-listen".to_string(),
         "127.0.0.1:0".to_string(),
         "--control-token-stdin".to_string(),
@@ -259,7 +291,8 @@ fn sidecar_args(
             "--outbound-proxy={}",
             if use_system_proxy { "system" } else { "direct" }
         ),
-    ])
+    ]);
+    Ok(arguments)
 }
 
 fn recovery_delay(attempt: u8) -> Duration {
@@ -429,6 +462,12 @@ pub struct CoreSnapshot {
     pub capabilities: Option<CapabilitiesResponse>,
     pub last_error: Option<String>,
     pub inference_port_fallback: Option<InferencePortFallback>,
+    /// Which interfaces the running Core was started to answer; `None` while
+    /// stopped. Differs from the saved preference until the next restart.
+    pub inference_listen_active: Option<crate::preferences::InferenceListen>,
+    /// Saved launch settings differ from the ones the running Core started
+    /// with; they apply after the next restart.
+    pub restart_pending: bool,
     pub recovery_attempt: u8,
     pub recovery_scheduled_in_ms: Option<u64>,
 }
@@ -450,7 +489,9 @@ struct CoreInner {
     last_error: Option<String>,
     app_handle: Option<AppHandle>,
     inference_port: u16,
-    started_inference_port: Option<u16>,
+    inference_listen: crate::preferences::InferenceListen,
+    /// The launch settings the running Core started with; `None` while stopped.
+    started_launch: Option<LaunchSettings>,
     max_concurrent_inspections: u16,
     response_start_timeout_seconds: u32,
     max_request_body_mib: u32,
@@ -492,7 +533,8 @@ impl Default for CoreInner {
             last_error: None,
             app_handle: None,
             inference_port: crate::preferences::DEFAULT_INFERENCE_PORT,
-            started_inference_port: None,
+            inference_listen: crate::preferences::InferenceListen::Loopback,
+            started_launch: None,
             max_concurrent_inspections: 16,
             response_start_timeout_seconds: 0,
             max_request_body_mib: 0,
@@ -692,8 +734,26 @@ impl CoreInner {
                 .is_some_and(|at| at.elapsed() < OBSERVER_ACTIVE_WINDOW)
     }
 
+    fn launch_settings(&self) -> LaunchSettings {
+        LaunchSettings {
+            inference: InferenceBind {
+                listen: self.inference_listen,
+                port: self.inference_port,
+            },
+            max_concurrent_inspections: self.max_concurrent_inspections,
+            response_start_timeout_seconds: self.response_start_timeout_seconds,
+            max_request_body_mib: self.max_request_body_mib,
+            use_system_proxy: self.use_system_proxy,
+        }
+    }
+
+    fn restart_pending(&self) -> bool {
+        self.started_launch
+            .is_some_and(|started| started != self.launch_settings())
+    }
+
     fn inference_port_fallback(&self) -> Option<InferencePortFallback> {
-        let requested_port = self.started_inference_port?;
+        let requested_port = self.started_launch?.inference.port;
         let active_port = reqwest::Url::parse(&self.ready.as_ref()?.inference_url)
             .ok()?
             .port_or_known_default()?;
@@ -742,7 +802,7 @@ impl CoreInner {
         self.raw_key_event = None;
         self.raw_key_replaced = false;
         self.ready = None;
-        self.started_inference_port = None;
+        self.started_launch = None;
         self.health = None;
         self.version = None;
         self.capabilities = None;
@@ -882,7 +942,8 @@ impl CoreManager {
             inner.phase = CorePhase::Spawning;
             inner.pid = None;
             inner.clear_handshake();
-            inner.started_inference_port = Some(inner.inference_port);
+            let launch = inner.launch_settings();
+            inner.started_launch = Some(launch);
             inner.last_error = None;
             inner.clear_process_guard();
             clear_published_control_session();
@@ -908,11 +969,11 @@ impl CoreManager {
             let arguments = match sidecar_args(
                 std::process::id(),
                 &data_directory,
-                inner.inference_port,
-                inner.max_concurrent_inspections,
-                inner.response_start_timeout_seconds,
-                inner.max_request_body_mib,
-                inner.use_system_proxy,
+                launch.inference,
+                launch.max_concurrent_inspections,
+                launch.response_start_timeout_seconds,
+                launch.max_request_body_mib,
+                launch.use_system_proxy,
             )
             .and_then(|mut arguments| {
                 arguments.extend(local_key_args(&local_key)?);
@@ -1065,6 +1126,7 @@ impl CoreManager {
     pub fn configure(&self, preferences: &crate::preferences::Preferences) {
         let mut inner = self.lock_inner();
         inner.inference_port = preferences.inference_port;
+        inner.inference_listen = preferences.inference_listen;
         inner.max_concurrent_inspections = preferences.max_concurrent_inspections;
         inner.response_start_timeout_seconds = preferences.response_start_timeout_seconds;
         inner.max_request_body_mib = preferences.max_request_body_mib;
@@ -1314,6 +1376,8 @@ impl CoreManager {
             capabilities: inner.capabilities.clone(),
             last_error: inner.last_error.clone(),
             inference_port_fallback: inner.inference_port_fallback(),
+            inference_listen_active: inner.started_launch.map(|launch| launch.inference.listen),
+            restart_pending: inner.restart_pending(),
             recovery_attempt: inner.recovery_attempt,
             recovery_scheduled_in_ms: inner.recovery_scheduled_at.map(|deadline| {
                 deadline
@@ -1574,6 +1638,22 @@ impl CoreManager {
         Ok(())
     }
 
+    /// The requests the privacy policy's warn action let through after
+    /// `since`, as Core's in-memory feed lists them.
+    pub async fn privacy_warnings(
+        &self,
+        since: u64,
+    ) -> Result<crate::privacy_warnings::WarningPage, String> {
+        let path = format!(
+            "{}?since={since}",
+            crate::privacy_warnings::PRIVACY_WARNINGS_PATH
+        );
+        let (_, body) = self
+            .authenticated_control(Method::GET, &path, None, None)
+            .await?;
+        crate::privacy_warnings::parse_page(&body)
+    }
+
     /// Agent requests for raw audit content awaiting the operator's
     /// decision, the timed grants still running, and whether an approval
     /// needs the raw password.
@@ -1687,6 +1767,16 @@ impl CoreManager {
             .map_err(|error| format!("access token list returned invalid JSON: {error}"))
     }
 
+    /// Addresses other devices reach this machine by, read from Core on each
+    /// call so a changed network shows its current address.
+    pub async fn list_network_addresses(&self) -> Result<serde_json::Value, String> {
+        let (_, body) = self
+            .authenticated_control(Method::GET, "/control/v1/network-addresses", None, None)
+            .await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("network address list returned invalid JSON: {error}"))
+    }
+
     pub async fn get_usage_summary(
         &self,
         from: &str,
@@ -1706,6 +1796,29 @@ impl CoreManager {
             .await?;
         serde_json::from_slice(&body)
             .map_err(|error| format!("usage summary returned invalid JSON: {error}"))
+    }
+
+    /// What the privacy policy did over a window, with the usage summary's
+    /// window, time zone and bucket rules.
+    pub async fn get_privacy_summary(
+        &self,
+        from: &str,
+        to: &str,
+        time_zone: &str,
+        bucket: &str,
+    ) -> Result<serde_json::Value, String> {
+        let path = format!(
+            "/control/v1/privacy-summary?from={}&to={}&time_zone={}&bucket={}",
+            percent_encode_query(from),
+            percent_encode_query(to),
+            percent_encode_query(time_zone),
+            percent_encode_query(bucket)
+        );
+        let (_, body) = self
+            .authenticated_control(Method::GET, &path, None, None)
+            .await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| format!("privacy summary returned invalid JSON: {error}"))
     }
 
     pub async fn list_access_token_usage(
@@ -2067,6 +2180,21 @@ impl CoreManager {
             .authenticated_control(method, &path, body, None)
             .await?;
         serde_json::from_slice(&body).map_err(|_| "pricing returned invalid JSON".into())
+    }
+
+    /// Configuration sync. `configure` stores the settings, `passphrase` sets
+    /// the package passphrase, `forget` clears it, `run` syncs now, and
+    /// `status`/`config` read the stored state.
+    pub async fn sync(
+        &self,
+        operation: &str,
+        input: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let (method, path, body) = sync_request(operation, input)?;
+        let (_, body) = self
+            .authenticated_control(method, &path, body, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "sync returned invalid JSON".into())
     }
 
     /// `fresh` asks Core to drop its 30s quota snapshot and query the
@@ -3102,6 +3230,42 @@ fn is_builtin_tool_test(method: &Method, path: &str) -> bool {
         )
 }
 
+/// Translates a sync operation into the control request it makes. Kept apart
+/// from the request itself so the mapping is testable without a running Core.
+fn sync_request(
+    operation: &str,
+    input: Option<serde_json::Value>,
+) -> Result<(Method, String, Option<serde_json::Value>), String> {
+    let base = "/control/v1/sync";
+    Ok(match operation {
+        "status" | "config" => (Method::GET, format!("{base}/{operation}"), None),
+        "configure" => (
+            Method::PUT,
+            format!("{base}/config"),
+            Some(input.ok_or("sync configuration is required")?),
+        ),
+        "passphrase" => {
+            let value = input.ok_or("sync passphrase is required")?;
+            // The passphrase travels as the control API's own body, so a
+            // caller passing a bare string and one passing the object both
+            // reach Core the same way.
+            let body = match value {
+                serde_json::Value::String(passphrase) => {
+                    serde_json::json!({ "passphrase": passphrase })
+                }
+                value @ serde_json::Value::Object(_) => value,
+                _ => return Err("sync passphrase is required".into()),
+            };
+            (Method::PUT, format!("{base}/passphrase"), Some(body))
+        }
+        // DELETE forgets the passphrase and leaves the remote settings alone,
+        // so entering the passphrase again resumes sync.
+        "forget" => (Method::DELETE, format!("{base}/passphrase"), None),
+        "run" => (Method::POST, format!("{base}/run"), None),
+        _ => return Err("unsupported sync operation".into()),
+    })
+}
+
 fn control_request_timeout(method: &Method, path: &str) -> Duration {
     let path = control_path(path);
     if crate::raw_access::is_proof_request(method, path) {
@@ -3123,6 +3287,10 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     }
     if method == Method::POST && path.starts_with("/control/v1/pricing/") {
         return Duration::from_secs(150);
+    }
+    // A sync run does several remote round trips and may retry the merge.
+    if method == Method::POST && path == "/control/v1/sync/run" {
+        return Duration::from_secs(320);
     }
     if method == Method::POST
         && (path == SERVICE_MODEL_PROBES_PATH
@@ -3365,11 +3533,11 @@ fn validate_privacy_policy_value(policy: &serde_json::Value) -> Result<(), Strin
         ],
         "privacy policy",
     )?;
-    if object["id"] != "policy_privacy_default"
-        || object["name"] != "隐私保护"
-        || object["priority"] != 0
-    {
+    if object["id"] != "policy_privacy_default" || object["priority"] != 0 {
         return Err("Core returned an unexpected privacy policy singleton".to_string());
+    }
+    if !object["name"].as_str().is_some_and(|name| !name.is_empty()) {
+        return Err("privacy policy name must be a non-empty string".to_string());
     }
     if !object["enabled"].is_boolean() {
         return Err("privacy policy enabled must be a boolean".to_string());
@@ -3442,10 +3610,16 @@ fn validate_privacy_kind_rules(value: &serde_json::Value) -> Result<(), String> 
     let mut kinds = HashSet::new();
     for (index, rule) in rules.iter().enumerate() {
         let context = format!("privacy policy kind rule {index}");
-        validate_exact_object_keys(rule, &["kind", "enabled", "style"], &context)?;
         let object = rule
             .as_object()
             .ok_or_else(|| format!("{context} must be an object"))?;
+        // notify is optional so a Core predating it still parses.
+        validate_allowed_object_keys(
+            object,
+            &["kind", "enabled", "style", "notify"],
+            &["kind", "enabled", "style"],
+            &context,
+        )?;
         let kind = object["kind"]
             .as_str()
             .ok_or_else(|| format!("{context} kind must be a string"))?;
@@ -3457,6 +3631,12 @@ fn validate_privacy_kind_rules(value: &serde_json::Value) -> Result<(), String> 
         }
         if !object["enabled"].is_boolean() {
             return Err(format!("{context} enabled must be a boolean"));
+        }
+        if object
+            .get("notify")
+            .is_some_and(|notify| !notify.is_boolean())
+        {
+            return Err(format!("{context} notify must be a boolean"));
         }
         let style = object["style"]
             .as_str()
@@ -4683,6 +4863,7 @@ const SUBSCRIPTION_PROVIDERS: &[&str] = &[
     "xai_grok",
     "antigravity",
     "github_copilot",
+    "factory_droid",
 ];
 const AUTHORIZATION_SESSION_STATUSES: &[&str] =
     &["pending", "completed", "cancelled", "expired", "failed"];
@@ -4880,7 +5061,9 @@ fn parse_authorization_session_value(
     if provider == "antigravity" && flow != "browser" {
         return Err("authorization flow is unsupported by provider".to_string());
     }
-    if (provider == "xai_grok" || provider == "github_copilot") && flow != "device_code" {
+    if (provider == "xai_grok" || provider == "github_copilot" || provider == "factory_droid")
+        && flow != "device_code"
+    {
         return Err("authorization flow is unsupported by provider".to_string());
     }
     let service_id = object
@@ -5158,7 +5341,7 @@ fn validate_purge_request_records_input(
         .ok_or_else(|| "request purge input must be an object".to_string())?;
     for key in object.keys() {
         match key.as_str() {
-            "scope" | "confirm" | "before" => {}
+            "scope" | "confirm" | "before" | "session_ids" => {}
             other => {
                 return Err(format!("request purge input contains unknown key {other}"));
             }
@@ -5199,7 +5382,38 @@ fn validate_purge_request_records_input(
                 return Err("request purge input has missing or unexpected fields".to_string());
             }
         }
-        _ => return Err("request purge input scope must be all or before".to_string()),
+        "sessions" => {
+            if object.contains_key("before") {
+                return Err(
+                    "request purge input before is forbidden when scope is sessions".to_string(),
+                );
+            }
+            let ids = object
+                .get("session_ids")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| {
+                    "request purge input session_ids is required when scope is sessions".to_string()
+                })?;
+            if ids.is_empty() || ids.len() > MAX_PURGE_SESSION_IDS {
+                return Err(format!(
+                    "request purge input session_ids must name 1 to {MAX_PURGE_SESSION_IDS} sessions"
+                ));
+            }
+            let mut seen = HashSet::with_capacity(ids.len());
+            for id in ids {
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| "request purge input session_ids must be strings".to_string())?;
+                validate_resource_id(id)?;
+                if !seen.insert(id) {
+                    return Err("request purge input session_ids must not repeat".to_string());
+                }
+            }
+            if object.len() != 3 {
+                return Err("request purge input has missing or unexpected fields".to_string());
+            }
+        }
+        _ => return Err("request purge input scope must be all, before or sessions".to_string()),
     }
     Ok(input.clone())
 }
@@ -5520,6 +5734,9 @@ fn verify_capabilities(capabilities: &CapabilitiesResponse) -> Result<(), String
         ("openai.completions", false, true),
         ("openai.models", false, false),
         ("google.models", false, false),
+        ("openai.embeddings", false, false),
+        ("google.embeddings", false, false),
+        ("rerank", false, false),
     ];
     for (id, primary, streaming) in required_protocols {
         let matches: Vec<_> = capabilities
@@ -5891,7 +6108,7 @@ mod tests {
                 client_inference_url: "http://localhost:8324".to_string(),
                 control_url: "http://127.0.0.1:43117".to_string(),
             });
-            inner.started_inference_port = Some(8317);
+            inner.started_launch = Some(started_on_port(8317));
         }
         let view = changes.borrow_and_update().clone();
         assert_eq!(view.phase, CorePhase::Ready);
@@ -5972,6 +6189,15 @@ mod tests {
         let mut copilot_browser = browser.clone();
         copilot_browser["provider"] = serde_json::json!("github_copilot");
         assert!(parse_authorization_session_value(&copilot_browser).is_err());
+
+        let mut droid = device.clone();
+        droid["provider"] = serde_json::json!("factory_droid");
+        droid["device_code"]["verification_url"] =
+            serde_json::json!("https://auth.factory.ai/device?user_code=DROI-D001");
+        assert!(parse_authorization_session_value(&droid).is_ok());
+        let mut droid_browser = browser.clone();
+        droid_browser["provider"] = serde_json::json!("factory_droid");
+        assert!(parse_authorization_session_value(&droid_browser).is_err());
 
         device["authorization_url"] = serde_json::json!("https://auth.openai.com/oauth/authorize");
         assert!(parse_authorization_session_value(&device).is_err());
@@ -6087,6 +6313,78 @@ mod tests {
                 &Method::PUT,
                 "/control/v1/builtin-tools/web_search/credential"
             ),
+            REQUEST_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn sync_operations_map_to_their_control_requests() {
+        assert_eq!(
+            sync_request("status", None).unwrap(),
+            (Method::GET, "/control/v1/sync/status".into(), None)
+        );
+        assert_eq!(
+            sync_request("config", None).unwrap(),
+            (Method::GET, "/control/v1/sync/config".into(), None)
+        );
+        assert_eq!(
+            sync_request("run", None).unwrap(),
+            (Method::POST, "/control/v1/sync/run".into(), None)
+        );
+        assert_eq!(
+            sync_request("forget", None).unwrap(),
+            (Method::DELETE, "/control/v1/sync/passphrase".into(), None)
+        );
+        assert_eq!(
+            sync_request("configure", Some(serde_json::json!({ "enabled": true }))).unwrap(),
+            (
+                Method::PUT,
+                "/control/v1/sync/config".into(),
+                Some(serde_json::json!({ "enabled": true }))
+            )
+        );
+        assert_eq!(
+            sync_request("passphrase", Some(serde_json::json!("twelve-chars"))).unwrap(),
+            (
+                Method::PUT,
+                "/control/v1/sync/passphrase".into(),
+                Some(serde_json::json!({ "passphrase": "twelve-chars" }))
+            )
+        );
+        assert_eq!(
+            sync_request(
+                "passphrase",
+                Some(serde_json::json!({ "passphrase": "twelve-chars" }))
+            )
+            .unwrap(),
+            (
+                Method::PUT,
+                "/control/v1/sync/passphrase".into(),
+                Some(serde_json::json!({ "passphrase": "twelve-chars" }))
+            )
+        );
+        for (operation, input) in [
+            ("configure", None),
+            ("passphrase", None),
+            ("passphrase", Some(serde_json::json!(7))),
+            ("nonsense", None),
+        ] {
+            assert!(sync_request(operation, input).is_err(), "{operation}");
+        }
+    }
+
+    #[test]
+    fn a_sync_run_gets_room_for_its_remote_round_trips() {
+        assert_eq!(
+            control_request_timeout(&Method::POST, "/control/v1/sync/run"),
+            Duration::from_secs(320)
+        );
+        assert_eq!(
+            control_request_timeout(&Method::GET, "/control/v1/sync/status"),
+            REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            control_request_timeout(&Method::PUT, "/control/v1/sync/config"),
             REQUEST_TIMEOUT
         );
     }
@@ -6329,6 +6627,42 @@ mod tests {
             "extra": true
         }))
         .is_err());
+        assert!(validate_purge_request_records_input(&serde_json::json!({
+            "scope": "sessions",
+            "confirm": true,
+            "session_ids": ["session_a", "req_bbbbbbbb"]
+        }))
+        .is_ok());
+        for input in [
+            serde_json::json!({ "scope": "sessions", "confirm": true }),
+            serde_json::json!({ "scope": "sessions", "confirm": true, "session_ids": [] }),
+            serde_json::json!({
+                "scope": "sessions",
+                "confirm": true,
+                "session_ids": ["session_a", "session_a"]
+            }),
+            serde_json::json!({ "scope": "sessions", "confirm": true, "session_ids": ["../x"] }),
+            serde_json::json!({ "scope": "sessions", "confirm": true, "session_ids": [7] }),
+            serde_json::json!({
+                "scope": "sessions",
+                "confirm": true,
+                "session_ids": ["session_a"],
+                "before": "2026-07-01T00:00:00Z"
+            }),
+            serde_json::json!({ "scope": "all", "confirm": true, "session_ids": ["session_a"] }),
+            serde_json::json!({
+                "scope": "sessions",
+                "confirm": true,
+                "session_ids": (0..=MAX_PURGE_SESSION_IDS)
+                    .map(|index| format!("session_{index}"))
+                    .collect::<Vec<_>>()
+            }),
+        ] {
+            assert!(
+                validate_purge_request_records_input(&input).is_err(),
+                "{input}"
+            );
+        }
     }
 
     #[test]
@@ -6369,6 +6703,13 @@ mod tests {
         );
     }
 
+    /// The default launch settings with the inference port Core started on.
+    fn started_on_port(port: u16) -> LaunchSettings {
+        let mut launch = CoreInner::default().launch_settings();
+        launch.inference.port = port;
+        launch
+    }
+
     fn ready_line(control_url: &str) -> String {
         format!(
             r#"{{"event":"ready","core_version":"0.1.0-dev","control_api_version":"v1","protocol_contract_version":"v1","inference_url":"http://127.0.0.1:8317","client_inference_url":"http://localhost:8317","control_url":"{control_url}"}}"#
@@ -6387,6 +6728,9 @@ mod tests {
                 ("openai.completions", false, true),
                 ("openai.models", false, false),
                 ("google.models", false, false),
+                ("openai.embeddings", false, false),
+                ("google.embeddings", false, false),
+                ("rerank", false, false),
             ]
             .into_iter()
             .map(|(id, primary, streaming)| ProtocolCapability {
@@ -6595,16 +6939,16 @@ mod tests {
             "regex_source": "builtin",
             "custom_regex_rules": [],
             "kind_rules": [
-                {"kind": "common_secret", "enabled": true, "style": "token"},
-                {"kind": "payment_card", "enabled": true, "style": "natural"},
-                {"kind": "account", "enabled": true, "style": "natural"},
-                {"kind": "email", "enabled": true, "style": "natural"},
-                {"kind": "phone", "enabled": true, "style": "natural"},
-                {"kind": "url", "enabled": false, "style": "natural"},
-                {"kind": "ip_address", "enabled": false, "style": "natural"},
-                {"kind": "private_person", "enabled": true, "style": "token"},
-                {"kind": "private_address", "enabled": true, "style": "token"},
-                {"kind": "private_date", "enabled": true, "style": "token"}
+                {"kind": "common_secret", "enabled": true, "style": "token", "notify": true},
+                {"kind": "payment_card", "enabled": true, "style": "natural", "notify": true},
+                {"kind": "account", "enabled": true, "style": "natural", "notify": true},
+                {"kind": "email", "enabled": true, "style": "natural", "notify": true},
+                {"kind": "phone", "enabled": true, "style": "natural", "notify": true},
+                {"kind": "url", "enabled": false, "style": "natural", "notify": true},
+                {"kind": "ip_address", "enabled": false, "style": "natural", "notify": true},
+                {"kind": "private_person", "enabled": true, "style": "token", "notify": true},
+                {"kind": "private_address", "enabled": true, "style": "token", "notify": true},
+                {"kind": "private_date", "enabled": true, "style": "token", "notify": true}
             ],
             "allowlist_rules": [
                 {"type": "domain_suffix", "value": "github.com"},
@@ -6727,6 +7071,25 @@ mod tests {
             {"kind": "email", "enabled": true}
         ]);
         assert!(validate_privacy_policy_value(&policy).is_err());
+
+        policy["kind_rules"] = serde_json::json!([
+            {"kind": "email", "enabled": true, "style": "natural", "notify": "no"}
+        ]);
+        assert!(validate_privacy_policy_value(&policy).is_err());
+    }
+
+    #[test]
+    fn privacy_kind_rules_accept_notify_and_its_absence() {
+        for rules in [
+            serde_json::json!([{"kind": "email", "enabled": true, "style": "natural", "notify": false}]),
+            serde_json::json!([{"kind": "email", "enabled": true, "style": "natural"}]),
+        ] {
+            let mut policy = privacy_policy_value();
+            policy["kind_rules"] = rules.clone();
+            assert!(validate_privacy_policy_value(&policy).is_ok());
+            let patch = serde_json::json!({"kind_rules": rules});
+            assert_eq!(validate_privacy_policy_patch(patch.clone()).unwrap(), patch);
+        }
     }
 
     #[test]
@@ -7433,8 +7796,19 @@ mod tests {
 
     #[test]
     fn sidecar_receives_pid_and_data_path_but_not_control_token_in_arguments() {
-        let arguments = sidecar_args(4242, Path::new("/tmp/astrlink-data"), 8317, 16, 0, 0, true)
-            .expect("test path should be valid UTF-8");
+        let arguments = sidecar_args(
+            4242,
+            Path::new("/tmp/astrlink-data"),
+            InferenceBind {
+                listen: crate::preferences::InferenceListen::Loopback,
+                port: 8317,
+            },
+            16,
+            0,
+            0,
+            true,
+        )
+        .expect("test path should be valid UTF-8");
         assert_eq!(
             arguments,
             [
@@ -7461,7 +7835,10 @@ mod tests {
         let direct = sidecar_args(
             4242,
             Path::new("/tmp/astrlink-data"),
-            8317,
+            InferenceBind {
+                listen: crate::preferences::InferenceListen::Loopback,
+                port: 8317,
+            },
             16,
             0,
             64,
@@ -7476,11 +7853,100 @@ mod tests {
     }
 
     #[test]
+    fn exposed_sidecar_binds_every_interface_without_a_port_fallback() {
+        let arguments = sidecar_args(
+            4242,
+            Path::new("/tmp/astrlink-data"),
+            InferenceBind {
+                listen: crate::preferences::InferenceListen::AllInterfaces,
+                port: 8317,
+            },
+            16,
+            0,
+            0,
+            true,
+        )
+        .expect("valid path");
+        assert!(arguments
+            .windows(2)
+            .any(|args| args == ["--inference-listen", "0.0.0.0:8317"]));
+        assert!(!arguments
+            .iter()
+            .any(|arg| arg == "--inference-port-fallback"));
+        // The control plane stays on this machine whatever the inference scope.
+        assert!(arguments
+            .windows(2)
+            .any(|args| args == ["--control-listen", "127.0.0.1:0"]));
+    }
+
+    #[test]
+    fn snapshot_reports_the_listen_scope_the_running_core_started_with() {
+        let manager = CoreManager::new();
+        assert_eq!(manager.snapshot().inference_listen_active, None);
+        manager.configure(&crate::preferences::Preferences {
+            inference_listen: crate::preferences::InferenceListen::AllInterfaces,
+            ..Default::default()
+        });
+        // Saving the preference alone changes nothing until Core restarts.
+        assert_eq!(manager.snapshot().inference_listen_active, None);
+        manager.lock_inner().started_launch = Some(started_on_port(8317));
+        assert_eq!(
+            manager.snapshot().inference_listen_active,
+            Some(crate::preferences::InferenceListen::Loopback)
+        );
+        manager.lock_inner().clear_handshake();
+        assert_eq!(manager.snapshot().inference_listen_active, None);
+    }
+
+    #[test]
+    fn restart_pending_tracks_every_launch_setting_until_the_next_start() {
+        let manager = CoreManager::new();
+        let saved = crate::preferences::Preferences::default();
+        manager.configure(&saved);
+        // A stopped Core picks up the saved settings when it starts.
+        assert!(!manager.snapshot().restart_pending);
+        let started = manager.lock_inner().launch_settings();
+        manager.lock_inner().started_launch = Some(started);
+        assert!(!manager.snapshot().restart_pending);
+
+        let changes: [fn(&mut crate::preferences::Preferences); 6] = [
+            |prefs| prefs.inference_port += 1,
+            |prefs| prefs.inference_listen = crate::preferences::InferenceListen::AllInterfaces,
+            |prefs| prefs.max_concurrent_inspections += 1,
+            |prefs| prefs.response_start_timeout_seconds += 1,
+            |prefs| prefs.max_request_body_mib += 1,
+            |prefs| prefs.use_system_proxy = !prefs.use_system_proxy,
+        ];
+        for change in changes {
+            let mut edited = saved.clone();
+            change(&mut edited);
+            manager.configure(&edited);
+            assert!(manager.snapshot().restart_pending, "{edited:?}");
+            manager.configure(&saved);
+            assert!(!manager.snapshot().restart_pending, "{edited:?}");
+        }
+
+        // Desktop-only preferences apply in place.
+        manager.configure(&crate::preferences::Preferences {
+            core_auto_recover: !saved.core_auto_recover,
+            ..saved.clone()
+        });
+        assert!(!manager.snapshot().restart_pending);
+
+        manager.configure(&crate::preferences::Preferences {
+            max_request_body_mib: saved.max_request_body_mib + 1,
+            ..saved
+        });
+        manager.lock_inner().clear_handshake();
+        assert!(!manager.snapshot().restart_pending);
+    }
+
+    #[test]
     fn fallback_notice_tracks_the_started_port_and_clears_on_stop() {
         let manager = CoreManager::new();
         {
             let mut inner = manager.lock_inner();
-            inner.started_inference_port = Some(9000);
+            inner.started_launch = Some(started_on_port(9000));
             inner.ready =
                 Some(parse_ready_announcement(&ready_line("http://127.0.0.1:43210")).unwrap());
         }
@@ -7501,7 +7967,7 @@ mod tests {
         assert!(manager.snapshot().inference_port_fallback.is_none());
         {
             let mut inner = manager.lock_inner();
-            inner.started_inference_port = Some(8317);
+            inner.started_launch = Some(started_on_port(8317));
             inner.ready =
                 Some(parse_ready_announcement(&ready_line("http://127.0.0.1:43210")).unwrap());
         }

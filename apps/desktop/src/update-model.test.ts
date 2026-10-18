@@ -5,6 +5,7 @@ import {
   parseUpdateSnapshot,
   updateBusy,
   updateNotice,
+  updateRetryWait,
 } from "./update-model";
 
 describe("update IPC", () => {
@@ -23,6 +24,8 @@ describe("update IPC", () => {
       { configured: 1 },
       { error_code: undefined },
       { latest_version: 123 },
+      { retry_at: undefined },
+      { retry_at: 60 },
     ]) {
       expect(() =>
         parseUpdateSnapshot({ ...browserUpdateSnapshot(), ...patch }),
@@ -33,6 +36,15 @@ describe("update IPC", () => {
         auto_check: true,
         auto_download: true,
         channel: "nightly",
+        official_mirror: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      parseUpdatePreferences({
+        auto_check: true,
+        auto_download: true,
+        channel: "stable",
+        official_mirror: "yes",
       }),
     ).toThrow();
     expect(() =>
@@ -84,5 +96,15 @@ describe("update IPC", () => {
     expect(updateNotice({ ...base, phase: "ready" })).toBe("ready");
     expect(updateNotice({ ...base, phase: "downloading" })).toBeNull();
     expect(updateNotice({ ...base, phase: "ready", release: null })).toBeNull();
+  });
+  it("counts whole seconds until the host accepts another check", () => {
+    const now = Date.parse("2026-10-07T04:00:00Z");
+    const at = (retry_at: string | null) =>
+      updateRetryWait({ ...browserUpdateSnapshot(), retry_at }, now);
+    expect(at(null)).toBe(0);
+    expect(at("invalid")).toBe(0);
+    expect(at("2026-10-07T03:59:59Z")).toBe(0);
+    expect(at("2026-10-07T04:00:00.200Z")).toBe(1);
+    expect(at("2026-10-07T04:12:17Z")).toBe(737);
   });
 });

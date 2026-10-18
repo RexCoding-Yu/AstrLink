@@ -172,10 +172,38 @@ func TestDefaultKindRulesCoverEveryKindAndDisableTheNoisyOnes(t *testing.T) {
 		if rule.Style != wantStyle {
 			t.Fatalf("kind %q default style = %q", rule.Kind, rule.Style)
 		}
-		wantEnabled := rule.Kind != "url" && rule.Kind != "ip_address"
+		wantEnabled := rule.Kind != "url" && rule.Kind != "ip_address" &&
+			rule.Kind != "private_date"
 		if rule.Enabled != wantEnabled {
 			t.Fatalf("kind %q default enabled = %v", rule.Kind, rule.Enabled)
 		}
+		if !rule.Notify {
+			t.Fatalf("kind %q does not notify by default", rule.Kind)
+		}
+	}
+}
+
+// TestKindRuleNotifiesUnlessTurnedOff covers rules stored or patched before
+// notify existed: they keep notifying as they did.
+func TestKindRuleNotifiesUnlessTurnedOff(t *testing.T) {
+	var rules []PolicyKindRule
+	if err := json.Unmarshal([]byte(`[
+		{"kind":"email","enabled":true,"style":"natural"},
+		{"kind":"phone","enabled":true,"style":"token","notify":false},
+		{"kind":"account","enabled":true,"style":"token","notify":true}
+	]`), &rules); err != nil {
+		t.Fatal(err)
+	}
+	if !rules[0].Notify || rules[1].Notify || !rules[2].Notify {
+		t.Fatalf("rules = %#v", rules)
+	}
+	var rule PolicyKindRule
+	if err := json.Unmarshal([]byte(`{"kind":"email","enabled":true,"style":"natural","quiet":true}`), &rule); err == nil {
+		t.Fatal("a kind rule with an unknown field was accepted")
+	}
+	document, err := json.Marshal(rules[1])
+	if err != nil || string(document) != `{"kind":"phone","enabled":true,"style":"token","notify":false}` {
+		t.Fatalf("wire shape = %s, %v", document, err)
 	}
 }
 

@@ -1,3 +1,4 @@
+import { isWebEdition } from "./edition";
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -9,6 +10,7 @@ import {
   Plus,
   RotateCcw,
   ScanText as ScanLine,
+  ShieldCheck,
   SlidersHorizontal,
   type AnimatedIcon,
 } from "@/components/icons";
@@ -19,9 +21,11 @@ import { ListToolbar } from "@/components/ListToolbar";
 import { HelpDisclosure } from "@/components/HelpDisclosure";
 import { HelpPopover } from "@/components/HelpPopover";
 import { SplitWorkspace } from "@/components/SplitWorkspace";
+import { UsageRangeSelect } from "@/components/UsageRangeSelect";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { FormMessage } from "@/components/FormMessage";
+import { IconButton } from "@/components/IconButton";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -63,6 +67,7 @@ import {
   getPrivacyModelReleases,
   getPrivacyPolicy,
   getPrivacyRegexBuiltinRules,
+  getPrivacySummary,
   installPrivacyModel,
   listPrivacyModelInstallations,
   pausePrivacyModelInstallation,
@@ -75,6 +80,8 @@ import { i18n, useT } from "./i18n";
 import { notify } from "./notify";
 import {
   compareReleaseVersions,
+  DEFAULT_PRIVACY_RESTORE_SETTINGS,
+  defaultPrivacyKindRules,
   isResourceHeavyVariant,
   localModelActive,
   MAX_PRIVACY_ALLOWLIST_RULES,
@@ -82,10 +89,13 @@ import {
   MAX_PRIVACY_CUSTOM_REGEX_RULES,
   MAX_PRIVACY_DRY_RUN_SAMPLE_BYTES,
   MAX_PRIVACY_REGEX_PATTERN_CHARS,
+  missingDefaultPrivacyAllowlistRules,
   patchUnloadsLocalModel,
   PLACEHOLDER_STYLE_LOCKED_KINDS,
   PRIVACY_KINDS,
   PRIVACY_REGEX_DETECTOR_KINDS,
+  privacyKindRulesAreDefault,
+  privacyRestoreSettingsAreDefault,
   utf8ByteLength,
   validateLocalProbeInput,
   validatePrivacyModelProbeInput,
@@ -110,6 +120,9 @@ import {
   type PrivacyRegexSource,
 } from "./privacy-policy-model";
 import { PageHeader } from "./PageHeader";
+import { PrivacyOverview } from "./PrivacyOverview";
+import { hasPrivacyActivity } from "./privacy-summary-model";
+import { resolveUsageWindow, type UsageRangePreset } from "./usage-range";
 import { RawPasswordEntry } from "./RawSealingControls";
 import {
   privacyDryRunError,
@@ -123,13 +136,23 @@ import {
 import type { DryRunTextSpan } from "./privacy-dry-run-model";
 
 type SafetyPolicyStatus = "blocked" | "loading" | "ready" | "error";
-type WorkspaceView = "detection" | "redaction" | "dryRun" | "models";
+type WorkspaceView =
+  | "overview"
+  | "detection"
+  | "redaction"
+  | "dryRun"
+  | "models";
 type ModelView = "catalog" | "installed" | "custom" | "local";
 type ProbeView = Extract<ModelView, "custom" | "local">;
+type PolicyReset = "kind_rules" | "restore" | "allowlist";
 
 // Core replies once the worker has exited, which is usually instant; keep the
 // unload notice up long enough to read.
 const MODEL_UNLOAD_MIN_VISIBLE_MS = 800;
+
+// With protection on and nothing checked yet, look again for the first
+// checked call so the overview tab appears without a manual refresh.
+const OVERVIEW_RECHECK_MS = 30_000;
 
 interface CatalogPreparation {
   catalogID: string;
@@ -159,8 +182,11 @@ type PendingModelAction =
 
 export interface SafetyPolicyProps {
   coreSessionKey: string | null;
-  /** Opens on the models tab, as when following a model update reminder. */
-  initialView?: "models";
+  /**
+   * Opens on the models tab, as when following a model update reminder, or on
+   * the overview, as when following the tray's privacy statistics link.
+   */
+  initialView?: "models" | "overview";
   isReady: boolean;
   /** Opens the agent tools page to install the placeholder skill. */
   onInstallPlaceholderSkill?: () => void;
@@ -1176,8 +1202,23 @@ export function SafetyPolicy({
   const [status, setStatus] = useState<SafetyPolicyStatus>(
     record ? "ready" : "blocked",
   );
-  const initialWorkspace: WorkspaceView = initialView ?? "detection";
+  // The overview tab exists only once a call in the last year went through the
+  // privacy check; null until the first check answers.
+  const [overviewAvailable, cacheOverviewAvailable] = useWorkspaceSnapshot<
+    boolean | null
+  >(`privacy-activity:${coreSessionKey}`, null);
+  // The tray offers its statistics link only once today has checked calls, so
+  // that request shows the tab before this visit's own check confirms it.
+  const overviewRequested = initialView === "overview";
+  const showOverview = overviewAvailable === true || overviewRequested;
+  const initialWorkspace: WorkspaceView =
+    initialView ?? (overviewAvailable ? "overview" : "detection");
   const [workspace, setWorkspace] = useState<WorkspaceView>(initialWorkspace);
+  const [statsRange, setStatsRange] = useWorkspaceSnapshot<UsageRangePreset>(
+    "privacy-summary-range",
+    "7d",
+    "desktop",
+  );
   const [allowlistQuery, setAllowlistQuery] = useState("");
   const [view, setView] = useState<ModelView>("catalog");
   const [selectedVariants, setSelectedVariants] = useState<
@@ -1218,6 +1259,7 @@ export function SafetyPolicy({
     useState<PendingModelAction | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [confirmFillBuiltinRules, setConfirmFillBuiltinRules] = useState(false);
+  const [pendingReset, setPendingReset] = useState<PolicyReset | null>(null);
   const [regexPatternDrafts, setRegexPatternDrafts] = useState<string[]>(
     () => record?.policy.custom_regex_rules.map((rule) => rule.pattern) ?? [],
   );
@@ -1315,16 +1357,59 @@ export function SafetyPolicy({
     }
   };
 
+  /**
+   * Whether any call in the last year went through the privacy check, or null
+   * when Core could not say. The rest of the page never waits on a failure.
+   */
+  const loadOverviewAvailability = async (): Promise<boolean | null> => {
+    try {
+      const summary = await getPrivacySummary(
+        resolveUsageWindow("1y", new Date()),
+      );
+      return hasPrivacyActivity(summary.totals);
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Shows or hides the overview tab. `pickDefault` is set only while the page
+   * is still loading for the first time, so opening on the overview never
+   * pulls the operator away from a tab already on screen.
+   */
+  const applyOverviewAvailability = (
+    available: boolean | null,
+    pickDefault: boolean,
+  ) => {
+    if (available === null) return;
+    cacheOverviewAvailable(available);
+    setWorkspace((current) => {
+      if (!available && current === "overview" && !overviewRequested) {
+        return "detection";
+      }
+      if (available && pickDefault && current === "detection") {
+        return "overview";
+      }
+      return current;
+    });
+  };
+
   // Only the operator's refresh skips Core's release cache.
-  const load = async (generation: number, refreshReleases = false) => {
+  const load = async (
+    generation: number,
+    refreshReleases = false,
+    pickDefault = false,
+  ) => {
     const version = policyMutationVersion.current;
     void loadReleases(generation, refreshReleases);
     try {
-      const [nextRecord, nextCatalog, nextInstallations] = await Promise.all([
-        getPrivacyPolicy(),
-        getPrivacyModelCatalog(),
-        listPrivacyModelInstallations(),
-      ]);
+      const [nextRecord, nextCatalog, nextInstallations, available] =
+        await Promise.all([
+          getPrivacyPolicy(),
+          getPrivacyModelCatalog(),
+          listPrivacyModelInstallations(),
+          loadOverviewAvailability(),
+        ]);
       if (generationRef.current !== generation) return;
       if (policyMutationVersion.current === version) {
         cacheRecord(nextRecord);
@@ -1346,6 +1431,7 @@ export function SafetyPolicy({
           }),
         ),
       );
+      applyOverviewAvailability(available, pickDefault);
       setStatus("ready");
     } catch (loadError) {
       if (
@@ -1402,7 +1488,9 @@ export function SafetyPolicy({
 
     setRecord(savedRecord);
     setStatus(savedRecord ? "ready" : "loading");
-    void load(generation);
+    // Without a cached record the tabs are not on screen yet, so the first
+    // load may still open the page on the overview.
+    void load(generation, false, savedRecord === null && !initialView);
 
     return () => {
       if (generationRef.current === generation) {
@@ -1410,6 +1498,38 @@ export function SafetyPolicy({
       }
     };
   }, [coreSessionKey, isReady]);
+
+  const privacyEnabled = record?.policy.enabled ?? false;
+  useEffect(() => {
+    if (
+      !isReady ||
+      coreSessionKey === null ||
+      !privacyEnabled ||
+      overviewAvailable === true
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const recheck = () => {
+      if (document.hidden) return;
+      void loadOverviewAvailability().then((available) => {
+        // The tab appears beside the one in use; it does not take focus.
+        if (!cancelled && available === true) cacheOverviewAvailable(true);
+      });
+    };
+    const timer = window.setInterval(recheck, OVERVIEW_RECHECK_MS);
+    document.addEventListener("visibilitychange", recheck);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", recheck);
+    };
+  }, [coreSessionKey, isReady, privacyEnabled, overviewAvailable]);
+
+  // A tray link can name a tab while this page is already open.
+  useEffect(() => {
+    if (initialView) setWorkspace(initialView);
+  }, [initialView]);
 
   const downloadingIDs = useMemo(
     () =>
@@ -1708,7 +1828,12 @@ export function SafetyPolicy({
       kind,
       enabled: false,
       style: "token",
+      notify: true,
     };
+  const kindRulesWarn = record?.policy.request_action === "warn";
+  const kindRulesTitle = t(
+    kindRulesWarn ? "safety.perKindWarn" : "safety.perKindRedact",
+  );
 
   const saveKindRule = (
     kind: CanonicalPrivacyKind,
@@ -1817,6 +1942,32 @@ export function SafetyPolicy({
       setError(messageOf(fillError, t("safety.fillBuiltinFailed")));
     } finally {
       setFillingBuiltinRules(false);
+    }
+  };
+
+  const confirmPendingReset = () => {
+    const reset = pendingReset;
+    setPendingReset(null);
+    if (record === null) return;
+    if (reset === "kind_rules") {
+      void patchPolicy({ kind_rules: defaultPrivacyKindRules() });
+    } else if (reset === "restore") {
+      void patchPolicy({ ...DEFAULT_PRIVACY_RESTORE_SETTINGS });
+    } else if (reset === "allowlist") {
+      const rules = record.policy.allowlist_rules;
+      const missing = missingDefaultPrivacyAllowlistRules(rules);
+      if (missing.length === 0) return;
+      if (rules.length + missing.length > MAX_PRIVACY_ALLOWLIST_RULES) {
+        setError(
+          t("safety.tooManyAllowlist", { max: MAX_PRIVACY_ALLOWLIST_RULES }),
+        );
+        return;
+      }
+      setAllowlistQuery("");
+      void patchPolicy(
+        { allowlist_rules: [...rules, ...missing] },
+        t("safety.restoredDefaultAllowlist", { count: missing.length }),
+      );
     }
   };
 
@@ -2434,6 +2585,32 @@ export function SafetyPolicy({
           .toLocaleLowerCase()
           .includes(normalizedAllowlistQuery),
     );
+  const missingAllowlistDefaults =
+    policy === null
+      ? []
+      : missingDefaultPrivacyAllowlistRules(policy.allowlist_rules);
+  const restoreDefaults = [
+    {
+      label: t("safety.restore"),
+      on: DEFAULT_PRIVACY_RESTORE_SETTINGS.response_restore,
+    },
+    {
+      label: t("safety.restoreTools"),
+      on: DEFAULT_PRIVACY_RESTORE_SETTINGS.restore_tool_arguments,
+    },
+    {
+      label: t("safety.injectNotice"),
+      on: DEFAULT_PRIVACY_RESTORE_SETTINGS.placeholder_notice,
+    },
+    {
+      label: t("safety.skipToolDeclarations"),
+      on: DEFAULT_PRIVACY_RESTORE_SETTINGS.skip_tool_declarations,
+    },
+    {
+      label: t("safety.skipAdditionalTools"),
+      on: !DEFAULT_PRIVACY_RESTORE_SETTINGS.inspect_additional_tools,
+    },
+  ];
   const cannotEnableLocalModel =
     policy?.enabled === false &&
     policy.detector === "local_model" &&
@@ -2657,32 +2834,69 @@ export function SafetyPolicy({
           onValueChange={(value) => setWorkspace(value as WorkspaceView)}
           value={workspace}
         >
-          <TabsList
-            aria-label={t("safety.workspace")}
-            className="shrink-0"
-            scrollable
-          >
-            <TabsTrigger value="detection">
-              <ScanLine aria-hidden="true" />
-              {t("safety.detectionAndRestore")}
-            </TabsTrigger>
-            <TabsTrigger value="redaction">
-              <SlidersHorizontal aria-hidden="true" />
-              {t("safety.redactionRules")}
-            </TabsTrigger>
-            <TabsTrigger
-              aria-label={t("safety.run")}
-              onClick={() => setWorkspace("dryRun")}
-              value="dryRun"
+          <div className="flex min-w-0 shrink-0 items-center justify-between gap-2">
+            <TabsList
+              aria-label={t("safety.workspace")}
+              className="shrink-0"
+              scrollable
             >
-              <FlaskConical aria-hidden="true" />
-              {t("safety.run")}
-            </TabsTrigger>
-            <TabsTrigger onClick={() => setWorkspace("models")} value="models">
-              <Boxes aria-hidden="true" />
-              {t("safety.tabModels")}
-            </TabsTrigger>
-          </TabsList>
+              {/* Without any checked call there is nothing to chart yet. */}
+              {showOverview ? (
+                <TabsTrigger value="overview">
+                  <ShieldCheck aria-hidden="true" />
+                  {t("safety.tabOverview")}
+                </TabsTrigger>
+              ) : null}
+              <TabsTrigger value="detection">
+                <ScanLine aria-hidden="true" />
+                {t("safety.detectionAndRestore")}
+              </TabsTrigger>
+              <TabsTrigger value="redaction">
+                <SlidersHorizontal aria-hidden="true" />
+                {t("safety.redactionRules")}
+              </TabsTrigger>
+              <TabsTrigger
+                aria-label={t("safety.run")}
+                onClick={() => setWorkspace("dryRun")}
+                value="dryRun"
+              >
+                <FlaskConical aria-hidden="true" />
+                {t("safety.run")}
+              </TabsTrigger>
+              <TabsTrigger
+                onClick={() => setWorkspace("models")}
+                value="models"
+              >
+                <Boxes aria-hidden="true" />
+                {t("safety.tabModels")}
+              </TabsTrigger>
+            </TabsList>
+            {/* The range scopes the whole overview, so it sits above it. */}
+            {showOverview && workspace === "overview" ? (
+              <UsageRangeSelect
+                label={t("privacyStats.range")}
+                onChange={setStatsRange}
+                preset={statsRange}
+              />
+            ) : null}
+          </div>
+
+          {showOverview ? (
+            <TabsContent
+              className="min-h-0 min-w-0 flex-1 overflow-y-clip"
+              forceMount
+              hidden={workspace !== "overview"}
+              value="overview"
+            >
+              <PrivacyOverview
+                active={workspace === "overview"}
+                coreSessionKey={coreSessionKey}
+                enabled={policy.enabled}
+                isReady={isReady}
+                preset={statsRange}
+              />
+            </TabsContent>
+          ) : null}
 
           <TabsContent
             className="min-h-0 min-w-0 flex-1 overflow-y-clip"
@@ -2934,6 +3148,11 @@ export function SafetyPolicy({
 
                 <div className="border-t pt-3">
                   <Field
+                    hint={
+                      policy.request_action === "warn"
+                        ? t("safety.warnNotifyHint")
+                        : undefined
+                    }
                     htmlFor="privacy-request-action"
                     label={t("safety.requestAction")}
                   >
@@ -3011,16 +3230,30 @@ export function SafetyPolicy({
                 title={t("safety.requestAndResponse")}
                 icon={RotateCcw}
                 actions={
-                  <Button
-                    className="h-auto w-fit gap-1 px-0 py-0 text-xs font-medium"
-                    onClick={() => setStreamingDemoOpen(true)}
-                    size="sm"
-                    type="button"
-                    variant="link"
-                  >
-                    {t("safety.viewStreamingDemo")}
-                    <ArrowUpRight aria-hidden="true" className="size-3.5" />
-                  </Button>
+                  <>
+                    <Button
+                      className="h-auto w-fit gap-1 px-0 py-0 text-xs font-medium"
+                      onClick={() => setStreamingDemoOpen(true)}
+                      size="sm"
+                      type="button"
+                      variant="link"
+                    >
+                      {t("safety.viewStreamingDemo")}
+                      <ArrowUpRight aria-hidden="true" className="size-3.5" />
+                    </Button>
+                    <IconButton
+                      className="text-muted-foreground"
+                      disabled={
+                        saving || privacyRestoreSettingsAreDefault(policy)
+                      }
+                      label={t("safety.resetSection")}
+                      onClick={() => setPendingReset("restore")}
+                      size="icon-xs"
+                      type="button"
+                    >
+                      <RotateCcw aria-hidden="true" />
+                    </IconButton>
+                  </>
                 }
               >
                 <fieldset className="min-w-0 border-0 p-0" disabled={saving}>
@@ -3192,7 +3425,13 @@ export function SafetyPolicy({
                     <>
                       <HelpPopover label={t("safety.placeholderGuide")}>
                         <div className="grid gap-3">
-                          <p>{t("safety.redactTypesHint")}</p>
+                          <p>
+                            {t(
+                              kindRulesWarn
+                                ? "safety.warnKindsHint"
+                                : "safety.redactTypesHint",
+                            )}
+                          </p>
                           <p className="text-xs leading-relaxed">
                             {t("safety.styleHintLead", {
                               natural: placeholderStyleLabel("natural"),
@@ -3224,29 +3463,41 @@ export function SafetyPolicy({
                           total: PRIVACY_KINDS.length,
                         })}
                       </Badge>
+                      <IconButton
+                        className="text-muted-foreground"
+                        disabled={
+                          saving ||
+                          privacyKindRulesAreDefault(policy.kind_rules)
+                        }
+                        label={t("safety.resetSection")}
+                        onClick={() => setPendingReset("kind_rules")}
+                        size="icon-xs"
+                        type="button"
+                      >
+                        <RotateCcw aria-hidden="true" />
+                      </IconButton>
                     </>
                   }
                 >
-                  <h2 className="text-sm font-semibold">
-                    {t("safety.perKindRedact")}
-                  </h2>
+                  <h2 className="text-sm font-semibold">{kindRulesTitle}</h2>
                 </PanelHeader>
                 <fieldset
                   className="flex min-h-0 flex-1 flex-col border-0 px-3"
                   disabled={saving}
                 >
-                  <legend className="sr-only">
-                    {t("safety.perKindRedact")}
-                  </legend>
+                  <legend className="sr-only">{kindRulesTitle}</legend>
                   <ul
                     className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain pr-1"
                     data-tab-scroller
                   >
                     {PRIVACY_KINDS.map((kind) => {
                       const rule = kindRuleFor(kind);
-                      const lockReason = placeholderStyleLockReason(kind);
                       const styleLocked =
+                        !kindRulesWarn &&
                         PLACEHOLDER_STYLE_LOCKED_KINDS.has(kind);
+                      const lockReason = styleLocked
+                        ? placeholderStyleLockReason(kind)
+                        : undefined;
                       const unreachable =
                         policy.detector === "regex" &&
                         localModelOnlyKinds.has(kind);
@@ -3287,47 +3538,87 @@ export function SafetyPolicy({
                             ) : null}
                           </span>
                           <span className="flex shrink-0 items-center gap-2">
-                            <Select
-                              disabled={saving || styleLocked || !rule.enabled}
-                              onValueChange={(value) =>
-                                saveKindRule(kind, {
-                                  style: value as PlaceholderStyle,
-                                })
-                              }
-                              value={rule.style}
-                            >
-                              <SelectTrigger
-                                aria-label={t("safety.styleFor", {
-                                  kind: canonicalKindLabel(kind),
-                                })}
-                                aria-describedby={
-                                  lockReason || unreachable
-                                    ? `privacy-kind-hint-${kind}`
-                                    : undefined
+                            {kindRulesWarn ? (
+                              <Select
+                                disabled={saving || !rule.enabled}
+                                onValueChange={(value) =>
+                                  saveKindRule(kind, {
+                                    notify: value === "notify",
+                                  })
                                 }
-                                className="h-8 w-32 px-2 text-xs @[400px]:w-36"
-                                size="sm"
-                                title={
-                                  styleLocked
-                                    ? lockReason
-                                    : placeholderStyleLabel(rule.style)
-                                }
+                                value={rule.notify ? "notify" : "record"}
                               >
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="natural">
-                                  {placeholderStyleLabel("natural")}
-                                </SelectItem>
-                                <SelectItem value="token">
-                                  {placeholderStyleLabel("token")}
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
+                                <SelectTrigger
+                                  aria-label={t("safety.notifyFor", {
+                                    kind: canonicalKindLabel(kind),
+                                  })}
+                                  aria-describedby={
+                                    unreachable
+                                      ? `privacy-kind-hint-${kind}`
+                                      : undefined
+                                  }
+                                  className="h-8 w-32 px-2 text-xs @[400px]:w-36"
+                                  size="sm"
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="notify">
+                                    {t("safety.notifyOn")}
+                                  </SelectItem>
+                                  <SelectItem value="record">
+                                    {t("safety.notifyOff")}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            ) : (
+                              <Select
+                                disabled={
+                                  saving || styleLocked || !rule.enabled
+                                }
+                                onValueChange={(value) =>
+                                  saveKindRule(kind, {
+                                    style: value as PlaceholderStyle,
+                                  })
+                                }
+                                value={rule.style}
+                              >
+                                <SelectTrigger
+                                  aria-label={t("safety.styleFor", {
+                                    kind: canonicalKindLabel(kind),
+                                  })}
+                                  aria-describedby={
+                                    lockReason || unreachable
+                                      ? `privacy-kind-hint-${kind}`
+                                      : undefined
+                                  }
+                                  className="h-8 w-32 px-2 text-xs @[400px]:w-36"
+                                  size="sm"
+                                  title={
+                                    styleLocked
+                                      ? lockReason
+                                      : placeholderStyleLabel(rule.style)
+                                  }
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="natural">
+                                    {placeholderStyleLabel("natural")}
+                                  </SelectItem>
+                                  <SelectItem value="token">
+                                    {placeholderStyleLabel("token")}
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            )}
                             <Switch
-                              aria-label={t("safety.redactKind", {
-                                kind: canonicalKindLabel(kind),
-                              })}
+                              aria-label={t(
+                                kindRulesWarn
+                                  ? "safety.detectKind"
+                                  : "safety.redactKind",
+                                { kind: canonicalKindLabel(kind) },
+                              )}
                               checked={rule.enabled}
                               disabled={saving}
                               onCheckedChange={(enabled) =>
@@ -3356,21 +3647,36 @@ export function SafetyPolicy({
                     content: t("safety.allowlistHint"),
                   }}
                   actions={
-                    <Button
-                      disabled={
-                        saving ||
-                        allowlistPending ||
-                        policy.allowlist_rules.length >=
-                          MAX_PRIVACY_ALLOWLIST_RULES
-                      }
-                      onClick={addAllowlistRule}
-                      size="sm"
-                      type="button"
-                      variant="outline"
-                    >
-                      <Plus aria-hidden="true" />
-                      {t("safety.addAllowlist")}
-                    </Button>
+                    <>
+                      <IconButton
+                        className="text-muted-foreground"
+                        disabled={
+                          saving ||
+                          allowlistPending ||
+                          missingAllowlistDefaults.length === 0
+                        }
+                        label={t("safety.restoreDefaultAllowlist")}
+                        onClick={() => setPendingReset("allowlist")}
+                        type="button"
+                      >
+                        <RotateCcw aria-hidden="true" />
+                      </IconButton>
+                      <Button
+                        disabled={
+                          saving ||
+                          allowlistPending ||
+                          policy.allowlist_rules.length >=
+                            MAX_PRIVACY_ALLOWLIST_RULES
+                        }
+                        onClick={addAllowlistRule}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        <Plus aria-hidden="true" />
+                        {t("safety.addAllowlist")}
+                      </Button>
+                    </>
                   }
                 />
                 <fieldset
@@ -4381,6 +4687,11 @@ export function SafetyPolicy({
                       htmlFor="privacy-local-model-path"
                     >
                       <span>{t("safety.localPathField")}</span>
+                      {isWebEdition && (
+                        <p className="text-xs text-muted-foreground">
+                          {t("webConsole.serverPath")}
+                        </p>
+                      )}
                       <Input
                         aria-describedby="local-model-mount-note"
                         aria-label={t("safety.localPath")}
@@ -4393,7 +4704,6 @@ export function SafetyPolicy({
                           resetProbedModel();
                         }}
                         placeholder={t("safety.localPathPlaceholder")}
-                        spellCheck={false}
                         value={localPath}
                       />
                     </Label>
@@ -4838,6 +5148,74 @@ export function SafetyPolicy({
           title={t("safety.fillBuiltin")}
         />
       ) : null}
+      <ConfirmDialog
+        confirmLabel={t(
+          pendingReset === "allowlist"
+            ? "safety.restoreDefaultAllowlistConfirm"
+            : "safety.resetConfirm",
+        )}
+        description={
+          pendingReset === "kind_rules" ? (
+            <p>
+              {t("safety.resetKindRulesHint", {
+                off: defaultPrivacyKindRules()
+                  .filter((rule) => !rule.enabled)
+                  .map((rule) => canonicalKindLabel(rule.kind))
+                  .join(t("safety.listJoin")),
+              })}
+            </p>
+          ) : pendingReset === "restore" ? (
+            <>
+              <p>{t("safety.resetRestoreHint")}</p>
+              <ul className="grid gap-1.5">
+                {restoreDefaults.map(({ label, on }) => (
+                  <li
+                    className="flex items-center justify-between gap-3"
+                    key={label}
+                  >
+                    <span>{label}</span>
+                    <Badge variant={on ? "secondary" : "outline"}>
+                      {t(on ? "safety.defaultOn" : "safety.defaultOff")}
+                    </Badge>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : pendingReset === "allowlist" ? (
+            <>
+              <p>
+                {t("safety.restoreDefaultAllowlistHint", {
+                  count: missingAllowlistDefaults.length,
+                })}
+              </p>
+              <ul className="flex flex-wrap gap-1.5">
+                {missingAllowlistDefaults.map((rule) => (
+                  <li key={`${rule.type}:${rule.value}`}>
+                    <Badge className="font-mono" variant="outline">
+                      {rule.value}
+                    </Badge>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null
+        }
+        disabled={saving}
+        onCancel={() => setPendingReset(null)}
+        onConfirm={confirmPendingReset}
+        open={pendingReset !== null}
+        title={
+          pendingReset === "kind_rules"
+            ? t(
+                kindRulesWarn
+                  ? "safety.resetKindRulesWarnTitle"
+                  : "safety.resetKindRulesTitle",
+              )
+            : pendingReset === "restore"
+              ? t("safety.resetRestoreTitle")
+              : t("safety.restoreDefaultAllowlistTitle")
+        }
+      />
       {pendingModelAction !== null && pendingActionInstallation !== null ? (
         <ModelActionDialog
           action={pendingModelAction}

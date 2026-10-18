@@ -154,27 +154,67 @@ func TestTokenPlaceholdersAreNotRedactedAgain(t *testing.T) {
 	}
 }
 
-// TestAllocatorRederivesWhenCandidateOccursInBody protects genuine text: if the
-// request already contains the candidate string, restoring would rewrite that
-// occurrence too.
-func TestAllocatorRederivesWhenCandidateOccursInBody(t *testing.T) {
+// TestAllocatorReusesItsOwnPlaceholderFromTheBody covers a model quoting a
+// placeholder in reasoning, which is never restored, so the client resends it
+// next turn beside the original value. Re-deriving gave the value a new name on
+// each such turn: the model saw one secret under several names, an older name
+// in a tool call was no longer restored, and the prefix cache broke at the
+// first redacted span.
+func TestAllocatorReusesItsOwnPlaceholderFromTheBody(t *testing.T) {
+	key := testDerivationKey(5)
+	for _, test := range []struct {
+		name  string
+		kind  Kind
+		value string
+		rule  func(Kind) KindRule
+	}{
+		{"secret token", KindCommonSecret, "sk-abcdefghijklmnop123456", tokenKindRule},
+		{"email token", KindEmail, "alice@example.com", tokenKindRule},
+		{"email stand-in", KindEmail, "alice@example.com", naturalKindRule},
+		{"url stand-in", KindURL, "https://internal.corp/orders/91", naturalKindRule},
+		{"ipv6 stand-in", KindIPAddress, "2606:4700::1111", naturalKindRule},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			free := newPlaceholderAllocator(key, test.rule, nil)
+			placeholder, _, err := free.allocate(test.kind, test.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := []byte(`{"input":"` + test.value + ` was ` + placeholder + `"}`)
+			replay := newPlaceholderAllocator(key, test.rule, body)
+			got, _, err := replay.allocate(test.kind, test.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != placeholder {
+				t.Fatalf("placeholder %q became %q after appearing in the body", placeholder, got)
+			}
+		})
+	}
+}
+
+// TestAllocatorRederivesIPv4StandInAlreadyInBody keeps the collision guard for
+// the one pool small enough to be shared: an address from the IPv4
+// documentation ranges may be another value's stand-in or documentation text,
+// which restoring would rewrite.
+func TestAllocatorRederivesIPv4StandInAlreadyInBody(t *testing.T) {
 	key := testDerivationKey(5)
 	free := newPlaceholderAllocator(key, naturalKindRule, nil)
-	natural, _, err := free.allocate(KindEmail, "alice@example.com")
+	standIn, _, err := free.allocate(KindIPAddress, "10.4.7.9")
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(`{"input":"alice@example.com already mentions ` + natural + `"}`)
+	body := []byte(`{"input":"10.4.7.9, see also ` + standIn + `"}`)
 	constrained := newPlaceholderAllocator(key, naturalKindRule, body)
-	avoided, _, err := constrained.allocate(KindEmail, "alice@example.com")
+	avoided, style, err := constrained.allocate(KindIPAddress, "10.4.7.9")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if avoided == natural {
-		t.Fatalf("allocator reused a stand-in already present in the body: %q", avoided)
+	if avoided == standIn {
+		t.Fatalf("allocator reused an IPv4 stand-in already present in the body: %q", avoided)
 	}
-	if !strings.HasSuffix(avoided, "@private.invalid") {
-		t.Fatalf("re-derived stand-in %q left the reserved namespace", avoided)
+	if style != contract.PlaceholderStyleNatural || !isReservedTestNetAddress(avoided) {
+		t.Fatalf("re-derived stand-in %q (%s) left the reserved namespace", avoided, style)
 	}
 }
 

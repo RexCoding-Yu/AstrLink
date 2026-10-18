@@ -456,3 +456,58 @@ func TestSubscriptionStreamErrorIsReportedWithoutChangingStream(t *testing.T) {
 		t.Fatalf("reports = %+v", reports)
 	}
 }
+
+// Anthropic's 400 for third-party usage leaves the account in service, and no
+// Claude subscription retries the request, even under a failure policy that
+// fails over on 400: one with extra usage would accept and bill it. Any other
+// 400 follows that policy.
+func TestClaudeExtraUsageRejectionStaysOnOneAccount(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, message string
+		failover      bool
+	}{
+		{"third-party usage", "Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going.", false},
+		{"out of extra usage", "You're out of extra usage. Add more at claude.ai/settings/usage and keep going.", false},
+		{"other request error", "prompt is too long: 250000 tokens > 200000 maximum", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			body := `{"type":"error","error":{"type":"invalid_request_error","message":"` + test.message + `"}}`
+			rejected := newRiskUpstream(t, http.StatusBadRequest, "application/json", body, nil)
+			other := newRiskUpstream(t, http.StatusOK, "application/json", identityClaudeResponse, nil)
+			policy := contract.DefaultFailurePolicy()
+			policy.InitialDelayMS = 0
+			policy.HTTPStatus["400"] = contract.FailureRetryAndFailover
+			first := protectionClaudeCandidate("service_claude_rejected", rejected.url)
+			second := protectionClaudeCandidate("service_claude_other", other.url)
+			first.FailurePolicy, second.FailurePolicy = &policy, &policy
+			reporter := newRecordingSubscriptionRisk()
+			handler := NewWithDependencies(Dependencies{
+				Resolver:         candidateResolver{candidates: []endpoint.Resolved{first, second}},
+				Authorizer:       endpoint.NewServiceAuthorizer(codingPlanCredentials{}, codingPlanCredentials{}),
+				SubscriptionRisk: reporter,
+			})
+			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+				`{"model":"claude-opus-5-5","max_tokens":64,"system":"Caller rule","messages":[{"role":"user","content":"hello"}]}`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if reports, _ := reporter.snapshot(); len(reports) != 0 {
+				t.Fatalf("account risk reported: %+v", reports)
+			}
+			if test.failover {
+				if response.Code != http.StatusOK || other.hits.Load() != 1 {
+					t.Fatalf("response = %d %s, other hits = %d", response.Code, response.Body.String(), other.hits.Load())
+				}
+				return
+			}
+			if response.Code != http.StatusBadRequest || response.Body.String() != body ||
+				rejected.hits.Load() != 1 || other.hits.Load() != 0 {
+				t.Fatalf("response = %d %q; rejected hits = %d, other hits = %d",
+					response.Code, response.Body.String(), rejected.hits.Load(), other.hits.Load())
+			}
+		})
+	}
+}

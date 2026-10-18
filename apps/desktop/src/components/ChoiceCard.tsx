@@ -1,4 +1,4 @@
-import type { ComponentProps, ReactNode } from "react";
+import { useId, type ComponentProps, type ReactNode } from "react";
 
 import { Label } from "@/components/ui/label";
 import { RadioGroupItem } from "@/components/ui/radio-group";
@@ -22,28 +22,34 @@ export function ChoiceCard({
   id?: string;
   icon?: ReactNode;
   label: string;
-  layout?: "row" | "tile";
+  layout?: "row" | "tile" | "compact";
   selected: boolean;
   value: string;
 } & Pick<
   ComponentProps<typeof RadioGroupItem>,
   "onClick" | "aria-haspopup" | "aria-expanded"
 >) {
+  const descriptionId = useId();
   return (
     <Label
       className={cn(
-        "flex min-w-0 cursor-pointer items-start gap-2 rounded-md border bg-card p-2.5 transition-colors hover:border-primary/40",
+        "flex min-w-0 cursor-pointer items-start gap-2 rounded-md border bg-card p-2.5 transition-colors",
+        // A disabled option keeps its border on hover.
+        !disabled && "hover:border-primary/40",
         layout === "tile" &&
           "relative flex-col items-center justify-center gap-2 px-2 py-3 text-center has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring/25",
+        layout === "compact" &&
+          "relative h-7 flex-row items-center justify-center gap-1.5 rounded-sm border-transparent bg-transparent px-2.5 py-0 whitespace-nowrap has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring has-[:focus-visible]:ring-inset",
         selected && "border-primary/50 bg-accent",
-        disabled && "cursor-not-allowed opacity-50 hover:border-border",
+        disabled && "cursor-not-allowed opacity-50",
         className,
       )}
       htmlFor={id}
     >
       <RadioGroupItem
         aria-label={label}
-        className={cn("shrink-0", layout === "tile" && "sr-only")}
+        aria-describedby={description ? descriptionId : undefined}
+        className={cn("shrink-0", layout !== "row" && "sr-only")}
         disabled={disabled}
         id={id}
         value={value}
@@ -55,9 +61,19 @@ export function ChoiceCard({
         </span>
       ) : null}
       <span className="grid min-w-0 gap-0.5">
-        <strong className="text-sm font-medium">{label}</strong>
+        <strong
+          className={cn(
+            "font-medium",
+            layout === "compact" ? "text-xs" : "text-sm",
+          )}
+        >
+          {label}
+        </strong>
         {description ? (
-          <small className="text-xs font-normal text-muted-foreground">
+          <small
+            id={descriptionId}
+            className="text-xs font-normal text-muted-foreground"
+          >
             {description}
           </small>
         ) : null}

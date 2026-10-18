@@ -52,6 +52,10 @@ type Request struct {
 	lastUserText string
 	// routingText is a bounded, request-local text view for literal keyword facts.
 	routingText string
+	// routingBody is the raw body a routing-group request was classified
+	// from, kept so routing can inspect it under the privacy policy before a
+	// classifier reads any of its text. Never persist, log, or forward it.
+	routingBody []byte
 	// shape is the body's structure as model routing facts read it. It is only
 	// read for a request that names a routing group, and holds counts alone.
 	shape requestShape
@@ -62,6 +66,10 @@ type Request struct {
 	// ModelRoutingMember is the concrete target selected from a virtual group.
 	// It is internal and never serialized or forwarded to an upstream.
 	ModelRoutingMember *contract.ModelRoutingMember
+	// codexTurn names the Codex turn a Responses request belongs to. Codex's
+	// own image and search requests for that turn go to the provider that
+	// served it.
+	codexTurn codexTurnRef
 }
 
 // routingModel is the model id used to select services and sent upstream.
@@ -104,6 +112,23 @@ var exactProtocolRoutes = map[string]protocolRoute{
 	"/v1/models": {
 		method: http.MethodGet, protocol: contract.ProtocolOpenAIModels,
 	},
+	"/v1/embeddings": {
+		method: http.MethodPost, protocol: contract.ProtocolOpenAIEmbeddings, inspectMetadata: true,
+	},
+	"/v1/rerank": {
+		method: http.MethodPost, protocol: contract.ProtocolRerank, inspectMetadata: true,
+	},
+	// Codex calls these itself for its image and web search tools. The
+	// built-in tools answer them, or the provider that served the turn.
+	"/v1/images/generations": {
+		method: http.MethodPost, protocol: contract.ProtocolOpenAIImages, inspectMetadata: true,
+	},
+	"/v1/images/edits": {
+		method: http.MethodPost, protocol: contract.ProtocolOpenAIImages, inspectMetadata: true,
+	},
+	"/v1/alpha/search": {
+		method: http.MethodPost, protocol: contract.ProtocolOpenAISearch, inspectMetadata: true,
+	},
 	"/v1beta/models": {
 		method: http.MethodGet, protocol: contract.ProtocolGoogleModels,
 	},
@@ -145,7 +170,7 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 		if err != nil {
 			return Request{}, err
 		}
-		result.routingText = boundedRoutingText(raw)
+		attachRoutingBody(&result, raw)
 		attachAutoClassifyText(&result, request, raw, maxBodyBytes)
 		return validateClassifiedRequest(result)
 	}
@@ -154,7 +179,10 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	if err != nil {
 		return Request{}, err
 	}
-	if result.Protocol != contract.ProtocolOpenAIResponsesCompact {
+	switch result.Protocol {
+	case contract.ProtocolOpenAIResponsesCompact, contract.ProtocolOpenAIEmbeddings,
+		contract.ProtocolGoogleEmbeddings, contract.ProtocolRerank:
+	default:
 		result.Streaming = metadata.Stream
 	}
 	if result.Model == "" {
@@ -166,8 +194,11 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	result.ConversationID = metadata.ConversationID
 	result.InputPreview = metadata.InputPreview
 	result.Conversation = metadata.Conversation
-	result.routingText = boundedRoutingText(metadata.raw)
+	attachRoutingBody(&result, metadata.raw)
 	result.shape = metadata.shape
+	if result.Protocol == contract.ProtocolOpenAIResponses {
+		result.codexTurn = metadata.codexTurn.or(codexTurnFromHeader(request.Header))
+	}
 	if result.Protocol == contract.ProtocolOpenAIResponses || result.Protocol == contract.ProtocolOpenAIResponsesCompact {
 		// Read the caller's identity before subscription forwarding scopes it
 		// to an upstream account. A fork can retain its parent's cache key and
@@ -185,6 +216,17 @@ func classify(request *http.Request, maxBodyBytes int64) (Request, error) {
 	return validateClassifiedRequest(result)
 }
 
+// attachRoutingBody keeps what model routing reads from the body. Only a
+// request that names a routing group needs it, so every other request skips
+// the copy.
+func attachRoutingBody(result *Request, raw []byte) {
+	if !namesModelRoutingGroup(result.Model) {
+		return
+	}
+	result.routingText = boundedRoutingText(raw)
+	result.routingBody = raw
+}
+
 func boundedRoutingText(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
@@ -197,10 +239,11 @@ func boundedRoutingText(raw []byte) string {
 
 // classifiedWithSanitizedText rebuilds every text view the routing evaluator
 // reads from the sanitized request bytes. Routing facts must not keep a
-// pre-redaction copy: the classifier and literal keyword matching share the
-// same sanitized view the upstreams receive.
+// pre-redaction copy: the classifier and literal keyword matching read only
+// what the privacy policy lets leave this machine. A nil body leaves no text.
 func classifiedWithSanitizedText(classified Request, sanitized []byte) Request {
 	classified.routingText = boundedRoutingText(sanitized)
+	classified.routingBody = nil
 	// Unconditional reassignment: a pre-redaction copy must never survive the
 	// rebuild, even when the sanitized body yields no extractable user text —
 	// the empty extraction is the sanitized truth, not a reason to keep raw text.
@@ -247,6 +290,10 @@ func matchProtocolRoute(path string) (protocolRoute, string, bool) {
 		return protocolRoute{
 			method: http.MethodPost, protocol: contract.ProtocolGoogleGenerateContent, streaming: true,
 		}, model, true
+	case "embedContent", "batchEmbedContents":
+		return protocolRoute{
+			method: http.MethodPost, protocol: contract.ProtocolGoogleEmbeddings, inspectMetadata: true,
+		}, model, true
 	default:
 		return protocolRoute{}, "", false
 	}
@@ -262,6 +309,7 @@ type requestMetadata struct {
 	InputPreview       string
 	Conversation       convo.RequestSummary
 	shape              requestShape
+	codexTurn          codexTurnRef
 	raw                []byte
 }
 
@@ -398,6 +446,9 @@ func inspectJSONMetadata(request *http.Request, protocol contract.ProtocolID, ma
 		}
 	}
 	metadata.PreviousResponseID = extractProtocolCursor(fields, "previous_response_id")
+	if protocol == contract.ProtocolOpenAIResponses {
+		metadata.codexTurn = codexTurnFromClientMetadata(fields["client_metadata"])
+	}
 	if convoProto, ok := convoProtocol(protocol); ok {
 		// The summary walks the history once; conversation cursors and the
 		// preview both come from it so the two never disagree.
@@ -407,6 +458,9 @@ func inspectJSONMetadata(request *http.Request, protocol contract.ProtocolID, ma
 			metadata.ConversationID = conversationCursor(summary, metadata.PreviousResponseID)
 			metadata.InputPreview = sanitizePreview(summary.LastUserText)
 		}
+	}
+	if text := builtinToolPreview(protocol, fields); text != "" {
+		metadata.InputPreview = sanitizePreview(text)
 	}
 	if namesModelRoutingGroup(metadata.Model) {
 		metadata.shape = inspectRequestShape(protocol, raw)

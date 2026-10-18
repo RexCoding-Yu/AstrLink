@@ -66,7 +66,7 @@ import {
 } from "./request-record-model";
 import type { RoutableService } from "./service-model";
 import type { RequestService } from "./request-service-model";
-import { i18n } from "./i18n";
+import { applyLocale, i18n } from "./i18n";
 
 const service: RoutableService & RequestService = {
   id: "service_01",
@@ -235,7 +235,7 @@ function sessionFromRecord(
 ): RequestSession {
   return {
     id: record.session_id ?? record.id,
-    title: record.input_preview ?? record.requested_model ?? "未命名会话",
+    title: record.input_preview ?? record.requested_model ?? "",
     started_at: record.started_at,
     last_started_at: record.started_at,
     completed_at: record.completed_at,
@@ -573,6 +573,36 @@ describe("RequestRecords", () => {
     },
   );
 
+  it("marks a conversation the warn action let through on its title line", async () => {
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [
+        sessionFromRecord(firstRecord, { privacy_warned: true }),
+        sessionFromRecord(secondRecord),
+      ],
+      next_cursor: null,
+    });
+    await renderRecords();
+    const rows = container.querySelectorAll(
+      '[data-testid="request-session-row"]',
+    );
+    const marker = rows[0]?.querySelector(
+      '[data-testid="privacy-warned-marker"]',
+    );
+    expect(marker?.textContent).toBe("已警告");
+    expect(marker?.getAttribute("title")).toBe(
+      "这段对话里有请求包含隐私内容，模型收到了原文。",
+    );
+    // It shares the title's line, so the row keeps its cells and height.
+    expect(
+      marker?.parentElement?.contains(rows[0]?.querySelector("strong") ?? null),
+    ).toBe(true);
+    expect(rows[0]?.children).toHaveLength(rows[1]?.children.length ?? -1);
+    expect(
+      rows[1]?.querySelector('[data-testid="privacy-warned-marker"]'),
+    ).toBeNull();
+    expect(rows[1]?.textContent).not.toContain("已警告");
+  });
+
   it("shows explicit reasoning effort beside the model and omits it for legacy sessions", async () => {
     bridgeMocks.listRequestSessions.mockResolvedValue({
       items: [
@@ -589,6 +619,33 @@ describe("RequestRecords", () => {
     expect(badge?.textContent).toBe("high");
     expect(badge?.parentElement?.textContent).toContain("gpt-4.1");
     expect(rows[1]?.querySelector('[aria-label^="思考强度:"]')).toBeNull();
+  });
+
+  it("names a session Core left untitled in the operator's language", async () => {
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [sessionFromRecord(firstRecord, { title: "" })],
+      next_cursor: null,
+    });
+    await renderRecords();
+    const title = container.querySelector(
+      '[data-testid="request-session-row"] strong',
+    );
+    expect(title?.textContent).toBe("未命名会话");
+    expect(title?.getAttribute("title")).toBe("未命名会话");
+  });
+
+  it("names the file in a title cut from a dropped file's path", async () => {
+    const path = "/Users/me/Desktop/Snapzy/Snapzy_2026-10-12_22-45-20_345…";
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [sessionFromRecord(firstRecord, { title: path })],
+      next_cursor: null,
+    });
+    await renderRecords();
+    const title = container.querySelector(
+      '[data-testid="request-session-row"] strong',
+    );
+    expect(title?.textContent).toBe("Snapzy_2026-10-12_22-45-20_345…");
+    expect(title?.getAttribute("title")).toBe(path);
   });
 
   it("renders a session stream instead of a wide table", async () => {
@@ -614,6 +671,43 @@ describe("RequestRecords", () => {
     );
     expect(provider?.querySelector('[aria-label="New API"]')).not.toBeNull();
     expect(provider?.getAttribute("title")).toContain(service.id);
+  });
+
+  it("widens the status column for English labels and counts one turn in the singular", async () => {
+    await applyLocale("en");
+    try {
+      const measureRect = HTMLElement.prototype.getBoundingClientRect;
+      vi.spyOn(
+        HTMLElement.prototype,
+        "getBoundingClientRect",
+      ).mockImplementation(function (this: HTMLElement) {
+        if (this.parentElement?.getAttribute("role") !== "feed") {
+          return measureRect.call(this);
+        }
+        return { width: 88.4, height: 20 } as DOMRect;
+      });
+      bridgeMocks.listRequestSessions.mockResolvedValue({
+        items: [sessionFromRecord(firstRecord)],
+        next_cursor: null,
+      });
+      await renderRecords();
+
+      const feed = container.querySelector<HTMLElement>('[role="feed"]');
+      expect(feed?.style.getPropertyValue("--request-status-column")).toBe(
+        "89px",
+      );
+      // The labels that size the column are not page text.
+      expect(feed?.textContent).not.toContain("Interrupted");
+      expect(feed?.textContent).toContain("Succeeded");
+      expect(feed?.textContent).toContain("1 record");
+      expect(feed?.textContent).not.toContain("1 records");
+      expect(
+        container.querySelector('[data-testid="request-session-row"]')
+          ?.textContent,
+      ).toContain("1 turn ·");
+    } finally {
+      await applyLocale("zh-CN");
+    }
   });
 
   it("mounts what fits the window first and the rest of a long list frame by frame", async () => {
@@ -1075,6 +1169,97 @@ describe("RequestRecords", () => {
     expect(payload.session.requested_model).toBe("gpt-4.1");
     expect(payload.session.model_redirect).toStrictEqual(redirect);
     expect(payload.records[0].model_redirect).toStrictEqual(redirect);
+  });
+
+  it("shows image compression as a trajectory step with its sizes", async () => {
+    const at = (ms: number) =>
+      new Date(Date.parse(firstRecord.started_at) + ms).toISOString();
+    const root: RequestRecord = {
+      ...firstRecord,
+      events: [
+        {
+          kind: "accepted",
+          started_at: at(0),
+          ended_at: at(3),
+          status: "succeeded",
+          summary: "gpt-4.1 · openai.responses",
+          attempt_index: 0,
+        },
+        {
+          kind: "image_compression",
+          started_at: at(4),
+          ended_at: at(52),
+          status: "succeeded",
+          summary: "lossless · 1/1 images · 75301 → 37406 bytes",
+          attempt_index: 1,
+        },
+        {
+          kind: "routed",
+          started_at: at(53),
+          ended_at: at(53),
+          status: "succeeded",
+          summary: "native · service_01",
+          attempt_index: 1,
+        },
+        {
+          kind: "upstream",
+          started_at: at(53),
+          ended_at: at(120),
+          status: "succeeded",
+          summary: "HTTP 200 · 10 → 20",
+          attempt_index: 1,
+        },
+      ],
+    };
+    const session = sessionFromRecord(root);
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [session],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValue({
+      ...session,
+      turns: [root],
+    });
+
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${root.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+
+    const chips = [
+      ...container.querySelectorAll<HTMLElement>(
+        '[data-testid="trajectory-row"]',
+      ),
+    ].map((row) => row.dataset.chip);
+    expect(chips.slice(0, 3)).toEqual(["CLIENT", "COMPRESS", "ROUTE"]);
+    const row = container.querySelector<HTMLButtonElement>(
+      '[data-testid="trajectory-row"][data-chip="COMPRESS"]',
+    );
+    expect(row?.textContent).toContain("压缩");
+    expect(row?.textContent).toContain(
+      "1/1 张图片 · 无损 WebP · 73.5 KB → 36.5 KB · 减小 50%",
+    );
+    expect(row?.textContent).toContain("48 ms");
+
+    await act(async () => {
+      row?.click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    const inspector = container.querySelector(
+      '[data-testid="trajectory-inspector"] [data-testid="compression-inspector"]',
+    );
+    expect(inspector?.textContent).toContain("方式无损 WebP");
+    expect(inspector?.textContent).toContain("已压缩1 张，共 1 张");
+    expect(inspector?.textContent).toContain("压缩前73.5 KB");
+    expect(inspector?.textContent).toContain("实际发送36.5 KB · 减小 50%");
+    expect(inspector?.textContent).toContain("不减少 Token 用量");
   });
 
   // The detail carries every root turn of the conversation, and the children
@@ -1837,7 +2022,7 @@ describe("RequestRecords", () => {
     ).toBe("redact");
     expect(
       after?.querySelector('[data-testid="policy-outcome"]')?.textContent,
-    ).toBe("已脱敏替换 4 处邮箱 ×2电话 ×1");
+    ).toBe("已脱敏替换 4 项类型明细");
     expect(after?.textContent).not.toContain("客户端响应");
     expect(after?.textContent).not.toContain("上游响应");
     // Capture is off here: the redacted request says so once, in its pane.
@@ -1918,11 +2103,25 @@ describe("RequestRecords", () => {
     const inspector = container.querySelector(
       '[data-testid="trajectory-inspector"]',
     );
-    const hits = inspector?.querySelector('[data-testid="privacy-hits"]');
-    expect(hits?.textContent).toContain("邮箱 ×2");
-    expect(hits?.textContent).toContain("电话 ×1");
-    expect(hits?.textContent).not.toContain("alice@");
-    expect(hits?.querySelector('[data-testid="privacy-mark"]')).toBeNull();
+    await act(async () => {
+      inspector
+        ?.querySelector<HTMLButtonElement>(
+          '[data-testid="policy-kinds-toggle"]',
+        )
+        ?.click();
+    });
+    const table = inspector?.querySelector('[data-testid="policy-kinds"]');
+    if (!table) throw new Error("Missing policy kind table");
+    expect(
+      [...table.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => cell.textContent),
+      ),
+    ).toEqual([
+      ["邮箱", "2"],
+      ["电话", "1"],
+    ]);
+    expect(table.textContent).not.toContain("alice@");
+    expect(table.querySelector('[data-testid="privacy-mark"]')).toBeNull();
     const pane = inspector?.querySelector('[aria-label="脱敏后请求"]');
     expect(pane?.textContent).toContain("脱敏后请求");
     expect(
@@ -1980,8 +2179,15 @@ describe("RequestRecords", () => {
     const scrollIntoView = vi.fn();
     mark.scrollIntoView = scrollIntoView;
 
+    await act(async () => {
+      inspector
+        ?.querySelector<HTMLButtonElement>(
+          '[data-testid="policy-kinds-toggle"]',
+        )
+        ?.click();
+    });
     const emailHit = inspector?.querySelector<HTMLButtonElement>(
-      '[data-testid="privacy-hits"] button[data-kind="email"]',
+      '[data-testid="policy-kinds"] button[data-kind="email"]',
     );
     if (!emailHit) throw new Error("Missing email privacy hit");
     await act(async () => {
@@ -2096,7 +2302,7 @@ describe("RequestRecords", () => {
     );
     expect(
       inspector?.querySelector('[data-testid="policy-outcome"]')?.textContent,
-    ).toBe("已脱敏替换 4 处");
+    ).toBe("已脱敏替换 4 项");
     expect(inspector?.querySelector('[data-testid="privacy-hits"]')).toBeNull();
   });
 
@@ -2195,6 +2401,739 @@ describe("RequestRecords", () => {
     ).toBeNull();
     expect(inspector?.textContent).not.toContain("hello");
     expect(inspector?.textContent).not.toContain(`${body.length} B`);
+  });
+
+  it("summarizes what the privacy policy replaced and restored", async () => {
+    const redacted: RequestRecord = {
+      ...firstRecord,
+      turn_index: 1,
+      privacy_decision: "redact",
+      privacy_restore: {
+        enabled: true,
+        mapping_count: 3,
+        restored_count: 2,
+        visible_restored_count: 2,
+        tool_argument_restored_count: 0,
+        fallback_count: 1,
+        hits: [
+          { kind: "email", count: 2 },
+          { kind: "phone", count: 1 },
+        ],
+      },
+    };
+    const clean: RequestRecord = {
+      ...firstRecord,
+      id: "req_cccccccccccccccccccccccccccccccc",
+      started_at: "2026-07-25T12:00:00Z",
+      completed_at: "2026-07-25T12:00:01Z",
+      privacy_decision: "allow",
+      privacy_restore: null,
+      turn_index: 2,
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(redacted)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce({
+      ...sessionFromRecord(redacted),
+      turns: [redacted, clean],
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${redacted.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => {
+      exactButton("隐私保护").click();
+    });
+
+    const panel = container.querySelector('[data-testid="privacy-audit"]');
+    const text = panel?.textContent ?? "";
+    expect(text).toContain("已脱敏");
+    expect(text).toContain("发送给模型前替换了 3 项隐私内容");
+    expect(text).toContain("替换内容");
+    expect(text).toContain("邮箱 ×2");
+    expect(text).toContain("电话 ×1");
+    expect(text).toContain("已还原");
+    expect(text).toContain("未还原");
+    // Only the call that did something gets a row; the clean turn is a count.
+    const rows = panel?.querySelectorAll('[data-testid="privacy-audit-call"]');
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0].textContent).toContain("第 1 次调用");
+    expect(rows?.[0].textContent).toContain("替换 3 项");
+    expect(rows?.[0].textContent).toContain("还原 2 处");
+    expect(
+      [
+        ...(panel?.querySelectorAll('[data-testid="privacy-audit-turn"]') ??
+          []),
+      ].map((turn) => turn.textContent),
+    ).toEqual([expect.stringContaining("第 1 轮")]);
+    expect(text).toContain("其余 1 轮没有替换内容。");
+  });
+
+  it("folds the call list by turn", async () => {
+    const restore = (count: number): RequestRecord["privacy_restore"] => ({
+      enabled: true,
+      mapping_count: count,
+      restored_count: count,
+      visible_restored_count: count,
+      tool_argument_restored_count: 0,
+      fallback_count: 0,
+      hits: [{ kind: "email", count }],
+    });
+    const call = (
+      id: string,
+      turn: number,
+      minute: number,
+      replaced: number,
+    ): RequestRecord => ({
+      ...firstRecord,
+      id: `req_${id.repeat(32)}`,
+      started_at: `2026-07-25T12:0${minute}:00Z`,
+      completed_at: `2026-07-25T12:0${minute}:01Z`,
+      turn_index: turn,
+      privacy_decision: replaced > 0 ? "redact" : "allow",
+      privacy_restore: replaced > 0 ? restore(replaced) : null,
+    });
+    const turns = [
+      call("a", 1, 0, 1),
+      call("b", 1, 1, 2),
+      call("c", 2, 2, 0),
+      call("d", 3, 3, 1),
+    ];
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(turns[0])],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce({
+      ...sessionFromRecord(turns[0]),
+      turns,
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${turns[0].id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => {
+      exactButton("隐私保护").click();
+    });
+
+    const panel = () =>
+      container.querySelector('[data-testid="privacy-audit"]');
+    const headers = () =>
+      [
+        ...(panel()?.querySelectorAll('[data-testid="privacy-audit-turn"]') ??
+          []),
+      ] as HTMLButtonElement[];
+    const callLabels = () =>
+      [
+        ...(panel()?.querySelectorAll('[data-testid="privacy-audit-call"]') ??
+          []),
+      ].map((row) => row.textContent?.match(/第 \d+ 次调用/)?.[0]);
+    // The turn that replaced nothing gets no header, and only the latest
+    // turn, which holds the selected call, starts open.
+    expect(headers().map((header) => header.textContent)).toEqual([
+      expect.stringContaining("第 1 轮"),
+      expect.stringContaining("第 3 轮"),
+    ]);
+    expect(headers()[0].textContent).toContain("2 次调用 · 替换 3 项");
+    expect(
+      headers().map((header) => header.getAttribute("aria-expanded")),
+    ).toEqual(["false", "true"]);
+    expect(callLabels()).toEqual(["第 1 次调用"]);
+    expect(panel()?.textContent).toContain("其余 1 轮没有替换内容。");
+
+    await act(async () => {
+      headers()[0].click();
+    });
+    expect(callLabels()).toEqual(["第 1 次调用", "第 2 次调用", "第 1 次调用"]);
+
+    // Picking a call in another turn leaves the open turns open.
+    const earlier = panel()?.querySelector<HTMLButtonElement>(
+      `[data-call-id="${turns[1].id}"] [data-testid="privacy-audit-call"]`,
+    );
+    expect(earlier).toBeTruthy();
+    await act(async () => {
+      earlier?.click();
+      await Promise.resolve();
+    });
+    expect(
+      headers().map((header) => header.getAttribute("aria-expanded")),
+    ).toEqual(["true", "true"]);
+
+    await act(async () => {
+      headers()[0].click();
+    });
+    expect(callLabels()).toEqual(["第 1 次调用"]);
+  });
+
+  it("opens a call's replacements in place on the privacy tab", async () => {
+    const policyEvents = (summary: string): RequestRecord["events"] => [
+      {
+        kind: "privacy",
+        started_at: firstRecord.started_at,
+        ended_at: firstRecord.started_at,
+        status: "succeeded",
+        summary,
+        attempt_index: 1,
+      },
+      {
+        kind: "completed",
+        started_at: firstRecord.started_at,
+        ended_at: firstRecord.completed_at,
+        status: "succeeded",
+        summary: "HTTP 200",
+        attempt_index: 1,
+      },
+    ];
+    const restore = (
+      hits: Array<{ kind: string; count: number }>,
+    ): RequestRecord["privacy_restore"] => ({
+      enabled: true,
+      mapping_count: hits.length,
+      restored_count: 0,
+      visible_restored_count: 0,
+      tool_argument_restored_count: 0,
+      fallback_count: 0,
+      hits,
+    });
+    const first: RequestRecord = {
+      ...firstRecord,
+      turn_index: 1,
+      privacy_decision: "redact",
+      privacy_restore: restore([
+        { kind: "email", count: 1 },
+        { kind: "phone", count: 1 },
+      ]),
+      events: policyEvents("redact · 2 · skill"),
+    };
+    const second: RequestRecord = {
+      ...first,
+      id: "req_cccccccccccccccccccccccccccccccc",
+      started_at: "2026-07-25T12:00:00Z",
+      completed_at: "2026-07-25T12:00:01Z",
+      privacy_restore: restore([{ kind: "email", count: 1 }]),
+      privacy_findings: [
+        {
+          kind: "email",
+          json_path: "/input/0/content",
+          count: 1,
+          confidence: { min: 0.97, max: 0.97, threshold: 0.8 },
+        },
+      ],
+      privacy_ignored: [
+        {
+          kind: "ip_address",
+          reason: "kind_disabled",
+          count: 16,
+          confidence: { min: 0.8181, max: 0.9913, threshold: 0.8 },
+        },
+      ],
+      events: policyEvents("redact · 1 · skill"),
+    };
+    const email = "<PRIVATE_EMAIL_0123456789abcdef>";
+    const phone = "<PRIVATE_PHONE_fedcba9876543210>";
+    const earlier = "<PRIVATE_EMAIL_aaaaaaaaaaaaaaaa>";
+    const upstream: Record<string, string> = {
+      [first.id]: JSON.stringify({
+        instructions:
+          "Treat redaction markers of the form <PRIVATE_KIND_hex> as opaque.",
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: `Mail ${email} about the invoice, then call ${phone}.`,
+              },
+            ],
+          },
+        ],
+      }),
+      [second.id]: JSON.stringify({
+        input: [
+          { role: "user", content: `Again ${email}` },
+          {
+            type: "function_call_output",
+            output: "Stand-in addresses come from `192.0.2.0/24`.",
+          },
+          {
+            type: "reasoning",
+            content: [
+              { type: "reasoning_text", text: `It was sent to ${earlier}.` },
+            ],
+          },
+        ],
+      }),
+    };
+    bridgeMocks.getRequestAuditContent.mockImplementation(
+      async (requestId: string) => ({
+        request_id: requestId,
+        view: "shareable",
+        withheld: {},
+        http_meta: null,
+        request_body: null,
+        response_content: null,
+        upstream_http_meta: null,
+        upstream_request_body: {
+          media_type: "application/json",
+          content: upstream[requestId],
+          truncated: false,
+          captured_bytes: upstream[requestId].length,
+        },
+        upstream_response_content: null,
+        privacy_findings: [],
+      }),
+    );
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(first)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce({
+      ...sessionFromRecord(first),
+      turns: [first, second],
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${first.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => {
+      exactButton("隐私保护").click();
+    });
+
+    const panel = () =>
+      container.querySelector('[data-testid="privacy-audit"]');
+    const callRows = () =>
+      [
+        ...(panel()?.querySelectorAll('[data-testid="privacy-audit-call"]') ??
+          []),
+      ] as HTMLButtonElement[];
+    const placeholders = () =>
+      [
+        ...(panel()?.querySelectorAll(
+          '[data-testid="privacy-replacements"] [data-testid="privacy-replacement"]',
+        ) ?? []),
+      ].map((item) => item.getAttribute("data-placeholder"));
+    // Every call explained its stand-ins the same way, so it is said once.
+    expect(
+      panel()?.querySelector('[data-testid="privacy-audit-explanation"]')
+        ?.textContent,
+    ).toContain("客户端已有隐私脱敏 Skill");
+    expect(callRows().map((row) => row.textContent?.includes("Skill"))).toEqual(
+      [false, false],
+    );
+    // The session opens on its latest call, which opens in place.
+    expect(callRows().map((row) => row.getAttribute("aria-expanded"))).toEqual([
+      "false",
+      "true",
+    ]);
+    // The IP kind was turned off, so a quoted reserved range is not a
+    // replacement.
+    expect(placeholders()).toEqual([email]);
+    expect(panel()?.textContent).toContain("user · input[0].content");
+    const detail = panel()?.querySelector(
+      '[data-testid="privacy-call-detail"]',
+    );
+    const [acted, left] = [
+      ...(detail?.querySelectorAll('[data-testid="policy-kinds"]') ?? []),
+    ];
+    expect(
+      [...(acted?.querySelectorAll("tbody tr") ?? [])].map((row) =>
+        row.getAttribute("data-kind"),
+      ),
+    ).toEqual(["email"]);
+    expect(acted?.textContent).not.toContain("类型已关闭");
+    // What the policy left in place stays folded until asked for.
+    const ignored = detail?.querySelector(
+      '[data-testid="privacy-call-ignored"] details',
+    ) as HTMLDetailsElement | null;
+    expect(ignored?.open).toBe(false);
+    expect(ignored?.querySelector("summary")?.textContent).toBe(
+      "未替换的匹配 16 处（类型已关闭 16）",
+    );
+    expect(
+      [...(left?.querySelectorAll("tbody tr") ?? [])].map((row) =>
+        row.getAttribute("data-kind"),
+      ),
+    ).toEqual(["ip_address"]);
+    expect(left?.textContent).not.toContain("命中");
+    // An earlier call's marker came back in the model's reasoning: this call
+    // neither replaced nor restores it.
+    const carried = detail?.querySelector(
+      '[data-testid="privacy-carried"] details',
+    ) as HTMLDetailsElement | null;
+    expect(carried?.open).toBe(false);
+    expect(carried?.querySelector("summary")?.textContent).toBe(
+      "对话里带回的旧替身值 1 个",
+    );
+    expect(
+      [
+        ...(carried?.querySelectorAll('[data-testid="privacy-replacement"]') ??
+          []),
+      ].map((item) => item.getAttribute("data-placeholder")),
+    ).toEqual([earlier]);
+
+    await act(async () => {
+      callRows()[0].click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    expect(bridgeMocks.getRequestAuditContent).toHaveBeenLastCalledWith(
+      first.id,
+    );
+    expect(exactButton("隐私保护").getAttribute("aria-selected")).toBe("true");
+    expect(callRows().map((row) => row.getAttribute("aria-expanded"))).toEqual([
+      "true",
+      "false",
+    ]);
+    // The notice's quoted marker shape replaced nothing.
+    expect(placeholders()).toEqual([email, phone]);
+    const item = panel()?.querySelector(
+      `[data-testid="privacy-replacement"][data-placeholder="${email}"]`,
+    );
+    expect(item?.textContent).toContain("邮箱");
+    expect(item?.textContent).toContain("请求中 1 处");
+    expect(item?.textContent).toContain("user · input[0].content[0].text");
+    // The context stops short of the next marker instead of splitting it.
+    expect(item?.textContent).toContain(
+      `Mail ${email} about the invoice, then call…`,
+    );
+
+    await act(async () => {
+      callRows()[0].click();
+    });
+    expect(callRows()[0].getAttribute("aria-expanded")).toBe("false");
+    expect(
+      panel()?.querySelector('[data-testid="privacy-call-detail"]'),
+    ).toBeNull();
+  });
+
+  it("names what a warning found in the policy step", async () => {
+    const warned: RequestRecord = {
+      ...firstRecord,
+      privacy_restore: null,
+      privacy_decision: "warn",
+      privacy_findings: [
+        { kind: "common_secret", json_path: "/input/0/content", count: 1 },
+        { kind: "email", json_path: "/input/0/content", count: 1 },
+        { kind: "email", json_path: "/input/2/content", count: 1 },
+      ],
+      events: [
+        {
+          kind: "accepted",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.started_at,
+          status: "succeeded",
+          summary: "gpt-4.1 · openai.responses",
+          attempt_index: 1,
+        },
+        {
+          kind: "privacy",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.started_at,
+          status: "succeeded",
+          summary: "warn",
+          attempt_index: 1,
+        },
+        {
+          kind: "completed",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.completed_at,
+          status: "succeeded",
+          summary: "HTTP 200",
+          attempt_index: 1,
+        },
+      ],
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(warned, { privacy_warned: true })],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce({
+      ...sessionFromRecord(warned, { privacy_warned: true }),
+      turns: [warned],
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${warned.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="trajectory-row"][data-chip="POLICY"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    const inspector = container.querySelector(
+      '[data-testid="trajectory-inspector"]',
+    );
+    const outcome =
+      inspector?.querySelector('[data-testid="policy-outcome"]')?.textContent ??
+      "";
+    expect(outcome).toContain("已警告");
+    expect(outcome).toContain("邮箱 ×2");
+    expect(outcome).toContain("常见密钥 ×1");
+    expect(outcome).not.toMatch(/替换 \d+ 处/);
+    expect(
+      inspector?.querySelector('[data-testid="policy-hint"]')?.textContent,
+    ).toBe(
+      "命中的内容已按原文发给模型，请求体见「客户端」。隐私保护设为「脱敏后继续」时，会在发送前替换这些内容。",
+    );
+    expect(
+      inspector?.querySelector('[data-testid="inspector-policy-body"]'),
+    ).toBeNull();
+    // Regex findings carry no confidence, so the counts stay inline.
+    expect(inspector?.querySelector('[data-testid="policy-kinds"]')).toBeNull();
+    expect(
+      inspector?.querySelector('[data-testid="policy-threshold"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      exactButton("隐私保护").click();
+    });
+    const panel =
+      container.querySelector('[data-testid="privacy-audit"]')?.textContent ??
+      "";
+    expect(panel).toContain("已警告");
+    expect(panel).toContain("命中了隐私内容，请求按原文发给了模型。");
+    expect(panel).toContain("命中类别");
+    expect(panel).toContain("邮箱 ×2");
+    expect(panel).not.toContain("替换");
+  });
+
+  it("shows model confidence and ignored matches in the policy step", async () => {
+    const warned: RequestRecord = {
+      ...firstRecord,
+      privacy_restore: null,
+      privacy_decision: "warn",
+      privacy_findings: [
+        {
+          kind: "email",
+          json_path: "/input/0/content",
+          count: 2,
+          confidence: { min: 0.9312, max: 0.9987, threshold: 0.7 },
+        },
+        {
+          kind: "email",
+          json_path: "/input/2/content",
+          count: 1,
+          confidence: { min: 0.81, max: 0.81, threshold: 0.7 },
+        },
+        {
+          kind: "private_person",
+          json_path: "/input/2/content",
+          count: 1,
+          confidence: { min: 0.88, max: 0.88, threshold: 0.7 },
+        },
+      ],
+      privacy_ignored: [
+        { kind: "url", reason: "kind_disabled", count: 5 },
+        {
+          kind: "private_person",
+          reason: "low_confidence",
+          count: 2,
+          confidence: { min: 0.41, max: 0.6234, threshold: 0.7 },
+        },
+        { kind: "email", reason: "allowlisted", count: 1 },
+      ],
+      events: [
+        {
+          kind: "accepted",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.started_at,
+          status: "succeeded",
+          summary: "gpt-4.1 · openai.responses",
+          attempt_index: 1,
+        },
+        {
+          kind: "privacy",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.started_at,
+          status: "succeeded",
+          summary: "warn",
+          attempt_index: 1,
+        },
+        {
+          kind: "completed",
+          started_at: firstRecord.started_at,
+          ended_at: firstRecord.completed_at,
+          status: "succeeded",
+          summary: "HTTP 200",
+          attempt_index: 1,
+        },
+      ],
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(warned, { privacy_warned: true })],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce({
+      ...sessionFromRecord(warned, { privacy_warned: true }),
+      turns: [warned],
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${warned.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="trajectory-row"][data-chip="POLICY"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    const inspector = container.querySelector(
+      '[data-testid="trajectory-inspector"]',
+    );
+    expect(
+      inspector?.querySelector('[data-testid="policy-threshold"]')?.textContent,
+    ).toBe("置信度门槛 70%");
+    // The table carries the counts, so the outcome line does not repeat them.
+    expect(
+      inspector?.querySelector(
+        '[data-testid="policy-outcome"] [data-testid="privacy-hits"]',
+      ),
+    ).toBeNull();
+    const table = inspector?.querySelector('[data-testid="policy-kinds"]');
+    if (!table) throw new Error("Missing policy kind table");
+    expect(
+      [...table.querySelectorAll("th")].map((th) => th.textContent),
+    ).toEqual(["类型", "命中", "低于门槛", "免脱敏名单", "类型已关闭"]);
+    expect(
+      [...table.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => cell.textContent),
+      ),
+    ).toEqual([
+      ["邮箱", "3", "81%–99.87%", "", "", "1", ""],
+      ["人名", "1", "88%", "2", "41%–62.34%", "", ""],
+      ["URL", "", "", "", "", "", "5"],
+    ]);
+    // Without a body the table is the content, so it does not fold.
+    expect(
+      inspector?.querySelector('[data-testid="policy-kinds-toggle"]'),
+    ).toBeNull();
+  });
+
+  it("folds the kind table above a redacted body until asked", async () => {
+    const body = `{"input":"<PRIVATE_EMAIL_aaaaaaaaaaaaaaaa>"}`;
+    const redacted: RequestRecord = {
+      ...firstRecord,
+      privacy_findings: [
+        {
+          kind: "email",
+          json_path: "/input",
+          count: 2,
+          confidence: { min: 0.9, max: 0.99, threshold: 0.8 },
+        },
+      ],
+      privacy_ignored: [{ kind: "url", reason: "kind_disabled", count: 3 }],
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(redacted)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce({
+      ...sessionFromRecord(redacted),
+      turns: [redacted],
+    });
+    bridgeMocks.getRequestAuditContent.mockResolvedValue({
+      request_id: redacted.id,
+      withheld: {},
+      http_meta: null,
+      request_body: null,
+      response_content: null,
+      upstream_http_meta: null,
+      upstream_request_body: {
+        media_type: "application/json",
+        content: body,
+        truncated: false,
+        captured_bytes: body.length,
+      },
+      upstream_response_content: null,
+    });
+    await renderRecords();
+    await act(async () => {
+      (
+        container.querySelector(
+          `[data-session-id="${redacted.id}"]`,
+        ) as HTMLButtonElement
+      ).click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => await Promise.resolve());
+    await act(async () => {
+      (
+        container.querySelector(
+          '[data-testid="trajectory-row"][data-chip="POLICY"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    const inspector = container.querySelector(
+      '[data-testid="trajectory-inspector"]',
+    );
+    const table = () =>
+      inspector?.querySelector('[data-testid="policy-kinds"]') ?? null;
+    const inlineHits = () =>
+      inspector?.querySelector(
+        '[data-testid="policy-outcome"] [data-testid="privacy-hits"]',
+      ) ?? null;
+    const toggle = inspector?.querySelector<HTMLButtonElement>(
+      '[data-testid="policy-kinds-toggle"]',
+    );
+    if (!toggle) throw new Error("Missing policy kind table toggle");
+    expect(
+      inspector?.querySelector('[data-testid="inspector-policy-body"]'),
+    ).not.toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(table()).toBeNull();
+    // However many kinds one redaction spans, the outcome line stays one row.
+    expect(inlineHits()).toBeNull();
+
+    await act(async () => toggle.click());
+
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(table()?.textContent).toContain("邮箱");
+    expect(inlineHits()).toBeNull();
   });
 
   it("explains missing capture in the inspector", async () => {
@@ -2515,11 +3454,130 @@ describe("RequestRecords", () => {
     });
   });
 
+  it("lists the conversations behind the tray's failure count until cleared", async () => {
+    const today = {
+      from: "2026-07-24T15:00:00.000Z",
+      to: "2026-07-25T15:00:00.000Z",
+    };
+    const scoped = { status: "failed", ...today };
+    const renderScoped = async (failedWithin?: typeof today) => {
+      await act(async () => {
+        reactRoot.render(
+          <RequestRecords
+            accessTokens={[]}
+            accessTokensReady
+            coreSessionKey="session-1"
+            initialFailedWithin={failedWithin}
+            services={[service]}
+            isReady
+          />,
+        );
+        await Promise.resolve();
+      });
+      await act(async () => await Promise.resolve());
+    };
+
+    await renderScoped(today);
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+      ...scoped,
+    });
+    // Core matched a failed call, so a conversation that recovered still lists.
+    expect(
+      container.querySelector(`[data-session-id="${firstRecord.id}"]`),
+    ).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+      ...scoped,
+    });
+    await act(async () => exactButton("加载更早记录").click());
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+      cursor: "cursor-1",
+      ...scoped,
+    });
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="清除筛选：今天有失败的会话"]',
+        )!
+        .click(),
+    );
+    expect(container.textContent).not.toContain("今天有失败的会话");
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+    });
+
+    // Another tray click is a new target and brings the narrowing back.
+    await renderScoped({ ...today });
+    expect(container.textContent).toContain("今天有失败的会话");
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+      ...scoped,
+    });
+
+    // The count covers model calls only, so model discovery drops the
+    // narrowing rather than listing failures the tray never counted.
+    await act(async () => exactButton("模型获取").focus());
+    expect(container.textContent).not.toContain("今天有失败的会话");
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "discovery",
+    });
+  });
+
+  it("counts failed and blocked calls apart in the conversation summary", async () => {
+    const blocked: RequestRecord = {
+      ...firstRecord,
+      id: "req_cccccccccccccccccccccccccccccccc",
+      status: "blocked",
+      http_status: 403,
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [sessionFromRecord(firstRecord)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValue({
+      ...sessionFromRecord(firstRecord, { turn_count: 3, call_count: 3 }),
+      turns: [secondRecord, blocked, firstRecord],
+    });
+    await renderRecords();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          `[data-session-id="${firstRecord.id}"]`,
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="session-failed-calls"]')
+          ?.textContent,
+      ).toBe("1 次失败"),
+    );
+    expect(
+      container.querySelector('[data-testid="session-blocked-calls"]')
+        ?.textContent,
+    ).toBe("1 次拦截");
+  });
+
   it("defaults to model calls and separates compact discovery rows with their own pagination and polling", async () => {
     vi.useFakeTimers();
     const discovery = sessionFromRecord(firstRecord, {
       id: "req_discovery",
-      title: "未命名会话",
+      title: "",
       input_protocol: "openai.models",
       requested_model: null,
       service_id: null,
@@ -2676,10 +3734,8 @@ describe("RequestRecords", () => {
     expect(container.textContent).toContain('"prompt": "secret"');
     expect(bridgeMocks.getRequestAuditContent).toHaveBeenCalledTimes(1);
 
-    // Explicit clear drops the cache and returns to the monitor.
-    await act(async () => {
-      exactButton("审计").click();
-    });
+    // Explicit clear drops the cache and returns to the monitor. The clear
+    // action belongs to the content tab, which is where decrypted text is read.
     await act(async () => {
       exactButton("清除已解密内容").click();
     });
@@ -2729,7 +3785,7 @@ describe("RequestRecords", () => {
         `[aria-label="${i18n.t("records.sections")}"] [role="tab"]`,
       ),
     ].map((tab) => tab.textContent?.trim());
-    expect(tabs.slice(0, 2)).toEqual(["对话", "追踪"]);
+    expect(tabs.slice(0, 2)).toEqual(["摘要", "追踪"]);
     expect(
       container.querySelector('[data-testid="request-conversation"]'),
     ).not.toBeNull();
@@ -3483,7 +4539,9 @@ describe("RequestRecords", () => {
       audit_risk_acknowledged: true,
     });
     expect(window.confirm).not.toHaveBeenCalled();
-    expect(notifyMocks.success).toHaveBeenCalledWith("已开启请求和响应捕获。");
+    expect(notifyMocks.success).toHaveBeenCalledWith(
+      "已开启请求和响应捕获，对新请求生效。",
+    );
     expect(
       document
         .querySelector('[role="switch"][aria-label="请求和响应捕获"]')
@@ -3558,7 +4616,9 @@ describe("RequestRecords", () => {
       response_content_enabled: true,
       audit_risk_acknowledged: true,
     });
-    expect(notifyMocks.success).toHaveBeenCalledWith("已开启请求和响应捕获。");
+    expect(notifyMocks.success).toHaveBeenCalledWith(
+      "已开启请求和响应捕获，对新请求生效。",
+    );
     expect(notifyMocks.success).not.toHaveBeenCalledWith("已设置口令");
     expect(proofDialog()).toBeNull();
     expect(captureSwitch().getAttribute("aria-checked")).toBe("true");
@@ -4144,18 +5204,21 @@ describe("RequestRecords", () => {
       response_content_enabled: false,
     });
     expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-    expect(notifyMocks.success).toHaveBeenCalledWith("已关闭请求和响应捕获。");
+    expect(notifyMocks.success).toHaveBeenCalledWith(
+      "已关闭请求和响应捕获，对新请求生效。",
+    );
   });
 
-  it("purges records through two in-app dialogs", async () => {
+  it("clears every record from the purge button's menu", async () => {
     await renderRecords();
     bridgeMocks.listRequestSessions.mockResolvedValue({
       items: [],
       next_cursor: null,
     });
 
-    await act(async () => exactButton("清理…").click());
-    await act(async () => exactButton("执行清理").click());
+    await act(async () =>
+      (await menuItem("更多清理方式", "清空全部记录及加密内容")).click(),
+    );
     expect(
       document.querySelector('[role="alertdialog"]')?.textContent,
     ).toContain("确定清空全部");
@@ -4172,6 +5235,301 @@ describe("RequestRecords", () => {
       "已删除 2 条记录、1 个加密内容块。",
     );
     expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("clears records before a chosen time from the purge button's menu", async () => {
+    await renderRecords();
+    await act(async () =>
+      (await menuItem("更多清理方式", "清除指定时间之前的记录")).click(),
+    );
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain("早于这个时间的请求记录");
+    expect(exactButton("执行清理").disabled).toBe(true);
+
+    const input = dialog?.querySelector<HTMLInputElement>(
+      'input[type="datetime-local"]',
+    );
+    if (!input) throw new Error("Missing cutoff input");
+    await typeInto(input, "2026-07-25T10:30");
+    await act(async () => exactButton("执行清理").click());
+    expect(
+      document.querySelector('[role="alertdialog"]')?.textContent,
+    ).toContain("之前的全部请求记录");
+    await act(async () => {
+      exactButton("确定清理").click();
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+
+    expect(bridgeMocks.purgeRequestRecords).toHaveBeenCalledWith({
+      scope: "before",
+      before: new Date("2026-07-25T10:30").toISOString(),
+    });
+  });
+
+  const sessionRow = (sessionId: string) => {
+    const row = container.querySelector<HTMLButtonElement>(
+      `[data-session-id="${sessionId}"]`,
+    );
+    if (!row) throw new Error(`Missing session row: ${sessionId}`);
+    return row;
+  };
+
+  const confirmDialogText = () =>
+    document.querySelector('[role="alertdialog"]')?.textContent ?? "";
+
+  async function confirmDelete() {
+    await act(async () => {
+      exactButton("确定删除").click();
+      await Promise.resolve();
+    });
+    await flush();
+  }
+
+  const selectionActions = () => {
+    const actions = container.querySelector<HTMLElement>(
+      '[data-testid="request-selection-actions"]',
+    );
+    if (!actions) throw new Error("Missing selection actions");
+    return actions;
+  };
+
+  it("selects sessions to delete from the purge button", async () => {
+    await renderRecords();
+    const purge = exactButton("清理");
+    await act(async () => purge.click());
+
+    // The selection actions take the header actions' place.
+    expect(selectionActions().textContent).toContain("已选 0 个会话");
+    expect(purge.closest(".invisible")).not.toBeNull();
+    expect(exactButton("删除", selectionActions()).disabled).toBe(true);
+    const failed = sessionRow(secondRecord.id);
+    expect(failed.getAttribute("role")).toBe("checkbox");
+    expect(failed.getAttribute("aria-checked")).toBe("false");
+    // The checkbox takes the client mark's cell, so nothing moves.
+    expect(failed.querySelector('[data-slot="checkbox-mark"]')).not.toBeNull();
+    expect(failed.querySelector('[role="img"][title^="客户端"]')).toBeNull();
+
+    // A row checks instead of opening its session.
+    await act(async () => failed.click());
+    expect(failed.getAttribute("aria-checked")).toBe("true");
+    expect(bridgeMocks.getRequestSession).not.toHaveBeenCalled();
+    expect(selectionActions().textContent).toContain("已选 1 个会话");
+
+    await act(async () => exactButton("删除", selectionActions()).click());
+    expect(confirmDialogText()).toContain("删除这个会话");
+    expect(confirmDialogText()).toContain(
+      "将永久删除 1 次调用和加密审计内容。",
+    );
+    await confirmDelete();
+
+    expect(bridgeMocks.purgeRequestRecords).toHaveBeenCalledWith({
+      scope: "sessions",
+      session_ids: [secondRecord.id],
+    });
+    expect(notifyMocks.success).toHaveBeenCalledWith("已删除 1 个会话。");
+    expect(
+      container.querySelector(`[data-session-id="${secondRecord.id}"]`),
+    ).toBeNull();
+    // Deleting ends selection mode.
+    expect(
+      container.querySelector('[data-testid="request-selection-actions"]'),
+    ).toBeNull();
+    expect(sessionRow(firstRecord.id).getAttribute("role")).toBeNull();
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it("checks every finished session on screen and leaves running ones alone", async () => {
+    const running: RequestRecord = {
+      ...firstRecord,
+      id: "req_cccccccccccccccccccccccccccccccc",
+      started_at: "2026-07-25T12:00:00Z",
+      completed_at: null,
+      status: "pending",
+      http_status: null,
+      latency_ms: null,
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [
+        sessionFromRecord(running),
+        sessionFromRecord(secondRecord),
+        sessionFromRecord(firstRecord, { call_count: 3 }),
+      ],
+      next_cursor: null,
+    });
+    await renderRecords();
+    await act(async () => exactButton("清理").click());
+
+    const runningRow = sessionRow(running.id);
+    expect(runningRow.getAttribute("aria-disabled")).toBe("true");
+    expect(runningRow.title).toBe("进行中的会话结束后才能删除");
+    await act(async () => runningRow.click());
+    expect(runningRow.getAttribute("aria-checked")).toBe("false");
+
+    const selectAll =
+      selectionActions().querySelector<HTMLButtonElement>('[role="checkbox"]')!;
+    await act(async () => selectAll.click());
+    expect(selectAll.getAttribute("data-state")).toBe("checked");
+    expect(sessionRow(secondRecord.id).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(sessionRow(firstRecord.id).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(runningRow.getAttribute("aria-checked")).toBe("false");
+    expect(selectionActions().textContent).toContain("已选 2 个会话");
+
+    await act(async () => sessionRow(firstRecord.id).click());
+    expect(selectAll.getAttribute("data-state")).toBe("unchecked");
+    await act(async () => selectAll.click());
+
+    await act(async () => exactButton("删除", selectionActions()).click());
+    expect(confirmDialogText()).toContain("删除 2 个会话");
+    expect(confirmDialogText()).toContain("将永久删除 4 次调用");
+    await act(async () =>
+      exactButton(
+        "取消",
+        document.querySelector('[role="alertdialog"]')!,
+      ).click(),
+    );
+    await flush();
+    expect(selectionActions().textContent).toContain("已选 2 个会话");
+
+    // The filters stay usable, and a row they hide is not deleted.
+    await chooseOption("状态筛选", "失败");
+    expect(selectionActions().textContent).toContain("已选 1 个会话");
+    await act(async () => exactButton("删除", selectionActions()).click());
+    await confirmDelete();
+    expect(bridgeMocks.purgeRequestRecords).toHaveBeenCalledWith({
+      scope: "sessions",
+      session_ids: [secondRecord.id],
+    });
+  });
+
+  it("holds new sessions back while selecting and leaves selection with Escape", async () => {
+    bridgeMocks.listRequestSessions.mockResolvedValueOnce({
+      items: [sessionFromRecord(firstRecord)],
+      next_cursor: null,
+    });
+    await renderRecords();
+    await act(async () => exactButton("清理").click());
+    const arriving: RequestRecord = {
+      ...firstRecord,
+      id: "req_arrivingffffffffffffffffffffffff",
+      started_at: "2026-07-25T10:02:00Z",
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [sessionFromRecord(arriving), sessionFromRecord(firstRecord)],
+      next_cursor: null,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    // Rows stay put under a pointer about to check one.
+    expect(
+      container.querySelector(`[data-session-id="${arriving.id}"]`),
+    ).toBeNull();
+    expect(buttonContaining("1 条新记录")).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="request-selection-actions"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector(`[data-session-id="${arriving.id}"]`),
+    ).not.toBeNull();
+  });
+
+  it("keeps a session open while deleting its calls one by one", async () => {
+    const sessionId = "session_client_retries";
+    const firstTry: RequestRecord = {
+      ...secondRecord,
+      id: "req_dddddddddddddddddddddddddddddddd",
+      session_id: sessionId,
+    };
+    const secondTry: RequestRecord = {
+      ...secondRecord,
+      id: "req_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      session_id: sessionId,
+      started_at: "2026-07-25T11:00:05Z",
+      completed_at: "2026-07-25T11:00:06Z",
+    };
+    const summary = sessionFromRecord(secondTry, {
+      started_at: firstTry.started_at,
+      call_count: 2,
+    });
+    let turns = [firstTry, secondTry];
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [summary, sessionFromRecord(firstRecord)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockImplementation(async () => {
+      if (turns.length === 0) throw new Error("request record not found");
+      return { ...summary, call_count: turns.length, turns };
+    });
+    bridgeMocks.deleteRequestRecord.mockImplementation(async (id: string) => {
+      turns = turns.filter((turn) => turn.id !== id);
+    });
+    await renderRecords();
+    await act(async () => {
+      sessionRow(sessionId).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await act(async () => (await menuItem("更多操作", "删除这次调用")).click());
+    expect(confirmDialogText()).toContain("删除请求记录");
+    await confirmDelete();
+
+    expect(bridgeMocks.deleteRequestRecord).toHaveBeenLastCalledWith(
+      secondTry.id,
+    );
+    expect(notifyMocks.success).toHaveBeenCalledWith("已删除该记录。");
+    expect(document.getElementById("request-detail-heading")).not.toBeNull();
+
+    // The remaining call is selected next, so it can go the same way.
+    await act(async () => (await menuItem("更多操作", "删除这次调用")).click());
+    await confirmDelete();
+    expect(bridgeMocks.deleteRequestRecord).toHaveBeenLastCalledWith(
+      firstTry.id,
+    );
+    expect(document.getElementById("request-detail-heading")).toBeNull();
+    expect(
+      container.querySelector(`[data-session-id="${sessionId}"]`),
+    ).toBeNull();
+    expect(
+      container.querySelector(`[data-session-id="${firstRecord.id}"]`),
+    ).not.toBeNull();
+  });
+
+  it("deletes a whole session from the detail and returns to the list", async () => {
+    await renderRecords();
+    await act(async () => {
+      sessionRow(secondRecord.id).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await act(async () => (await menuItem("更多操作", "删除整个会话")).click());
+    expect(confirmDialogText()).toContain("删除这个会话");
+    expect(confirmDialogText()).toContain("将永久删除 1 次调用");
+    await confirmDelete();
+
+    expect(bridgeMocks.purgeRequestRecords).toHaveBeenCalledWith({
+      scope: "sessions",
+      session_ids: [secondRecord.id],
+    });
+    expect(bridgeMocks.deleteRequestRecord).not.toHaveBeenCalled();
+    expect(document.getElementById("request-detail-heading")).toBeNull();
+    expect(
+      container.querySelector(`[data-session-id="${secondRecord.id}"]`),
+    ).toBeNull();
+    expect(notifyMocks.success).toHaveBeenCalledWith("已删除 1 个会话。");
   });
 
   it("updates a pending detail in place while queuing new requests off-monitor", async () => {

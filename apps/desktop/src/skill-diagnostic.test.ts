@@ -246,6 +246,44 @@ describe("buildSkillDiagnosticPayload", () => {
     );
   });
 
+  it("carries conversion diagnostics and the image compression step", () => {
+    const diagnostic = {
+      phase: "request" as const,
+      severity: "warning" as const,
+      code: "dropped_field",
+      path: "metadata",
+      message: "metadata is not supported upstream",
+    };
+    const compression = {
+      kind: "image_compression" as const,
+      started_at: "2026-09-16T12:00:00Z",
+      ended_at: "2026-09-16T12:00:00Z",
+      status: "succeeded" as const,
+      summary: "lossless · 1/1 images · 75301 → 37406 bytes",
+      attempt_index: 1,
+    };
+    const payload = buildSkillDiagnosticPayload({
+      session,
+      selectedRequestId: root.id,
+      turns: [
+        {
+          ...root,
+          conversion_diagnostics: [diagnostic],
+          events: [root.events[0]!, compression, ...root.events.slice(1)],
+        },
+      ],
+      childrenByRoot: { [root.id]: [child] },
+    });
+
+    expect(payload.records[0]?.conversion_diagnostics).toStrictEqual([
+      diagnostic,
+    ]);
+    expect(payload.records[0]?.events[1]).toStrictEqual(compression);
+    expect(payload.records[0]?.children?.[0]?.conversion_diagnostics).toEqual(
+      [],
+    );
+  });
+
   it("states explicitly that a call was not redirected", () => {
     const payload = buildSkillDiagnosticPayload({
       session,

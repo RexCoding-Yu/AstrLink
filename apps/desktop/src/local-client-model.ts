@@ -25,6 +25,8 @@ export type LocalClientInstallMethod =
   (typeof LOCAL_CLIENT_INSTALL_METHODS)[number];
 export interface LocalClientStatus {
   id: LocalClientId;
+  /** The WSL distribution the client runs in; `null` for this computer. */
+  wsl: string | null;
   phase: LocalClientPhase;
   current_version: string | null;
   latest_version: string | null;
@@ -39,8 +41,15 @@ export interface LocalClientStatus {
 export interface LocalClientSnapshot {
   revision: number;
   busy: boolean;
+  /** This computer's four clients, then those found in WSL distributions. */
   clients: LocalClientStatus[];
+  /** WSL distributions left unchecked because they were not running. */
+  wsl_unchecked: string[];
 }
+/** A client on this computer (`wsl: null`) or in a WSL distribution. */
+export type LocalClientTarget = Pick<LocalClientStatus, "id" | "wsl">;
+export const localClientKey = ({ id, wsl }: LocalClientTarget) =>
+  `${wsl ?? ""}/${id}`;
 const LOCAL_CLIENTS = {
   codex: {
     label: "Codex CLI",
@@ -65,6 +74,7 @@ export function emptyLocalClients(): LocalClientSnapshot {
     busy: false,
     clients: LOCAL_CLIENT_IDS.map((id) => ({
       id,
+      wsl: null,
       phase: "idle",
       current_version: null,
       latest_version: null,
@@ -76,8 +86,12 @@ export function emptyLocalClients(): LocalClientSnapshot {
       error_code: null,
       error_detail: null,
     })),
+    wsl_unchecked: [],
   };
 }
+
+const distributionName = (value: unknown) =>
+  typeof value === "string" && value.length > 0 && value.length <= 255;
 
 export function parseLocalClients(value: unknown): LocalClientSnapshot {
   function object(item: unknown): Record<string, unknown> {
@@ -91,16 +105,21 @@ export function parseLocalClients(value: unknown): LocalClientSnapshot {
     (root.revision as number) < 0 ||
     typeof root.busy !== "boolean" ||
     !Array.isArray(root.clients) ||
-    root.clients.length !== LOCAL_CLIENT_IDS.length
+    root.clients.length > 1024 ||
+    !Array.isArray(root.wsl_unchecked) ||
+    root.wsl_unchecked.length > 256 ||
+    !root.wsl_unchecked.every(distributionName)
   ) {
     throw new Error("Invalid local client snapshot");
   }
-  const ids = new Set();
+  const keys = new Set<string>();
   for (const item of root.clients) {
     const client = object(item);
+    const key = localClientKey(client as unknown as LocalClientTarget);
     if (
       !LOCAL_CLIENT_IDS.includes(client.id as LocalClientId) ||
-      ids.has(client.id) ||
+      (client.wsl !== null && !distributionName(client.wsl)) ||
+      keys.has(key) ||
       !LOCAL_CLIENT_PHASES.includes(client.phase as LocalClientPhase) ||
       !LOCAL_CLIENT_INSTALL_METHODS.includes(
         client.install_method as LocalClientInstallMethod,
@@ -108,7 +127,7 @@ export function parseLocalClients(value: unknown): LocalClientSnapshot {
       typeof client.can_update !== "boolean"
     )
       throw new Error("Invalid local client status");
-    ids.add(client.id);
+    keys.add(key);
     for (const key of [
       "current_version",
       "latest_version",
@@ -134,6 +153,11 @@ export function parseLocalClients(value: unknown): LocalClientSnapshot {
       throw new Error("Invalid local client installations");
     }
   }
+  // This computer's clients always appear, installed or not.
+  if (
+    LOCAL_CLIENT_IDS.some((id) => !keys.has(localClientKey({ id, wsl: null })))
+  )
+    throw new Error("Invalid local client snapshot");
   return root as unknown as LocalClientSnapshot;
 }
 

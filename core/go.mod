@@ -1,19 +1,21 @@
 module github.com/QuantumNous/astrlink/core
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/QuantumNous/astrlink/convo v0.0.0
-	github.com/QuantumNous/new-api/relaykit v0.2.2
+	github.com/QuantumNous/new-api/relaykit v0.3.1
+	github.com/deepteams/webp v1.2.8
 	github.com/expr-lang/expr v1.17.8
 	github.com/gorilla/websocket v1.5.3
 	github.com/tidwall/gjson v1.19.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/zalando/go-keyring v0.2.6
-	golang.org/x/crypto v0.53.0
-	golang.org/x/net v0.56.0
-	golang.org/x/sys v0.46.0
-	modernc.org/sqlite v1.38.2
+	golang.org/x/crypto v0.57.0
+	golang.org/x/image v0.45.0
+	golang.org/x/net v0.60.0
+	golang.org/x/sys v0.48.0
+	modernc.org/sqlite v1.40.1
 )
 
 // convo is developed in this repository; consumers outside the monorepo fetch
@@ -33,8 +35,8 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
-	golang.org/x/text v0.39.0 // indirect
-	modernc.org/libc v1.66.3 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	modernc.org/libc v1.66.10 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )

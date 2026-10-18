@@ -1,3 +1,4 @@
+mod agent_home;
 mod agent_install;
 mod cc_switch;
 mod client_config;
@@ -9,11 +10,13 @@ mod dev_reload;
 mod failure_policy;
 mod host_files;
 mod i18n;
+mod instance;
 mod kek_store;
 #[cfg(target_os = "macos")]
 mod macos_app;
 mod model_updates;
 mod preferences;
+mod privacy_warnings;
 mod provider_import;
 mod proxy_check;
 mod raw_access;
@@ -25,6 +28,7 @@ mod sidecar;
 mod startup_window;
 mod tray;
 mod updates;
+mod wsl;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -79,6 +83,8 @@ struct PreferencesInput {
     core_auto_recover: bool,
     use_system_proxy: bool,
     inference_port: u16,
+    #[serde(default)]
+    inference_listen: preferences::InferenceListen,
     max_concurrent_inspections: u16,
     response_start_timeout_seconds: u32,
     max_request_body_mib: u32,
@@ -100,6 +106,7 @@ impl From<PreferencesInput> for Preferences {
             core_auto_recover: input.core_auto_recover,
             use_system_proxy: input.use_system_proxy,
             inference_port: input.inference_port,
+            inference_listen: input.inference_listen,
             max_concurrent_inspections: input.max_concurrent_inspections,
             response_start_timeout_seconds: input.response_start_timeout_seconds,
             max_request_body_mib: input.max_request_body_mib,
@@ -228,35 +235,90 @@ fn get_preferences(
     settings_snapshot(&app, store.inner())
 }
 
-fn agent_install_context(app: &tauri::AppHandle) -> Result<agent_install::InstallContext, String> {
-    Ok(agent_install::InstallContext {
-        home: control_session::user_home()?,
+/// The homes agent installs work on: the desktop user's, and the WSL
+/// distributions `reach` selects. Tool directories follow CC Switch's
+/// settings. Also returns the distributions left unchecked.
+fn agent_install_context(
+    home: std::path::PathBuf,
+    data_directory: Option<std::path::PathBuf>,
+    raw_key_pins: Option<std::path::PathBuf>,
+    reach: wsl::Reach,
+) -> Result<(agent_install::InstallContext, Vec<String>), String> {
+    let homes = agent_home::Homes::find(home, reach)?;
+    let context = agent_install::InstallContext {
+        home: homes.host,
         // Install reports a missing sidecar itself; status and uninstall do not need it.
         cli_source: agent_install::resolve_sidecar_binary("astrlink-cli").unwrap_or_default(),
-        data_directory: app.path().app_data_dir().ok(),
-        raw_key_pins: raw_key_pin_file(app),
-    })
+        data_directory,
+        raw_key_pins,
+        dirs: homes.dirs,
+        wsl: homes.wsl,
+    };
+    Ok((context, homes.unchecked))
 }
 
-/// Keeps client configs AstrLink wrote pointed at the gateway's current
-/// address, including a fallback port picked at startup.
-fn start_client_config_sync(manager: &CoreManager, preferences: Arc<PreferencesStore>) {
+fn app_agent_install_context(
+    app: &tauri::AppHandle,
+    reach: wsl::Reach,
+) -> Result<(agent_install::InstallContext, Vec<String>), String> {
+    agent_install_context(
+        control_session::user_home()?,
+        app.path().app_data_dir().ok(),
+        raw_key_pin_file(app),
+        reach,
+    )
+}
+
+/// Work on agent and client homes runs wsl.exe and edits files over the WSL
+/// share, so it stays off the main thread.
+async fn home_task<T: Send + 'static>(
+    task: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("home task failed: {error}"))?
+}
+
+/// Keeps client configs this gateway wrote pointed at its current address,
+/// including a fallback port picked at startup. Reading its tokens, which
+/// tell its configs from another AstrLink's, needs a ready Core.
+fn start_client_config_sync(manager: Arc<CoreManager>, preferences: Arc<PreferencesStore>) {
     let mut changes = manager.subscribe();
     tauri::async_runtime::spawn(async move {
         let mut synced: Option<String> = None;
         while changes.changed().await.is_ok() {
-            let inference_url = changes.borrow_and_update().inference_url.clone();
+            let inference_url = {
+                let view = changes.borrow_and_update();
+                view.inference_url
+                    .clone()
+                    .filter(|_| view.phase == sidecar::CorePhase::Ready)
+            };
             let Some(inference_url) = inference_url.filter(|url| synced.as_ref() != Some(url))
             else {
                 continue;
             };
             synced = Some(inference_url.clone());
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                client_config::sync(&control_session::user_home()?, &inference_url)
-            })
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result);
+            let result = match client_config::Tokens::of(&manager).await {
+                Ok(tokens) => tauri::async_runtime::spawn_blocking(move || {
+                    let homes = agent_home::Homes::find(
+                        control_session::user_home()?,
+                        wsl::Reach::Running,
+                    )?;
+                    let errors = homes
+                        .iter()
+                        .filter_map(|home| client_config::sync(home, &inference_url, &tokens).err())
+                        .collect::<Vec<_>>();
+                    if errors.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(errors.join("; "))
+                    }
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result),
+                Err(error) => Err(error),
+            };
             if let Err(error) = result {
                 eprintln!("failed to update client configs for the gateway address: {error}");
                 preferences.report_warning(i18n::t(
@@ -269,6 +331,71 @@ fn start_client_config_sync(manager: &CoreManager, preferences: Arc<PreferencesS
     });
 }
 
+/// Keeps installed agent skills, guards, and the CLI current. Recorded WSL
+/// distributions sync off the main thread, and only while running; starting
+/// AstrLink never starts a distribution.
+fn sync_agent_installs(
+    home: std::path::PathBuf,
+    data_directory: std::path::PathBuf,
+    raw_key_pins: Option<std::path::PathBuf>,
+) {
+    let distributions = agent_install::recorded_wsl(&home);
+    let sync_homes = |context: &agent_install::InstallContext, wsl_only: bool| {
+        for target in context
+            .homes()
+            .filter(|target| !wsl_only || target.distribution().is_some())
+        {
+            let place = target
+                .distribution()
+                .map(|distribution| format!(" in WSL {distribution}"))
+                .unwrap_or_default();
+            if let Err(error) = agent_install::sync_installed_skills(target) {
+                eprintln!("failed to sync AstrLink agent skills{place}: {error}");
+            }
+            if let Err(error) = agent_install::sync_installed_host_guards(
+                target,
+                context.data_directory.as_deref(),
+                context.raw_key_pins.as_deref(),
+            ) {
+                eprintln!("failed to sync AstrLink agent host guards{place}: {error}");
+            }
+        }
+    };
+    // The desktop user's home first; WSL distributions follow below.
+    match agent_install_context(
+        home,
+        Some(data_directory),
+        raw_key_pins,
+        wsl::Reach::Named(&[]),
+    ) {
+        Ok((context, _)) => {
+            sync_homes(&context, false);
+            // Runs without a sidecar too, so the MCP migration still happens.
+            if let Err(error) = agent_install::sync_installed_cli(&context) {
+                eprintln!("failed to sync AstrLink agent CLI: {error}");
+            }
+            if distributions.is_empty() {
+                return;
+            }
+            std::thread::spawn(move || {
+                match agent_install_context(
+                    context.home,
+                    context.data_directory,
+                    context.raw_key_pins,
+                    wsl::Reach::RunningAmong(&distributions),
+                ) {
+                    // The desktop user's home synced above.
+                    Ok((context, _)) => sync_homes(&context, true),
+                    Err(error) => {
+                        eprintln!("failed to reach WSL for AstrLink agent installs: {error}")
+                    }
+                }
+            });
+        }
+        Err(error) => eprintln!("failed to sync AstrLink agent installs: {error}"),
+    }
+}
+
 /// The raw key pin file agent guards deny, where the pins live in one.
 fn raw_key_pin_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     app.try_state::<Arc<raw_key_pin::RawKeyPins>>()?
@@ -277,22 +404,45 @@ fn raw_key_pin_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
 }
 
 #[tauri::command]
-fn agent_debug_status(app: tauri::AppHandle) -> Result<agent_install::AgentInstallStatus, String> {
-    Ok(agent_install::status(&agent_install_context(&app)?))
+async fn agent_debug_status(
+    app: tauri::AppHandle,
+) -> Result<agent_install::AgentInstallStatus, String> {
+    home_task(move || {
+        let (context, unchecked) = app_agent_install_context(&app, wsl::Reach::Running)?;
+        let mut status = agent_install::status(&context);
+        status.wsl_unchecked = unchecked;
+        Ok(status)
+    })
+    .await
 }
 
 #[tauri::command]
-fn install_agent_debug(
+async fn install_agent_debug(
     app: tauri::AppHandle,
     skill_ids: Vec<agent_install::AgentSkillId>,
-    tool_ids: Vec<agent_install::AgentToolId>,
+    tools: Vec<agent_install::AgentToolTarget>,
 ) -> Result<agent_install::InstallReceipt, String> {
-    agent_install::install(&agent_install_context(&app)?, &skill_ids, &tool_ids)
+    home_task(move || {
+        let distributions = tools
+            .iter()
+            .filter_map(|tool| tool.wsl.clone())
+            .collect::<Vec<_>>();
+        let (context, _) = app_agent_install_context(&app, wsl::Reach::Named(&distributions))?;
+        agent_install::install(&context, &skill_ids, &tools)
+    })
+    .await
 }
 
+/// Also reaches recorded WSL distributions that are stopped, starting them,
+/// so no skill is left pointing at the removed CLI.
 #[tauri::command]
-fn uninstall_agent_debug(app: tauri::AppHandle) -> Result<(), String> {
-    agent_install::uninstall(&agent_install_context(&app)?)
+async fn uninstall_agent_debug(app: tauri::AppHandle) -> Result<(), String> {
+    home_task(move || {
+        let distributions = agent_install::recorded_wsl(&control_session::user_home()?);
+        let (context, _) = app_agent_install_context(&app, wsl::Reach::RunningAnd(&distributions))?;
+        agent_install::uninstall(&context)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -440,8 +590,12 @@ fn tray_action(app: tauri::AppHandle, action: tray::TrayAction) -> Result<(), St
 }
 
 #[tauri::command]
-fn tray_popover_resize(app: tauri::AppHandle, height: f64) -> Result<(), String> {
-    tray::resize_popover(&app, height)
+fn tray_popover_resize(
+    app: tauri::AppHandle,
+    height: f64,
+    device_pixel_ratio: f64,
+) -> Result<(), String> {
+    tray::resize_popover(&app, height, device_pixel_ratio)
 }
 
 #[tauri::command]
@@ -454,7 +608,7 @@ fn receive_deep_links(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
     if let Some(url) = urls
         .iter()
         .rev()
-        .find(|url| url.scheme() == provider_import::SCHEME)
+        .find(|url| url.scheme() == instance::link_scheme())
     {
         provider_import::receive(app, url.as_str());
     }
@@ -541,19 +695,26 @@ pub(crate) fn notify_native(app: &tauri::AppHandle, title: String, body: String)
 const TRAJECTORY_INSPECTOR_LABEL_PREFIX: &str = "trajectory-inspector-";
 const TRAJECTORY_INSPECTOR_SELECT_EVENT: &str = "trajectory-inspector:select";
 
-const TRAJECTORY_INSPECTOR_WIDTH: f64 = 460.0;
-const TRAJECTORY_INSPECTOR_HEIGHT: f64 = 680.0;
+/// Opening width: the policy table keeps its confidence columns. A smaller
+/// work area shrinks it.
+const TRAJECTORY_INSPECTOR_WIDTH: f64 = 640.0;
+/// Opening height when there is no main window to match.
+const TRAJECTORY_INSPECTOR_HEIGHT: f64 = 720.0;
 const TRAJECTORY_INSPECTOR_MIN_WIDTH: f64 = 320.0;
 const TRAJECTORY_INSPECTOR_MIN_HEIGHT: f64 = 400.0;
 /// Breathing room between the main window and the inspector parked beside it.
 const TRAJECTORY_INSPECTOR_GAP: f64 = 12.0;
+/// How far the inspector stays inside the main window's top and bottom edges,
+/// so it reads as the secondary window rather than a second main one.
+const TRAJECTORY_INSPECTOR_INSET: f64 = 32.0;
 /// Diagonal offset per extra inspector, so a second window is grabbable rather
 /// than exactly beneath the first.
 const TRAJECTORY_INSPECTOR_CASCADE: f64 = 28.0;
 /// Width a widened inspector aims for: a captured JSON body and its headers
 /// read without wrapping, and the window still fits a 13-inch display.
 const TRAJECTORY_INSPECTOR_WIDE_WIDTH: f64 = 1120.0;
-/// Room a widened inspector leaves at the edges of the work area.
+/// Room an inspector leaves at the edges of the work area when it opens or
+/// widens.
 const TRAJECTORY_INSPECTOR_SCREEN_MARGIN: f64 = 16.0;
 /// Long enough to read as the window stretching, short enough not to wait on.
 #[cfg(target_os = "macos")]
@@ -673,25 +834,39 @@ struct WindowBox {
     height: f64,
 }
 
-/// Parks the inspector beside the main window, cascading each extra one down
-/// and to the right, and folding it back over the main window's right edge when
-/// the monitor has no room to its side. A window placed past the monitor edge
-/// cannot be dragged back on Windows and X11, so staying on screen matters more
-/// than keeping the windows disjoint.
+/// The inspector's opening size: a little shorter than the main window, and
+/// the default width less a margin inside a smaller work area. Neither goes
+/// below the window's minimum.
+fn inspector_size(main: WindowBox, work: WindowBox) -> (f64, f64) {
+    let width = TRAJECTORY_INSPECTOR_WIDTH
+        .min(work.width - 2.0 * TRAJECTORY_INSPECTOR_SCREEN_MARGIN)
+        .max(TRAJECTORY_INSPECTOR_MIN_WIDTH);
+    let height = (main.height - 2.0 * TRAJECTORY_INSPECTOR_INSET)
+        .min(work.height)
+        .max(TRAJECTORY_INSPECTOR_MIN_HEIGHT);
+    (width, height)
+}
+
+/// Parks the inspector beside the main window and centered on its height,
+/// cascading each extra one down and to the right, and folding it back over
+/// the main window's right edge when the work area has no room to its side. A
+/// window placed past the monitor edge cannot be dragged back on Windows and
+/// X11, and one under the Dock or taskbar hides its bottom, so staying in the
+/// work area matters more than keeping the windows disjoint.
 fn inspector_placement(
     main: WindowBox,
-    monitor: WindowBox,
+    work: WindowBox,
     size: (f64, f64),
     cascade: u32,
 ) -> (f64, f64) {
     let (width, height) = size;
     let offset = f64::from(cascade) * TRAJECTORY_INSPECTOR_CASCADE;
     let x = (main.x + main.width + TRAJECTORY_INSPECTOR_GAP + offset)
-        .min(monitor.x + monitor.width - width)
-        .max(monitor.x);
-    let y = (main.y + offset)
-        .min(monitor.y + monitor.height - height)
-        .max(monitor.y);
+        .min(work.x + work.width - width)
+        .max(work.x);
+    let y = (main.y + (main.height - height) / 2.0 + offset)
+        .min(work.y + work.height - height)
+        .max(work.y);
     (x, y)
 }
 
@@ -723,23 +898,17 @@ fn logical_work_area(window: &tauri::WebviewWindow) -> Option<WindowBox> {
     })
 }
 
-fn inspector_anchor(main: &tauri::WebviewWindow, cascade: u32) -> Option<(f64, f64)> {
+fn inspector_opening_frame(main: &tauri::WebviewWindow, cascade: u32) -> Option<WindowBox> {
     let frame = logical_frame(main)?;
-    let monitor = main.current_monitor().ok()??;
-    let monitor_scale = monitor.scale_factor();
-    let monitor_position = monitor.position().to_logical::<f64>(monitor_scale);
-    let monitor_size = monitor.size().to_logical::<f64>(monitor_scale);
-    Some(inspector_placement(
-        frame,
-        WindowBox {
-            x: monitor_position.x,
-            y: monitor_position.y,
-            width: monitor_size.width,
-            height: monitor_size.height,
-        },
-        (TRAJECTORY_INSPECTOR_WIDTH, TRAJECTORY_INSPECTOR_HEIGHT),
-        cascade,
-    ))
+    let work = logical_work_area(main)?;
+    let (width, height) = inspector_size(frame, work);
+    let (x, y) = inspector_placement(frame, work, (width, height), cascade);
+    Some(WindowBox {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 /// The frame a widened inspector takes: as wide as the work area allows, up to
@@ -1050,7 +1219,6 @@ fn build_inspector_window(app: &tauri::AppHandle, label: &str, cascade: u32) -> 
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
         .title(inspector_window_title(locale, false))
         .background_color(theme_background(theme))
-        .inner_size(TRAJECTORY_INSPECTOR_WIDTH, TRAJECTORY_INSPECTOR_HEIGHT)
         .min_inner_size(
             TRAJECTORY_INSPECTOR_MIN_WIDTH,
             TRAJECTORY_INSPECTOR_MIN_HEIGHT,
@@ -1071,12 +1239,17 @@ fn build_inspector_window(app: &tauri::AppHandle, label: &str, cascade: u32) -> 
         builder = builder.decorations(false);
     }
 
+    // Undecorated or overlaid, so the inner size is the whole frame.
     builder = match app
         .get_webview_window("main")
-        .and_then(|main| inspector_anchor(&main, cascade))
+        .and_then(|main| inspector_opening_frame(&main, cascade))
     {
-        Some((x, y)) => builder.position(x, y),
-        None => builder.center(),
+        Some(frame) => builder
+            .inner_size(frame.width, frame.height)
+            .position(frame.x, frame.y),
+        None => builder
+            .inner_size(TRAJECTORY_INSPECTOR_WIDTH, TRAJECTORY_INSPECTOR_HEIGHT)
+            .center(),
     };
 
     builder.build().map_err(|error| error.to_string())?;
@@ -1149,6 +1322,15 @@ async fn pricing(
     manager
         .pricing(&operation, service_id.as_deref(), input)
         .await
+}
+
+#[tauri::command]
+async fn sync_config(
+    operation: String,
+    input: Option<serde_json::Value>,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.sync(&operation, input).await
 }
 
 #[tauri::command]
@@ -1377,18 +1559,24 @@ async fn list_request_record_children(
 
 #[tauri::command]
 async fn delete_request_record(
+    app: tauri::AppHandle,
     request_id: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<(), String> {
-    manager.delete_request_record(&request_id).await
+    manager.delete_request_record(&request_id).await?;
+    tray::records_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
 async fn purge_request_records(
+    app: tauri::AppHandle,
     input: serde_json::Value,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<serde_json::Value, String> {
-    manager.purge_request_records(input).await
+    let purged = manager.purge_request_records(input).await?;
+    tray::records_changed(&app);
+    Ok(purged)
 }
 
 #[tauri::command]
@@ -1731,6 +1919,13 @@ async fn list_access_tokens(
 }
 
 #[tauri::command]
+async fn list_network_addresses(
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager.list_network_addresses().await
+}
+
+#[tauri::command]
 async fn get_usage_summary(
     from: String,
     to: String,
@@ -1740,6 +1935,19 @@ async fn get_usage_summary(
 ) -> Result<serde_json::Value, String> {
     manager
         .get_usage_summary(&from, &to, &time_zone, &bucket)
+        .await
+}
+
+#[tauri::command]
+async fn get_privacy_summary(
+    from: String,
+    to: String,
+    time_zone: String,
+    bucket: String,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager
+        .get_privacy_summary(&from, &to, &time_zone, &bucket)
         .await
 }
 
@@ -1797,7 +2005,8 @@ async fn open_cc_switch_import(
     inference_url: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<(), String> {
-    cc_switch::open_import(&manager, &token_id, client, &models, &inference_url).await
+    let home = control_session::user_home()?;
+    cc_switch::open_import(&manager, home, &token_id, client, &models, &inference_url).await
 }
 
 /// Read-only: reports whether the system proxy keeps Codex from reaching
@@ -1807,16 +2016,64 @@ async fn check_client_proxy(inference_url: String) -> Result<proxy_check::ProxyC
     proxy_check::check(&inference_url).await
 }
 
+/// The client configs in the desktop user's home and in running WSL
+/// distributions. A WSL home that cannot be read is reported unchecked.
 #[tauri::command]
 async fn client_config_status(
     inference_url: Option<String>,
-) -> Result<Vec<client_config::ClientStatus>, String> {
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<client_config::ClientOverview, String> {
     let home = control_session::user_home()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        client_config::status(&home, inference_url.as_deref())
+    let tokens = match inference_url {
+        Some(_) => client_config::Tokens::of(&manager).await.ok(),
+        None => None,
+    };
+    home_task(move || {
+        let homes = agent_home::Homes::find(home, wsl::Reach::Running)?;
+        let mut clients = Vec::new();
+        let mut wsl_unchecked = homes.unchecked.clone();
+        for home in homes.iter() {
+            match (
+                client_config::status(home, inference_url.as_deref(), tokens.as_ref()),
+                home.distribution(),
+            ) {
+                (Ok(statuses), _) => clients.extend(statuses),
+                (Err(error), None) => return Err(error),
+                (Err(error), Some(distribution)) => {
+                    eprintln!("unable to read client configs in WSL {distribution}: {error}");
+                    wsl_unchecked.push(distribution.to_string());
+                }
+            }
+        }
+        let dirs = cc_switch::config_dirs(&homes.host);
+        Ok(client_config::ClientOverview {
+            clients,
+            wsl_unchecked,
+            wsl_localhost: wsl::localhost_shared(&homes.host),
+            cc_switch_wsl: client_config::CcSwitchWsl {
+                claude: cc_switch::managed_distribution(
+                    dirs.clone(),
+                    client_config::Client::Claude,
+                ),
+                codex: cc_switch::managed_distribution(dirs, client_config::Client::Codex),
+            },
+        })
     })
     .await
-    .map_err(|error| error.to_string())?
+}
+
+/// The home a client config command works on. Naming a WSL distribution
+/// starts it if it is stopped.
+fn client_home(wsl: Option<String>) -> Result<agent_home::OwnedHome, String> {
+    let names = wsl.iter().cloned().collect::<Vec<_>>();
+    agent_home::Homes::find(control_session::user_home()?, wsl::Reach::Named(&names))?
+        .take(wsl.as_deref())
+        .ok_or_else(|| {
+            format!(
+                "WSL distribution {} is no longer available",
+                wsl.unwrap_or_default()
+            )
+        })
 }
 
 #[tauri::command]
@@ -1826,12 +2083,13 @@ async fn apply_client_config(
     models: client_config::Models,
     inference_url: String,
     replace: bool,
+    wsl: Option<String>,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<client_config::ApplyOutcome, String> {
-    let home = control_session::user_home()?;
+    let target = home_task(move || client_home(wsl)).await?;
     client_config::apply(
         &manager,
-        home,
+        target,
         token_id,
         client,
         &models,
@@ -1842,11 +2100,11 @@ async fn apply_client_config(
 }
 
 #[tauri::command]
-async fn remove_client_config(client: client_config::Client) -> Result<(), String> {
-    let home = control_session::user_home()?;
-    tauri::async_runtime::spawn_blocking(move || client_config::remove(&home, client))
-        .await
-        .map_err(|error| error.to_string())?
+async fn remove_client_config(
+    client: client_config::Client,
+    wsl: Option<String>,
+) -> Result<(), String> {
+    home_task(move || client_config::remove(client_home(wsl)?.home(), client)).await
 }
 
 /// The config `apply_client_config` would write to a fresh file, with the
@@ -2061,6 +2319,8 @@ fn platform_initialization_script(platform: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the development bundle is staged: `make dev` stages its own.
+    let context = instance::configure(tauri::generate_context!());
     // Cocoa must see the .app before NSApplication is initialized. Replacing
     // this process preserves the PID and Tauri dev's signal/restart handling.
     #[cfg(all(target_os = "macos", dev))]
@@ -2134,6 +2394,7 @@ pub fn run() {
             get_service_usage,
             get_service_reset_credits,
             pricing,
+            sync_config,
             reset_service_usage,
             test_service,
             probe_service_models,
@@ -2180,8 +2441,10 @@ pub fn run() {
             update_audit_settings,
             local_data_status,
             list_access_tokens,
+            list_network_addresses,
             list_access_token_usage,
             get_usage_summary,
+            get_privacy_summary,
             create_access_token,
             copy_access_token,
             cc_switch_installed,
@@ -2261,7 +2524,7 @@ pub fn run() {
                     &[("error", &error)],
                 ));
             }
-            start_client_config_sync(&setup_manager, Arc::clone(&preferences));
+            start_client_config_sync(Arc::clone(&setup_manager), Arc::clone(&preferences));
             app.manage(preferences);
             let updates =
                 Arc::new(updates::UpdateManager::new(app.handle()).map_err(std::io::Error::other)?);
@@ -2290,28 +2553,12 @@ pub fn run() {
             #[cfg(debug_assertions)]
             dev_reload::start(app.handle());
 
-            if let Ok(home) = control_session::user_home() {
-                if let Err(error) = agent_install::sync_installed_skills(&home) {
-                    eprintln!("failed to sync AstrLink agent skills: {error}");
-                }
-                if let Err(error) = agent_install::sync_installed_host_guards(
-                    &home,
-                    Some(&data_directory),
-                    raw_key_pin_file.as_deref(),
-                ) {
-                    eprintln!("failed to sync AstrLink agent host guards: {error}");
-                }
-                // Runs without a sidecar too, so the MCP migration still happens.
-                if let Err(error) =
-                    agent_install::sync_installed_cli(&agent_install::InstallContext {
-                        home,
-                        cli_source: agent_install::resolve_sidecar_binary("astrlink-cli")
-                            .unwrap_or_default(),
-                        data_directory: Some(data_directory.clone()),
-                        raw_key_pins: raw_key_pin_file.clone(),
-                    })
-                {
-                    eprintln!("failed to sync AstrLink agent CLI: {error}");
+            // The development instance shares the user's agent tools with the
+            // other AstrLink, whose guards name that one's data directory.
+            // Only installing from its settings points them at its own.
+            if !instance::is_isolated() {
+                if let Ok(home) = control_session::user_home() {
+                    sync_agent_installs(home, data_directory.clone(), raw_key_pin_file.clone());
                 }
             }
 
@@ -2327,7 +2574,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build AstrLink desktop app");
 
     app.run(|app_handle, event| {
@@ -2696,6 +2943,8 @@ mod tests {
                 capabilities: None,
                 last_error: None,
                 inference_port_fallback: None,
+                inference_listen_active: None,
+                restart_pending: false,
                 recovery_attempt: 0,
                 recovery_scheduled_in_ms: None,
             },
@@ -2738,15 +2987,23 @@ mod tests {
     }
 
     #[test]
-    fn inspector_parks_beside_the_main_window() {
+    fn inspector_parks_beside_the_main_window_inset_from_its_edges() {
+        let main = roomy_main();
+        let size = inspector_size(main, wide_monitor());
+
         assert_eq!(
-            inspector_placement(
-                roomy_main(),
-                wide_monitor(),
-                (TRAJECTORY_INSPECTOR_WIDTH, TRAJECTORY_INSPECTOR_HEIGHT),
-                0
-            ),
-            (200.0 + 1120.0 + TRAJECTORY_INSPECTOR_GAP, 120.0)
+            size,
+            (
+                TRAJECTORY_INSPECTOR_WIDTH,
+                main.height - 2.0 * TRAJECTORY_INSPECTOR_INSET
+            )
+        );
+        assert_eq!(
+            inspector_placement(main, wide_monitor(), size, 0),
+            (
+                200.0 + 1120.0 + TRAJECTORY_INSPECTOR_GAP,
+                main.y + TRAJECTORY_INSPECTOR_INSET
+            )
         );
     }
 
@@ -2772,31 +3029,58 @@ mod tests {
     }
 
     #[test]
-    fn inspector_stays_on_screen_when_the_main_window_hugs_the_edge() {
-        let monitor = WindowBox {
+    fn inspector_shrinks_to_a_small_work_area_but_not_below_its_minimum() {
+        // 1024 × 600 below a 25-point menu bar, beside a main window the
+        // operator dragged taller than the work area.
+        let small = WindowBox {
+            x: 0.0,
+            y: 25.0,
+            width: 1024.0,
+            height: 575.0,
+        };
+        let tall_main = WindowBox {
+            height: 700.0,
+            ..small
+        };
+        assert_eq!(
+            inspector_size(tall_main, small),
+            (TRAJECTORY_INSPECTOR_WIDTH, 575.0)
+        );
+
+        let tiny = WindowBox {
             x: 0.0,
             y: 0.0,
-            width: 1440.0,
-            height: 900.0,
+            width: 300.0,
+            height: 300.0,
         };
+        assert_eq!(
+            inspector_size(tiny, tiny),
+            (
+                TRAJECTORY_INSPECTOR_MIN_WIDTH,
+                TRAJECTORY_INSPECTOR_MIN_HEIGHT
+            )
+        );
+    }
+
+    #[test]
+    fn inspector_stays_in_the_work_area_when_the_main_window_hugs_the_edge() {
+        // Below a 25-point menu bar and above a 75-point Dock.
+        let work = laptop_work_area();
         let main = WindowBox {
             x: 300.0,
             y: 600.0,
             width: 1120.0,
             height: 780.0,
         };
+        let size = inspector_size(main, work);
 
         // Even a deep cascade must not push a window past the monitor edge,
-        // where it cannot be dragged back on Windows and X11.
-        let (x, y) = inspector_placement(
-            main,
-            monitor,
-            (TRAJECTORY_INSPECTOR_WIDTH, TRAJECTORY_INSPECTOR_HEIGHT),
-            9,
-        );
+        // where it cannot be dragged back on Windows and X11, or under the Dock.
+        let (x, y) = inspector_placement(main, work, size, 9);
 
-        assert_eq!(x, 1440.0 - TRAJECTORY_INSPECTOR_WIDTH);
-        assert_eq!(y, 900.0 - 680.0);
+        assert_eq!(x + size.0, work.x + work.width);
+        assert_eq!(y + size.1, work.y + work.height);
+        assert!(y >= work.y);
     }
 
     #[test]
@@ -2831,7 +3115,7 @@ mod tests {
     #[test]
     fn a_wide_inspector_grows_away_from_the_nearer_screen_edge() {
         let right = WindowBox {
-            x: 960.0,
+            x: 780.0,
             y: 80.0,
             width: TRAJECTORY_INSPECTOR_WIDTH,
             height: 680.0,
@@ -2859,7 +3143,7 @@ mod tests {
             height: 600.0,
         };
         let current = WindowBox {
-            x: 560.0,
+            x: 360.0,
             y: 40.0,
             width: TRAJECTORY_INSPECTOR_WIDTH,
             height: 520.0,
@@ -2892,7 +3176,7 @@ mod tests {
     #[test]
     fn narrowing_returns_the_inspector_to_where_it_was() {
         let before = WindowBox {
-            x: 960.0,
+            x: 780.0,
             y: 80.0,
             width: TRAJECTORY_INSPECTOR_WIDTH,
             height: 680.0,

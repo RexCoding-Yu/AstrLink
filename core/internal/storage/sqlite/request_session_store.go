@@ -451,7 +451,7 @@ const requestSessionSummaryColumns = `
     turn_index, NULL, NULL, NULL, NULL,
     (SELECT COUNT(*) FROM request_records children
      WHERE children.parent_request_id = request_records.id), NULL, NULL, model_redirect_json, NULL, NULL, client_type,
-    NULL, NULL, NULL, NULL`
+    privacy_decision, NULL, NULL, NULL, NULL`
 
 // sessionSummaryQuery reads the root turns of sessions, each session's in
 // time order. Without statistics SQLite takes `parent_request_id IS NULL`,
@@ -544,19 +544,23 @@ func sessionFromTurns(turns []contract.RequestRecord) (contract.RequestSession, 
 	} else if first.SessionID != nil {
 		id = *first.SessionID
 	}
-	title := "未命名会话"
+	title := ""
 	for _, turn := range turns {
 		if turn.InputPreview != nil && *turn.InputPreview != "" {
 			title = contract.ClampRunes(*turn.InputPreview, contract.MaxSessionTitleRunes)
 			break
 		}
 	}
-	if title == "未命名会话" && latest.RequestedModel != nil && *latest.RequestedModel != "" {
+	if title == "" && latest.RequestedModel != nil && *latest.RequestedModel != "" {
 		title = contract.ClampRunes(*latest.RequestedModel, contract.MaxSessionTitleRunes)
 	}
 	callCount := 0
+	warned := false
 	for _, turn := range turns {
 		callCount += 1 + turn.ChildCount
+		if turn.PrivacyDecision != nil && *turn.PrivacyDecision == contract.PrivacyDecisionWarn {
+			warned = true
+		}
 	}
 	session := contract.RequestSession{
 		ClientType:         latest.ClientType,
@@ -574,6 +578,7 @@ func sessionFromTurns(turns []contract.RequestRecord) (contract.RequestSession, 
 		InputProtocol:      latest.InputProtocol,
 		ServiceID:          latest.ServiceID,
 		LocalAccessTokenID: latest.LocalAccessTokenID,
+		PrivacyWarned:      warned,
 	}
 	if err := session.Validate(); err != nil {
 		return contract.RequestSession{}, fmt.Errorf("%w: session %q: %v", storagecontract.ErrInvalidRecord, id, err)

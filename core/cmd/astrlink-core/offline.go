@@ -264,6 +264,11 @@ func writeAuditText(output io.Writer, content contract.AuditContent) {
 	if len(content.PrivacyFindings) > 0 {
 		fmt.Fprintln(output, "privacy findings:")
 		for _, finding := range content.PrivacyFindings {
+			if confidence := finding.Confidence; confidence != nil {
+				fmt.Fprintf(output, "  %s at %s (%d, confidence %.2f-%.2f, threshold %.2f)\n",
+					finding.Kind, finding.JSONPath, finding.Count, confidence.Min, confidence.Max, confidence.Threshold)
+				continue
+			}
 			fmt.Fprintf(output, "  %s at %s (%d)\n", finding.Kind, finding.JSONPath, finding.Count)
 		}
 	}

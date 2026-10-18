@@ -118,7 +118,7 @@ func TestInferencePlaneReturnsStructuredBoundaryErrors(t *testing.T) {
 		resolveErr error
 		body       string
 	}{
-		{name: "unknown path", method: http.MethodPost, path: "/v1/embeddings", status: http.StatusNotFound, code: "not_found"},
+		{name: "unknown path", method: http.MethodPost, path: "/v1/moderations", status: http.StatusNotFound, code: "not_found"},
 		{name: "wrong method", method: http.MethodGet, path: "/v1/responses", status: http.StatusMethodNotAllowed, code: "method_not_allowed", wantAllow: http.MethodPost},
 		{name: "missing capability", method: http.MethodPost, path: "/v1/messages", status: http.StatusUnprocessableEntity, code: "missing_protocol_capability", resolveErr: endpoint.ErrNoEndpoint},
 		{name: "resolver failure", method: http.MethodPost, path: "/v1/chat/completions", status: http.StatusServiceUnavailable, code: "endpoint_resolver_unavailable", resolveErr: errors.New("database detail must stay private")},
@@ -2166,7 +2166,7 @@ func TestInferencePlaneRecordsBoundaryAndClassifyErrors(t *testing.T) {
 		store := &memoryRequestRecordStore{}
 		handler := NewWithDependencies(Dependencies{RequestRecords: store})
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{}`)))
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/moderations", strings.NewReader(`{}`)))
 		assertInferenceError(t, response, http.StatusNotFound, "not_found")
 		if len(store.records) != 0 {
 			t.Fatalf("unknown path recorded: %#v", store.records)

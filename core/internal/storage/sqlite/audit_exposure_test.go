@@ -148,6 +148,7 @@ func TestRequestRecordPersistsPrivacyDecisionAndFindings(t *testing.T) {
 		InputProtocol: contract.ProtocolOpenAIResponses, Audit: contract.NotCapturedAuditSummary(),
 		PrivacyDecision: &decision,
 		PrivacyFindings: []contract.PrivacyFinding{{Kind: contract.CanonicalKindEmail, JSONPath: "$.input[0].content", Count: 2}},
+		PrivacyIgnored:  []contract.PrivacyIgnored{{Kind: contract.CanonicalKindEmail, Reason: contract.PrivacyIgnoreAllowlisted, Count: 1}},
 	}
 	if err := store.InsertRequestRecord(ctx, record); err != nil {
 		t.Fatal(err)
@@ -161,6 +162,9 @@ func TestRequestRecordPersistsPrivacyDecisionAndFindings(t *testing.T) {
 	}
 	if len(loaded.PrivacyFindings) != 1 || loaded.PrivacyFindings[0] != record.PrivacyFindings[0] {
 		t.Fatalf("findings=%#v", loaded.PrivacyFindings)
+	}
+	if len(loaded.PrivacyIgnored) != 1 || loaded.PrivacyIgnored[0] != record.PrivacyIgnored[0] {
+		t.Fatalf("ignored=%#v", loaded.PrivacyIgnored)
 	}
 
 	settings, err := store.GetAuditSettings(ctx)

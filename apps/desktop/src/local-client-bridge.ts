@@ -3,8 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import {
   emptyLocalClients,
   parseLocalClients,
-  type LocalClientId,
   type LocalClientSnapshot,
+  type LocalClientTarget,
 } from "./local-client-model";
 
 async function call(command: string, args?: Record<string, unknown>) {
@@ -19,8 +19,10 @@ export const getLocalClients = () =>
     ? call("local_client_status")
     : Promise.resolve(emptyLocalClients());
 export const refreshLocalClients = () => call("refresh_local_clients");
-export const updateLocalClients = (ids: LocalClientId[]) =>
-  call("update_local_clients", { ids });
+export const updateLocalClients = (targets: LocalClientTarget[]) =>
+  call("update_local_clients", {
+    targets: targets.map(({ id, wsl }) => ({ id, wsl })),
+  });
 export const listenLocalClients = (
   listener: (snapshot: LocalClientSnapshot) => void,
 ) =>

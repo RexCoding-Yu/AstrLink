@@ -8,6 +8,8 @@ import {
 import {
   clientDisconnect,
   clientDisconnectNote,
+  confidencePercent,
+  confidenceRange,
   eventTone,
   extendPendingTimeline,
   extractPrivacyHits,
@@ -17,11 +19,16 @@ import {
   inspectorPart,
   inspectorTitle,
   modelRedirectSummary,
+  parseImageCompression,
+  parsePolicySummary,
   policyDecision,
+  policyKindTable,
   callProgressAtListOffset,
   callProgressAtScrollLeft,
   listOffsetForCall,
   listScrollForTimeline,
+  recordedPrivacyConfidence,
+  recordedPrivacyFindings,
   recordedPrivacyHits,
   scrollLeftForCall,
   splitPrivacyHighlights,
@@ -204,6 +211,145 @@ describe("request trajectory model", () => {
     };
     expect(inspectorChainRows(ambiguous)[0]?.redirect).toBeUndefined();
     expect(inspectorChainRows(ambiguous)[0]?.summary).toBe("a → b → c");
+  });
+
+  it("shows image compression as its own gateway step", () => {
+    const at = "2026-08-16T10:00:00.100Z";
+    const compressed: RequestRecord = {
+      ...record,
+      events: [
+        {
+          kind: "accepted",
+          started_at: record.started_at,
+          ended_at: at,
+          status: "succeeded",
+          summary: "gpt-4.1 · openai.responses",
+          attempt_index: 0,
+        },
+        {
+          kind: "image_compression",
+          started_at: at,
+          ended_at: "2026-08-16T10:00:00.148Z",
+          status: "succeeded",
+          summary: "lossless · 1/1 images · 75301 → 37406 bytes",
+          attempt_index: 1,
+        },
+        {
+          kind: "routed",
+          started_at: "2026-08-16T10:00:00.150Z",
+          ended_at: "2026-08-16T10:00:00.150Z",
+          status: "succeeded",
+          summary: "native · service_01",
+          attempt_index: 1,
+        },
+      ],
+    };
+    const [, row] = inspectorChainRows(compressed);
+    expect(row).toMatchObject({
+      chip: "COMPRESS",
+      lane: "gateway",
+      tone: "ok",
+      summary: "1/1 张图片 · 无损 WebP · 73.5 KB → 36.5 KB · 减小 50%",
+      compression: {
+        mode: "lossless",
+        quality: null,
+        images: 1,
+        compressed: 1,
+        beforeBytes: 75301,
+        afterBytes: 37406,
+      },
+    });
+    expect(inspectorPart("COMPRESS")).toBe("compression");
+    expect(inspectorTitle("COMPRESS")).toBe("图片压缩");
+
+    expect(
+      parseImageCompression("lossy q70 · 0/2 images · 900 → 900 bytes"),
+    ).toStrictEqual({
+      mode: "lossy",
+      quality: 70,
+      images: 2,
+      compressed: 0,
+      beforeBytes: 900,
+      afterBytes: 900,
+    });
+    const kept: RequestRecord = {
+      ...compressed,
+      events: [
+        {
+          ...compressed.events[1]!,
+          summary: "lossy q70 · 0/2 images · 900 → 900 bytes",
+        },
+      ],
+    };
+    expect(inspectorChainRows(kept)[0]?.summary).toBe(
+      "0/2 张图片 · 有损 WebP，质量 70 · 900 B → 900 B",
+    );
+    // A summary in another shape stays as Core wrote it.
+    const unknown: RequestRecord = {
+      ...compressed,
+      events: [{ ...compressed.events[1]!, summary: "webp · 3 images" }],
+    };
+    const [fallback] = inspectorChainRows(unknown);
+    expect(fallback?.summary).toBe("webp · 3 images");
+    expect(fallback?.compression).toBeUndefined();
+  });
+
+  it("spells out the policy decision and restore counts Core writes", () => {
+    const at = "2026-08-16T10:00:00.000Z";
+    const event = (
+      kind: RequestRecord["events"][number]["kind"],
+      summary: string,
+      status: RequestRecord["status"] = "succeeded",
+    ) => ({
+      kind,
+      started_at: at,
+      ended_at: at,
+      status,
+      summary,
+      attempt_index: 1,
+    });
+    const summaries = (...events: RequestRecord["events"]) =>
+      inspectorChainRows({ ...record, events }).map((row) => row.summary);
+
+    expect(
+      summaries(
+        event("privacy", "redact · 1 · skill"),
+        event("restore", "restore · 0/1"),
+      ),
+    ).toEqual(["已脱敏 · 替换 1 项", "还原 0 处"]);
+    expect(
+      summaries(
+        event("privacy", "redact · 3 · notice"),
+        event("restore", "restore · 4/3 · tool 4"),
+      ),
+    ).toEqual(["已脱敏 · 替换 3 项", "还原 4 处（工具参数 4 处）"]);
+    expect(
+      summaries(event("privacy", "warn"), event("privacy", "block", "blocked")),
+    ).toEqual(["已警告", "已阻止"]);
+    expect(summaries(event("privacy", "allow · trusted"))).toEqual([
+      "信任的提供商",
+    ]);
+    // Progress and failure codes have no decision and stay as Core wrote them.
+    expect(
+      summaries(event("privacy", "privacy_policy_unavailable", "failed")),
+    ).toEqual(["privacy_policy_unavailable"]);
+    expect(
+      inspectorChainRows({
+        ...record,
+        events: [event("privacy", "redact · 2 · skill")],
+      })[0]?.policy,
+    ).toEqual({
+      action: "redact",
+      replaced: 2,
+      explainedBy: "skill",
+      trusted: false,
+    });
+    expect(parsePolicySummary("allow · trusted")).toEqual({
+      action: "allow",
+      replaced: null,
+      explainedBy: null,
+      trusted: true,
+    });
   });
 
   it("keeps persisted events when present", () => {
@@ -1395,12 +1541,151 @@ describe("request trajectory model", () => {
     expect(recordedPrivacyHits(record.privacy_restore)).toEqual([]);
   });
 
+  it("names what a warning found, adding up each kind across paths", () => {
+    expect(
+      recordedPrivacyFindings([
+        { kind: "email", json_path: "/input/1/content", count: 1 },
+        { kind: "common_secret", json_path: "/input/0/content", count: 2 },
+        { kind: "email", json_path: "/input/0/content", count: 1 },
+      ]).map((hit) => [hit.kind, hit.label, hit.count]),
+    ).toEqual([
+      ["email", "邮箱", 2],
+      ["common_secret", "常见密钥", 2],
+    ]);
+    expect(recordedPrivacyFindings(undefined)).toEqual([]);
+  });
+
+  it("merges model confidence by kind and keeps the threshold", () => {
+    const threshold = 0.7;
+    expect(
+      recordedPrivacyConfidence([
+        {
+          kind: "private_person",
+          json_path: "/input/1/content",
+          count: 1,
+          confidence: { min: 0.88, max: 0.88, threshold },
+        },
+        {
+          kind: "email",
+          json_path: "/input/1/content",
+          count: 1,
+          confidence: { min: 0.81, max: 0.9, threshold },
+        },
+        {
+          kind: "email",
+          json_path: "/input/0/content",
+          count: 2,
+          confidence: { min: 0.93, max: 0.9987, threshold },
+        },
+      ]),
+    ).toEqual({
+      groups: [
+        { kind: "email", label: "邮箱", min: 0.81, max: 0.9987 },
+        { kind: "private_person", label: "人名", min: 0.88, max: 0.88 },
+      ],
+      threshold,
+    });
+    // Regex findings and older records carry no confidence at all.
+    expect(
+      recordedPrivacyConfidence([
+        { kind: "email", json_path: "/input/0/content", count: 1 },
+      ]),
+    ).toBeNull();
+    expect(recordedPrivacyConfidence(undefined)).toBeNull();
+    expect(confidenceRange(0.88, 0.88)).toBe("88%");
+    expect(confidenceRange(0.81, 0.99999)).toBe("81%–100%");
+    expect(confidencePercent(0.70004)).toBe("70%");
+  });
+
+  it("puts each kind's matches, confidence, and ignored matches on one row", () => {
+    const threshold = 0.7;
+    const { rows, threshold: read } = policyKindTable(
+      [
+        { kind: "private_person", label: "人名", count: 1, placeholders: [] },
+        { kind: "url", label: "URL", count: 3, placeholders: [] },
+      ],
+      [
+        {
+          kind: "private_person",
+          json_path: "/input/0/content",
+          count: 1,
+          confidence: { min: 0.88, max: 0.88, threshold },
+        },
+      ],
+      [
+        { kind: "url", reason: "kind_disabled", count: 5 },
+        { kind: "email", reason: "allowlisted", count: 1 },
+        {
+          kind: "private_person",
+          reason: "low_confidence",
+          count: 2,
+          confidence: { min: 0.5, max: 0.6234, threshold },
+        },
+        {
+          kind: "private_person",
+          reason: "low_confidence",
+          count: 1,
+          confidence: { min: 0.41, max: 0.6, threshold },
+        },
+      ],
+    );
+    expect(read).toBe(threshold);
+    // Kinds the policy acted on come first; email was only ignored.
+    expect(rows).toEqual([
+      {
+        kind: "url",
+        label: "URL",
+        count: 3,
+        confidence: null,
+        ignored: { kind_disabled: { count: 5, confidence: null } },
+      },
+      {
+        kind: "private_person",
+        label: "人名",
+        count: 1,
+        confidence: { min: 0.88, max: 0.88 },
+        ignored: {
+          low_confidence: { count: 3, confidence: { min: 0.41, max: 0.6234 } },
+        },
+      },
+      {
+        kind: "email",
+        label: "邮箱",
+        count: 0,
+        confidence: null,
+        ignored: { allowlisted: { count: 1, confidence: null } },
+      },
+    ]);
+  });
+
+  it("reads the threshold from ignored matches when none were accepted", () => {
+    expect(
+      policyKindTable([], undefined, [
+        {
+          kind: "email",
+          reason: "low_confidence",
+          count: 1,
+          confidence: { min: 0.4, max: 0.4, threshold: 0.8 },
+        },
+      ]).threshold,
+    ).toBe(0.8);
+    expect(policyKindTable([], undefined, undefined)).toEqual({
+      rows: [],
+      threshold: null,
+    });
+  });
+
   it("reads the policy decision from the phase summary Core writes", () => {
     const decide = (
       summary: string,
       status: RequestRecord["status"] = "succeeded",
-    ) => policyDecision({ summary, status }, null);
+    ) =>
+      policyDecision(
+        { policy: parsePolicySummary(summary) ?? undefined, status },
+        null,
+      );
     expect(decide("allow")).toBe("allow");
+    expect(decide("allow · trusted")).toBe("trusted");
     expect(decide("warn")).toBe("warn");
     expect(decide("block", "blocked")).toBe("block");
     expect(decide("redact · 3")).toBe("redact");
@@ -1413,7 +1698,10 @@ describe("request trajectory model", () => {
     // Records synthesized without events carry only the mapping.
     expect(
       policyDecision(
-        { summary: "allow", status: "succeeded" },
+        {
+          policy: parsePolicySummary("allow") ?? undefined,
+          status: "succeeded",
+        },
         {
           enabled: false,
           mapping_count: 2,

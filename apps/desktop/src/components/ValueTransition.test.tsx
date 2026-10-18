@@ -69,7 +69,6 @@ it("transitions pages without adding a wrapper or remounting their controls", as
           valueKey={page}
           duration={280}
           initialOpacity={0}
-          offsetY={8}
         >
           <main data-slot="workspace">
             <input defaultValue="saved" />
@@ -86,13 +85,12 @@ it("transitions pages without adding a wrapper or remounting their controls", as
   expect(container.querySelector("input")).toBe(input);
   expect(input.value).toBe("draft");
   expect(animate).toHaveBeenCalledOnce();
-  expect(animate).toHaveBeenLastCalledWith(
-    [
-      { opacity: 0, transform: "translateY(8px)" },
-      { opacity: 1, transform: "none" },
-    ],
-    { duration: 280, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
-  );
+  // A fade with no transform: a sliding page draws its scrollers in WKWebView
+  // a pixel off the rest of the page until the slide ends.
+  expect(animate).toHaveBeenLastCalledWith([{ opacity: 0 }, { opacity: 1 }], {
+    duration: 280,
+    easing: "ease-out",
+  });
   // Rapid navigation cancels the previous reveal instead of stacking effects.
   await render("records");
   expect(cancel).toHaveBeenCalledOnce();
@@ -107,18 +105,10 @@ it("shows updated content immediately without motion when reduced motion is enab
     matches: true,
   } as MediaQueryList);
   await act(async () =>
-    root.render(
-      <ValueTransition valueKey="one" offsetY={8}>
-        One
-      </ValueTransition>,
-    ),
+    root.render(<ValueTransition valueKey="one">One</ValueTransition>),
   );
   await act(async () =>
-    root.render(
-      <ValueTransition valueKey="two" offsetY={8}>
-        Two
-      </ValueTransition>,
-    ),
+    root.render(<ValueTransition valueKey="two">Two</ValueTransition>),
   );
   expect(container.textContent).toBe("Two");
   expect(animate).not.toHaveBeenCalled();

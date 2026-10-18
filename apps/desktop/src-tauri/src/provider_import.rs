@@ -17,7 +17,6 @@ use zeroize::Zeroizing;
 use crate::sidecar::{CoreManager, ServiceRecordResponse};
 
 pub const EVENT: &str = "provider-import";
-pub const SCHEME: &str = "astrlink";
 
 // Also bounded by the Windows command line that carries the link.
 const MAX_LINK_BYTES: usize = 32 * 1024;
@@ -224,7 +223,7 @@ fn parse(raw: &str) -> Result<Link, Rejection> {
         return Err(reject(Reason::Malformed, None));
     }
     let url = Url::parse(raw).map_err(|_| reject(Reason::Malformed, None))?;
-    if url.scheme() != SCHEME
+    if url.scheme() != crate::instance::link_scheme()
         || url.host_str() != Some("v1")
         || url.path() != "/providers/import"
         || url.port().is_some()

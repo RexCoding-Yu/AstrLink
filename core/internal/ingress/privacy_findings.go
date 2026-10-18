@@ -14,9 +14,35 @@ import (
 // as "*" so a finding path never repeats request content.
 var privacyFindingKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 
+// privacyThreshold is the confidence threshold the policy judged matches
+// against, or nil when the regex detector decided: its matches carry no
+// confidence.
+func privacyThreshold(policy privacy.Policy) *float64 {
+	if policy.Mode != privacy.ModeLocalModel {
+		return nil
+	}
+	threshold := policy.MinConfidence
+	return &threshold
+}
+
+// widenPrivacyConfidence returns a new range that also covers confidence.
+// The entry's range is replaced rather than changed in place, because record
+// snapshots share it.
+func widenPrivacyConfidence(current *contract.PrivacyConfidence, confidence float64, threshold *float64) *contract.PrivacyConfidence {
+	if threshold == nil {
+		return current
+	}
+	next := contract.PrivacyConfidence{Min: confidence, Max: confidence, Threshold: *threshold}
+	if current != nil {
+		next.Min = min(current.Min, confidence)
+		next.Max = max(current.Max, confidence)
+	}
+	return &next
+}
+
 // mergePrivacyFindings counts accepted findings by kind and structural path.
 // Paths are JSON pointers from the inspection segments; values never enter.
-func mergePrivacyFindings(existing []contract.PrivacyFinding, findings []privacy.Finding) []contract.PrivacyFinding {
+func mergePrivacyFindings(existing []contract.PrivacyFinding, findings []privacy.Finding, threshold *float64) []contract.PrivacyFinding {
 	for _, finding := range findings {
 		kind := contract.CanonicalKind(finding.Kind)
 		if !kind.Valid() {
@@ -27,6 +53,7 @@ func mergePrivacyFindings(existing []contract.PrivacyFinding, findings []privacy
 		for index := range existing {
 			if existing[index].Kind == kind && existing[index].JSONPath == path {
 				existing[index].Count++
+				existing[index].Confidence = widenPrivacyConfidence(existing[index].Confidence, finding.Confidence, threshold)
 				merged = true
 				break
 			}
@@ -37,7 +64,39 @@ func mergePrivacyFindings(existing []contract.PrivacyFinding, findings []privacy
 		if len(existing) >= contract.MaxPrivacyFindings {
 			continue
 		}
-		existing = append(existing, contract.PrivacyFinding{Kind: kind, JSONPath: path, Count: 1})
+		existing = append(existing, contract.PrivacyFinding{
+			Kind: kind, JSONPath: path, Count: 1,
+			Confidence: widenPrivacyConfidence(nil, finding.Confidence, threshold),
+		})
+	}
+	return existing
+}
+
+// mergePrivacyIgnored counts suppressed findings by kind and reason. A match
+// suppressed because it is already a placeholder is skipped: it was never
+// private content.
+func mergePrivacyIgnored(existing []contract.PrivacyIgnored, suppressed []privacy.Finding, threshold *float64) []contract.PrivacyIgnored {
+	for _, finding := range suppressed {
+		kind := contract.CanonicalKind(finding.Kind)
+		reason := contract.PrivacyIgnoreReason(finding.Suppression)
+		if !kind.Valid() || !reason.Valid() {
+			continue
+		}
+		merged := false
+		for index := range existing {
+			if existing[index].Kind == kind && existing[index].Reason == reason {
+				existing[index].Count++
+				existing[index].Confidence = widenPrivacyConfidence(existing[index].Confidence, finding.Confidence, threshold)
+				merged = true
+				break
+			}
+		}
+		if !merged && len(existing) < contract.MaxPrivacyFindings {
+			existing = append(existing, contract.PrivacyIgnored{
+				Kind: kind, Reason: reason, Count: 1,
+				Confidence: widenPrivacyConfidence(nil, finding.Confidence, threshold),
+			})
+		}
 	}
 	return existing
 }

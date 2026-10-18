@@ -26,6 +26,9 @@ func TestAlphaProtocolDescriptorsAreFrozen(t *testing.T) {
 		ProtocolOpenAICompletions,
 		ProtocolOpenAIModels,
 		ProtocolGoogleModels,
+		ProtocolOpenAIEmbeddings,
+		ProtocolGoogleEmbeddings,
+		ProtocolRerank,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Alpha protocol IDs = %#v, want %#v", got, want)
@@ -95,11 +98,8 @@ func TestServiceCapabilitySchemaMatchesNonStreamingRegistry(t *testing.T) {
 func TestReservedPostAlphaProtocolIDsAreValid(t *testing.T) {
 	reserved := []ProtocolID{
 		ProtocolOpenAIRealtime,
-		ProtocolOpenAIEmbeddings,
-		ProtocolGoogleEmbeddings,
 		ProtocolOpenAIImages,
 		ProtocolOpenAIAudio,
-		ProtocolRerank,
 		ProtocolOpenAIVideos,
 	}
 	for _, id := range reserved {

@@ -58,13 +58,16 @@ it("shows default-setting tabs and clears dirty state on unmount under StrictMod
       ...container.querySelectorAll('[data-slot="tabs-list"] [role="tab"]'),
     ];
     expect(tabs.map((tab) => tab.textContent)).toEqual([
-      "模型与工具",
+      "请求改写",
+      "重定向",
       "恢复与重试",
       "错误规则",
       "会话粘性",
       "转发身份",
     ]);
     expect(tabs[0].getAttribute("aria-selected")).toBe("true");
+    expect(container.textContent).toContain("请求图片压缩");
+    await act(async () => (tabs[1] as HTMLButtonElement).click());
     expect(container.textContent).toContain("Codex 自动审查");
     expect(container.textContent).not.toContain("astrlink/auto");
     // The redirect editor suggests models from the forwarded services.

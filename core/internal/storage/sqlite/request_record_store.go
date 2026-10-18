@@ -27,7 +27,7 @@ const requestRecordSelectColumns = `
            WHERE request_record_cursors.request_id = request_records.id
            ORDER BY kind, direction, value)) AS cursors_json, first_token_ms, model_redirect_json,
     routing_decision_json, model_routing_json, client_type, privacy_decision, privacy_findings_json, conversion_diagnostics_json,
-    first_answer_ms`
+    first_answer_ms, privacy_ignored_json`
 
 const requestRecordInsertColumns = `
     id, parent_request_id, attempt_index, started_at, completed_at, status, input_protocol,
@@ -36,9 +36,9 @@ const requestRecordInsertColumns = `
     session_id, previous_response_id, output_response_id, input_preview, events_json, created_at,
     turn_index, session_link_json, turn_user_messages, turn_user_fingerprint, recovery_json, first_token_ms,
     model_redirect_json, routing_decision_json, model_routing_json, client_type, privacy_decision, privacy_findings_json,
-    conversion_diagnostics_json, first_answer_ms`
+    conversion_diagnostics_json, first_answer_ms, privacy_ignored_json`
 
-const requestRecordInsertValues = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const requestRecordInsertValues = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (row requestRecordRow) insertArgs() []any {
 	return []any{
@@ -49,7 +49,7 @@ func (row requestRecordRow) insertArgs() []any {
 		row.outputResponseID, row.inputPreview, row.eventsJSON, row.createdAt,
 		row.turnIndex, row.sessionLinkJSON, row.turnUserMessages, row.turnUserFingerprint, row.recoveryJSON, row.firstTokenMs,
 		row.modelRedirectJSON, row.routingDecisionJSON, row.modelRoutingJSON, row.clientType, row.privacyDecision, row.privacyFindingsJSON,
-		row.conversionDiagnosticsJSON, row.firstAnswerMs,
+		row.conversionDiagnosticsJSON, row.firstAnswerMs, row.privacyIgnoredJSON,
 	}
 }
 
@@ -142,6 +142,7 @@ ON CONFLICT(id) DO UPDATE SET
     client_type = excluded.client_type,
     privacy_decision = excluded.privacy_decision,
     privacy_findings_json = excluded.privacy_findings_json,
+    privacy_ignored_json = excluded.privacy_ignored_json,
     conversion_diagnostics_json = excluded.conversion_diagnostics_json
 WHERE request_records.status = 'pending' OR excluded.status <> 'pending'`,
 		row.insertArgs()...,
@@ -538,6 +539,9 @@ func (store *Store) PurgeRequestRecords(
 			err = rowsErr
 			return contract.PurgeResult{}, fmt.Errorf("read purge result: %w", err)
 		}
+		if err = deleteOrphanedStandIns(ctx, transaction); err != nil {
+			return contract.PurgeResult{}, err
+		}
 		if err = transaction.Commit(); err != nil {
 			return contract.PurgeResult{}, fmt.Errorf("commit request purge: %w", err)
 		}
@@ -597,14 +601,92 @@ WHERE parent_request_id IN (
 		); err != nil {
 			return contract.PurgeResult{}, fmt.Errorf("purge request records: %w", err)
 		}
+		if err = deleteOrphanedStandIns(ctx, transaction); err != nil {
+			return contract.PurgeResult{}, err
+		}
 		if err = transaction.Commit(); err != nil {
 			return contract.PurgeResult{}, fmt.Errorf("commit request purge: %w", err)
 		}
 		return contract.PurgeResult{DeletedRecords: recordCount, DeletedAuditBlobs: blobCount}, nil
+	case contract.PurgeScopeSessions:
+		var result contract.PurgeResult
+		if result, err = purgeRequestSessions(ctx, transaction, request.SessionIDs); err != nil {
+			return contract.PurgeResult{}, err
+		}
+		if err = deleteOrphanedStandIns(ctx, transaction); err != nil {
+			return contract.PurgeResult{}, err
+		}
+		if err = transaction.Commit(); err != nil {
+			return contract.PurgeResult{}, fmt.Errorf("commit request purge: %w", err)
+		}
+		return result, nil
 	default:
 		err = fmt.Errorf("%w: unknown purge scope", storagecontract.ErrInvalidArgument)
 		return contract.PurgeResult{}, err
 	}
+}
+
+// purgeRequestSessions deletes the named conversations: their roots with
+// every retry attempt, cursor and audit part. A root still running stays,
+// since its attempts and final snapshot are yet to be written; the
+// conversation keeps it and loses the rest.
+func purgeRequestSessions(
+	ctx context.Context,
+	transaction *sql.Tx,
+	sessionIDs []contract.SessionID,
+) (contract.PurgeResult, error) {
+	// Write first, so the counts match what is deleted and another
+	// connection's write makes this wait on busy_timeout instead of failing a
+	// deferred read transaction upgrade with SQLITE_BUSY.
+	if _, err := transaction.ExecContext(ctx, `UPDATE request_records SET id = id WHERE 0`); err != nil {
+		return contract.PurgeResult{}, fmt.Errorf("lock request records: %w", err)
+	}
+	args := make([]any, len(sessionIDs))
+	for index, id := range sessionIDs {
+		args[index] = string(id)
+	}
+	withDoomed := `WITH roots AS (
+    SELECT id FROM request_records INDEXED BY request_records_session_turns_idx
+    WHERE parent_request_id IS NULL AND COALESCE(session_id, id) IN (` + sessionPlaceholders(len(args)) + `)
+      AND status <> 'pending'
+), doomed AS (
+    SELECT id FROM roots
+    UNION
+    SELECT id FROM request_records WHERE parent_request_id IN (SELECT id FROM roots)
+)
+`
+	var result contract.PurgeResult
+	if err := transaction.QueryRowContext(ctx,
+		withDoomed+`SELECT COUNT(*) FROM audit_blobs WHERE request_id IN (SELECT id FROM doomed)`, args...,
+	).Scan(&result.DeletedAuditBlobs); err != nil {
+		return contract.PurgeResult{}, fmt.Errorf("count purge audit blobs: %w", err)
+	}
+	if err := transaction.QueryRowContext(ctx,
+		withDoomed+`SELECT COUNT(*) FROM doomed`, args...,
+	).Scan(&result.DeletedRecords); err != nil {
+		return contract.PurgeResult{}, fmt.Errorf("count purge request records: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx,
+		withDoomed+`DELETE FROM audit_blobs WHERE request_id IN (SELECT id FROM doomed)`, args...,
+	); err != nil {
+		return contract.PurgeResult{}, fmt.Errorf("purge audit blobs: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx,
+		withDoomed+`DELETE FROM request_record_cursors WHERE request_id IN (SELECT id FROM doomed)`, args...,
+	); err != nil {
+		return contract.PurgeResult{}, fmt.Errorf("purge request record cursors: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx,
+		withDoomed+`DELETE FROM request_records WHERE parent_request_id IN (SELECT id FROM roots)`, args...,
+	); err != nil {
+		return contract.PurgeResult{}, fmt.Errorf("purge child request records: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx,
+		withDoomed+`DELETE FROM request_records WHERE id IN (SELECT id FROM roots)`, args...,
+	); err != nil {
+		return contract.PurgeResult{}, fmt.Errorf("purge request records: %w", err)
+	}
+	return result, nil
 }
 
 type requestRecordRow struct {
@@ -647,6 +729,7 @@ type requestRecordRow struct {
 	turnUserFingerprint       any
 	privacyDecision           any
 	privacyFindingsJSON       any
+	privacyIgnoredJSON        any
 	conversionDiagnosticsJSON any
 }
 
@@ -767,6 +850,13 @@ func encodeRequestRecordRow(record contract.RequestRecord, createdAt time.Time) 
 		}
 		row.privacyFindingsJSON = string(encoded)
 	}
+	if len(record.PrivacyIgnored) > 0 {
+		encoded, err := json.Marshal(record.PrivacyIgnored)
+		if err != nil {
+			return requestRecordRow{}, fmt.Errorf("encode privacy ignored: %w", err)
+		}
+		row.privacyIgnoredJSON = string(encoded)
+	}
 	if len(record.ConversionDiagnostics) > 0 {
 		encoded, err := json.Marshal(record.ConversionDiagnostics)
 		if err != nil {
@@ -818,7 +908,7 @@ type scannable interface {
 
 func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 	var recoveryJSON, modelRedirectJSON, routingDecisionJSON, modelRoutingJSON, clientType sql.NullString
-	var privacyDecision, privacyFindingsJSON, conversionDiagnosticsJSON sql.NullString
+	var privacyDecision, privacyFindingsJSON, privacyIgnoredJSON, conversionDiagnosticsJSON sql.NullString
 	var firstTokenMs, firstAnswerMs sql.NullInt64
 	var (
 		id, startedAt, status, inputProtocol, auditJSON, createdAt        string
@@ -839,7 +929,7 @@ func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 		&sessionID, &previousResponseID, &outputResponseID, &inputPreview, &eventsJSON,
 		&createdAt, &turnIndex, &sessionLinkJSON, &turnUserMessages, &turnUserFingerprint, &recoveryJSON, &childCount, &cursorsJSON, &firstTokenMs,
 		&modelRedirectJSON, &routingDecisionJSON, &modelRoutingJSON, &clientType, &privacyDecision, &privacyFindingsJSON,
-		&conversionDiagnosticsJSON, &firstAnswerMs,
+		&conversionDiagnosticsJSON, &firstAnswerMs, &privacyIgnoredJSON,
 	); err != nil {
 		return contract.RequestRecord{}, err
 	}
@@ -972,6 +1062,11 @@ func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 	if privacyFindingsJSON.Valid && privacyFindingsJSON.String != "" {
 		if err := json.Unmarshal([]byte(privacyFindingsJSON.String), &record.PrivacyFindings); err != nil {
 			return contract.RequestRecord{}, fmt.Errorf("%w: request %q privacy_findings", storagecontract.ErrInvalidRecord, id)
+		}
+	}
+	if privacyIgnoredJSON.Valid && privacyIgnoredJSON.String != "" {
+		if err := json.Unmarshal([]byte(privacyIgnoredJSON.String), &record.PrivacyIgnored); err != nil {
+			return contract.RequestRecord{}, fmt.Errorf("%w: request %q privacy_ignored", storagecontract.ErrInvalidRecord, id)
 		}
 	}
 	if conversionDiagnosticsJSON.Valid && conversionDiagnosticsJSON.String != "" {

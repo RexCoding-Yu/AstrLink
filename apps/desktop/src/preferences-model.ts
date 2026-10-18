@@ -5,6 +5,17 @@ import { isThemePreference, type ThemePreference } from "./theme-model";
 
 export type CloseBehavior = "hide_to_tray" | "quit";
 
+/** Which interfaces the inference port answers; mirrors `InferenceListen` in `preferences.rs`. */
+export const INFERENCE_LISTENS = ["loopback", "all_interfaces"] as const;
+export type InferenceListen = (typeof INFERENCE_LISTENS)[number];
+
+export function isInferenceListen(value: unknown): value is InferenceListen {
+  return (
+    typeof value === "string" &&
+    (INFERENCE_LISTENS as readonly string[]).includes(value)
+  );
+}
+
 export const DEFAULT_MAX_CONCURRENT_INSPECTIONS = 16;
 export const MIN_MAX_CONCURRENT_INSPECTIONS = 4;
 export const MAX_MAX_CONCURRENT_INSPECTIONS = 128;
@@ -37,6 +48,7 @@ export type TrayPage = (typeof TRAY_PAGES)[number];
 export const TRAY_USAGE_KEYS = [
   "today",
   "cost",
+  "privacy",
   "subscription_windows",
   "top_model",
   "compare_yesterday",
@@ -65,6 +77,7 @@ export function defaultTrayPreferences(): TrayPreferences {
     usage: {
       today: true,
       cost: true,
+      privacy: true,
       subscription_windows: true,
       top_model: true,
       compare_yesterday: false,
@@ -84,6 +97,7 @@ export interface Preferences {
   core_auto_recover: boolean;
   use_system_proxy: boolean;
   inference_port: number;
+  inference_listen: InferenceListen;
   max_concurrent_inspections: number;
   response_start_timeout_seconds: number;
   max_request_body_mib: number;
@@ -229,6 +243,7 @@ export function parseSettingsSnapshot(value: unknown): SettingsSnapshot {
       "core_auto_recover",
       "use_system_proxy",
       "inference_port",
+      "inference_listen",
       "max_concurrent_inspections",
       "response_start_timeout_seconds",
       "max_request_body_mib",
@@ -276,6 +291,9 @@ export function parseSettingsSnapshot(value: unknown): SettingsSnapshot {
       "$.values.inference_port",
       "expected an integer from 1024 through 65535",
     );
+  }
+  if (!isInferenceListen(values.inference_listen)) {
+    invalid("$.values.inference_listen", "unknown inference listen scope");
   }
   if (
     typeof values.max_concurrent_inspections !== "number" ||

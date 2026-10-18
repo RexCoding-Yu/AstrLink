@@ -373,6 +373,41 @@ func TestGetServiceUsageReadsNewAPIKeyQuota(t *testing.T) {
 	}
 }
 
+func TestGetServiceUsageReportsAProviderRateLimitWithoutAskingAgain(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/usage/token/" {
+			http.NotFound(writer, request)
+			return
+		}
+		atomic.AddInt32(&hits, 1)
+		writer.Header().Set("Retry-After", "120")
+		writer.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(upstream.Close)
+
+	_, _, handler := newUsageHandler(t, upstream, "service_newapi_limited")
+	service := createServiceForTest(t, handler, `{
+		"name":"new-api","kind":"newapi",
+		"http":{"base_url":"`+upstream.URL+`/v1","auth":{"scheme":"bearer"},"credential":{"secret":"sk-gateway-secret"}},
+		"capabilities":[{"protocol":"openai.responses","mode":"delegated","streaming":true}]
+	}`)
+	path := ServicesPath + "/" + string(service.ID) + "/usage"
+	for _, query := range []string{"", "?refresh=1"} {
+		response := serviceRequestForTest(t, handler, http.MethodGet, path+query, "", "", "")
+		var envelope errorEnvelope
+		decode(t, response, &envelope)
+		if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "120" ||
+			envelope.Error.Code != "subscription_usage_rate_limited" ||
+			len(envelope.Error.Details) != 1 || envelope.Error.Details[0].RetryAfterSeconds != 120 {
+			t.Fatalf("%q status=%d Retry-After=%q body=%s", query, response.Code, response.Header().Get("Retry-After"), response.Body.String())
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("upstream hits = %d; the refresh must wait out the pause", got)
+	}
+}
+
 func TestGetServiceUsageReadsCodingPlanQuotaWithServiceKey(t *testing.T) {
 	var authorization string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

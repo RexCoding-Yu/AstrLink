@@ -111,6 +111,24 @@ const subscriptionKinds = new Set<ServiceKind>([
   "opencode_go",
 ]);
 
+/** Today's privacy counts; mirrors `PrivacyDigest` in `tray.rs`. */
+export interface TrayPrivacy {
+  /** The policy switch right now; null when the host could not read it. */
+  enabled: boolean | null;
+  /** Calls the policy finished checking. */
+  checked: number;
+  redacted: number;
+  warned: number;
+  blocked: number;
+  /** Calls that reached the model unchecked because the check failed. */
+  unchecked: number;
+  replaced: number;
+  restored: number;
+  unrestored: number;
+  /** Kinds found, the most frequent first. */
+  kinds: Array<{ kind: string; count: number }>;
+}
+
 export interface TrayUsageDigest {
   today: TrayUsageTotals | null;
   /** Tokens per local hour of today; 24 slots or empty when unknown. */
@@ -118,6 +136,7 @@ export interface TrayUsageDigest {
   yesterday_tokens: number | null;
   top_model: TrayShare | null;
   cost_today: TrayCost | null;
+  privacy: TrayPrivacy | null;
   top_client: TrayShare | null;
   last_request: TrayLastRequest | null;
   month_tokens: number | null;
@@ -348,6 +367,55 @@ function parseShare(value: unknown, path: string): TrayShare {
   return { name: stringAt(share.name, `${path}.name`, 256), percent };
 }
 
+function parsePrivacy(value: unknown, path: string): TrayPrivacy {
+  const privacy = objectAt(value, path);
+  exactKeys(
+    privacy,
+    [
+      "enabled",
+      "checked",
+      "redacted",
+      "warned",
+      "blocked",
+      "unchecked",
+      "replaced",
+      "restored",
+      "unrestored",
+      "kinds",
+    ],
+    path,
+  );
+  if (!Array.isArray(privacy.kinds) || privacy.kinds.length > 16) {
+    invalid(`${path}.kinds`, "expected at most 16 kinds");
+  }
+  const counts = {
+    checked: countAt(privacy.checked, `${path}.checked`),
+    redacted: countAt(privacy.redacted, `${path}.redacted`),
+    warned: countAt(privacy.warned, `${path}.warned`),
+    blocked: countAt(privacy.blocked, `${path}.blocked`),
+  };
+  if (counts.redacted + counts.warned + counts.blocked > counts.checked) {
+    invalid(`${path}.checked`, "fewer checks than outcomes");
+  }
+  return {
+    enabled: nullable(privacy.enabled, `${path}.enabled`, booleanAt),
+    ...counts,
+    unchecked: countAt(privacy.unchecked, `${path}.unchecked`),
+    replaced: countAt(privacy.replaced, `${path}.replaced`),
+    restored: countAt(privacy.restored, `${path}.restored`),
+    unrestored: countAt(privacy.unrestored, `${path}.unrestored`),
+    kinds: (privacy.kinds as unknown[]).map((raw, index) => {
+      const kindPath = `${path}.kinds[${index}]`;
+      const kind = objectAt(raw, kindPath);
+      exactKeys(kind, ["kind", "count"], kindPath);
+      return {
+        kind: stringAt(kind.kind, `${kindPath}.kind`, 64),
+        count: countAt(kind.count, `${kindPath}.count`),
+      };
+    }),
+  };
+}
+
 function parseDigest(value: unknown, path: string): TrayUsageDigest {
   const digest = objectAt(value, path);
   exactKeys(
@@ -358,6 +426,7 @@ function parseDigest(value: unknown, path: string): TrayUsageDigest {
       "yesterday_tokens",
       "top_model",
       "cost_today",
+      "privacy",
       "top_client",
       "last_request",
       "month_tokens",
@@ -413,6 +482,7 @@ function parseDigest(value: unknown, path: string): TrayUsageDigest {
       };
     },
   );
+  const privacy = nullable(digest.privacy, `${path}.privacy`, parsePrivacy);
   const last = nullable(
     digest.last_request,
     `${path}.last_request`,
@@ -519,6 +589,7 @@ function parseDigest(value: unknown, path: string): TrayUsageDigest {
     ),
     top_model: nullable(digest.top_model, `${path}.top_model`, parseShare),
     cost_today: cost,
+    privacy,
     top_client: nullable(digest.top_client, `${path}.top_client`, parseShare),
     last_request: last,
     month_tokens: nullableCountAt(digest.month_tokens, `${path}.month_tokens`),

@@ -50,6 +50,7 @@ import {
   listRequestRecords,
   listAccessTokens,
   listAccessTokenUsage,
+  getPrivacySummary,
   getUsageSummary,
   listPrivacyModelInstallations,
   listPrivacyPolicies,
@@ -86,6 +87,7 @@ import {
   classifierCredentialAction,
 } from "./bridge";
 import { defaultPrivacyKindRules } from "./privacy-policy-model";
+import { emptyPrivacyTotals } from "./privacy-summary-model";
 import { emptyUsageTotals, resolveUsageWindow } from "./usage-range";
 
 function validSnapshot(): Record<string, unknown> {
@@ -104,6 +106,8 @@ function validSnapshot(): Record<string, unknown> {
     },
     last_error: null,
     inference_port_fallback: null,
+    inference_listen_active: null,
+    restart_pending: false,
     recovery_attempt: 0,
     recovery_scheduled_in_ms: null,
     health: { status: "ok" },
@@ -387,6 +391,24 @@ describe("desktop bridge contract", () => {
     expect(result.by_hour).toHaveLength(24);
     expect(result.capped).toBe(false);
   });
+  it("asks Core for a privacy summary in the usage window's buckets", async () => {
+    const window = resolveUsageWindow("7d", new Date(2026, 8, 19, 12));
+    invokeMock.mockResolvedValueOnce({
+      totals: emptyPrivacyTotals(),
+      by_day: [],
+      by_hour: [],
+      by_kind: [{ kind: "email", count: 2 }],
+    });
+    const result = await getPrivacySummary(window);
+    expect(invokeMock).toHaveBeenCalledWith("get_privacy_summary", {
+      from: window.from,
+      to: window.to,
+      timeZone: window.time_zone,
+      bucket: "day",
+    });
+    expect(result.by_day).toHaveLength(7);
+    expect(result.by_kind).toEqual([{ kind: "email", count: 2 }]);
+  });
   it("roundtrips ordered service IDs and rejects malformed order responses", async () => {
     const record = {
       service_ids: ["service_b", "service_a"],
@@ -559,7 +581,7 @@ describe("desktop bridge contract", () => {
 
       expect(invokeMock).toHaveBeenCalledWith(command);
       expect(parsed).toEqual(wireSnapshot);
-      expect(parsed.capabilities?.protocols).toHaveLength(8);
+      expect(parsed.capabilities?.protocols).toHaveLength(11);
     },
   );
 
@@ -657,7 +679,7 @@ describe("desktop bridge contract", () => {
     (invalid.capabilities as any).protocols.shift();
     invokeMock.mockResolvedValueOnce(invalid);
     await expect(getCoreStatus()).rejects.toThrow(
-      "expected at least 8 entries",
+      "expected at least 11 entries",
     );
 
     const extended = validSnapshot();
@@ -823,20 +845,25 @@ describe("desktop bridge contract", () => {
     const statuses = [
       {
         client: "claude",
+        wsl: null,
         detected: true,
         paths: ["/Users/me/.claude/settings.json"],
         state: "configured",
         token_id: "token_01",
+        models: { model: "claude-route", opusModel: "opus-route" },
       },
       {
         client: "codex",
+        wsl: null,
         detected: false,
         paths: ["/Users/me/.codex/config.toml"],
         state: "not_configured",
         token_id: null,
+        models: {},
       },
       {
         client: "pi",
+        wsl: null,
         detected: true,
         paths: [
           "/Users/me/.pi/agent/models.json",
@@ -844,19 +871,38 @@ describe("desktop bridge contract", () => {
         ],
         state: "not_configured",
         token_id: null,
+        models: {},
       },
     ];
-    invokeMock.mockResolvedValueOnce(statuses);
+    const inUbuntu = statuses.map((status) => ({
+      ...status,
+      wsl: "Ubuntu",
+      paths: status.paths.map((path) => `//wsl$/Ubuntu${path}`),
+    }));
+    const overview = {
+      clients: [...statuses, ...inUbuntu],
+      wsl_unchecked: ["Debian"],
+      wsl_localhost: true,
+      cc_switch_wsl: { claude: null, codex: "Ubuntu" },
+    };
+    invokeMock.mockResolvedValueOnce(overview);
     await expect(
       getClientConfigStatus("http://127.0.0.1:8317"),
-    ).resolves.toEqual(statuses);
+    ).resolves.toEqual(overview);
     expect(invokeMock).toHaveBeenLastCalledWith("client_config_status", {
       inferenceUrl: "http://127.0.0.1:8317",
     });
-    invokeMock.mockResolvedValueOnce([statuses[1], statuses[0]]);
-    await expect(getClientConfigStatus(null)).rejects.toThrow(
-      "Invalid client-config IPC response",
-    );
+    for (const clients of [
+      [statuses[1], statuses[0], statuses[2]],
+      [...inUbuntu, ...statuses],
+      [...statuses, inUbuntu[0], inUbuntu[1]],
+      [...statuses, ...statuses],
+    ]) {
+      invokeMock.mockResolvedValueOnce({ ...overview, clients });
+      await expect(getClientConfigStatus(null)).rejects.toThrow(
+        "Invalid client-config IPC response",
+      );
+    }
 
     const proxyCheck = {
       client: { route: "blocked", proxy: "127.0.0.1:7892" },
@@ -883,30 +929,39 @@ describe("desktop bridge contract", () => {
     invokeMock.mockResolvedValueOnce({
       status: "needs_confirmation",
       keys: ["model_provider"],
+      gateway: "http://localhost:8317/v1",
     });
     await expect(
-      applyClientConfig({ ...target, replace: false }),
+      applyClientConfig({ ...target, replace: false, wsl: null }),
     ).resolves.toEqual({
       status: "needs_confirmation",
       keys: ["model_provider"],
+      gateway: "http://localhost:8317/v1",
     });
     expect(invokeMock).toHaveBeenLastCalledWith("apply_client_config", {
       ...target,
       replace: false,
+      wsl: null,
     });
     invokeMock.mockResolvedValueOnce({ status: "applied" });
     await expect(
-      applyClientConfig({ ...target, replace: true }),
+      applyClientConfig({ ...target, replace: true, wsl: "Ubuntu" }),
     ).resolves.toEqual({ status: "applied" });
+    expect(invokeMock).toHaveBeenLastCalledWith("apply_client_config", {
+      ...target,
+      replace: true,
+      wsl: "Ubuntu",
+    });
     invokeMock.mockResolvedValueOnce({ status: "applied", keys: [] });
     await expect(
-      applyClientConfig({ ...target, replace: true }),
+      applyClientConfig({ ...target, replace: true, wsl: null }),
     ).rejects.toThrow("unexpected field");
 
     invokeMock.mockResolvedValueOnce(undefined);
-    await removeClientConfig("claude");
+    await removeClientConfig("claude", "Ubuntu");
     expect(invokeMock).toHaveBeenLastCalledWith("remove_client_config", {
       client: "claude",
+      wsl: "Ubuntu",
     });
 
     invokeMock.mockResolvedValueOnce(
@@ -1499,6 +1554,7 @@ describe("desktop bridge contract", () => {
       tools: [
         {
           id: "cursor",
+          wsl: null,
           detected: true,
           skills: [
             {
@@ -1522,6 +1578,7 @@ describe("desktop bridge contract", () => {
         },
       ],
       shared_paths: ["/tmp/.astrlink/agent-installs.json"],
+      wsl_unchecked: [],
     };
     invokeMock.mockResolvedValueOnce(status);
     await expect(getAgentDebugStatus()).resolves.toEqual(status);
@@ -1533,14 +1590,19 @@ describe("desktop bridge contract", () => {
       installed_at_unix: 1,
       cli_binary: null,
       files: ["/tmp/a"],
+      wsl: ["Ubuntu"],
     };
+    const tools = [
+      { id: "grok" as const, wsl: null },
+      { id: "claude" as const, wsl: "Ubuntu" },
+    ];
     invokeMock.mockResolvedValueOnce(receipt);
     await expect(
-      installAgentDebug(["redaction-placeholders"], ["grok"]),
+      installAgentDebug(["redaction-placeholders"], tools),
     ).resolves.toEqual(receipt);
     expect(invokeMock).toHaveBeenLastCalledWith("install_agent_debug", {
       skillIds: ["redaction-placeholders"],
-      toolIds: ["grok"],
+      tools,
     });
 
     invokeMock.mockResolvedValueOnce(undefined);

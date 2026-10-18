@@ -23,8 +23,17 @@ cd AstrLink
 make dev
 ```
 
-该命令安装前端依赖、构建网关和 worker，然后启动桌面应用。Windows 没有 `make`
-时，可在安装好上述工具后执行：
+该命令安装前端依赖、构建网关和 worker，然后启动一个隔离的开发实例。它有自己的数据和配置目录，默认端口是 18318，可以和正式版或
+`make start`
+同时运行。客户端配置和 Agent 工具仍写在当前用户的主目录，与其他实例共用。
+
+在开发实例里写入客户端配置后，客户端就改连开发实例；配置原本连着另一个 AstrLink 时会先确认。两个实例启动时只更新自己写入的配置，不会互相改回。`astrlink`
+命令行连接最后启动的实例。
+
+要用原来的数据和端口运行 AstrLink，执行
+`make start`。它只构建一次前端，不监听文件，改代码后重新执行才会生效。
+
+Windows 没有 `make` 时，可在安装好上述工具后执行：
 
 ```sh
 cd apps/desktop
@@ -32,14 +41,16 @@ bun install --frozen-lockfile
 bun run desktop:dev
 ```
 
+`bun run desktop:start` 对应 `make start`。
+
 仅调试前端时，在 `apps/desktop` 下运行
 `bun run dev`。纯浏览器预览没有桌面原生接口，需要模拟数据；完整功能请通过
 `desktop:dev` 使用。
 
-macOS 开发版会自动在 Cargo 输出目录生成 `AstrLink Dev.app`
-并从该应用包运行，确保隐藏到菜单栏、重新打开和系统通知始终使用 AstrLink 的名称与图标。开发版使用独立的
-`com.astrlink.desktop.dev`
-系统身份，通知权限与正式版分开；配置和网关数据仍使用原有目录。Rust 重编译和前端热加载保持原来的启动方式。
+macOS 开发版会自动在 Cargo 输出目录生成应用包并从中运行，确保隐藏到菜单栏、重新打开和系统通知始终使用 AstrLink 的名称与图标。`make start`
+使用 `AstrLink Dev.app` 和 `com.astrlink.desktop.dev` 系统身份，`make dev` 使用
+`AstrLink Isolated.app` 和
+`com.astrlink.desktop.isolated`，两者的通知权限都与正式版分开。Rust 重编译和前端热加载保持原来的启动方式。
 
 ## 检查改动
 

@@ -11,15 +11,15 @@ import (
 func TestBaselineIdentitySnapshot(t *testing.T) {
 	claude := DefaultClaudeIdentity()
 	wantClaude := ClientIdentity{
-		UserAgent: "claude-cli/2.1.258 (external, cli)",
-		Version:   "2.1.258",
+		UserAgent: "claude-cli/2.1.296 (external, cli)",
+		Version:   "2.1.296",
 		Headers: map[string]string{
 			"X-Stainless-Lang":                          "js",
-			"X-Stainless-Package-Version":               "0.94.0",
+			"X-Stainless-Package-Version":               "0.128.0",
 			"X-Stainless-Os":                            stainlessOS(runtime.GOOS),
 			"X-Stainless-Arch":                          stainlessArch(runtime.GOARCH),
 			"X-Stainless-Runtime":                       "node",
-			"X-Stainless-Runtime-Version":               "v24.3.0",
+			"X-Stainless-Runtime-Version":               "v26.3.0",
 			"X-Stainless-Retry-Count":                   "0",
 			"X-Stainless-Timeout":                       "600",
 			"X-App":                                     "cli",

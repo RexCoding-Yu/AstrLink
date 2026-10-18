@@ -1,11 +1,10 @@
 package privacy
 
 import (
-	"bytes"
-	"encoding/json"
 	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/systemprompt"
 	"github.com/tidwall/gjson"
 )
 
@@ -51,28 +50,40 @@ func placeholderNoticeText(restoreToolArguments bool) string {
 }
 
 // injectPlaceholderNotice prepends the convention note to the protocol's system
-// instruction channel. It reports whether the document was modified.
+// instruction channel, after any official client identity that opens it. It
+// reports whether the document was modified.
 func injectPlaceholderNotice(document *jsonDocument, protocol contract.ProtocolID, notice string) (bool, error) {
 	switch protocol {
 	case contract.ProtocolOpenAIResponses, contract.ProtocolOpenAIResponsesCompact:
 		// A client may replay the notice in input after converting protocols.
-		if messagesContainNotice(gjson.GetBytes(document.body, "input")) {
+		if messagesContainNotice(gjson.GetBytes(document.body, "input")) ||
+			contentContainsNotice(gjson.GetBytes(document.body, "instructions")) {
 			return false, nil
 		}
-		return prependStringField(document, "instructions", notice)
 	case contract.ProtocolAnthropicMessages:
-		return prependAnthropicSystem(document, notice)
+		if contentContainsNotice(gjson.GetBytes(document.body, "system")) {
+			return false, nil
+		}
 	case contract.ProtocolOpenAIChat:
-		return prependChatSystemMessage(document, notice)
+		if messagesContainNotice(gjson.GetBytes(document.body, "messages")) {
+			return false, nil
+		}
 	case contract.ProtocolGoogleGenerateContent:
-		return prependGeminiSystemInstruction(document, notice)
-	case contract.ProtocolOpenAICompletions:
+		if contentContainsNotice(gjson.GetBytes(document.body, "systemInstruction.parts")) ||
+			contentContainsNotice(gjson.GetBytes(document.body, "system_instruction.parts")) {
+			return false, nil
+		}
+	default:
 		// A raw completion has no system channel, and prefixing the prompt would
 		// change what the model is asked to continue.
 		return false, nil
-	default:
-		return false, nil
 	}
+	updated, changed, err := systemprompt.Prepend(protocol, document.body, notice)
+	if err != nil {
+		return false, err
+	}
+	document.body = updated
+	return changed, nil
 }
 
 // placeholderSkillName is the agent skill that teaches the same convention in
@@ -176,75 +187,6 @@ func noticeAlreadyPresent(value string) bool {
 	return strings.Contains(value, "redaction markers of the form")
 }
 
-func prependStringField(document *jsonDocument, path, notice string) (bool, error) {
-	existing := gjson.GetBytes(document.body, path)
-	if existing.Type == gjson.Null {
-		return true, document.setValue(path, notice)
-	}
-	if existing.Type != gjson.String || noticeAlreadyPresent(existing.Str) {
-		return false, nil
-	}
-	return true, document.setValue(path, notice+"\n\n"+existing.Str)
-}
-
-// prependAnthropicSystem handles both accepted shapes of the system field: a
-// plain string and an array of text blocks.
-func prependAnthropicSystem(document *jsonDocument, notice string) (bool, error) {
-	system := gjson.GetBytes(document.body, "system")
-	if !system.IsArray() {
-		return prependStringField(document, "system", notice)
-	}
-	if contentContainsNotice(system) {
-		return false, nil
-	}
-	return true, document.prependArrayValue("system", map[string]string{"type": "text", "text": notice})
-}
-
-// prependChatSystemMessage folds the note into the leading system or developer
-// message when there is one, so the cacheable prefix keeps its shape, and
-// otherwise inserts a new message ahead of the conversation.
-func prependChatSystemMessage(document *jsonDocument, notice string) (bool, error) {
-	messages := gjson.GetBytes(document.body, "messages")
-	if !messages.IsArray() || messagesContainNotice(messages) {
-		return false, nil
-	}
-	for index, message := range messages.Array() {
-		if !message.IsObject() {
-			continue
-		}
-		role := message.Get("role").Str
-		if role != "system" && role != "developer" {
-			break
-		}
-		path := "messages." + jsonIndex(index) + ".content"
-		content := message.Get("content")
-		if content.Type == gjson.String {
-			return prependStringField(document, path, notice)
-		}
-		if content.IsArray() {
-			return true, document.prependArrayValue(path, map[string]string{"type": "text", "text": notice})
-		}
-		break
-	}
-	return true, document.prependArrayValue("messages", map[string]string{"role": "system", "content": notice})
-}
-
-func prependGeminiSystemInstruction(document *jsonDocument, notice string) (bool, error) {
-	instruction := gjson.GetBytes(document.body, "systemInstruction")
-	if instruction.Type != gjson.Null && !instruction.IsObject() {
-		return false, nil
-	}
-	parts := instruction.Get("parts")
-	if contentContainsNotice(parts) {
-		return false, nil
-	}
-	part := map[string]string{"text": notice}
-	if !parts.IsArray() {
-		return true, document.setValue("systemInstruction.parts", []any{part})
-	}
-	return true, document.prependArrayValue("systemInstruction.parts", part)
-}
-
 // Scan every system/developer message before choosing where to insert. Clients
 // may add a new prefix ahead of an already annotated message on the next turn.
 // User or assistant quotations do not count as system-channel instructions.
@@ -272,28 +214,4 @@ func contentContainsNotice(content gjson.Result) bool {
 		}
 	}
 	return false
-}
-
-// SJSON replaces this array using its raw elements, so their whitespace,
-// property order, numeric spelling and string escapes survive the insertion.
-func (document *jsonDocument) prependArrayValue(path string, value any) error {
-	existing := gjson.GetBytes(document.body, path)
-	if !existing.IsArray() {
-		return ErrUnsafeRewrite
-	}
-	var encoded bytes.Buffer
-	encoder := json.NewEncoder(&encoded)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
-		return err
-	}
-	item := bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})
-	updated := make([]byte, 0, len(existing.Raw)+len(item)+1)
-	updated = append(updated, '[')
-	updated = append(updated, item...)
-	if strings.TrimSpace(existing.Raw[1:len(existing.Raw)-1]) != "" {
-		updated = append(updated, ',')
-	}
-	updated = append(updated, existing.Raw[1:]...)
-	return document.setRaw(path, updated)
 }

@@ -20,6 +20,7 @@ import {
   formatQuotaUSD,
   formatResetCountdown,
   formatResetCreditExpiry,
+  formatUsageReadTime,
   resetCreditExpiryWarning,
   quotaUsedPercent,
   usageWindowTone,
@@ -64,43 +65,20 @@ export function SubscriptionUsageMeter({
   }
   if (status === "error" && !usage) {
     return (
-      <div
-        className="flex min-w-0 items-start gap-1 [&_summary]:min-h-5.5"
-        data-testid="subscription-usage"
-      >
-        {error ? (
-          <HelpDisclosure title={t("usage.readFailed")} tone="warning">
-            <p className="text-micro break-all">{error}</p>
-          </HelpDisclosure>
-        ) : (
-          <p className="flex min-h-5.5 items-center text-xs text-warning-foreground">
-            {t("usage.readFailed")}
-          </p>
-        )}
-        {onRefresh ? (
-          <IconButton
-            aria-busy={refreshing || undefined}
-            className="text-muted-foreground"
-            disabled={refreshing}
-            label={refreshing ? t("common.refreshing") : t("common.refresh")}
-            onClick={onRefresh}
-            size="icon-xs"
-            type="button"
-          >
-            <RefreshCw
-              aria-hidden="true"
-              className={
-                refreshing
-                  ? "animate-spin motion-reduce:animate-none"
-                  : undefined
-              }
-            />
-          </IconButton>
-        ) : null}
+      <div className="min-w-0" data-testid="subscription-usage">
+        <UsageReadFailure
+          error={error}
+          onRefresh={onRefresh}
+          refreshing={refreshing}
+          title={t("usage.readFailed")}
+        />
       </div>
     );
   }
   if (!usage) return null;
+  // A failed refresh keeps the last reading on screen, dimmed, under a notice
+  // that it is no longer current.
+  const stale = status === "error";
 
   const windows = [
     { limit_name: "", primary: usage.primary, secondary: usage.secondary },
@@ -136,50 +114,114 @@ export function SubscriptionUsageMeter({
         now={now}
       />
     ));
+  const meters =
+    windows.length > 2 ? (
+      <Popover>
+        <div className="relative min-w-0">
+          <div id={summaryId} className="grid gap-2">
+            {summary}
+          </div>
+          <PopoverTrigger asChild>
+            <Button
+              aria-label={t("usage.viewAllLimits", { count: windows.length })}
+              aria-describedby={summaryId}
+              title={t("usage.viewAllLimits", { count: windows.length })}
+              className="absolute inset-0 h-full w-full cursor-pointer rounded-sm p-0 hover:bg-transparent hover:ring-1 hover:ring-border"
+              variant="ghost"
+              type="button"
+            />
+          </PopoverTrigger>
+        </div>
+        <PopoverContent
+          align="start"
+          className="w-80 max-h-[min(24rem,var(--radix-popover-content-available-height))]"
+          aria-labelledby={titleId}
+        >
+          <h3 id={titleId} className="mb-3 text-sm font-semibold">
+            {t("usage.allLimits")}
+          </h3>
+          <div className="grid gap-3">
+            {windows.map(({ key, ...row }) => (
+              <UsageWindowRow key={key} {...row} now={now} />
+            ))}
+          </div>
+        </PopoverContent>
+      </Popover>
+    ) : windows.length > 0 ? (
+      summary
+    ) : usage.quota ? (
+      <QuotaRow
+        limitReached={usage.limit_reached}
+        now={now}
+        quota={usage.quota}
+      />
+    ) : usage.limit_reached ? (
+      <p className="text-micro text-destructive">{t("usage.limitReached")}</p>
+    ) : null;
+  const readAt = formatUsageReadTime(usage.fetched_at);
   return (
     <div className="grid min-w-0 gap-2" data-testid="subscription-usage">
-      {windows.length > 2 ? (
-        <Popover>
-          <div className="relative min-w-0">
-            <div id={summaryId} className="grid gap-2">
-              {summary}
-            </div>
-            <PopoverTrigger asChild>
-              <Button
-                aria-label={t("usage.viewAllLimits", { count: windows.length })}
-                aria-describedby={summaryId}
-                title={t("usage.viewAllLimits", { count: windows.length })}
-                className="absolute inset-0 h-full w-full cursor-pointer rounded-sm p-0 hover:bg-transparent hover:ring-1 hover:ring-border"
-                variant="ghost"
-                type="button"
-              />
-            </PopoverTrigger>
-          </div>
-          <PopoverContent
-            align="start"
-            className="w-80 max-h-[min(24rem,var(--radix-popover-content-available-height))]"
-            aria-labelledby={titleId}
-          >
-            <h3 id={titleId} className="mb-3 text-sm font-semibold">
-              {t("usage.allLimits")}
-            </h3>
-            <div className="grid gap-3">
-              {windows.map(({ key, ...row }) => (
-                <UsageWindowRow key={key} {...row} now={now} />
-              ))}
-            </div>
-          </PopoverContent>
-        </Popover>
-      ) : windows.length > 0 ? (
-        summary
-      ) : usage.quota ? (
-        <QuotaRow
-          limitReached={usage.limit_reached}
-          now={now}
-          quota={usage.quota}
+      {stale ? (
+        <div className="grid min-w-0 gap-2 opacity-60">{meters}</div>
+      ) : (
+        meters
+      )}
+      {stale ? (
+        <UsageReadFailure
+          detail={readAt ? t("usage.staleSnapshot", { time: readAt }) : null}
+          error={error}
+          onRefresh={onRefresh}
+          refreshing={refreshing}
+          title={t("usage.refreshFailed")}
         />
-      ) : usage.limit_reached ? (
-        <p className="text-micro text-destructive">{t("usage.limitReached")}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function UsageReadFailure({
+  detail,
+  error,
+  onRefresh,
+  refreshing,
+  title,
+}: {
+  detail?: string | null;
+  error?: string;
+  onRefresh?: () => void;
+  refreshing: boolean;
+  title: string;
+}) {
+  const t = useT();
+  return (
+    <div className="flex min-w-0 items-start gap-1 [&_summary]:min-h-5.5">
+      {error || detail ? (
+        <HelpDisclosure title={title} tone="warning">
+          {error ? <p className="text-micro break-all">{error}</p> : null}
+          {detail ? <p className="text-micro">{detail}</p> : null}
+        </HelpDisclosure>
+      ) : (
+        <p className="flex min-h-5.5 items-center text-xs text-warning-foreground">
+          {title}
+        </p>
+      )}
+      {onRefresh ? (
+        <IconButton
+          aria-busy={refreshing || undefined}
+          className="text-muted-foreground"
+          disabled={refreshing}
+          label={refreshing ? t("common.refreshing") : t("common.refresh")}
+          onClick={onRefresh}
+          size="icon-xs"
+          type="button"
+        >
+          <RefreshCw
+            aria-hidden="true"
+            className={
+              refreshing ? "animate-spin motion-reduce:animate-none" : undefined
+            }
+          />
+        </IconButton>
       ) : null}
     </div>
   );

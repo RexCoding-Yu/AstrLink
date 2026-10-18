@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { defaultBuiltinTools, parseBuiltinTools } from "./builtin-tools-model";
+import {
+  defaultBuiltinTools,
+  isImageGenerationModel,
+  parseBuiltinTools,
+  runsImageGenerationTool,
+} from "./builtin-tools-model";
 
 describe("builtin tools configuration", () => {
   it("defaults off and accepts both independent backend types", () => {
@@ -53,5 +58,60 @@ describe("builtin tools configuration", () => {
         image_generation: { ...image_generation, model: "" },
       }),
     ).toThrow();
+  });
+  it("limits the provider search API to web search with a provider and model", () => {
+    const tools = defaultBuiltinTools();
+    const web_search = {
+      enabled: true,
+      backend: "service_search" as const,
+      service_id: "newapi_main",
+      model: "gpt-5.5",
+    };
+    expect(parseBuiltinTools({ ...tools, web_search })).toEqual({
+      ...tools,
+      web_search,
+    });
+    for (const invalid of [
+      { ...tools, image_generation: web_search },
+      { ...tools, web_search: { ...web_search, model: "" } },
+      { ...tools, web_search: { ...web_search, service_id: "" } },
+    ])
+      expect(() => parseBuiltinTools(invalid)).toThrow();
+  });
+  it("recognizes image generation models by name", () => {
+    for (const model of [
+      "gpt-image-1",
+      "gpt-image-2-all",
+      "dall-e-3",
+      "imagen-4.0-generate-001",
+      "gemini-2.5-flash-image",
+      "black-forest-labs/FLUX.1-dev",
+      "doubao-seedream-4-0-250828",
+      "qwen-image",
+      "wan2.5-t2i-preview",
+      "image-01",
+    ])
+      expect(isImageGenerationModel(model)).toBe(true);
+    for (const model of [
+      "gpt-5",
+      "claude-sonnet-5",
+      "gemini-2.5-flash",
+      "MiniMax-M3",
+      "kling-v1-image2video",
+    ])
+      expect(isImageGenerationModel(model)).toBe(false);
+  });
+  it("runs the Responses image tool only on OpenAI chat models", () => {
+    for (const model of ["gpt-5", "gpt-4.1-mini", "o3", "openai/gpt-5.1-codex"])
+      expect(runsImageGenerationTool(model)).toBe(true);
+    for (const model of [
+      "claude-sonnet-5",
+      "gemini-2.5-flash",
+      "grok-4",
+      "gpt-image-1",
+      "gpt-oss-120b",
+      "gpt-4o-mini-tts",
+    ])
+      expect(runsImageGenerationTool(model)).toBe(false);
   });
 });

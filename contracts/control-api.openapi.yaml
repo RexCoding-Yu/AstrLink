@@ -87,6 +87,7 @@ x-astrlink-implementation:
     - GET /control/v1/access-tokens
     - GET /control/v1/access-token-usage
     - GET /control/v1/usage-summary
+    - GET /control/v1/privacy-summary
     - POST /control/v1/access-tokens
     - GET /control/v1/access-tokens/{token_id}/secret
     - DELETE /control/v1/access-tokens/{token_id}
@@ -441,6 +442,18 @@ paths:
                     phase: alpha
                     primary: false
                     streaming: false
+                  - id: openai.embeddings
+                    phase: alpha
+                    primary: false
+                    streaming: false
+                  - id: google.embeddings
+                    phase: alpha
+                    primary: false
+                    streaming: false
+                  - id: rerank
+                    phase: alpha
+                    primary: false
+                    streaming: false
                 plan_types:
                   - id: native
                     available_in_alpha: true
@@ -546,9 +559,9 @@ paths:
       summary: Create one independently addressable API service.
       description: |
         `codex_subscription`, `claude_subscription`, `grok_subscription`,
-        `antigravity_subscription` and `copilot_subscription` create a
-        disconnected service that is authorized through its service-scoped OAuth
-        operation. HTTP kinds such as `newapi`
+        `antigravity_subscription`, `copilot_subscription` and
+        `droid_subscription` create a disconnected service that is authorized
+        through its service-scoped OAuth operation. HTTP kinds such as `newapi`
         carry an `http` connection and optional write-only credential.
       requestBody:
         required: true
@@ -1034,14 +1047,33 @@ paths:
       description: |
         Fetches the official ChatGPT `/wham/usage` snapshot for a connected
         `codex_subscription` service, Claude's `/api/oauth/usage` windows, the
-        Grok CLI proxy `/v1/billing?format=credits` snapshot, or GitHub
-        Copilot's `/copilot_internal/user` quota snapshots. API-key coding
+        Grok CLI proxy `/v1/billing?format=credits` snapshot, GitHub
+        Copilot's `/copilot_internal/user` quota snapshots, or Factory's
+        `/api/billing/limits` windows for a `droid_subscription`. API-key coding
         plans (Kimi, GLM, MiniMax, OpenCode Go) report their plan windows with
         the service key, and a `newapi` service reports its key's prepaid
         `quota` from New API `/api/usage/token/`, valued at the site's
         `/api/status` quota per USD. The response is sanitized: email, user_id,
         account_id, key names, and credential material never appear. This
         lookup does not consume quota and does not redeem reset credits.
+
+        Snapshots are cached per service for 30 seconds (5 minutes for
+        `newapi`). An API-key plan snapshot is dropped when the service is
+        edited or its lookup fails. When an API-key provider answers 429, Core
+        stops asking that host, for every service on it, until the provider's
+        `Retry-After` (5 minutes when it sends none), answering 429
+        `subscription_usage_rate_limited` meanwhile.
+      parameters:
+        - name: refresh
+          in: query
+          required: false
+          description: >-
+            `1` asks the provider for current numbers instead of the cached
+            snapshot. An API-key plan snapshot younger than 10 seconds still
+            answers.
+          schema:
+            type: string
+            enum: ["1"]
       responses:
         "200":
           description: Sanitized live usage snapshot.
@@ -1058,6 +1090,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "502":
           $ref: "#/components/responses/BadGateway"
         "503":
@@ -1113,9 +1147,10 @@ paths:
       summary: Restore scheduling for a subscription paused by an upstream risk signal.
       description: |
         Removes the current `subscription.risk` of a Claude Code or Codex
-        subscription service and records a `cleared` risk event. Credentials
-        are kept. If the provider still restricts the account, the next
-        request pauses it again.
+        subscription service and records a `cleared` risk event. On success,
+        also removes this service's in-memory HTTP 429 route cooldowns, even
+        if its account risk was already cleared. Credentials are kept. If
+        the provider still restricts the account, the next request pauses it again.
       responses:
         "200":
           description: Updated service without a current risk.
@@ -1235,6 +1270,95 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /control/v1/privacy-summary:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: observer
+      tags: [Requests]
+      operationId: getPrivacySummary
+      summary: Summarize what the privacy policy did to retained root requests in a calendar window.
+      description: >-
+        Counts finished root inference requests by privacy decision, sums the
+        values replaced and restored, and counts the kinds found, with sparse
+        calendar buckets in one response. Retry children, pending requests and
+        model discovery are excluded; blocked and cancelled requests are
+        included. Records from before decisions were stored count as blocked
+        when their status is blocked and as redacted when they carry a restore
+        summary. Replaced values are distinct per request, so a value repeated
+        across requests counts once per request. Kinds count distinct replaced
+        values for redacted requests and matches for warned or blocked ones.
+        No values or placeholders are returned. Calendar buckets use the
+        supplied IANA zone, including DST transitions.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive whole-second RFC3339 timestamp.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Exclusive whole-second RFC3339 timestamp, at most 366 days after from.
+          schema: { type: string, format: date-time }
+        - name: time_zone
+          in: query
+          required: true
+          schema: { type: string, examples: [Asia/Tokyo] }
+        - name: bucket
+          in: query
+          required: true
+          description: Day buckets are always included; hour also includes local-hour buckets.
+          schema: { type: string, enum: [day, hour] }
+      responses:
+        "200":
+          description: Complete privacy statistics for the retained window.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivacySummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /control/v1/privacy/warnings:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: observer
+      tags: [Requests]
+      operationId: listPrivacyWarnings
+      summary: List recent requests the privacy policy's warn action let through.
+      description: >-
+        Core keeps the latest 128 warnings in memory only and starts over when it
+        restarts. Events come oldest first and name the kinds found whose kind
+        rule notifies, with their counts, never a value or a fingerprint; a
+        request that carried no such kind is left out. notifiable is set when the
+        request carried a value of those kinds no earlier warning of this Core
+        process carried, so a value resent with a conversation's history does
+        not notify again.
+        A reader passes the last sequence it read as since; when epoch changes,
+        sequences have started over and the reader reads again from 0.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Return events with a greater sequence. Defaults to 0, which returns every retained event.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Retained warnings after since.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivacyWarningPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /control/v1/access-token-usage:
     x-astrlink-implementation-status: implemented
     get:
@@ -3160,6 +3284,34 @@ paths:
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /control/v1/network-addresses:
+    x-astrlink-implementation-status: implemented
+    get:
+      x-astrlink-role: operator
+      tags: [Bootstrap]
+      operationId: listNetworkAddresses
+      summary: List the addresses other machines reach this host by.
+      description: |
+        Read on each call from the host's network interfaces, so a changed
+        Wi-Fi network or a VPN that came up later shows its current address.
+        Loopback, link-local, multicast and unspecified addresses are left
+        out. IPv4 addresses come first. Clients on other machines combine one
+        of these with the inference port while the inference plane answers
+        every interface.
+      responses:
+        "200":
+          description: Reachable unicast addresses, at most 64.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkAddresses"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /control/v1/local-data:
     x-astrlink-implementation-status: implemented
     get:
@@ -3925,6 +4077,112 @@ components:
           type: array
           items: { $ref: "#/components/schemas/UsageGroup" }
         scanned_records: { type: integer, minimum: 0 }
+    PrivacyTotals:
+      type: object
+      description: >-
+        Each request lands in at most one outcome count (allowed, ignored,
+        warned, redacted, blocked, fail_open, trusted); a request no policy
+        applied to is counted in requests alone.
+      required:
+        [
+          requests,
+          allowed,
+          ignored,
+          warned,
+          redacted,
+          blocked,
+          fail_open,
+          trusted,
+          replaced,
+          restored,
+          restored_visible,
+          restored_tool_arguments,
+          unrestored,
+          ignored_allowlisted,
+          ignored_low_confidence,
+        ]
+      properties:
+        requests: { type: integer, minimum: 0 }
+        allowed:
+          type: integer
+          minimum: 0
+          description: Allowed requests with nothing to protect. Matches of a disabled kind still count here.
+        ignored:
+          type: integer
+          minimum: 0
+          description: Allowed requests whose every protected match was allowlisted or below the confidence threshold.
+        warned: { type: integer, minimum: 0 }
+        redacted: { type: integer, minimum: 0 }
+        blocked: { type: integer, minimum: 0 }
+        fail_open:
+          type: integer
+          minimum: 0
+          description: Requests forwarded unchecked because the check failed.
+        trusted:
+          type: integer
+          minimum: 0
+          description: Requests forwarded uninspected to a service with privacy_trusted.
+        replaced:
+          type: integer
+          minimum: 0
+          description: Distinct values each request replaced before forwarding, summed over requests.
+        restored: { type: integer, minimum: 0 }
+        restored_visible: { type: integer, minimum: 0 }
+        restored_tool_arguments: { type: integer, minimum: 0 }
+        unrestored:
+          type: integer
+          minimum: 0
+          description: Response parts left with replacements in them.
+        ignored_allowlisted:
+          type: integer
+          minimum: 0
+          description: Matches left in requests because they matched the allowlist, whatever each request's outcome.
+        ignored_low_confidence:
+          type: integer
+          minimum: 0
+          description: Matches left in requests because the local model's confidence was below the threshold.
+    PrivacyDayBucket:
+      allOf:
+        - $ref: "#/components/schemas/PrivacyTotals"
+        - type: object
+          required: [date]
+          properties:
+            date: { type: string, format: date }
+      unevaluatedProperties: false
+    PrivacyHourBucket:
+      allOf:
+        - $ref: "#/components/schemas/PrivacyTotals"
+        - type: object
+          required: [date, hour]
+          properties:
+            date: { type: string, format: date }
+            hour: { type: integer, minimum: 0, maximum: 23 }
+      unevaluatedProperties: false
+    PrivacyKindCount:
+      type: object
+      additionalProperties: false
+      required: [kind, count]
+      properties:
+        kind: { type: string }
+        count: { type: integer, minimum: 1 }
+    PrivacySummary:
+      type: object
+      additionalProperties: false
+      required: [totals, by_day, by_hour, by_kind]
+      properties:
+        totals:
+          $ref: "#/components/schemas/PrivacyTotals"
+          unevaluatedProperties: false
+        by_day:
+          type: array
+          items: { $ref: "#/components/schemas/PrivacyDayBucket" }
+        by_hour:
+          type: array
+          items: { $ref: "#/components/schemas/PrivacyHourBucket" }
+        by_kind:
+          type: array
+          description: Most frequent kind first.
+          items: { $ref: "#/components/schemas/PrivacyKindCount" }
     AccessTokenUsageResponse:
       type: object
       additionalProperties: false
@@ -4529,11 +4787,14 @@ components:
       properties:
         enabled: { type: boolean, default: false }
         backend:
-          { type: string, enum: ["", upstream, external, service_images] }
+          {
+            type: string,
+            enum: ["", upstream, external, service_images, service_search],
+          }
         service_id: { type: string }
         model: { type: string, maxLength: 256 }
         base_url: { type: string, maxLength: 2048, format: uri }
-      description: Upstream execution requires an enabled native Responses provider and an executor model that supports the hosted tool; the executor chooses the image model. service_images (image generation only) calls the OpenAI Images API of an enabled newapi, openai or openai_compatible provider with its own credential; model is the image model. External search uses Tavily; external images use OpenAI Images with a configured model. Credentials are stored separately. Enabled configurations require the selected backend's fields.
+      description: Upstream execution requires an enabled native Responses provider and an executor model that supports the hosted tool; the executor chooses the image model. service_images (image generation only) calls the OpenAI Images API of an enabled newapi, openai or openai_compatible provider with its own credential; model is the image model. service_search (web search only) calls the /alpha/search API of an enabled codex_subscription or newapi provider with its own credential; model names the search model. External search uses Tavily; external images use OpenAI Images with a configured model. Credentials are stored separately. Enabled configurations require the selected backend's fields.
     BuiltinTools:
       type: object
       additionalProperties: false
@@ -4985,7 +5246,7 @@ components:
         official_client_passthrough:
           type: boolean
           default: true
-          description: Forward a recognized Claude Code or Codex CLI request untouched, adding only credentials and required OAuth items. Identity and request protections then apply to third-party and converted requests only.
+          description: Forward a recognized Claude Code or Codex CLI request untouched, adding only credentials and required OAuth items. The global system prompt and reasoning settings still apply to it. Identity and request protections then apply to third-party and converted requests only.
         claude_identity_auto_learn:
           type: boolean
           default: true
@@ -5004,6 +5265,32 @@ components:
           $ref: "#/components/schemas/ClientIdentityVersion"
         codex_identity_version:
           $ref: "#/components/schemas/CodexIdentityVersion"
+        system_prompt_enabled:
+          type: boolean
+          default: false
+          description: Add system_prompt_prefix at the start and system_prompt_suffix at the end of the system prompt of Chat, Responses, Anthropic Messages and Gemini requests. An official client identity line stays first. Claude Code requests for a Claude Haiku model keep their own prompt.
+        system_prompt_prefix:
+          $ref: "#/components/schemas/SystemPromptText"
+        system_prompt_suffix:
+          $ref: "#/components/schemas/SystemPromptText"
+        reasoning_mode:
+          $ref: "#/components/schemas/ReasoningMode"
+        reasoning_level:
+          $ref: "#/components/schemas/ReasoningLevel"
+        adaptive_preset:
+          $ref: "#/components/schemas/AdaptivePreset"
+        adaptive_min:
+          allOf:
+            - $ref: "#/components/schemas/ReasoningLevel"
+          default: low
+          description: Lowest level of the custom adaptive range; at most adaptive_max. Kept and validated while another preset or mode is chosen.
+        adaptive_max:
+          allOf:
+            - $ref: "#/components/schemas/ReasoningLevel"
+          default: max
+          description: Highest level of the custom adaptive range; at least adaptive_min. Kept and validated while another preset or mode is chosen.
+        image_compression:
+          $ref: "#/components/schemas/ImageCompression"
         model_redirects:
           type: array
           maxItems: 200
@@ -5039,6 +5326,50 @@ components:
           maximum: 20
           default: 6
       additionalProperties: false
+    SystemPromptText:
+      type: string
+      maxLength: 20000
+      default: ""
+      description: Text sent verbatim in the system prompt while system_prompt_enabled is on. Whitespace-only text adds nothing.
+    ReasoningMode:
+      type: string
+      enum: [passthrough, fixed, adaptive]
+      default: passthrough
+      description: >-
+        passthrough leaves reasoning as each client sets it. fixed sends every request to a model with known
+        reasoning support at reasoning_level, turning reasoning on or off as needed. adaptive sends a level inside
+        the adaptive_preset range: its lower end for a simple request, one level higher for each of more than 10
+        messages, more than 3 tools and a last user message over 2000 characters, at most its upper end, and the
+        upper end when all three apply. Claude Code requests for a Claude Haiku model keep their own reasoning in
+        both modes.
+    ReasoningLevel:
+      type: string
+      enum: ["off", low, medium, high, max]
+      default: medium
+      description: Level the fixed mode sends. off turns reasoning off, or to the lowest setting of a model that cannot turn it off; max selects the highest level each model supports.
+    AdaptivePreset:
+      type: string
+      enum: [everyday, research, custom]
+      default: everyday
+      description: Range of the adaptive mode. everyday sends low through max, research medium through max, and custom adaptive_min through adaptive_max.
+    ImageCompression:
+      type: object
+      additionalProperties: false
+      required: [enabled, mode, quality]
+      description: Re-encodes the base64 images of Chat, Responses, Anthropic Messages and Gemini requests as WebP before they are forwarded, so fewer bytes go upstream. An image is replaced only when its WebP is smaller. Image URLs, file IDs, animated GIFs, WebP images and JPEG photos rotated by EXIF are forwarded as sent. The request record notes how many images were re-encoded.
+      properties:
+        enabled: { type: boolean, default: false }
+        mode:
+          type: string
+          enum: [lossless, lossy]
+          default: lossless
+          description: lossless keeps every pixel and re-encodes PNG and single-frame GIF images. lossy encodes at quality and also re-encodes JPEG images; a PNG or GIF whose lossless WebP is smaller is sent lossless.
+        quality:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 85
+          description: Quality of the lossy encoder. Kept while the lossless mode is chosen.
     ClientIdentityVersion:
       type: string
       maxLength: 64
@@ -5091,6 +5422,33 @@ components:
           oneOf:
             - $ref: "#/components/schemas/CodexIdentityVersion"
             - { type: string, const: "" }
+        system_prompt_enabled:
+          type: boolean
+        system_prompt_prefix:
+          type: string
+          maxLength: 20000
+        system_prompt_suffix:
+          type: string
+          maxLength: 20000
+        reasoning_mode:
+          type: string
+          enum: [passthrough, fixed, adaptive]
+        reasoning_level:
+          type: string
+          enum: ["off", low, medium, high, max]
+        adaptive_preset:
+          type: string
+          enum: [everyday, research, custom]
+        adaptive_min:
+          type: string
+          enum: ["off", low, medium, high, max]
+          description: Checked against adaptive_max after the patch is merged; a range whose lower end is above its upper end is rejected.
+        adaptive_max:
+          type: string
+          enum: ["off", low, medium, high, max]
+          description: Checked against adaptive_min after the patch is merged; a range whose lower end is above its upper end is rejected.
+        image_compression:
+          $ref: "#/components/schemas/ImageCompression"
         model_redirects:
           type: array
           maxItems: 200
@@ -5155,6 +5513,7 @@ components:
         - grok_subscription
         - antigravity_subscription
         - copilot_subscription
+        - droid_subscription
         - opencode_go
         - opencode_zen
         - kimi_coding
@@ -5168,6 +5527,7 @@ components:
         - doubao
         - xai
         - newapi
+        - magpie
         - openai
         - anthropic
         - gemini
@@ -5212,7 +5572,14 @@ components:
         provider:
           type: string
           enum:
-            [openai_codex, claude_code, xai_grok, antigravity, github_copilot]
+            [
+              openai_codex,
+              claude_code,
+              xai_grok,
+              antigravity,
+              github_copilot,
+              factory_droid,
+            ]
         status:
           type: string
           enum: [disconnected, authorizing, connected, needs_reauth, error]
@@ -5337,6 +5704,9 @@ components:
           $ref: "#/components/schemas/ServiceKind"
         enabled:
           type: boolean
+        privacy_trusted:
+          type: boolean
+          description: Requests routed to this service skip the privacy policy and go upstream as the client wrote them, without inspection, redaction, warning or blocking. Their request bodies are withheld from the shareable audit view. Omitted when false.
         models:
           $ref: "#/components/schemas/ServiceModels"
         capabilities:
@@ -5364,6 +5734,7 @@ components:
                   grok_subscription,
                   antigravity_subscription,
                   copilot_subscription,
+                  droid_subscription,
                 ]
           required: [subscription]
           not:
@@ -5419,13 +5790,17 @@ components:
         enabled:
           type: boolean
           default: true
+        privacy_trusted:
+          type: boolean
+          default: false
+          description: Requests routed to this service skip the privacy policy and go upstream as the client wrote them.
         models:
           $ref: "#/components/schemas/ServiceModels"
         http:
           $ref: "#/components/schemas/HTTPServiceConnectionInput"
         capabilities:
           type: array
-          description: Required for HTTP services. Subscription services default to the provider's fixed native capabilities; when supplied, the list must keep those unchanged and may only add native-mode local conversions whose convert_to is a protocol the provider serves (openai.responses for Codex, anthropic.messages for Claude, openai.responses or openai.chat for Grok, anthropic.messages, openai.responses or openai.chat for GitHub Copilot).
+          description: Required for HTTP services. Subscription services default to the provider's fixed native capabilities; when supplied, the list must keep those unchanged and may only add native-mode local conversions whose convert_to is a protocol the provider serves (openai.responses for Codex, anthropic.messages for Claude, openai.responses or openai.chat for Grok, anthropic.messages, openai.responses or openai.chat for GitHub Copilot and Factory Droid).
           items:
             $ref: ./protocol-capabilities.schema.json#/$defs/ServiceCapability
       additionalProperties: false
@@ -5439,6 +5814,7 @@ components:
                   grok_subscription,
                   antigravity_subscription,
                   copilot_subscription,
+                  droid_subscription,
                 ]
           not:
             required: [http]
@@ -5493,6 +5869,9 @@ components:
           maxLength: 128
         enabled:
           type: boolean
+        privacy_trusted:
+          type: boolean
+          description: Requests routed to this service skip the privacy policy and go upstream as the client wrote them.
         models:
           $ref: "#/components/schemas/ServiceModels"
         http:
@@ -5772,14 +6151,23 @@ components:
           type: boolean
         style:
           $ref: "#/components/schemas/PlaceholderStyle"
+        notify:
+          type: boolean
+          default: true
+          description: >
+            Under request_action warn, lets a value of this kind raise a
+            desktop notification. Off, the kind is still detected and its
+            findings recorded; it only stays out of the warnings feed. A rule
+            that omits the field notifies.
       additionalProperties: false
       description: >
-        Per-kind detection switch and placeholder shape. url and ip_address ship
-        disabled because they are the dominant false-positive source for coding
-        agents. common_secret, payment_card, account, phone, private_person,
-        private_address, and private_date are rejected with any style other
-        than token; models regroup, truncate, or remark on stand-in numbers in
-        ways restoration cannot follow.
+        Per-kind detection switch, placeholder shape, and warning notification.
+        url, ip_address, and private_date ship disabled because they are the
+        dominant false-positive sources for coding agents. common_secret,
+        payment_card, account, phone, private_person, private_address, and
+        private_date are rejected with any style other than token; models
+        regroup, truncate, or remark on stand-in numbers in ways restoration
+        cannot follow.
     PlaceholderStyle:
       type: string
       enum: [natural, token]
@@ -6851,7 +7239,7 @@ components:
           type: [string, "null"]
           minLength: 1
           maxLength: 32
-          description: Explicit client-requested reasoning level, normalized to lowercase. Null for unspecified levels and historical records; never inferred from model names or token budgets.
+          description: Reasoning level of the final attempt, in lowercase. It is the level the gateway's reasoning settings sent when they changed the request ("none" when they turned reasoning off), and otherwise the client's explicit level. A client's token budget or model name is never read as a level. Null when the client named no level and the settings left reasoning unchanged, and for historical records.
         streaming:
           type: boolean
         route_id:
@@ -6931,7 +7319,7 @@ components:
           type: [string, "null"]
           minLength: 1
           maxLength: 80
-          description: Bounded title from the newest visible user text. URLs and obvious secrets are stripped.
+          description: Bounded title from the newest visible user text. URLs and obvious secrets are stripped; absolute file paths are shortened to their file names.
         turn_index:
           type: [integer, "null"]
           minimum: 1
@@ -6984,17 +7372,24 @@ components:
           maxItems: 64
           items:
             $ref: "#/components/schemas/PrivacyFinding"
-          description: Present for redact and block decisions. Omitted on legacy rows.
+          description: Present for warn, redact and block decisions. Omitted on legacy rows, including warn rows recorded before warn kept its findings.
+        privacy_ignored:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/PrivacyIgnored"
+          description: Matches the policy left in the request, by kind and reason, for any decision. Omitted when none were left and on rows recorded before ignored matches were kept.
         extensions:
           $ref: ./protocol-capabilities.schema.json#/$defs/Extensions
       additionalProperties: false
     PrivacyDecision:
       type: string
-      enum: [none, allow, warn, redact, block, fail_open]
+      enum: [none, trusted, allow, warn, redact, block, fail_open]
       description: |
         Request-time privacy outcome. Retries combine to the most severe decision
-        any attempt reached. Omitted on records captured before decisions were
-        recorded.
+        any attempt reached. `trusted` means the policy applied but the request
+        went uninspected to a service with `privacy_trusted`. Omitted on records
+        captured before decisions were recorded.
     ConversionDiagnostic:
       type: object
       required: [phase, severity, code, message]
@@ -7033,6 +7428,98 @@ components:
           type: string
           minLength: 1
           maxLength: 256
+        count:
+          type: integer
+          minimum: 1
+        confidence:
+          $ref: "#/components/schemas/PrivacyConfidence"
+      additionalProperties: false
+    PrivacyConfidence:
+      type: object
+      required: [min, max, threshold]
+      description: |
+        Range of local model confidence over the matches an entry counts, and
+        the policy threshold they were judged against. Omitted when the regex
+        detector decided, since regex matches carry no confidence, and on rows
+        recorded before confidence was kept.
+      properties:
+        min:
+          type: number
+          minimum: 0
+          maximum: 1
+        max:
+          type: number
+          minimum: 0
+          maximum: 1
+        threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+      additionalProperties: false
+    PrivacyIgnored:
+      type: object
+      required: [kind, reason, count]
+      description: |
+        Matches of one kind the policy left in the request for one reason. A
+        match that was already a placeholder is not counted. Never carries the
+        matched value.
+      properties:
+        kind:
+          $ref: "#/components/schemas/PrivacyCanonicalKind"
+        reason:
+          type: string
+          enum: [kind_disabled, low_confidence, allowlisted]
+        count:
+          type: integer
+          minimum: 1
+        confidence:
+          $ref: "#/components/schemas/PrivacyConfidence"
+      additionalProperties: false
+    PrivacyWarningPage:
+      type: object
+      required: [epoch, events]
+      properties:
+        epoch:
+          type: string
+          pattern: "^[0-9a-f]{16}$"
+          description: Names this Core process's feed. A different value means Core restarted and sequences started over.
+        events:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/PrivacyWarningEvent"
+      additionalProperties: false
+    PrivacyWarningEvent:
+      type: object
+      required: [sequence, at, kinds, notifiable]
+      description: One request the warn action let through. Never carries a value or a fingerprint.
+      properties:
+        sequence:
+          type: integer
+          minimum: 1
+        at:
+          type: string
+          format: date-time
+        request_id:
+          $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
+        client_type:
+          $ref: "#/components/schemas/ClientType"
+        kinds:
+          type: array
+          maxItems: 10
+          description: The kinds found whose kind rule notifies.
+          items:
+            $ref: "#/components/schemas/PrivacyWarningKindCount"
+        notifiable:
+          type: boolean
+          description: Set when the request carried a value of those kinds no earlier warning of this Core process carried.
+      additionalProperties: false
+    PrivacyWarningKindCount:
+      type: object
+      required: [kind, count]
+      properties:
+        kind:
+          $ref: "#/components/schemas/PrivacyCanonicalKind"
         count:
           type: integer
           minimum: 1
@@ -7164,11 +7651,18 @@ components:
               accepted,
               model_redirect,
               privacy,
+              image_compression,
               routed,
               upstream,
               restore,
               completed,
             ]
+          description: |
+            image_compression is a closed phase just ahead of an attempt's routed
+            event when request image compression found inline images. Its summary
+            is "<mode> · <compressed>/<found> images · <before> → <after> bytes",
+            where mode is "lossless" or "lossy q<quality>" and the sizes are the
+            decoded image bytes.
         started_at:
           type: string
           format: date-time
@@ -7208,7 +7702,7 @@ components:
           $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
         title:
           type: string
-          minLength: 1
+          description: Empty when no call has a preview or model; clients supply a localized name.
           maxLength: 80
         started_at:
           type: string
@@ -7246,7 +7740,7 @@ components:
           type: [string, "null"]
           minLength: 1
           maxLength: 32
-          description: Explicit client-requested reasoning level, normalized to lowercase. Null for unspecified levels and historical records; never inferred from model names or token budgets.
+          description: Reasoning level of the final attempt, in lowercase. It is the level the gateway's reasoning settings sent when they changed the request ("none" when they turned reasoning off), and otherwise the client's explicit level. A client's token budget or model name is never read as a level. Null when the client named no level and the settings left reasoning unchanged, and for historical records.
         input_protocol:
           $ref: ./protocol-capabilities.schema.json#/$defs/ProtocolId
         service_id:
@@ -7257,6 +7751,9 @@ components:
           oneOf:
             - $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
             - type: "null"
+        privacy_warned:
+          type: boolean
+          description: Present and true when the privacy policy's warn action let at least one call of the session through.
       additionalProperties: false
     RequestSessionPage:
       type: object
@@ -7605,11 +8102,14 @@ components:
         - privacy_restored
         - privacy_fail_open
         - privacy_pending
+        - privacy_trusted
         - privacy_unknown
         - raw_locked
         - raw_not_kept
       description: |
-        Why a part was withheld. `privacy_unknown` covers parts captured before
+        Why a part was withheld. `privacy_trusted` covers the client and
+        upstream request bodies of a request sent uninspected to a trusted
+        provider. `privacy_unknown` covers parts captured before
         decisions were recorded; `raw_locked` is returned to the operator until
         raw reading is unlocked. `raw_not_kept` marks raw parts captured before
         a raw password protected the raw key, whose content was never stored.
@@ -7779,6 +8279,27 @@ components:
         audit_key_missing:
           type: boolean
           description: Bodies captured earlier cannot be opened on this device.
+      additionalProperties: false
+    NetworkAddress:
+      type: object
+      required: [interface, ip]
+      properties:
+        interface:
+          type: string
+          description: Interface name as the operating system reports it.
+        ip:
+          type: string
+          description: IPv4 or IPv6 unicast address without a port.
+      additionalProperties: false
+    NetworkAddresses:
+      type: object
+      required: [addresses]
+      properties:
+        addresses:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/NetworkAddress"
       additionalProperties: false
     RawSealingSummary:
       type: object
@@ -7962,11 +8483,23 @@ components:
       properties:
         scope:
           type: string
-          enum: [all, before]
+          enum: [all, before, sessions]
         before:
           type: string
           format: date-time
           description: Required when scope is before.
+        session_ids:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          items:
+            $ref: ./protocol-capabilities.schema.json#/$defs/ResourceId
+          description: |
+            Required when scope is sessions. Conversation ids as the session list
+            returns them; a root without a session id is named by its request id.
+            Every listed conversation loses its root records with their retry
+            attempts and audit content. Roots still pending are kept.
         confirm:
           type: boolean
           const: true
@@ -7980,12 +8513,25 @@ components:
             required: [scope]
           then:
             required: [before]
+            not:
+              required: [session_ids]
         - if:
             properties:
               scope:
                 const: all
             required: [scope]
           then:
+            not:
+              anyOf:
+                - required: [before]
+                - required: [session_ids]
+        - if:
+            properties:
+              scope:
+                const: sessions
+            required: [scope]
+          then:
+            required: [session_ids]
             not:
               required: [before]
     PurgeResult:
@@ -8195,7 +8741,7 @@ components:
     AuthorizationFlow:
       type: string
       enum: [browser, device_code, authorization_code]
-      description: Codex supports browser and device_code. Claude Code supports authorization_code with PKCE and a manual code#state callback. Grok (xai_grok) supports device_code only (RFC 8628 against auth.x.ai). Antigravity supports browser authorization with Google OAuth and a loopback callback. GitHub Copilot (github_copilot) supports device_code only (RFC 8628 against github.com with the OpenCode OAuth app).
+      description: Codex supports browser and device_code. Claude Code supports authorization_code with PKCE and a manual code#state callback. Grok (xai_grok) supports device_code only (RFC 8628 against auth.x.ai). Antigravity supports browser authorization with Google OAuth and a loopback callback. GitHub Copilot (github_copilot) supports device_code only (RFC 8628 against github.com with the OpenCode OAuth app). Factory Droid (factory_droid) supports device_code only (RFC 8628 against WorkOS with the Droid CLI's public client).
     AuthorizationStartRequest:
       type: object
       required: [flow]
@@ -8234,7 +8780,14 @@ components:
         provider:
           type: string
           enum:
-            [openai_codex, claude_code, xai_grok, antigravity, github_copilot]
+            [
+              openai_codex,
+              claude_code,
+              xai_grok,
+              antigravity,
+              github_copilot,
+              factory_droid,
+            ]
         status:
           type: string
           enum: [pending, completed, cancelled, expired, failed]

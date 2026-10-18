@@ -90,15 +90,46 @@ describe("local client updates", () => {
         .querySelector<HTMLButtonElement>('[aria-label="更新 Codex CLI"]')!
         .click(),
     );
-    expect(mocks.update).toHaveBeenCalledWith(["codex"]);
+    expect(mocks.update).toHaveBeenCalledWith([{ id: "codex", wsl: null }]);
     expect(button("刷新").disabled).toBe(true);
     await act(async () => listener({ ...available(), revision: 3 }));
     await act(async () => button("全部更新（4）").click());
+    expect(mocks.update).toHaveBeenLastCalledWith(
+      ["codex", "claude", "cursor", "pi"].map((id) => ({ id, wsl: null })),
+    );
+  });
+
+  it("lists clients found in WSL by distribution and updates them there", async () => {
+    const snapshot = available();
+    snapshot.clients.push({
+      ...snapshot.clients[1],
+      wsl: "Ubuntu",
+      executable: "/home/ada/.local/bin/claude",
+    });
+    snapshot.wsl_unchecked = ["Debian", "Arch"];
+    mocks.get.mockResolvedValue(snapshot);
+    await render();
+    const wsl = container.querySelector('[data-client="claude"][data-wsl]');
+    expect(wsl?.querySelector("h3")?.textContent).toBe("Claude Code");
+    expect(wsl?.textContent).toContain("WSL · Ubuntu");
+    expect(container.textContent).toContain(
+      "Debian、Arch 未运行，没有检测其中的客户端。",
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[aria-label="更新 Claude Code（WSL · Ubuntu）"]',
+        )!
+        .click(),
+    );
+    expect(mocks.update).toHaveBeenCalledWith([
+      { id: "claude", wsl: "Ubuntu" },
+    ]);
+    await act(async () => listener({ ...snapshot, revision: 3 }));
+    await act(async () => button("全部更新（5）").click());
     expect(mocks.update).toHaveBeenLastCalledWith([
-      "codex",
-      "claude",
-      "cursor",
-      "pi",
+      ...["codex", "claude", "cursor", "pi"].map((id) => ({ id, wsl: null })),
+      { id: "claude", wsl: "Ubuntu" },
     ]);
   });
 
@@ -167,9 +198,20 @@ describe("local client updates", () => {
       phase: "manual",
       can_update: false,
     };
+    snapshot.clients[2] = {
+      ...snapshot.clients[2],
+      phase: "error",
+      error_code: "damaged",
+      error_detail: "C:\\npm\\cursor-agent.exe is not a Windows program",
+      can_update: false,
+    };
     mocks.get.mockResolvedValue(snapshot);
     await render();
     expect(container.textContent).toContain("请检查网络和代理设置后重试");
+    expect(
+      container.querySelector('[data-client="cursor"] [role="alert"]')
+        ?.textContent,
+    ).toBe("安装不完整或文件已损坏，无法启动。请重新安装后重试。");
     await act(async () => button("手动更新").click());
     expect(mocks.open).toHaveBeenCalledWith(
       "https://code.claude.com/docs/en/setup",
@@ -190,5 +232,11 @@ describe("local client updates", () => {
     expect(button("刷新").disabled).toBe(true);
     expect(container.textContent).toContain("请在桌面应用中");
     expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
+  it("leaves scrolling to the About page", async () => {
+    await render();
+    expect(container.querySelector('[data-client="codex"]')).not.toBeNull();
+    expect(container.querySelector('[class*="overscroll-"]')).toBeNull();
   });
 });

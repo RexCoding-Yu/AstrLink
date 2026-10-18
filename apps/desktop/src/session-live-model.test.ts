@@ -3,8 +3,12 @@ import { describe, expect, it } from "vitest";
 import type { RequestSession } from "./request-record-model";
 import {
   mergeLiveSessions,
+  removeSessions,
+  replaceSession,
   reuseUnchangedSessions,
   sessionMatchesFilters,
+  sessionRunning,
+  sessionSummary,
 } from "./session-live-model";
 
 function session(
@@ -246,5 +250,32 @@ describe("sessionMatchesFilters", () => {
     expect(
       sessionMatchesFilters(undetected, { ...filters, clientType: "codex" }),
     ).toBe(false);
+  });
+});
+
+describe("deleted sessions", () => {
+  it("drops and replaces rows without touching an unchanged list", () => {
+    const items = [session("sess_a"), session("sess_b")];
+    expect(removeSessions(items, new Set(["sess_x"]))).toBe(items);
+    expect(removeSessions(items, new Set(["sess_a"]))).toEqual([items[1]]);
+    expect(replaceSession(items, session("sess_x"))).toBe(items);
+    const shorter = session("sess_b", { call_count: 1, turn_count: 1 });
+    expect(replaceSession(items, shorter)).toEqual([items[0], shorter]);
+  });
+
+  it("keeps the turns of a detail out of the list row", () => {
+    const summary = sessionSummary({ ...session("sess_a"), turns: [] });
+    expect(summary).toEqual(session("sess_a"));
+    expect("turns" in summary).toBe(false);
+  });
+
+  it("treats a conversation with a call in flight as running", () => {
+    expect(sessionRunning(session("sess_a"))).toBe(false);
+    expect(sessionRunning(session("sess_a", { status: "pending" }))).toBe(true);
+    expect(
+      sessionRunning(
+        session("sess_a", { active_request_starts: ["2026-07-25T10:00:03Z"] }),
+      ),
+    ).toBe(true);
   });
 });

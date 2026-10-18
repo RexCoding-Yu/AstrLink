@@ -298,6 +298,8 @@ func TestPreviewShaping(t *testing.T) {
 		{"short first sentence is not a stub", stubSentence, string([]rune(stubSentence)[:previewTargetRunes]) + "…"},
 		{"clause boundary truncation", clauseSentence, string(clauseRunes[:comma]) + "…"},
 		{"word boundary truncation", strings.Repeat("words ", 20) + "tail", strings.TrimSpace(strings.Repeat("words ", 10)) + "…"},
+		// The full path alone runs past the target and would cut the question.
+		{"dropped file named, question kept", "/Users/caion/Desktop/Snapzy/Snapzy_2026-10-12_22-45-20_345.png这是什么", "Snapzy_2026-10-12_22-45-20_345.png这是什么"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,6 +309,31 @@ func TestPreviewShaping(t *testing.T) {
 			}
 			if n := len([]rune(got)); n > contract.MaxInputPreviewRunes {
 				t.Fatalf("preview has %d runes, over the contract bound", n)
+			}
+		})
+	}
+}
+
+func TestShortenFilePaths(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"glued to CJK", "/Users/me/Desktop/Snapzy/shot_345.png这是什么", "shot_345.png这是什么"},
+		{"shell escapes and CJK name", `看看 /Users/me/Desktop/截屏2026-10-12\ 22.45.20.png 是什么`, "看看 截屏2026-10-12 22.45.20.png 是什么"},
+		{"home and windows", `~/notes/todo.md 和 C:\Users\me\report.docx`, "todo.md 和 report.docx"},
+		{"two paths glued by prose", "对比/tmp/a.png和/tmp/b.png", "对比a.png和b.png"},
+		{"line reference and full stop", "see /repo/src/main.ts:12 and /repo/README.md.", "see main.ts:12 and README.md."},
+		{"multi-part extension", "unpack /tmp/build/out.tar.gz now", "unpack out.tar.gz now"},
+		{"commands and routes stay", "/review the /v1/chat/completions handler", "/review the /v1/chat/completions handler"},
+		{"relative and url stay", "src/app.ts ./a/b.ts https://example.com/a/b.png", "src/app.ts ./a/b.ts https://example.com/a/b.png"},
+		{"no directory or extension stays", "/a.png /usr/lib/python3.12 /home/u/.bashrc", "/a.png /usr/lib/python3.12 /home/u/.bashrc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shortenFilePaths(tc.in); got != tc.want {
+				t.Fatalf("shortenFilePaths(%q)\n got %q\nwant %q", tc.in, got, tc.want)
 			}
 		})
 	}

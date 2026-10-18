@@ -59,6 +59,18 @@ describe("formatCompactNumber in Chinese", () => {
   });
 });
 
+describe("formatCompactNumber in Japanese", () => {
+  it("abbreviates myriads and hundred-millions", async () => {
+    await applyLocale("ja");
+
+    expect(formatCompactNumber(1_234)).toBe("1,234");
+    expect(formatCompactNumber(10_000)).toBe("1万");
+    expect(formatCompactNumber(12_345)).toBe("1.23万");
+    expect(formatCompactNumber(100_000_000)).toBe("1億");
+    expect(formatExactNumber(46_646_695)).toBe("46,646,695");
+  });
+});
+
 describe("formatCompactNumber guards", () => {
   it("renders an em dash for non-finite input", () => {
     expect(formatCompactNumber(Number.NaN)).toBe("—");

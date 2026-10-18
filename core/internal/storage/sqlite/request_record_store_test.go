@@ -662,6 +662,95 @@ func TestRequestRecordCursorsRoundTripScopeAndCascade(t *testing.T) {
 	}
 }
 
+func TestPurgeRequestSessionsDeletesWholeConversations(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "purge-sessions.db"))
+	defer store.Close()
+	ctx := context.Background()
+	key, err := store.GetOrCreateAuditKey(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 10, 10, 17, 27, 0, 0, time.UTC)
+	root := func(id string, session *contract.SessionID, offset time.Duration, status contract.RequestStatus) contract.RequestRecord {
+		record := contract.RequestRecord{
+			ID: contract.RequestID(id), SessionID: session, StartedAt: start.Add(offset), Status: status,
+			InputProtocol: contract.ProtocolOpenAIResponses, Audit: contract.NotCapturedAuditSummary(),
+		}
+		if status != contract.RequestStatusPending {
+			record.CompletedAt = ptrTime(record.StartedAt.Add(time.Second))
+		}
+		return record
+	}
+	failing := contract.SessionID("session_failing")
+	kept := contract.SessionID("session_kept")
+	live := contract.SessionID("session_live")
+	firstTry := root("request_fail_1", &failing, 0, contract.RequestStatusFailed)
+	firstTry.Cursors = []contract.SessionCursor{{Kind: contract.SessionCursorEchoID, Direction: contract.SessionCursorOut, Value: "call_purged_session_cursor"}}
+	secondTry := root("request_fail_2", &failing, time.Second, contract.RequestStatusFailed)
+	retry := secondTry
+	retry.ID, retry.ParentRequestID, retry.AttemptIndex = "request_fail_2_retry", &secondTry.ID, 1
+	records := []contract.RequestRecord{
+		firstTry, secondTry, retry,
+		root("request_solo", nil, 2*time.Second, contract.RequestStatusFailed),
+		root("request_kept", &kept, 3*time.Second, contract.RequestStatusFailed),
+		root("request_live_done", &live, 4*time.Second, contract.RequestStatusSucceeded),
+		root("request_live_running", &live, 5*time.Second, contract.RequestStatusPending),
+	}
+	for _, record := range records {
+		if err := store.InsertRequestRecord(ctx, record); err != nil {
+			t.Fatalf("InsertRequestRecord(%s): %v", record.ID, err)
+		}
+	}
+	for _, id := range []contract.RequestID{"request_fail_2", "request_fail_2_retry", "request_kept", "request_live_running"} {
+		nonce, ciphertext, err := storagecontract.SealAuditBlob(key, []byte(`{"input":"hello"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.InsertAuditBlob(ctx, storagecontract.AuditBlob{
+			RequestID: id, Direction: storagecontract.AuditDirectionRequest,
+			MediaType: "application/json", Nonce: nonce, Ciphertext: ciphertext, CapturedBytes: 17,
+		}); err != nil {
+			t.Fatalf("InsertAuditBlob(%s): %v", id, err)
+		}
+	}
+
+	result, err := store.PurgeRequestRecords(ctx, contract.PurgeRequest{
+		Scope: contract.PurgeScopeSessions, Confirm: true,
+		SessionIDs: []contract.SessionID{failing, "request_solo", live, "session_never_recorded"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both turns and the retry of the failing conversation, the root without a
+	// session id, and the finished turn of the live conversation.
+	if result.DeletedRecords != 5 || result.DeletedAuditBlobs != 2 {
+		t.Fatalf("purge sessions = %+v, want 5 records and 2 audit parts", result)
+	}
+	for _, id := range []contract.RequestID{"request_fail_1", "request_fail_2", "request_fail_2_retry", "request_solo", "request_live_done"} {
+		if _, err := store.GetRequestRecord(ctx, id); !errors.Is(err, storagecontract.ErrNotFound) {
+			t.Fatalf("GetRequestRecord(%s) error = %v, want not found", id, err)
+		}
+	}
+	var cursors int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM request_record_cursors WHERE request_id = 'request_fail_1'`).Scan(&cursors); err != nil || cursors != 0 {
+		t.Fatalf("cursor rows after purge = %d err=%v", cursors, err)
+	}
+	for _, id := range []contract.RequestID{"request_kept", "request_live_running"} {
+		blobs, err := store.GetAuditBlobsByRequest(ctx, id)
+		if err != nil || len(blobs) != 1 {
+			t.Fatalf("%s audit parts = %d err=%v, want its own part kept", id, len(blobs), err)
+		}
+	}
+	page, err := store.ListRequestSessions(ctx, storagecontract.RequestSessionListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.Items[0].ID != live || page.Items[0].TurnCount != 1 ||
+		page.Items[0].Status != contract.SessionStatusPending || page.Items[1].ID != kept {
+		t.Fatalf("sessions after purge = %+v", page.Items)
+	}
+}
+
 func TestSessionTurnCountGroupsByTurnIndex(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "turns.db"))
 	defer store.Close()

@@ -1,4 +1,4 @@
-import { i18n } from "./i18n";
+import { currentLocale, i18n } from "./i18n";
 import type {
   ClientType,
   RequestRecord,
@@ -131,7 +131,7 @@ function localDateKey(date: Date): string {
 function formatDateLabel(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(i18n.language === "zh-CN" ? "zh-CN" : "en", {
+  return new Intl.DateTimeFormat(currentLocale(), {
     year: "numeric",
     month: "long",
     day: "numeric",

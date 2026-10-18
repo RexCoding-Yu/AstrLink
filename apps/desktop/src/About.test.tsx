@@ -88,8 +88,10 @@ describe("About updates", () => {
       phase: "downloading" as const,
       downloaded_bytes: 5,
       total_bytes: 10,
+      download_source: "download_site" as const,
     };
     await render(downloading);
+    expect(container.textContent).toContain("官方下载站");
     expect(
       container
         .querySelector('[role="progressbar"]')
@@ -102,17 +104,85 @@ describe("About updates", () => {
     );
     mocks.saveUpdatePreferences.mockResolvedValue({
       ...ready,
-      preferences: { ...ready.preferences, auto_check: false },
+      preferences: { ...ready.preferences, official_mirror: true },
     });
     await act(async () =>
       (container.querySelector('[role="switch"]') as HTMLButtonElement).click(),
     );
     expect(mocks.saveUpdatePreferences).toHaveBeenCalledWith({
-      auto_check: false,
+      auto_check: true,
       auto_download: true,
       channel: "stable",
+      official_mirror: true,
     });
     expect(receive).toHaveBeenCalled();
+  });
+  it("holds retries until GitHub's rate limit lifts", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    try {
+      vi.setSystemTime(Date.parse("2026-10-07T04:00:00Z"));
+      const limited: UpdateSnapshot = {
+        ...ready,
+        phase: "error",
+        error_code: "rate_limit",
+        error_detail: "GitHub HTTP 403 Forbidden; 0 of 60 requests left",
+        retry_at: "2026-10-07T04:01:30Z",
+      };
+      await render(limited);
+      expect(button("重试").disabled).toBe(true);
+      expect(
+        container.querySelector('button[aria-label="检查更新"]'),
+      ).toHaveProperty("disabled", true);
+      expect(container.textContent).toContain("2分钟后可以再次检查。");
+      await act(async () => vi.advanceTimersByTime(60_000));
+      expect(container.textContent).toContain("30秒钟后可以再次检查。");
+      await act(async () => vi.advanceTimersByTime(30_000));
+      expect(container.textContent).not.toContain("可以再次检查");
+      mocks.checkAppUpdate.mockResolvedValue(ready);
+      await act(async () => button("重试").click());
+      expect(mocks.checkAppUpdate).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("offers the official mirror while GitHub's rate limit holds checks", async () => {
+    const limited: UpdateSnapshot = {
+      ...ready,
+      phase: "error",
+      release: null,
+      error_code: "rate_limit",
+      error_detail: "GitHub HTTP 403 Forbidden; 0 of 60 requests left",
+      retry_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+    };
+    const mirrored = {
+      ...limited,
+      preferences: { ...limited.preferences, official_mirror: true },
+    };
+    mocks.saveUpdatePreferences.mockResolvedValue(mirrored);
+    mocks.checkAppUpdate.mockResolvedValue({
+      ...mirrored,
+      phase: "up_to_date",
+      error_code: null,
+      error_detail: null,
+      retry_at: null,
+    });
+    await render(limited);
+    expect(button("检查更新").disabled).toBe(true);
+    expect(button("改用官方镜像源").disabled).toBe(false);
+    await act(async () => button("改用官方镜像源").click());
+    expect(mocks.saveUpdatePreferences).toHaveBeenCalledWith({
+      ...limited.preferences,
+      official_mirror: true,
+    });
+    expect(mocks.checkAppUpdate).toHaveBeenCalledOnce();
+    expect(
+      mocks.saveUpdatePreferences.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.checkAppUpdate.mock.invocationCallOrder[0]);
+    expect(receive).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phase: "up_to_date" }),
+    );
+    await render(mirrored);
+    expect(button("改用官方镜像源")).toBeUndefined();
   });
   it("reports command failures and retries checks", async () => {
     mocks.checkAppUpdate.mockRejectedValue(new Error("offline"));
@@ -126,5 +196,18 @@ describe("About updates", () => {
     });
     await act(async () => button("检查更新").click());
     expect(mocks.checkAppUpdate).toHaveBeenCalledTimes(2);
+  });
+  it("leaves scrolling to the page scrollport", async () => {
+    await render();
+    await act(async () =>
+      (
+        container.querySelector("button[aria-controls]") as HTMLButtonElement
+      ).click(),
+    );
+    const page = container.querySelector('[data-slot="about-workspace"]')!;
+    expect(page.className).toContain("overflow-y-auto");
+    // A nested overscroll-contained box stops the wheel even when it has
+    // nothing to scroll, so the page would not move under the pointer.
+    expect(page.querySelector('[class*="overscroll-"]')).toBeNull();
   });
 });

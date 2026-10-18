@@ -10,7 +10,7 @@
 
 # AstrLink
 
-[English](README.md) | **简体中文**
+[English](README.md) | **简体中文** | [日本語](README.ja.md)
 
 **为 AI
 Agent 打造的本地隐私网关：敏感信息在发送给模型之前，先在本地完成检测和脱敏。**

@@ -43,8 +43,9 @@ type LearnedIdentityStore interface {
 // IdentityRegistry resolves the subscription client identity AstrLink sends
 // when it must supply one, and learns it from recognized official clients.
 // The base identity is the learned one when auto-learn is on, otherwise the
-// baseline; the configured version is a floor on the version it declares. A
-// nil registry resolves the baseline and learns nothing.
+// baseline; a learned Claude Code release older than the baseline is skipped.
+// The configured version is a floor on the version it declares. A nil
+// registry resolves the baseline and learns nothing.
 type IdentityRegistry struct {
 	settings  IdentitySettingsSource
 	store     LearnedIdentityStore
@@ -88,12 +89,17 @@ func (registry *IdentityRegistry) Hydrate(ctx context.Context) error {
 	return nil
 }
 
-// ClaudeIdentity resolves the Claude Code identity for settings.
+// ClaudeIdentity resolves the Claude Code identity for settings. A learned
+// identity replaces the baseline as a whole, unless it is an older release:
+// models reject Claude Code versions below their minimum, and the baseline
+// keeps up with it.
 func (registry *IdentityRegistry) ClaudeIdentity(settings contract.RoutingSettings) ClientIdentity {
 	base := DefaultClaudeIdentity()
 	if settings.ClaudeIdentityAutoLearn {
 		if learned, ok := registry.learnedIdentity(contract.SubscriptionProviderClaudeCode); ok {
-			base = learned
+			if order, valid := contract.CompareClientVersions(learned.Version, base.Version); valid && order >= 0 {
+				base = learned
+			}
 		}
 	}
 	return withVersionFloor(base, settings.ClaudeIdentityVersion)

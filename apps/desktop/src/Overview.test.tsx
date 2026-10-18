@@ -87,6 +87,8 @@ const readySnapshot: AppSnapshot = {
   },
   last_error: null,
   inference_port_fallback: null,
+  inference_listen_active: null,
+  restart_pending: false,
   recovery_attempt: 0,
   recovery_scheduled_in_ms: null,
 };
@@ -207,8 +209,7 @@ describe("Overview", () => {
       root.render(
         <Overview
           catalog={overrides.catalog ?? readyCatalog}
-          copyError={null}
-          copyFeedback={null}
+          copyState="idle"
           isNativeApp={overrides.isNativeApp ?? true}
           isReady={overrides.isReady ?? true}
           isRestarting={overrides.isRestarting ?? false}
@@ -726,6 +727,17 @@ describe("Overview", () => {
     expect(button("重启中…").disabled).toBe(true);
   });
 
+  it("offers a restart while saved settings wait for one", async () => {
+    await renderOverview();
+    expect(container.textContent).not.toContain("重启以应用设置");
+    const { onRestart } = await renderOverview({
+      snapshot: { ...readySnapshot, restart_pending: true },
+    });
+    expect(container.textContent).not.toContain("重启网关");
+    await act(async () => button("重启以应用设置").click());
+    expect(onRestart).toHaveBeenCalledOnce();
+  });
+
   it("keeps historical usage visible after services and tokens are removed", async () => {
     await renderOverview({
       catalog: emptyCatalog,
@@ -1182,11 +1194,20 @@ describe("Overview", () => {
       ];
       expect(bands).toHaveLength(1);
       for (const band of bands) {
-        const cellSize = Number(
+        const [, columns, cellWidth] = band.style.gridTemplateColumns
+          .match(/repeat\((\d+), ([\d.]+)px\)/)!
+          .map(Number);
+        const rowHeight = Number(
           band.style.gridTemplateRows.match(/repeat\(7, ([\d.]+)px\)/)?.[1],
         );
-        expect(cellSize).toBeGreaterThanOrEqual(14);
-        expect(cellSize).toBeLessThanOrEqual(18);
+        expect(cellWidth).toBeGreaterThanOrEqual(14);
+        expect(rowHeight).toBeGreaterThanOrEqual(14);
+        expect(rowHeight).toBeLessThanOrEqual(Math.min(22, cellWidth));
+        // Wide panels are filled edge to edge; narrow ones scroll instead.
+        const minimumWidth = columns * 14 + (columns - 1) * 3;
+        expect(columns * cellWidth + (columns - 1) * 3).toBeCloseTo(
+          Math.max(minimumWidth, width - 28 - 3),
+        );
       }
       const cells = [
         ...container.querySelectorAll<HTMLButtonElement>(

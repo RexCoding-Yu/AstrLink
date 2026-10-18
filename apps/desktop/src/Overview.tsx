@@ -1,3 +1,4 @@
+import { isWebEdition } from "./edition";
 import { BillingOverview, useBillingSummary } from "./BillingOverview";
 import {
   memo,
@@ -76,7 +77,8 @@ import {
   formatCompactNumber,
   formatExactNumber,
 } from "./format-compact-number";
-import { i18n, useT } from "./i18n";
+import type { CopyState } from "./copy-feedback";
+import { currentLocale, i18n, useT } from "./i18n";
 import { PageHeader } from "./PageHeader";
 import { ActionGroup } from "@/components/ActionGroup";
 import { ScrollWorkspace } from "@/components/ScrollWorkspace";
@@ -117,8 +119,7 @@ const USAGE_BREAKDOWN_HEADER = "min-h-14 flex-wrap items-center py-2";
 
 export function Overview({
   catalog,
-  copyError,
-  copyFeedback,
+  copyState,
   isNativeApp,
   isReady,
   isRestarting,
@@ -141,13 +142,12 @@ export function Overview({
   usagePreset,
 }: {
   catalog: ServiceCatalog;
-  copyError: string | null;
-  copyFeedback: string | null;
+  copyState: CopyState;
   isNativeApp: boolean;
   isReady: boolean;
   isRestarting: boolean;
   onAddService: () => void;
-  onCopy: (value: string, label: string) => void;
+  onCopy: (value: string) => void;
   onManageServices: () => void;
   onManageTokens: () => void;
   onOpenOnboarding?: () => void;
@@ -209,8 +209,7 @@ export function Overview({
 
   const inferenceURL = snapshot?.ready?.client_inference_url ?? "";
   const apiAddressLabel = t("overview.apiAddress");
-  const apiCopied =
-    copyFeedback === t("copy.copiedNamed", { label: apiAddressLabel });
+  const apiCopied = copyState === "copied";
   // A retained summary survives a failed refresh so the panel does not flash
   // empty, but its numbers must not be presented as current.
   const totals =
@@ -222,21 +221,25 @@ export function Overview({
     summary?.by_service ?? [],
   );
   const modelRows = summary?.by_model ?? [];
-  const systemDetails: Array<[string, ReactNode]> = [
-    [
-      t("overview.desktopVersion"),
-      snapshot?.app_version ?? t("common.unknown"),
-    ],
+  const systemDetailRows: Array<[string, ReactNode] | null> = [
+    isWebEdition
+      ? null
+      : [
+          t("overview.desktopVersion"),
+          snapshot?.app_version ?? t("common.unknown"),
+        ],
     [
       t("overview.gatewayVersion"),
       snapshot?.version?.core_version ??
         snapshot?.ready?.core_version ??
         t("overview.pending"),
     ],
-    [
-      t("overview.process"),
-      snapshot?.pid ? `PID ${snapshot.pid}` : t("overview.notRunning"),
-    ],
+    isWebEdition
+      ? null
+      : [
+          t("overview.process"),
+          snapshot?.pid ? `PID ${snapshot.pid}` : t("overview.notRunning"),
+        ],
     [
       t("overview.controlListen"),
       snapshot?.ready?.control_url ?? t("overview.unassigned"),
@@ -257,6 +260,7 @@ export function Overview({
       </ExternalLink>,
     ],
   ];
+  const systemDetails = systemDetailRows.filter((row) => row !== null);
 
   const moduleLabels: Record<OverviewModuleId, string> = {
     usage: t("overview.usageSummary"),
@@ -602,7 +606,7 @@ export function Overview({
             <Button
               aria-label={t("overview.copyApiAddress")}
               disabled={!inferenceURL}
-              onClick={() => onCopy(inferenceURL, apiAddressLabel)}
+              onClick={() => onCopy(inferenceURL)}
               size="icon-sm"
               type="button"
               variant="ghost"
@@ -651,19 +655,19 @@ export function Overview({
             </Button>
           </div>
         </div>
-        {copyError ? (
+        {copyState === "failed" ? (
           <p
             className="border-t px-4 py-2 text-xs text-danger-foreground"
             role="alert"
           >
-            {copyError}
+            {t("copy.manualSelect")}
           </p>
-        ) : copyFeedback ? (
+        ) : apiCopied ? (
           <p
             className="border-t px-4 py-2 text-xs text-success-foreground"
             role="status"
           >
-            {copyFeedback}
+            {t("copy.copiedNamed", { label: apiAddressLabel })}
           </p>
         ) : null}
       </Panel>
@@ -774,7 +778,7 @@ export function Overview({
                 <StatusBadge tone={statusTone}>
                   {isReady ? t("overview.gatewayHealthy") : statusLabel}
                 </StatusBadge>
-                {isNativeApp && !isReady ? (
+                {isNativeApp && (!isReady || snapshot?.restart_pending) ? (
                   <Button
                     variant="outline"
                     size="sm"
@@ -784,7 +788,9 @@ export function Overview({
                   >
                     {isRestarting
                       ? t("overview.restarting")
-                      : t("overview.restartGateway")}
+                      : isReady
+                        ? t("overview.restartToApply")
+                        : t("overview.restartGateway")}
                   </Button>
                 ) : null}
               </>
@@ -969,10 +975,7 @@ function compareTokenUsageRows(
   if (tokenFee(right) !== tokenFee(left))
     return tokenFee(right) - tokenFee(left);
 
-  return left.name.localeCompare(
-    right.name,
-    i18n.language === "zh-CN" ? "zh" : "en",
-  );
+  return left.name.localeCompare(right.name, currentLocale());
 }
 
 function TokenUsagePanel({
@@ -2032,7 +2035,7 @@ const dayFormats = new Map<string, Intl.DateTimeFormat>();
 function dayLabel(date: string, width: "long" | "short"): string {
   const [year, month, day] = date.split("-").map(Number);
   if (!year || !month || !day) return date;
-  const locale = i18n.language === "zh-CN" ? "zh-CN" : "en";
+  const locale = currentLocale();
   const key = `${locale}:${width}`;
   let format = dayFormats.get(key);
   if (!format) {

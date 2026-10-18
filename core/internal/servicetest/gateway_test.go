@@ -62,9 +62,7 @@ func onlyGatewayRecord(t *testing.T, store *sqlite.Store) contract.RequestRecord
 func gatewayPrivacy(t *testing.T, policy privacy.Policy) *privacy.Engine {
 	t.Helper()
 	filter, err := privacy.New(privacy.PolicyProviderFunc(func(_ context.Context, scope privacy.Scope) (privacy.Policy, error) {
-		// The single request-level preflight resolves the policy once with no
-		// per-candidate service scope.
-		if scope.ServiceID != "" || scope.AccessTokenID != "" {
+		if scope.ServiceID != "service_test" || scope.AccessTokenID != "" {
 			t.Errorf("privacy scope=%+v", scope)
 		}
 		return policy, nil
@@ -111,7 +109,7 @@ func TestGatewayPrivacyAndRecords(t *testing.T) {
 				deps := gatewayDependencies(t, store)
 				deps.PrivacyFilter = gatewayPrivacy(t, privacy.Policy{Enabled: test.enabled, Mode: privacy.ModeRegex, Action: test.action, ResponseRestore: test.restore})
 				calls, warnings := 0, 0
-				deps.PolicyWarningReporter = ingress.PolicyWarningReporterFunc(func(contract.ProtocolID, contract.ServiceID, string) { warnings++ })
+				deps.PolicyWarningReporter = ingress.PolicyWarningReporterFunc(func(privacy.Warning) { warnings++ })
 				redacted := test.enabled && test.action == privacy.ActionRedact
 				placeholder := ""
 				deps.Forwarder = transport.New(timingTransport(func(request *http.Request) (*http.Response, error) {

@@ -38,11 +38,15 @@ export function PanelHeader({
   actions,
   children,
   className,
+  icon,
+  iconTone = "primary",
   size = "default",
   ...props
 }: Omit<HTMLAttributes<HTMLDivElement>, "children"> & {
   actions?: ReactNode;
   children: ReactNode;
+  icon?: ReactNode;
+  iconTone?: "primary" | "warm";
   size?: "default" | "sm";
 }) {
   return (
@@ -55,7 +59,22 @@ export function PanelHeader({
       data-slot="panel-header"
       {...props}
     >
-      <div className="min-w-0">{children}</div>
+      <div className="flex min-w-0 items-center gap-3">
+        {icon ? (
+          <span
+            aria-hidden="true"
+            className={cn(
+              "inline-flex size-8 shrink-0 items-center justify-center rounded-md",
+              iconTone === "warm"
+                ? "bg-warning-wash text-warning-foreground"
+                : "bg-accent text-primary",
+            )}
+          >
+            {icon}
+          </span>
+        ) : null}
+        <div className="min-w-0">{children}</div>
+      </div>
       {actions ? (
         <ActionGroup className="shrink-0 gap-1.5">{actions}</ActionGroup>
       ) : null}

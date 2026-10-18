@@ -226,6 +226,28 @@ func TestRequestSessionControlAPI(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid kind status=%d", response.Code)
 	}
+
+	response = requestRecordHTTP(t, handler, http.MethodPost, RequestsPurgePath,
+		"application/json", `{"scope":"sessions","confirm":true}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("sessions purge without ids status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = requestRecordHTTP(t, handler, http.MethodPost, RequestsPurgePath, "application/json",
+		`{"scope":"sessions","session_ids":["session_ctrl","request_discovery_openai"],"confirm":true}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("sessions purge status=%d body=%s", response.Code, response.Body.String())
+	}
+	var purge contract.PurgeResult
+	decode(t, response, &purge)
+	if purge.DeletedRecords != 2 || purge.DeletedAuditBlobs != 0 {
+		t.Fatalf("sessions purge=%#v", purge)
+	}
+	response = requestRecordHTTP(t, handler, http.MethodGet, RequestSessionsPath, "", "")
+	page = requestSessionPageResponse{}
+	decode(t, response, &page)
+	if len(page.Items) != 1 || page.Items[0].ID != "request_discovery_google" {
+		t.Fatalf("sessions after purge=%#v", page)
+	}
 }
 
 func requestRecordHTTP(

@@ -268,6 +268,28 @@ describe("subscription usage contract", () => {
     expect(formatSubscriptionUsageError({})).toBe("无法读取额度");
   });
 
+  it("says when a rate-limited lookup can be refreshed again", () => {
+    expect(
+      formatSubscriptionUsageError(
+        new Error(
+          `GET /control/v1/services/service_newapi/usage?refresh=1 returned 429 Too Many Requests: {"error":{"code":"subscription_usage_rate_limited","message":"new-api usage lookups are rate limited; retry in 4m1s","details":[{"reason":"retry_after","retry_after_seconds":241}]}}`,
+        ),
+      ),
+    ).toBe("额度查询过于频繁，约 5 分钟后可再刷新。");
+    const webConsoleError = Object.assign(
+      new Error("subscription_usage_rate_limited"),
+      { code: "subscription_usage_rate_limited", retryAfter: 30 },
+    );
+    expect(formatSubscriptionUsageError(webConsoleError)).toBe(
+      "额度查询过于频繁，约 1 分钟后可再刷新。",
+    );
+    expect(
+      formatSubscriptionUsageError(
+        `{"error":{"code":"subscription_usage_rate_limited","message":"x","details":[]}}`,
+      ),
+    ).toBe("额度查询过于频繁，请稍后再刷新。");
+  });
+
   it("parses an official consume outcome", () => {
     expect(
       parseSubscriptionUsageReset({

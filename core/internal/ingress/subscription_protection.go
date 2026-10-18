@@ -55,16 +55,17 @@ func (handler *Handler) learnClientIdentity(ctx context.Context, provider contra
 	}
 }
 
-// subscriptionProtection reuses the settings the request already read. A
-// store without routing settings, or a failed read, keeps every protection
-// on: turning one off is always an explicit choice.
-func (handler *Handler) subscriptionProtection(ctx context.Context) subscriptionProtection {
+// requestRoutingSettings reuses the settings the request already read. A
+// store without routing settings, or a failed read, yields the defaults:
+// every protection on, no global prompt and no reasoning override. Turning a
+// protection off is always an explicit choice.
+func (handler *Handler) requestRoutingSettings(ctx context.Context) contract.RoutingSettings {
 	if session := recordSessionFromContext(ctx); session != nil && session.routingSettings != nil {
-		return subscriptionProtectionFrom(*session.routingSettings)
+		return *session.routingSettings
 	}
 	settings, loaded, err := handler.loadRoutingSettings(ctx)
 	if err != nil || !loaded {
 		settings = contract.DefaultRoutingSettings()
 	}
-	return subscriptionProtectionFrom(settings)
+	return settings
 }

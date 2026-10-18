@@ -117,20 +117,22 @@ func TestTextRestorerHoldsSpellingCutShortUntilFinal(t *testing.T) {
 	}
 }
 
-// TestAllocatorRederivesWhenRestorableSpellingOccursInBody extends the literal
-// collision guard to every spelling the restorer recognises: an escaped marker
-// already in the request is genuine text too.
-func TestAllocatorRederivesWhenRestorableSpellingOccursInBody(t *testing.T) {
+// TestAllocatorKeepsMarkerQuotedInAnotherSpelling covers a client that resends
+// an unrestored marker escaped or without its brackets: it is still this
+// value's marker, so the value keeps it.
+func TestAllocatorKeepsMarkerQuotedInAnotherSpelling(t *testing.T) {
 	key := testDerivationKey(7)
 	free := newPlaceholderAllocator(key, naturalKindRule, nil)
 	marker, _, err := free.allocate(KindPerson, "Zoë")
 	if err != nil {
 		t.Fatal(err)
 	}
-	escaped := "&lt;" + strings.Trim(marker, "<>") + "&gt;"
-	body := []byte(`{"input":"` + escaped + `"}`)
-	constrained := newPlaceholderAllocator(key, naturalKindRule, body)
-	if avoided, _, err := constrained.allocate(KindPerson, "Zoë"); err != nil || avoided == marker {
-		t.Fatalf("marker = %q (%v), already present as %q", avoided, err, escaped)
+	inner := strings.Trim(marker, "<>")
+	for _, spelling := range []string{"&lt;" + inner + "&gt;", `\u003c` + inner + `\u003e`, inner} {
+		body := []byte(`{"input":"Zoë, ` + spelling + `"}`)
+		replay := newPlaceholderAllocator(key, naturalKindRule, body)
+		if got, _, err := replay.allocate(KindPerson, "Zoë"); err != nil || got != marker {
+			t.Fatalf("marker = %q (%v), want %q quoted as %q", got, err, marker, spelling)
+		}
 	}
 }

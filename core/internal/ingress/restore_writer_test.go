@@ -904,6 +904,18 @@ func TestRestoringWriterNonStreamingVisibleFieldsAcrossAlphaProtocols(t *testing
 			body: `{"candidates":[{"content":{"parts":[{"text":"` +
 				placeholder + `"}]}}]}`,
 		},
+		{
+			name:     "rerank document object",
+			protocol: contract.ProtocolRerank,
+			body: `{"results":[{"index":0,"relevance_score":0.9,` +
+				`"document":{"text":"` + placeholder + `"}}]}`,
+		},
+		{
+			name:     "rerank document string",
+			protocol: contract.ProtocolRerank,
+			body: `{"results":[{"index":0,"relevance_score":0.9,` +
+				`"document":"` + placeholder + `"}]}`,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

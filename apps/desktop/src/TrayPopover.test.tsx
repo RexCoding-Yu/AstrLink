@@ -101,6 +101,47 @@ describe("TrayPopoverPanel", () => {
     expect(bridge.trayAction).not.toHaveBeenCalled();
   });
 
+  it("reports its height with the pixel ratio it draws at", async () => {
+    // Windows at 150% scale and 110% text size.
+    let ratio = 1.65;
+    const ratioSpy = vi
+      .spyOn(window, "devicePixelRatio", "get")
+      .mockImplementation(() => ratio);
+    const resolutionListeners: (() => void)[] = [];
+    const matchMediaSpy = vi.spyOn(window, "matchMedia").mockImplementation(
+      (query) =>
+        ({
+          matches: false,
+          addEventListener: (_type: string, listener: () => void) => {
+            if (query.startsWith("(resolution:"))
+              resolutionListeners.push(listener);
+          },
+          removeEventListener: () => {},
+        }) as unknown as MediaQueryList,
+    );
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 0, 360, 412.4));
+    try {
+      bridge.getTrayState.mockResolvedValue(parseTrayState(readyTrayState));
+      bridge.trayPopoverResize.mockReset().mockResolvedValue(undefined);
+      await act(async () => root.render(<TrayPopoverWindow />));
+      expect(bridge.trayPopoverResize).toHaveBeenLastCalledWith(413, 1.65);
+
+      // Raising the text size to 125% changes only the pixel ratio.
+      ratio = 1.875;
+      await act(async () => {
+        resolutionListeners.at(-1)!();
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      });
+      expect(bridge.trayPopoverResize).toHaveBeenLastCalledWith(413, 1.875);
+    } finally {
+      ratioSpy.mockRestore();
+      matchMediaSpy.mockRestore();
+      rectSpy.mockRestore();
+    }
+  });
+
   it("opens the popover when the host snapshot includes Antigravity usage", async () => {
     const snapshot = {
       ...readyTrayState,
@@ -287,6 +328,104 @@ describe("TrayPopoverPanel", () => {
       { kind: "open" },
       { kind: "quit" },
     ]);
+  });
+
+  it("opens today's failed requests from the failure count", async () => {
+    await render(readyTrayState);
+    const failures = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="今天 3 次失败，在请求记录中查看"]',
+    );
+    expect(failures?.textContent).toBe("3 次失败");
+    act(() => failures!.click());
+    expect(actions).toEqual([{ kind: "navigate", page: "failedToday" }]);
+
+    await render({
+      ...readyTrayState,
+      digest: {
+        ...readyTrayState.digest,
+        today: { ...readyTrayState.digest.today, failed: 0 },
+      },
+    });
+    expect(container.textContent).not.toContain("次失败");
+  });
+
+  it("sums up today's privacy protection in one row of the day", async () => {
+    await render(readyTrayState);
+    const row = container.querySelector('[data-slot="tray-privacy"]')!;
+    expect(
+      row.querySelector('[data-slot="tray-privacy-status"]')?.textContent,
+    ).toBe("替换 23 · 还原 17 · 阻止 1");
+    // The three most frequent kinds, then a count of the rest.
+    expect(
+      row.querySelector('[data-slot="tray-privacy-kinds"]')?.textContent,
+    ).toBe("邮箱 14 · 常见密钥 6 · 电话 3 · 另有 1 类");
+    // A row of the usage area itself, not a section with its own divider.
+    expect(row.parentElement?.getAttribute("data-slot")).toBe("tray-usage");
+
+    act(() =>
+      row
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="在安全页查看隐私保护统计"]',
+        )!
+        .click(),
+    );
+    expect(actions).toEqual([{ kind: "navigate", page: "privacyOverview" }]);
+  });
+
+  it("keeps a quiet privacy day to one line or leaves it out", async () => {
+    const privacy = readyTrayState.digest.privacy;
+    const quiet = {
+      ...privacy,
+      redacted: 0,
+      blocked: 0,
+      replaced: 0,
+      restored: 0,
+      kinds: [],
+    };
+    const withPrivacy = (value: typeof privacy) => ({
+      ...readyTrayState,
+      digest: { ...readyTrayState.digest, privacy: value },
+    });
+    const row = () => container.querySelector('[data-slot="tray-privacy"]');
+    const status = () =>
+      row()?.querySelector('[data-slot="tray-privacy-status"]')?.textContent;
+
+    await render(withPrivacy(quiet));
+    expect(status()).toBe("今天未发现隐私内容");
+    expect(row()?.querySelectorAll("p")).toHaveLength(0);
+
+    await render(withPrivacy({ ...quiet, unchecked: 2 }));
+    expect(status()).toBe("今天未发现隐私内容");
+    expect(row()?.textContent).toContain("2 次检查失败，请求按原文发出");
+
+    await render(withPrivacy({ ...quiet, checked: 0, unchecked: 2 }));
+    expect(status()).toBe("2 次检查失败，请求按原文发出");
+    expect(row()?.querySelectorAll("p")).toHaveLength(0);
+
+    await render(withPrivacy({ ...privacy, enabled: false }));
+    expect(status()).toBe("已关闭，请求按原文发出");
+    expect(row()?.querySelector('[data-slot="tray-privacy-kinds"]')).toBeNull();
+
+    // Nothing checked yet and protection on: nothing to say.
+    await render(withPrivacy({ ...quiet, checked: 0 }));
+    expect(row()).toBeNull();
+
+    // Off with nothing checked: there are no statistics to open.
+    await render(withPrivacy({ ...quiet, enabled: false, checked: 0 }));
+    act(() =>
+      row()!
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="在安全页查看隐私保护统计"]',
+        )!
+        .click(),
+    );
+    expect(actions.at(-1)).toEqual({ kind: "navigate", page: "safety" });
+
+    await render(readyTrayState, {
+      ...defaultTrayPreferences(),
+      usage: { ...defaultTrayPreferences().usage, privacy: false },
+    });
+    expect(row()).toBeNull();
   });
 
   it("offers a start button and hides usage while the gateway is down", async () => {

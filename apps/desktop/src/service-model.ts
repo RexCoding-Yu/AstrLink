@@ -26,6 +26,7 @@ export type HTTPServiceKind =
   | "glm_coding"
   | "minimax_coding"
   | "newapi"
+  | "magpie"
   | "openai"
   | "anthropic"
   | "gemini"
@@ -94,7 +95,8 @@ export type SubscriptionServiceKind =
   | "claude_subscription"
   | "grok_subscription"
   | "antigravity_subscription"
-  | "copilot_subscription";
+  | "copilot_subscription"
+  | "droid_subscription";
 export type ServiceKind = SubscriptionServiceKind | HTTPServiceKind;
 
 /** Provider owning each subscription kind; mirrors contract.ServiceKind.SubscriptionProvider. */
@@ -107,6 +109,7 @@ export const subscriptionKindProviders: Record<
   grok_subscription: "xai_grok",
   antigravity_subscription: "antigravity",
   copilot_subscription: "github_copilot",
+  droid_subscription: "factory_droid",
 };
 
 /** Fixed native capabilities; mirrors contract.SubscriptionProvider.Capabilities. */
@@ -139,6 +142,12 @@ export const subscriptionNativeCapabilities: Record<
     { protocol: "openai.chat", mode: "native", streaming: true },
     { protocol: "openai.models", mode: "native", streaming: false },
   ],
+  droid_subscription: [
+    { protocol: "anthropic.messages", mode: "native", streaming: true },
+    { protocol: "openai.responses", mode: "native", streaming: true },
+    { protocol: "openai.chat", mode: "native", streaming: true },
+    { protocol: "openai.models", mode: "native", streaming: false },
+  ],
 };
 
 /**
@@ -158,6 +167,7 @@ export const subscriptionConversionTargets: Record<
     "openai.responses",
     "openai.chat",
   ],
+  droid_subscription: ["anthropic.messages", "openai.responses", "openai.chat"],
 };
 
 export const subscriptionKinds = Object.keys(
@@ -253,6 +263,8 @@ export interface SubscriptionRiskEvent {
 export interface Service {
   proxy?: ServiceProxy;
   responses_websocket_enabled?: boolean;
+  /** Requests to this provider skip the privacy policy; omitted when false. */
+  privacy_trusted?: boolean;
   /** This provider's own redirects; routing keeps the requested model. */
   model_redirects?: ModelRedirect[];
   failure_policy?: FailurePolicy;
@@ -292,6 +304,7 @@ export interface ServiceRecord {
 export type SubscriptionServiceCreateInput = {
   proxy?: ServiceProxyInput | null;
   responses_websocket_enabled?: boolean;
+  privacy_trusted?: boolean;
   model_redirects?: ModelRedirect[];
   claude_model_aliases_enabled?: boolean;
   failure_policy?: FailurePolicy;
@@ -305,6 +318,7 @@ export type SubscriptionServiceCreateInput = {
 export type HTTPServiceCreateInput = {
   proxy?: ServiceProxyInput | null;
   responses_websocket_enabled?: boolean;
+  privacy_trusted?: boolean;
   model_redirects?: ModelRedirect[];
   claude_model_aliases_enabled?: boolean;
   failure_policy?: FailurePolicy;
@@ -328,6 +342,7 @@ export type ServiceCreateInput =
 export type ServicePatchInput = {
   proxy?: ServiceProxyInput | null;
   responses_websocket_enabled?: boolean;
+  privacy_trusted?: boolean;
   model_redirects?: ModelRedirect[];
   failure_policy?: FailurePolicy | null;
   name?: string;
@@ -382,6 +397,7 @@ const httpKinds = new Set<HTTPServiceKind>([
   "glm_coding",
   "minimax_coding",
   "newapi",
+  "magpie",
   "openai",
   "anthropic",
   "gemini",
@@ -804,7 +820,8 @@ function parseSubscriptionConnection(
     subscription.provider !== "claude_code" &&
     subscription.provider !== "xai_grok" &&
     subscription.provider !== "antigravity" &&
-    subscription.provider !== "github_copilot"
+    subscription.provider !== "github_copilot" &&
+    subscription.provider !== "factory_droid"
   ) {
     invalid(`${path}.provider`, "unknown subscription provider");
   }
@@ -892,6 +909,7 @@ export function parseService(value: unknown, path = "$"): Service {
       "subscription",
       "failure_policy",
       "responses_websocket_enabled",
+      "privacy_trusted",
       "model_redirects",
       "proxy",
     ],
@@ -921,6 +939,14 @@ export function parseService(value: unknown, path = "$"): Service {
           service.responses_websocket_enabled as boolean,
       }
     : {};
+  if (
+    Object.hasOwn(service, "privacy_trusted") &&
+    typeof service.privacy_trusted !== "boolean"
+  ) {
+    invalid(`${path}.privacy_trusted`, "expected a boolean");
+  }
+  const trustSetting =
+    service.privacy_trusted === true ? { privacy_trusted: true } : {};
   let modelRedirects: ModelRedirect[] = [];
   try {
     modelRedirects = parseModelRedirects(service.model_redirects);
@@ -965,6 +991,7 @@ export function parseService(value: unknown, path = "$"): Service {
       kind: service.kind,
       enabled: service.enabled,
       ...websocketSetting,
+      ...trustSetting,
       ...redirectSettings,
       ...(service.proxy !== undefined
         ? { proxy: parseServiceProxy(service.proxy, id) }
@@ -996,6 +1023,7 @@ export function parseService(value: unknown, path = "$"): Service {
     kind: service.kind as HTTPServiceKind,
     enabled: service.enabled,
     ...websocketSetting,
+    ...trustSetting,
     ...redirectSettings,
     ...(service.proxy !== undefined
       ? { proxy: parseServiceProxy(service.proxy, id) }
@@ -1124,8 +1152,12 @@ export function subscriptionRiskLabel(
 export function supportsResponsesWebSocket(
   service: Pick<Service, "kind" | "capabilities">,
 ): boolean {
-  // The Copilot API serves Responses over HTTP only.
-  if (service.kind === "copilot_subscription") return false;
+  // The Copilot API and Factory's gateway serve Responses over HTTP only.
+  if (
+    service.kind === "copilot_subscription" ||
+    service.kind === "droid_subscription"
+  )
+    return false;
   return (
     service.kind === "codex_subscription" ||
     service.capabilities.some(

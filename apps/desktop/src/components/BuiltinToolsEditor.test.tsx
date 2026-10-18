@@ -6,6 +6,7 @@ import { defaultBuiltinTools, type BuiltinTools } from "@/builtin-tools-model";
 import { applyLocale } from "@/i18n";
 import type { RoutableService } from "@/service-model";
 import { BuiltinToolsEditor } from "./BuiltinToolsEditor";
+import { settleClosedLayer } from "../lib/test-layer-settle";
 
 const action = vi.hoisted(() => vi.fn());
 vi.mock("@/bridge", () => ({ builtinToolAction: action }));
@@ -187,6 +188,13 @@ it("separates the provider Images API from a chat model executing the tool", asy
       new Event("input", { bubbles: true }),
     );
   });
+  expect(latest?.image_generation.model).toBe("");
+  await act(async () =>
+    field("图片生成绘图模型")!.dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true }),
+    ),
+  );
+  expect(latest?.image_generation.model).toBe("gpt-image-1");
   const providers = (await choose("图片生成提供商", "")).join("\n");
   expect(providers).toContain("绘图站");
   expect(providers).not.toContain("Claude");
@@ -215,4 +223,241 @@ it("separates the provider Images API from a chat model executing the tool", asy
     model: "",
   });
   expect(field("图片生成绘图模型")).toBeNull();
+});
+
+it("offers Codex subscriptions and New API for the provider search API", async () => {
+  const responses = {
+    protocol: "openai.responses",
+    mode: "native" as const,
+    streaming: true,
+  };
+  const services: RoutableService[] = [
+    {
+      id: "newapi_main",
+      name: "主站",
+      kind: "newapi",
+      enabled: true,
+      models: ["gpt-5.5"],
+      capabilities: [responses],
+    },
+    {
+      id: "codex_team",
+      name: "Codex 团队",
+      kind: "codex_subscription",
+      enabled: true,
+      models: ["gpt-5.6-sol"],
+      capabilities: [responses],
+    },
+    {
+      id: "claude_main",
+      name: "Claude",
+      kind: "anthropic",
+      enabled: true,
+      models: ["claude-sonnet"],
+      capabilities: [responses],
+    },
+  ];
+  let latest: BuiltinTools | undefined;
+  function Editor({ services }: { services: RoutableService[] }) {
+    const [value, setValue] = useState<BuiltinTools>(() => ({
+      ...defaultBuiltinTools(),
+      web_search: {
+        enabled: true,
+        backend: "upstream",
+        service_id: "newapi_main",
+        model: "gpt-5.5",
+      },
+    }));
+    return (
+      <BuiltinToolsEditor
+        value={value}
+        services={services}
+        disabled={false}
+        onChange={(next) => {
+          latest = next;
+          setValue(next);
+        }}
+      />
+    );
+  }
+  await act(async () => root.render(<Editor services={services} />));
+  await choose("网页搜索执行方", "提供商的搜索 API");
+  // A chat model that searched through Responses also names the search
+  // model, so the provider and model carry over.
+  expect(latest?.web_search).toEqual({
+    enabled: true,
+    backend: "service_search",
+    service_id: "newapi_main",
+    model: "gpt-5.5",
+  });
+  expect(container.textContent).not.toContain("API 密钥");
+  const providers = (await choose("网页搜索提供商", "")).join("\n");
+  expect(providers).toContain("主站");
+  expect(providers).toContain("Codex 团队");
+  expect(providers).not.toContain("Claude");
+  await act(async () =>
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
+  );
+  await settleClosedLayer();
+  const test = [
+    ...container.querySelectorAll<HTMLButtonElement>("button"),
+  ].filter((button) => button.textContent === "测试工具")[0]!;
+  await act(async () => test.click());
+  expect(action).toHaveBeenCalledWith("web_search", "test", {
+    enabled: true,
+    backend: "service_search",
+    service_id: "newapi_main",
+    model: "gpt-5.5",
+  });
+
+  await act(async () => root.render(<Editor services={[services[2]!]} />));
+  expect(container.textContent).toContain(
+    "暂无已启用的 Codex 订阅或 New API 提供商",
+  );
+});
+
+it("passes on typed values only when committed and flags an incomplete tool", async () => {
+  const services: RoutableService[] = [
+    {
+      id: "codex_main",
+      name: "订阅",
+      kind: "codex_subscription",
+      enabled: true,
+      models: ["gpt-5.6-sol"],
+      capabilities: [
+        { protocol: "openai.responses", mode: "native", streaming: true },
+      ],
+    },
+  ];
+  const changed = vi.fn();
+  function Editor() {
+    const [value, setValue] = useState<BuiltinTools>(defaultBuiltinTools);
+    return (
+      <BuiltinToolsEditor
+        value={value}
+        services={services}
+        disabled={false}
+        onChange={(next) => {
+          changed(next);
+          setValue(next);
+        }}
+      />
+    );
+  }
+  const field = (label: string) =>
+    container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+  const type = async (input: HTMLInputElement, text: string) =>
+    act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  const warning = () =>
+    [...container.querySelectorAll('[role="status"]')].find((element) =>
+      element.textContent?.startsWith("请填写"),
+    )?.textContent;
+  await act(async () => root.render(<Editor />));
+  expect(warning()).toBeUndefined();
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="启用网页搜索接管"]')!
+      .click(),
+  );
+  expect(warning()).toContain("API 提供商和执行模型");
+  await choose("网页搜索提供商", "Codex订阅");
+  await settleClosedLayer();
+  expect(warning()).toContain("请填写执行模型");
+
+  await type(field("网页搜索执行模型"), "gpt-5");
+  expect(field("网页搜索执行模型").value).toBe("gpt-5");
+  expect(changed).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      web_search: {
+        enabled: true,
+        backend: "upstream",
+        service_id: "codex_main",
+        model: "",
+      },
+    }),
+  );
+  await type(field("网页搜索执行模型"), " gpt-5.6-sol ");
+  await act(async () =>
+    field("网页搜索执行模型").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    ),
+  );
+  expect(changed.mock.lastCall?.[0].web_search.model).toBe("gpt-5.6-sol");
+  expect(field("网页搜索执行模型").value).toBe("gpt-5.6-sol");
+  expect(warning()).toBeUndefined();
+
+  await choose("网页搜索执行方", "Tavily 兼容 API");
+  await settleClosedLayer();
+  const calls = changed.mock.calls.length;
+  await type(field("网页搜索 API 地址"), "https://api.tav");
+  expect(changed).toHaveBeenCalledTimes(calls);
+  expect(warning()).toContain("请填写API 基础地址");
+  await type(field("网页搜索 API 地址"), "https://api.tavily.com");
+  await act(async () =>
+    field("网页搜索 API 地址").dispatchEvent(
+      new FocusEvent("focusout", { bubbles: true }),
+    ),
+  );
+  expect(changed.mock.lastCall?.[0].web_search.base_url).toBe(
+    "https://api.tavily.com",
+  );
+  expect(warning()).toBeUndefined();
+});
+
+it("offers MiniMax and its image models for the provider Images API", async () => {
+  const services: RoutableService[] = [
+    {
+      id: "minimax_plan",
+      name: "MiniMax 订阅",
+      kind: "minimax_coding",
+      enabled: true,
+      models: ["MiniMax-M3"],
+      capabilities: [],
+    },
+  ];
+  function Editor() {
+    const [value, setValue] = useState<BuiltinTools>(() => ({
+      ...defaultBuiltinTools(),
+      image_generation: {
+        enabled: true,
+        backend: "service_images",
+        service_id: "minimax_plan",
+        model: "",
+      },
+    }));
+    return (
+      <BuiltinToolsEditor
+        value={value}
+        services={services}
+        disabled={false}
+        onChange={setValue}
+      />
+    );
+  }
+  await act(async () => root.render(<Editor />));
+  expect((await choose("图片生成提供商", "")).join("\n")).toContain(
+    "MiniMax 订阅",
+  );
+  await act(async () =>
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
+  );
+  // Radix hands focus back to the provider trigger a tick after closing; a
+  // model list opened before that is dismissed as focus moving outside it.
+  await settleClosedLayer();
+  await act(async () =>
+    container
+      .querySelector<HTMLInputElement>('[aria-label="图片生成绘图模型"]')!
+      .click(),
+  );
+  expect(
+    [...document.querySelectorAll('[role="option"]')].map((option) =>
+      option.getAttribute("aria-label"),
+    ),
+  ).toEqual(["image-01", "image-01-live"]);
 });

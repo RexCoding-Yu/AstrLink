@@ -231,7 +231,41 @@ func (scanner *usageScanner) parseEventJSON(payload []byte) {
 		scanner.parseAnthropic(document)
 	case contract.ProtocolGoogleGenerateContent:
 		scanner.parseGemini(document)
+	case contract.ProtocolOpenAIEmbeddings, contract.ProtocolRerank:
+		scanner.parseInputOnlyUsage(document)
 	}
+}
+
+// parseInputOnlyUsage reads embeddings and rerank usage. Neither generates
+// output: OpenAI embeddings omit completion_tokens and Jina-style rerank
+// reports only total_tokens.
+func (scanner *usageScanner) parseInputOnlyUsage(document map[string]json.RawMessage) {
+	var payload struct {
+		PromptTokens     *int `json:"prompt_tokens"`
+		CompletionTokens *int `json:"completion_tokens"`
+		TotalTokens      *int `json:"total_tokens"`
+	}
+	if json.Unmarshal(document["usage"], &payload) != nil {
+		return
+	}
+	output := 0
+	if payload.CompletionTokens != nil && *payload.CompletionTokens > 0 {
+		output = *payload.CompletionTokens
+	}
+	input := payload.PromptTokens
+	if input == nil && payload.TotalTokens != nil {
+		remaining := *payload.TotalTokens - output
+		input = &remaining
+	}
+	if input == nil || *input < 0 {
+		return
+	}
+	total := *input + output
+	if payload.TotalTokens != nil {
+		total = *payload.TotalTokens
+	}
+	scanner.usage = normalizeOpenAIStyleUsage(*input, output, total, nil)
+	scanner.complete = true
 }
 
 func (scanner *usageScanner) parseOpenAIResponses(document map[string]json.RawMessage) {

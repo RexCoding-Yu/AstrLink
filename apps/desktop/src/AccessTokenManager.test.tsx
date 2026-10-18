@@ -25,7 +25,10 @@ import {
   type AccessTokenCatalog,
 } from "./AccessTokenManager";
 import type { AccessTokenSummary } from "./access-token-model";
-import type { ClientConfigStatus } from "./client-config-model";
+import type {
+  ClientConfigOverview,
+  ClientConfigStatus,
+} from "./client-config-model";
 import {
   finishExitAnimations,
   installDialogAnimations,
@@ -50,23 +53,34 @@ const firstSecret = `astr_${"A".repeat(43)}`;
 function clientStatuses(
   claudeToken: string | null,
   codexToken: string | null = null,
-): ClientConfigStatus[] {
-  return [
+  wsl: ClientConfigStatus[] = [],
+): ClientConfigOverview {
+  const clients: ClientConfigStatus[] = [
     {
       client: "claude",
+      wsl: null,
       detected: true,
       paths: ["/Users/me/.claude/settings.json"],
       state: claudeToken ? "configured" : "not_configured",
       token_id: claudeToken,
+      models: {},
     },
     {
       client: "codex",
+      wsl: null,
       detected: true,
       paths: ["/Users/me/.codex/config.toml"],
       state: codexToken ? "modified" : "not_configured",
       token_id: codexToken,
+      models: {},
     },
   ];
+  return {
+    clients: [...clients, ...wsl],
+    wsl_unchecked: [],
+    wsl_localhost: false,
+    cc_switch_wsl: { claude: null, codex: null },
+  };
 }
 
 function readyCatalog(items: AccessTokenSummary[]): AccessTokenCatalog {
@@ -256,12 +270,23 @@ describe("AccessTokenManager", () => {
 
   it("removes a deleted token's client configs unless asked to keep them", async () => {
     bridgeMocks.getClientConfigStatus.mockResolvedValue(
-      clientStatuses(firstToken.id, firstToken.id),
+      clientStatuses(firstToken.id, firstToken.id, [
+        {
+          client: "claude",
+          wsl: "Ubuntu",
+          detected: true,
+          paths: [String.raw`\\wsl$\Ubuntu\home\me\.claude\settings.json`],
+          state: "configured",
+          token_id: firstToken.id,
+          models: {},
+        },
+      ]),
     );
     bridgeMocks.deleteAccessToken.mockResolvedValue(undefined);
     bridgeMocks.removeClientConfig
       .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error("unable to write config.toml"));
+      .mockRejectedValueOnce(new Error("unable to write config.toml"))
+      .mockResolvedValueOnce(undefined);
     await renderManager(readyCatalog([firstToken, secondToken]));
 
     await act(async () => button("删除", row(firstToken.name)).click());
@@ -277,8 +302,9 @@ describe("AccessTokenManager", () => {
     });
     expect(bridgeMocks.deleteAccessToken).toHaveBeenCalledWith(firstToken.id);
     expect(bridgeMocks.removeClientConfig.mock.calls).toEqual([
-      ["claude"],
-      ["codex"],
+      ["claude", null],
+      ["codex", null],
+      ["claude", "Ubuntu"],
     ]);
 
     bridgeMocks.removeClientConfig.mockClear();

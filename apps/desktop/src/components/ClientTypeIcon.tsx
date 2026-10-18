@@ -7,7 +7,7 @@ import {
   GithubCopilotMono,
   KiloCodeMono,
   OpenClawColor,
-  PiMono,
+  PiColor,
   RooCodeMono,
 } from "@/components/brand-icons";
 import { Bot } from "@/components/icons";
@@ -32,7 +32,7 @@ const clients: Record<
   opencode: { name: "OpenCode", Mark: vendorMarks.opencode },
   openclaw: { name: "OpenClaw", Mark: OpenClawColor },
   cline: { name: "Cline", Mark: ClineMono },
-  pi: { name: "Pi", Mark: PiMono },
+  pi: { name: "Pi", Mark: PiColor },
   deepseek_harness: { name: "DeepSeek Harness", Mark: vendorMarks.deepseek },
   codewhale: { name: "Codewhale" },
   reasonix: { name: "Reasonix" },

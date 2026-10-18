@@ -23,19 +23,20 @@ func (id SessionID) Validate() error {
 type RequestEventKind string
 
 const (
-	RequestEventAccepted      RequestEventKind = "accepted"
-	RequestEventModelRedirect RequestEventKind = "model_redirect"
-	RequestEventPrivacy       RequestEventKind = "privacy"
-	RequestEventRouted        RequestEventKind = "routed"
-	RequestEventUpstream      RequestEventKind = "upstream"
-	RequestEventRestore       RequestEventKind = "restore"
-	RequestEventCompleted     RequestEventKind = "completed"
+	RequestEventAccepted         RequestEventKind = "accepted"
+	RequestEventModelRedirect    RequestEventKind = "model_redirect"
+	RequestEventPrivacy          RequestEventKind = "privacy"
+	RequestEventImageCompression RequestEventKind = "image_compression"
+	RequestEventRouted           RequestEventKind = "routed"
+	RequestEventUpstream         RequestEventKind = "upstream"
+	RequestEventRestore          RequestEventKind = "restore"
+	RequestEventCompleted        RequestEventKind = "completed"
 )
 
 func (kind RequestEventKind) Valid() bool {
 	switch kind {
-	case RequestEventAccepted, RequestEventModelRedirect, RequestEventPrivacy, RequestEventRouted,
-		RequestEventUpstream, RequestEventRestore, RequestEventCompleted:
+	case RequestEventAccepted, RequestEventModelRedirect, RequestEventPrivacy, RequestEventImageCompression,
+		RequestEventRouted, RequestEventUpstream, RequestEventRestore, RequestEventCompleted:
 		return true
 	default:
 		return false
@@ -294,7 +295,10 @@ type PrivacyDecision string
 
 const (
 	// PrivacyDecisionNone means no privacy policy applied to the request.
-	PrivacyDecisionNone     PrivacyDecision = "none"
+	PrivacyDecisionNone PrivacyDecision = "none"
+	// PrivacyDecisionTrusted means the policy applied, but the request went
+	// uninspected to a provider the user trusts with the original text.
+	PrivacyDecisionTrusted  PrivacyDecision = "trusted"
 	PrivacyDecisionAllow    PrivacyDecision = "allow"
 	PrivacyDecisionWarn     PrivacyDecision = "warn"
 	PrivacyDecisionRedact   PrivacyDecision = "redact"
@@ -317,28 +321,57 @@ func (decision PrivacyDecision) Severity() int {
 	switch decision {
 	case PrivacyDecisionNone:
 		return 1
-	case PrivacyDecisionAllow:
+	case PrivacyDecisionTrusted:
 		return 2
-	case PrivacyDecisionWarn:
+	case PrivacyDecisionAllow:
 		return 3
-	case PrivacyDecisionFailOpen:
+	case PrivacyDecisionWarn:
 		return 4
-	case PrivacyDecisionRedact:
+	case PrivacyDecisionFailOpen:
 		return 5
-	case PrivacyDecisionBlock:
+	case PrivacyDecisionRedact:
 		return 6
+	case PrivacyDecisionBlock:
+		return 7
 	default:
 		return 0
 	}
 }
 
 // PrivacyFinding says where accepted matches of one kind were found. It is
-// stored for block and redact so a withheld body can still be explained; it
-// never contains the matched value or a placeholder.
+// stored for warn, redact and block, so a record says what the policy found
+// even where the body is withheld; it never contains the matched value or a
+// placeholder.
 type PrivacyFinding struct {
 	Kind     CanonicalKind `json:"kind"`
 	JSONPath string        `json:"json_path"`
 	Count    int           `json:"count"`
+	// Confidence is nil when the regex detector decided and on records
+	// written before confidence was kept.
+	Confidence *PrivacyConfidence `json:"confidence,omitempty"`
+}
+
+// PrivacyConfidence is the range of local model confidence over the matches
+// an entry counts, beside the policy threshold they were judged against.
+type PrivacyConfidence struct {
+	Min       float64 `json:"min"`
+	Max       float64 `json:"max"`
+	Threshold float64 `json:"threshold"`
+}
+
+func (confidence *PrivacyConfidence) validate() error {
+	if confidence == nil {
+		return nil
+	}
+	for _, value := range []float64{confidence.Min, confidence.Max, confidence.Threshold} {
+		if math.IsNaN(value) || value < 0 || value > 1 {
+			return fmt.Errorf("privacy confidence must be between 0 and 1")
+		}
+	}
+	if confidence.Min > confidence.Max {
+		return fmt.Errorf("privacy confidence min must not exceed max")
+	}
+	return nil
 }
 
 func validatePrivacyFindings(findings []PrivacyFinding) error {
@@ -355,6 +388,68 @@ func validatePrivacyFindings(findings []PrivacyFinding) error {
 		if finding.Count < 1 {
 			return fmt.Errorf("privacy finding counts must be positive")
 		}
+		if err := finding.Confidence.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PrivacyIgnoreReason says why the policy left a match in the request.
+type PrivacyIgnoreReason string
+
+const (
+	PrivacyIgnoreKindDisabled  PrivacyIgnoreReason = "kind_disabled"
+	PrivacyIgnoreLowConfidence PrivacyIgnoreReason = "low_confidence"
+	PrivacyIgnoreAllowlisted   PrivacyIgnoreReason = "allowlisted"
+)
+
+func (reason PrivacyIgnoreReason) Valid() bool {
+	switch reason {
+	case PrivacyIgnoreKindDisabled, PrivacyIgnoreLowConfidence, PrivacyIgnoreAllowlisted:
+		return true
+	default:
+		return false
+	}
+}
+
+// PrivacyIgnored counts the matches of one kind the policy left in the
+// request for one reason, whatever it decided. A match that is already a
+// placeholder is not counted: it is not private content. Like
+// PrivacyFinding it never contains the matched value.
+type PrivacyIgnored struct {
+	Kind   CanonicalKind       `json:"kind"`
+	Reason PrivacyIgnoreReason `json:"reason"`
+	Count  int                 `json:"count"`
+	// Confidence is nil when the regex detector decided and on records
+	// written before confidence was kept.
+	Confidence *PrivacyConfidence `json:"confidence,omitempty"`
+}
+
+func validatePrivacyIgnored(ignored []PrivacyIgnored) error {
+	if len(ignored) > MaxPrivacyFindings {
+		return fmt.Errorf("privacy_ignored must contain at most %d items", MaxPrivacyFindings)
+	}
+	type ignoredKey struct {
+		kind   CanonicalKind
+		reason PrivacyIgnoreReason
+	}
+	seen := make(map[ignoredKey]struct{}, len(ignored))
+	for _, entry := range ignored {
+		if !entry.Kind.Valid() || !entry.Reason.Valid() {
+			return fmt.Errorf("privacy ignored kind or reason is invalid")
+		}
+		if entry.Count < 1 {
+			return fmt.Errorf("privacy ignored counts must be positive")
+		}
+		if err := entry.Confidence.validate(); err != nil {
+			return err
+		}
+		key := ignoredKey{kind: entry.Kind, reason: entry.Reason}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("privacy ignored kind and reason must be unique")
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }
@@ -459,7 +554,10 @@ type RequestRecord struct {
 	ModelRedirect *RequestModelRedirect `json:"model_redirect,omitempty"`
 	// ModelRouting records the selected member for a virtual model group.
 	ModelRouting *ModelRoutingDecision `json:"model_routing,omitempty"`
-	// ReasoningEffort is the explicitly requested level; nil means unspecified or historical.
+	// ReasoningEffort is the level the final attempt sent: the explicitly
+	// requested one, or the gateway's when its reasoning settings changed it
+	// ("none" when they turned reasoning off). Nil means unspecified or
+	// historical.
 	ReasoningEffort *string    `json:"reasoning_effort"`
 	Streaming       bool       `json:"streaming"`
 	RouteID         *RouteID   `json:"route_id"`
@@ -489,8 +587,11 @@ type RequestRecord struct {
 	PrivacyRestore *PrivacyRestoreSummary `json:"privacy_restore"`
 	// PrivacyDecision is nil on historical records and while the decision is
 	// still pending.
-	PrivacyDecision    *PrivacyDecision `json:"privacy_decision,omitempty"`
-	PrivacyFindings    []PrivacyFinding `json:"privacy_findings,omitempty"`
+	PrivacyDecision *PrivacyDecision `json:"privacy_decision,omitempty"`
+	PrivacyFindings []PrivacyFinding `json:"privacy_findings,omitempty"`
+	// PrivacyIgnored is empty when nothing was left in place and on records
+	// written before ignored matches were kept.
+	PrivacyIgnored     []PrivacyIgnored `json:"privacy_ignored,omitempty"`
 	SessionID          *SessionID       `json:"session_id"`
 	PreviousResponseID *string          `json:"previous_response_id"`
 	OutputResponseID   *string          `json:"output_response_id"`
@@ -636,6 +737,9 @@ func (record RequestRecord) Validate() error {
 	if err := validatePrivacyFindings(record.PrivacyFindings); err != nil {
 		return err
 	}
+	if err := validatePrivacyIgnored(record.PrivacyIgnored); err != nil {
+		return err
+	}
 	if err := validateConversionDiagnostics(record.ConversionDiagnostics); err != nil {
 		return err
 	}
@@ -712,8 +816,9 @@ func (record RequestRecord) EffectiveStatus() RequestStatus {
 
 type RequestSession struct {
 	// ClientType mirrors the latest call, like the model and provider fields.
-	ClientType    ClientType `json:"client_type,omitempty"`
-	ID            SessionID  `json:"id"`
+	ClientType ClientType `json:"client_type,omitempty"`
+	ID         SessionID  `json:"id"`
+	// Title is empty when no call has a preview or model; clients name it.
 	Title         string     `json:"title"`
 	StartedAt     time.Time  `json:"started_at"`
 	LastStartedAt time.Time  `json:"last_started_at"`
@@ -735,6 +840,9 @@ type RequestSession struct {
 	InputProtocol      ProtocolID            `json:"input_protocol"`
 	ServiceID          *ServiceID            `json:"service_id"`
 	LocalAccessTokenID *AccessTokenID        `json:"local_access_token_id"`
+	// PrivacyWarned is set when the warn action let at least one call of the
+	// session through, so the list can mark it without loading every call.
+	PrivacyWarned bool `json:"privacy_warned,omitempty"`
 }
 
 func (session RequestSession) Validate() error {
@@ -744,7 +852,7 @@ func (session RequestSession) Validate() error {
 	if err := session.ID.Validate(); err != nil {
 		return err
 	}
-	if err := validateBoundedText("title", session.Title, MaxSessionTitleRunes, false); err != nil {
+	if err := validateBoundedText("title", session.Title, MaxSessionTitleRunes, true); err != nil {
 		return err
 	}
 	if session.StartedAt.IsZero() || session.LastStartedAt.IsZero() {
@@ -866,18 +974,27 @@ func ClampRunes(value string, maxRunes int) string {
 type PurgeScope string
 
 const (
-	PurgeScopeAll    PurgeScope = "all"
-	PurgeScopeBefore PurgeScope = "before"
+	PurgeScopeAll      PurgeScope = "all"
+	PurgeScopeBefore   PurgeScope = "before"
+	PurgeScopeSessions PurgeScope = "sessions"
 )
 
+// MaxPurgeSessionIDs bounds one sessions purge; the desktop sends the
+// conversations an operator selected in the list it has loaded.
+const MaxPurgeSessionIDs = 1000
+
 func (scope PurgeScope) Valid() bool {
-	return scope == PurgeScopeAll || scope == PurgeScopeBefore
+	return scope == PurgeScopeAll || scope == PurgeScopeBefore || scope == PurgeScopeSessions
 }
 
 type PurgeRequest struct {
-	Scope   PurgeScope `json:"scope"`
-	Before  *time.Time `json:"before,omitempty"`
-	Confirm bool       `json:"confirm"`
+	Scope  PurgeScope `json:"scope"`
+	Before *time.Time `json:"before,omitempty"`
+	// SessionIDs names the conversations a sessions purge deletes, as the
+	// session list identifies them: a root without a session id is its own
+	// conversation, named by its request id.
+	SessionIDs []SessionID `json:"session_ids,omitempty"`
+	Confirm    bool        `json:"confirm"`
 }
 
 func (request PurgeRequest) Validate() error {
@@ -887,6 +1004,9 @@ func (request PurgeRequest) Validate() error {
 	if !request.Confirm {
 		return fmt.Errorf("confirm must be true")
 	}
+	if request.Scope != PurgeScopeSessions && len(request.SessionIDs) > 0 {
+		return fmt.Errorf("session_ids must be omitted unless scope is sessions")
+	}
 	switch request.Scope {
 	case PurgeScopeBefore:
 		if request.Before == nil || request.Before.IsZero() {
@@ -895,6 +1015,26 @@ func (request PurgeRequest) Validate() error {
 	case PurgeScopeAll:
 		if request.Before != nil {
 			return fmt.Errorf("before must be omitted when scope is all")
+		}
+	case PurgeScopeSessions:
+		if request.Before != nil {
+			return fmt.Errorf("before must be omitted when scope is sessions")
+		}
+		if len(request.SessionIDs) == 0 {
+			return fmt.Errorf("session_ids is required when scope is sessions")
+		}
+		if len(request.SessionIDs) > MaxPurgeSessionIDs {
+			return fmt.Errorf("session_ids must contain at most %d ids", MaxPurgeSessionIDs)
+		}
+		seen := make(map[SessionID]struct{}, len(request.SessionIDs))
+		for _, id := range request.SessionIDs {
+			if err := id.Validate(); err != nil {
+				return err
+			}
+			if _, repeated := seen[id]; repeated {
+				return fmt.Errorf("session_ids must not repeat %q", id)
+			}
+			seen[id] = struct{}{}
 		}
 	}
 	return nil

@@ -82,11 +82,27 @@ func (style PlaceholderStyle) Effective() PlaceholderStyle {
 	return style
 }
 
-// PolicyKindRule is the per-kind detection switch and placeholder shape.
+// PolicyKindRule is the per-kind detection switch, placeholder shape, and
+// warning notification.
 type PolicyKindRule struct {
 	Kind    string           `json:"kind"`
 	Enabled bool             `json:"enabled"`
 	Style   PlaceholderStyle `json:"style"`
+	// Notify lets a value of this kind that the warn action lets through
+	// raise a desktop notification. Off, the kind is still detected and its
+	// findings recorded; only the notification is left out. A rule written
+	// before the field existed notifies.
+	Notify bool `json:"notify"`
+}
+
+func (rule *PolicyKindRule) UnmarshalJSON(data []byte) error {
+	type wire PolicyKindRule
+	decoded := wire{Notify: true}
+	if err := decodeStrictContractJSON(data, &decoded); err != nil {
+		return err
+	}
+	*rule = PolicyKindRule(decoded)
+	return nil
 }
 
 // PrivacyKinds is the canonical ordering of every kind a detector may emit.
@@ -144,9 +160,10 @@ func PlaceholderStyleLocked(kind string) bool {
 
 // DefaultPrivacyKindRules seeds one rule per kind.
 //
-// url and ip_address default to disabled: they are the dominant false-positive
-// source for coding agents, whose prompts are dense with documentation links,
-// loopback addresses, and repository URLs that carry no user PII.
+// url, ip_address, and private_date default to disabled: they are the dominant
+// false-positive sources for coding agents, whose prompts are dense with
+// documentation links, loopback addresses, repository URLs, and log or release
+// dates that carry no user PII. Every kind notifies.
 func DefaultPrivacyKindRules() []PolicyKindRule {
 	rules := make([]PolicyKindRule, 0, len(PrivacyKinds()))
 	for _, kind := range PrivacyKinds() {
@@ -154,8 +171,8 @@ func DefaultPrivacyKindRules() []PolicyKindRule {
 		if PlaceholderStyleLocked(kind) {
 			style = PlaceholderStyleToken
 		}
-		enabled := kind != "url" && kind != "ip_address"
-		rules = append(rules, PolicyKindRule{Kind: kind, Enabled: enabled, Style: style})
+		enabled := kind != "url" && kind != "ip_address" && kind != "private_date"
+		rules = append(rules, PolicyKindRule{Kind: kind, Enabled: enabled, Style: style, Notify: true})
 	}
 	return rules
 }

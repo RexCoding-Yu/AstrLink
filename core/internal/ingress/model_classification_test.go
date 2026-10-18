@@ -223,6 +223,44 @@ func TestModelRoutingExistingModelClassificationEndToEnd(t *testing.T) {
 	}
 }
 
+// Under a redacting policy the existing-model classifier receives the redacted
+// text, its own call is not inspected a second time, and the routing record
+// lists the privacy check of the request's provider attempt alone.
+func TestModelRoutingExistingModelClassifiesRedactedText(t *testing.T) {
+	store := newRedirectSettingsStore()
+	handler, outbound := classificationRoutingHandler(t, existingModelSettings(), cloudTestGroup(nil), store)
+	handler.privacyFilter = testPrivacyEngine(t, privacyPolicyRedact(), nil)
+	response := serveCloudRouting(t, handler, `{"model":"astrlink/superclaude","input":"write go code for alice@example.com"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	calls := outbound()
+	if len(calls) != 2 {
+		t.Fatalf("upstream calls = %d, want classification plus business call", len(calls))
+	}
+	for _, call := range calls {
+		// The classification body is JSON-encoded, which escapes the
+		// placeholder's angle brackets.
+		if strings.Contains(call.body, "alice@example.com") || !strings.Contains(call.body, "PRIVATE_EMAIL_") {
+			t.Fatalf("outbound body = %q, want the redacted text", call.body)
+		}
+	}
+	decision := store.records.records[0].ModelRouting
+	if decision == nil || decision.MemberID != "strong" {
+		t.Fatalf("decision = %+v, want the coding rule's member", decision)
+	}
+	// The classification call is the record's first attempt; the business
+	// call is the second, and only its check is listed.
+	if len(decision.PrivacyAttempts) != 1 {
+		t.Fatalf("privacy attempts = %+v, want the business attempt alone", decision.PrivacyAttempts)
+	}
+	attempt := decision.PrivacyAttempts[0]
+	if attempt.AttemptIndex != 2 || attempt.ServiceID != "endpoint_test" ||
+		attempt.Decision != contract.ModelRoutingPrivacyAllow || attempt.FindingCount != 1 || attempt.ErrorCode != "" {
+		t.Fatalf("privacy attempt = %+v", attempt)
+	}
+}
+
 // The production path must send instructions that actually ask for the JSON
 // shape the strict parser requires: the constraint-compiled shape demand and
 // schema section from the immutable label snapshot — never the legacy

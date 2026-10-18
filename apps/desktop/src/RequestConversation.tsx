@@ -25,10 +25,16 @@ import { MarkdownContent } from "@/components/MarkdownContent";
 import { ModelBrandIcon } from "@/components/ModelBrandIcon";
 import { ModelLabel } from "@/components/ModelLabel";
 import { StatusDot, type StatusTone } from "@/components/StatusDot";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 import { copyButtonLabel, type CopyFeedback } from "./copy-feedback";
+import {
+  compactFilePaths,
+  splitFilePaths,
+  type FilePathSpan,
+} from "./file-path-spans";
 import { formatCompactNumber } from "./format-compact-number";
 import { i18n, useT } from "./i18n";
 import { useLiveClock } from "./live-clock";
@@ -59,6 +65,7 @@ import {
 import {
   inspectorChainRows,
   splitPrivacyHighlights,
+  type PrivacyHighlightSpan,
   type TrajectoryRow,
   type TrajectoryTone,
 } from "./request-trajectory-model";
@@ -933,7 +940,14 @@ function ReplyIdentity({
 function UserBlock({ turn }: { turn: ConversationTurn }) {
   const t = useT();
   const { user } = turn;
-  const spans = useMemo(() => splitPrivacyHighlights(user.text), [user.text]);
+  const spans = useMemo(
+    () =>
+      splitPrivacyHighlights(user.text).flatMap(
+        (span): Array<PrivacyHighlightSpan & FilePathSpan> =>
+          span.kind ? [span] : splitFilePaths(span.text),
+      ),
+    [user.text],
+  );
   const hits = spans.filter((span) => span.kind).length;
   const pasted = user.wrappers.filter((w) => w.kind === "pasted");
   const system = user.wrappers.filter((w) => w.kind === "system").length;
@@ -955,6 +969,16 @@ function UserBlock({ turn }: { turn: ConversationTurn }) {
               >
                 {span.text}
               </mark>
+            ) : span.file ? (
+              <Badge
+                className="mx-0.5 max-w-full bg-background align-baseline font-mono font-normal text-text-secondary"
+                data-testid="conversation-file"
+                key={index}
+                title={span.text}
+                variant="outline"
+              >
+                <span className="truncate">{span.file}</span>
+              </Badge>
             ) : (
               <span key={index}>{span.text}</span>
             ),
@@ -1419,7 +1443,7 @@ function Outline({
                     current && "text-foreground",
                   )}
                 >
-                  {turn.user.text || "—"}
+                  {compactFilePaths(turn.user.text) || "—"}
                 </span>
                 <span className="text-micro tabular-nums text-muted-foreground">
                   {t("conversation.calls", { count: turn.stats.calls })}

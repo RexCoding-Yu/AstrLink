@@ -7,7 +7,6 @@ export function ValueTransition({
   asChild = false,
   initialOpacity = 0.45,
   duration = 180,
-  offsetY = 0,
   children,
   ...props
 }: HTMLAttributes<HTMLSpanElement> & {
@@ -15,7 +14,6 @@ export function ValueTransition({
   asChild?: boolean;
   initialOpacity?: number;
   duration?: number;
-  offsetY?: number;
 }) {
   const element = useRef<HTMLSpanElement>(null);
   const previous = useRef(valueKey);
@@ -23,20 +21,16 @@ export function ValueTransition({
     if (previous.current === valueKey) return;
     previous.current = valueKey;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    // Navigation can use a small compositor-only slide. Value refreshes retain
-    // their opacity-only reveal; neither variant remounts or measures content.
-    const keyframes = offsetY
-      ? [
-          { opacity: initialOpacity, transform: `translateY(${offsetY}px)` },
-          { opacity: 1, transform: "none" },
-        ]
-      : [{ opacity: initialOpacity }, { opacity: 1 }];
-    const animation = element.current?.animate?.(keyframes, {
-      duration,
-      easing: offsetY ? "cubic-bezier(0.22, 1, 0.36, 1)" : "ease-out",
-    });
+    // Opacity only, navigation included; it neither remounts nor measures
+    // content. While a page slides, WKWebView moves its scrollers in fractions
+    // of a pixel and the rest in whole pixels, so the two drift a pixel apart
+    // and snap back when the slide ends; see panel-reveal in globals.css.
+    const animation = element.current?.animate?.(
+      [{ opacity: initialOpacity }, { opacity: 1 }],
+      { duration, easing: "ease-out" },
+    );
     return () => animation?.cancel();
-  }, [valueKey, initialOpacity, duration, offsetY]);
+  }, [valueKey, initialOpacity, duration]);
 
   const Component = asChild ? Slot.Root : "span";
   return (

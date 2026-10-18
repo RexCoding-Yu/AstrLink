@@ -144,6 +144,24 @@ func TestUsageScannerProtocols(t *testing.T) {
 			},
 		},
 		{
+			name:     "embeddings prompt tokens only",
+			protocol: contract.ProtocolOpenAIEmbeddings,
+			chunks:   []string{`{"object":"list","data":[],"usage":{"prompt_tokens":8,"total_tokens":8}}`},
+			want:     &contract.Usage{InputTokens: 8, OutputTokens: 0, TotalTokens: 8},
+		},
+		{
+			name:     "rerank total tokens only",
+			protocol: contract.ProtocolRerank,
+			chunks:   []string{`{"results":[],"usage":{"total_tokens":12}}`},
+			want:     &contract.Usage{InputTokens: 12, OutputTokens: 0, TotalTokens: 12},
+		},
+		{
+			name:     "rerank without usage yields null",
+			protocol: contract.ProtocolRerank,
+			chunks:   []string{`{"results":[]}`},
+			want:     nil,
+		},
+		{
 			name:     "absent usage yields null",
 			protocol: contract.ProtocolOpenAIChat,
 			chunks:   []string{`{"id":"c","choices":[]}`},

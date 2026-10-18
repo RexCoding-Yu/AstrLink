@@ -26,11 +26,16 @@ function readSource(name: string): string {
   return readFileSync(controlAPIDirectory + name, "utf8");
 }
 
-/** Codes a file passes to `writeError`/`writeErrorDetails`. */
+/**
+ * Codes a file passes to `writeError`/`writeErrorDetails`: the literal third
+ * argument, after the writer and the status. Reading the argument itself keeps
+ * a string on the following lines from passing for the code of a call whose
+ * code is a variable.
+ */
 function emittedCodes(source: string): string[] {
   const codes = new Set<string>();
   for (const match of source.matchAll(
-    /writeError(?:Details)?\([\s\S]{0,200}?"([a-z][a-z0-9_]{2,})"/g,
+    /writeError(?:Details)?\(\s*\w+,\s*[^,()]+(?:\([^()]*\))?,\s*"([a-z][a-z0-9_]{2,})"/g,
   )) {
     codes.add(match[1]);
   }

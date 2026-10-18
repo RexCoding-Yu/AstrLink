@@ -63,6 +63,7 @@ func (store *Store) PutSubscriptionAccount(ctx context.Context, account contract
 		service.ResponsesWebSocketEnabled = existing.Service.ResponsesWebSocketEnabled
 		service.ModelRedirects = existing.Service.ModelRedirects
 		service.Enabled = existing.Service.Enabled
+		service.PrivacyTrusted = existing.Service.PrivacyTrusted
 		service.FailurePolicy = existing.Service.FailurePolicy
 		service.Models = append([]string{}, existing.Service.Models...)
 		service.CreatedAt = existing.Service.CreatedAt
@@ -94,7 +95,7 @@ func (store *Store) DeleteSubscriptionAccount(ctx context.Context, id contract.S
 	if err := id.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", storagecontract.ErrInvalidArgument, err)
 	}
-	result, err := store.db.ExecContext(ctx, `DELETE FROM services WHERE id = ? AND json_extract(document_json, '$.kind') IN ('codex_subscription', 'claude_subscription', 'grok_subscription', 'antigravity_subscription', 'copilot_subscription')`, id)
+	result, err := store.db.ExecContext(ctx, `DELETE FROM services WHERE id = ? AND json_extract(document_json, '$.kind') IN ('codex_subscription', 'claude_subscription', 'grok_subscription', 'antigravity_subscription', 'copilot_subscription', 'droid_subscription')`, id)
 	if err != nil {
 		return fmt.Errorf("delete subscription account: %w", err)
 	}

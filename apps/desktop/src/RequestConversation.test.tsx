@@ -774,6 +774,44 @@ describe("RequestConversation", () => {
     ).not.toBeNull();
   });
 
+  it("names a dropped file by its file name and copies the message as sent", async () => {
+    const path = "/Users/me/Desktop/Snapzy/Snapzy_2026-10-12_22-45-20_345.png";
+    bridgeMocks.getRequestAuditContent.mockImplementation(async (id: string) =>
+      content(
+        id,
+        anthropicRequest(`${path}这是什么`),
+        anthropicResponse([{ type: "text", text: "一张终端截图。" }]),
+      ),
+    );
+    vi.mocked(copyFeedback.copy).mockClear();
+    render({ turns: [calls[4]!] });
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain("一张终端截图。");
+    });
+    const user = container.querySelector('[data-testid="conversation-user"]')!;
+    const file = user.querySelector('[data-testid="conversation-file"]');
+    expect(file?.textContent).toBe("Snapzy_2026-10-12_22-45-20_345.png");
+    expect(file?.getAttribute("title")).toBe(path);
+    expect(user.textContent).toBe("Snapzy_2026-10-12_22-45-20_345.png这是什么");
+    expect(
+      container.querySelector('[data-testid="conversation-outline"]')
+        ?.textContent,
+    ).toContain("Snapzy_2026-10-12_22-45-20_345.png这是什么");
+    expect(container.textContent).not.toContain("/Users/me");
+    const copy = [
+      ...container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="conversation-turn"] button',
+      ),
+    ].find((button) => button.textContent === "复制")!;
+    await act(async () => {
+      copy.click();
+    });
+    expect(copyFeedback.copy).toHaveBeenCalledWith(
+      expect.stringMatching(/^conversation-user:/),
+      `${path}这是什么`,
+    );
+  });
+
   it("falls back to the preview and says the bodies are locked", async () => {
     bridgeMocks.getRequestAuditContent.mockImplementation(
       async (id: string) =>

@@ -225,10 +225,9 @@ func TestPrivacyModelCollectionRoutesAndSelectedDeleteGuard(t *testing.T) {
 	}
 	var catalog contract.PrivacyModelCatalogResponse
 	decode(t, response, &catalog)
-	if len(catalog.Items) != 2 ||
+	if len(catalog.Items) != 1 ||
 		catalog.Items[0].ID != privacymodel.CatalogAstrLinkGuard ||
-		!catalog.Items[0].Recommended ||
-		catalog.Items[1].ID != privacymodel.CatalogPPLXPIITracer {
+		!catalog.Items[0].Recommended {
 		t.Fatalf("catalog=%#v", catalog)
 	}
 

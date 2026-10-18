@@ -157,8 +157,14 @@ func (forwarder *Forwarder) RoundTrip(request *http.Request, target Target) (*ht
 			return nil, &TargetError{err: err}
 		}
 	}
+	if target.Service.Kind == contract.ServiceKindDroidSubscription {
+		if err := providerapi.DroidRequest(outbound, target.RequestHeaders.Get(providerapi.DroidEndpointHeader)); err != nil {
+			return nil, &TargetError{err: err}
+		}
+	}
 	removeHopByHopHeaders(outbound.Header)
 	removeGatewayHeaders(outbound.Header)
+	removeForwardingHeaders(outbound.Header)
 
 	if target.ObserveOutbound != nil {
 		target.ObserveOutbound(outbound)
@@ -237,13 +243,63 @@ func removeInboundCredentials(header http.Header) {
 	} {
 		header.Del(name)
 	}
+	// Codex shows its image and search tools only for a provider that sends
+	// this OpenAI header. Its value is a local switch, not a credential that
+	// an upstream should ever see.
+	removeHeaderFold(header, OpenAIActorAuthorizationHeader)
 }
+
+// OpenAIActorAuthorizationHeader is the header Codex checks before showing its
+// own image generation and web search tools.
+const OpenAIActorAuthorizationHeader = "X-Openai-Actor-Authorization"
 
 // Gateway diagnostics belong to the local connection. Apply this after target
 // overlays as well, so a provider adapter cannot reintroduce gateway branding.
 func removeGatewayHeaders(header http.Header) {
 	for name := range header {
 		if strings.HasPrefix(strings.ToLower(name), "x-astrlink-") {
+			delete(header, name)
+		}
+	}
+}
+
+// forwardingHeaders are set by reverse proxies and CDNs in front of the
+// gateway (Caddy, nginx, Traefik, Cloudflare). They describe the caller's
+// address and the forwarding chain, so passing them on would show the
+// provider the user's IP and how the gateway is reached.
+var forwardingHeaders = canonicalHeaderSet(
+	"Forwarded",
+	"Via",
+	"X-Real-IP",
+	"X-Client-IP",
+	"X-Cluster-Client-IP",
+	"X-Original-Forwarded-For",
+	"True-Client-IP",
+	"Fastly-Client-IP",
+	"CF-Connecting-IP",
+	"CF-Connecting-IPv6",
+	"CF-IPCountry",
+	"CF-Ray",
+	"CF-Visitor",
+	"CF-EW-Via",
+	"CF-Worker",
+	"CDN-Loop",
+)
+
+func canonicalHeaderSet(names ...string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[http.CanonicalHeaderKey(name)] = true
+	}
+	return set
+}
+
+// removeForwardingHeaders keeps the proxy chain on the local hop. Apply it
+// after target overlays, like removeGatewayHeaders.
+func removeForwardingHeaders(header http.Header) {
+	for name := range header {
+		canonical := http.CanonicalHeaderKey(name)
+		if forwardingHeaders[canonical] || strings.HasPrefix(canonical, "X-Forwarded-") {
 			delete(header, name)
 		}
 	}

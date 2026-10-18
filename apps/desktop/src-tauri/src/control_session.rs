@@ -29,6 +29,8 @@ pub struct ControlSessionFile {
     pub desktop_pid: Option<u32>,
 }
 
+/// The home whose agent tools and client configs AstrLink manages. Every
+/// AstrLink on this computer shares it.
 pub fn user_home() -> Result<PathBuf, String> {
     if let Ok(value) = std::env::var("ASTRLINK_AGENT_HOME") {
         if !value.is_empty() {

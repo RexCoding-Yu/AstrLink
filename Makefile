@@ -10,8 +10,10 @@ model-safety-check:
 core-check:
 	cd core && ASTRLINK_CI_NO_REMOTE_MODELS=1 go test ./...
 
+# -race turns on checkptr everywhere. modernc.org/sqlite is SQLite translated to
+# Go, so checkptr nearly doubles the cost of every migration; our code keeps it.
 core-race:
-	cd core && ASTRLINK_CI_NO_REMOTE_MODELS=1 go test -race ./...
+	cd core && ASTRLINK_CI_NO_REMOTE_MODELS=1 go test -race -gcflags='modernc.org/...=-d=checkptr=0' ./...
 
 convo-check:
 	cd convo && go vet ./... && go test ./...
@@ -70,11 +72,21 @@ desktop-toolchain:
 	@command -v rustc >/dev/null || { echo "error: rustc not found on PATH (need Rust stable)"; exit 1; }
 	@command -v cargo >/dev/null || { echo "error: cargo not found on PATH"; exit 1; }
 
-# One-shot local desktop: install JS deps, build Go/Rust sidecars, start Tauri.
+# One-shot local desktop: install JS deps, build Go/Rust sidecars, start an
+# isolated development instance with its own data, port and identity. Client
+# configs stay in the user's home; it asks before taking over a client another
+# AstrLink set up.
 dev: desktop-install desktop-toolchain
 	cd apps/desktop && $(BUN) run desktop:dev
 
-# Like dev, but builds the frontend once and starts without file watching:
-# neither frontend nor Rust changes reload until the next start.
+# AstrLink with its usual data and port. Builds the frontend once and starts
+# without file watching: neither frontend nor Rust changes reload until the
+# next start.
 start: desktop-install desktop-toolchain
 	cd apps/desktop && $(BUN) run desktop:start
+
+.PHONY: web
+web:
+	cd apps/desktop && $(BUN) run build:web
+	$(BUN) apps/desktop/scripts/stage-web.mjs
+	cd core && go build -tags webui -o bin/astrlink-core ./cmd/astrlink-core

@@ -203,6 +203,8 @@ describe("model routing record written in the Go wire shape", () => {
         execution: { state: "succeeded", attempt_count: 1 },
       },
     };
-    expect(() => parseRequestRecord(drifted)).toThrow("执行状态无效");
+    expect(() => parseRequestRecord(drifted)).toThrow(
+      "execution.status）：未知状态",
+    );
   });
 });

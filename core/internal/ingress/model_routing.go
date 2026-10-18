@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/classifieroutput"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/modelrouting"
+	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
@@ -144,12 +145,19 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 		bindingReset = &contract.ModelRoutingBindingReset{Reason: contract.ModelRoutingBindingMemberRemoved, MemberID: binding.MemberID, ServiceID: binding.ServiceID, Model: binding.Model}
 		handler.dropModelRoutingBinding(ctx, session, binding)
 	}
-	facts := modelRoutingFacts(classified, session)
-	var taskType modelrouting.TaskTypeOutcome
 	classifier := classifierSettings()
 	dimensions := classifier.ResolveCallPlan(group).Dimensions
-	if modelRoutingNeedsClassification(*group, dimensions) {
-		taskType = handler.modelRoutingTaskType(ctx, classified, *group, classifier)
+	needsClassification := modelRoutingNeedsClassification(*group, dimensions)
+	// Rules read the request's text only through the classifier and keyword
+	// conditions; a group with neither never pays for the inspection.
+	view := classified
+	if needsClassification || group.ReferencesField("literal_keyword") {
+		view = handler.modelRoutingTextView(ctx, session, classified)
+	}
+	facts := modelRoutingFacts(view, session)
+	var taskType modelrouting.TaskTypeOutcome
+	if needsClassification {
+		taskType = handler.modelRoutingTaskType(ctx, view, *group, classifier)
 		facts.TaskType = taskType.Value
 		facts.TaskTypeCandidates = modelrouting.TaskTypeCandidateLabels(taskType, *group)
 	}
@@ -188,7 +196,7 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 		Rules:                 modelrouting.RuleVerdicts(verdicts, *group),
 		BindingReset:          bindingReset,
 	}
-	if modelRoutingNeedsClassification(*group, dimensions) {
+	if needsClassification {
 		decision.Classifier = modelrouting.ClassifierAnswers(taskType, facts.Dimensions, dimensions)
 	}
 	if err := decision.Validate(); err != nil {
@@ -276,8 +284,14 @@ func cloneModelRoutingPrivacyAttempts(attempts []contract.ModelRoutingPrivacyAtt
 	return append([]contract.ModelRoutingPrivacyAttempt{}, attempts...)
 }
 
+// noteModelRoutingPrivacyAttempt lists one provider attempt's privacy check
+// in the routing decision. The check runs before the attempt opens, so it
+// belongs to the attempt after the last one counted.
 func (session *recordSession) noteModelRoutingPrivacyAttempt(serviceID contract.ServiceID, decision contract.ModelRoutingPrivacyDecision, findings, durationMS int, code string) {
 	if session == nil || session.modelRouting == nil {
+		return
+	}
+	if len(session.modelRouting.PrivacyAttempts) >= maxModelRoutingPrivacyAttempts {
 		return
 	}
 	if findings < 0 {
@@ -286,7 +300,54 @@ func (session *recordSession) noteModelRoutingPrivacyAttempt(serviceID contract.
 	if durationMS < 0 {
 		durationMS = 0
 	}
-	session.modelRouting.PrivacyAttempts = append(session.modelRouting.PrivacyAttempts, contract.ModelRoutingPrivacyAttempt{AttemptIndex: session.attemptIndex, ServiceID: serviceID, Decision: decision, FindingCount: findings, DurationMS: durationMS, ErrorCode: code})
+	session.modelRouting.PrivacyAttempts = append(session.modelRouting.PrivacyAttempts, contract.ModelRoutingPrivacyAttempt{AttemptIndex: session.attemptIndex + 1, ServiceID: serviceID, Decision: decision, FindingCount: findings, DurationMS: durationMS, ErrorCode: code})
+}
+
+// maxModelRoutingPrivacyAttempts is the most attempts a decision may list;
+// the contract rejects a longer list, which would drop the whole record.
+const maxModelRoutingPrivacyAttempts = 64
+
+// modelRoutingTextView is the request as the classifier and keyword
+// conditions read it. Under an active privacy policy its text views are
+// rebuilt from the redacted body, so a classifier outside this machine never
+// receives what the policy keeps from an upstream. A body the policy blocks,
+// or an inspection that fails, leaves routing no text: rules that need it
+// fall back as if classification were unavailable, and the provider attempt
+// still meets the policy on its own. Nothing here is recorded; each provider
+// attempt inspects the body it sends and reports that.
+func (handler *Handler) modelRoutingTextView(ctx context.Context, session *recordSession, classified Request) Request {
+	if handler.privacyFilter == nil {
+		return classified
+	}
+	accessTokenID, _ := AccessTokenIDFromContext(ctx)
+	policy, err := handler.privacyFilter.ResolvePolicy(ctx, privacy.Scope{
+		Protocol:      classified.Protocol,
+		Model:         classified.Model,
+		AccessTokenID: accessTokenID,
+	})
+	if err != nil {
+		return classifiedWithSanitizedText(classified, nil)
+	}
+	if !policy.Enabled {
+		return classified
+	}
+	if session != nil {
+		// The same conversation names a value the same way the provider
+		// attempt will, so a classifier sees the placeholders the upstream sees.
+		ctx = privacy.WithConversation(ctx, string(session.sessionID))
+	}
+	result, err := handler.privacyFilter.Inspect(ctx, policy, classified.Protocol, classified.routingBody)
+	if err != nil {
+		return classifiedWithSanitizedText(classified, nil)
+	}
+	switch result.Decision {
+	case privacy.DecisionAllow, privacy.DecisionWarn:
+		return classified
+	case privacy.DecisionRedact:
+		return classifiedWithSanitizedText(classified, result.Body)
+	default:
+		return classifiedWithSanitizedText(classified, nil)
+	}
 }
 
 func (session *recordSession) updateModelRoutingExecution(status contract.ModelRoutingExecutionStatus, code string) {

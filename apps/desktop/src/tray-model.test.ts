@@ -42,6 +42,23 @@ export const readyTrayState = {
     yesterday_tokens: 1_000_000,
     top_model: { name: "claude-sonnet-4", percent: 62 },
     cost_today: { amount_usd: 0.834, unpriced: 0 },
+    privacy: {
+      enabled: true,
+      checked: 120,
+      redacted: 9,
+      warned: 0,
+      blocked: 1,
+      unchecked: 0,
+      replaced: 23,
+      restored: 17,
+      unrestored: 0,
+      kinds: [
+        { kind: "email", count: 14 },
+        { kind: "common_secret", count: 6 },
+        { kind: "phone", count: 3 },
+        { kind: "url", count: 1 },
+      ],
+    },
     top_client: { name: "Cursor", percent: 71 },
     last_request: {
       started_at: "2026-09-22T10:00:00Z",
@@ -111,6 +128,40 @@ describe("tray state IPC contract", () => {
       kind: "raw_key_reset",
       at: "2026-09-28T09:30:00Z",
     });
+  });
+
+  it("reads today's privacy counts and rejects ones that cannot add up", () => {
+    const parsed = parseTrayState(readyTrayState);
+    expect(parsed.digest?.privacy?.replaced).toBe(23);
+    expect(parsed.digest?.privacy?.kinds[0]).toEqual({
+      kind: "email",
+      count: 14,
+    });
+    const privacy = readyTrayState.digest.privacy;
+    const withPrivacy = (value: unknown) => ({
+      ...readyTrayState,
+      digest: { ...readyTrayState.digest, privacy: value },
+    });
+    expect(parseTrayState(withPrivacy(null)).digest?.privacy).toBeNull();
+    expect(
+      parseTrayState(withPrivacy({ ...privacy, enabled: null })).digest?.privacy
+        ?.enabled,
+    ).toBeNull();
+    expect(() =>
+      parseTrayState(withPrivacy({ ...privacy, checked: 5 })),
+    ).toThrow("$.digest.privacy.checked");
+    expect(() =>
+      parseTrayState(
+        withPrivacy({
+          ...privacy,
+          kinds: Array.from({ length: 17 }, () => privacy.kinds[0]),
+        }),
+      ),
+    ).toThrow("$.digest.privacy.kinds");
+    const { unrestored: _unrestored, ...missing } = privacy;
+    expect(() => parseTrayState(withPrivacy(missing))).toThrow(
+      "$.digest.privacy.unrestored",
+    );
   });
 
   it("accepts a stopped gateway without a digest", () => {

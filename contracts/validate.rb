@@ -98,6 +98,9 @@ expected_protocols = %w[
   openai.completions
   openai.models
   google.models
+  openai.embeddings
+  google.embeddings
+  rerank
 ]
 actual_protocols = fixture.fetch("protocols").map { |protocol| protocol.fetch("id") }
 raise "Alpha protocol registry drifted" unless actual_protocols == expected_protocols
@@ -324,11 +327,14 @@ end
 implemented_operations = openapi.dig("x-astrlink-implementation", "implemented_operations")
 
 public_operations = %w[/control/v1/health /control/v1/version /control/v1/capabilities]
+# Host addresses tell a client where to reach the gateway from another
+# machine; only the operator who exposes the gateway needs them.
 operator_reads = %w[
   /control/v1/access-tokens/{token_id}/secret
   /control/v1/services/{service_id}/authorization
   /control/v1/builtin-tools/{kind}/credential
   /control/v1/audit/raw-access
+  /control/v1/network-addresses
 ]
 # An agent may ask for raw access and give up its own grant; only the
 # operator can approve it.
@@ -483,7 +489,8 @@ raise "PrivacyKind wire values drifted" unless openapi.dig("components", "schema
 ]
 policy_kind_rule = openapi.dig("components", "schemas", "PolicyKindRule")
 raise "PolicyKindRule contract drifted" unless policy_kind_rule.fetch("required") == %w[kind enabled style] &&
-                                              policy_kind_rule.dig("properties", "style", "$ref") == "#/components/schemas/PlaceholderStyle"
+                                              policy_kind_rule.dig("properties", "style", "$ref") == "#/components/schemas/PlaceholderStyle" &&
+                                              policy_kind_rule.dig("properties", "notify", "default") == true
 raise "PolicyAllowlistRule type values drifted" unless openapi.dig("components", "schemas", "PolicyAllowlistRule", "properties", "type", "enum") == %w[literal domain_suffix cidr]
 # A natural stand-in that is never restored inside a tool argument is acted on by
 # the local agent as if it were real, so the two fields must stay paired.

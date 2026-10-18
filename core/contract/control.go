@@ -41,7 +41,8 @@ type ClientIdentities struct {
 }
 
 // ClientIdentityStatus pairs the version learned from official client
-// requests with the built-in version used until one is learned.
+// requests with the built-in version used until one is learned; Claude Code
+// keeps the built-in version until a release at least as new is learned.
 type ClientIdentityStatus struct {
 	// LearnedVersion is empty until an official client request is learned. It
 	// is reported even while learning is off.
@@ -198,4 +199,15 @@ func validateReadyURL(name, value string) error {
 		return fmt.Errorf("%s must contain a canonical port from 1 to 65535", name)
 	}
 	return nil
+}
+
+// NetworkAddress is one address other machines reach this host by while the
+// inference plane answers every interface.
+type NetworkAddress struct {
+	Interface string `json:"interface"`
+	IP        string `json:"ip"`
+}
+
+type NetworkAddressesResponse struct {
+	Addresses []NetworkAddress `json:"addresses"`
 }

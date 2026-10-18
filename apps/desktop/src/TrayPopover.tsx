@@ -10,12 +10,14 @@ import { listen } from "@tauri-apps/api/event";
 
 import {
   ArrowUpRight,
+  BadgeAlert,
   Ban,
   Copy,
   Eye,
   RefreshCw,
   RotateCcw,
   Settings,
+  ShieldCheck,
   X,
 } from "@/components/icons";
 import { IconButton } from "@/components/IconButton";
@@ -40,6 +42,7 @@ import {
 import type { CorePhase } from "./core-model";
 import { i18n, useT } from "./i18n";
 import type { TrayPreferences } from "./preferences-model";
+import { privacyKindShares } from "./privacy-summary-model";
 import { useQuotaDisplayMode } from "./quota-display";
 import type { RawAccessGrant } from "./raw-access-model";
 import { formatResetCountdown, windowLabel } from "./subscription-usage-model";
@@ -50,16 +53,24 @@ import {
   parseTrayState,
   percentChange,
   type TrayAction,
+  type TrayPrivacy,
   type TrayRawKeyEventKind,
   type TrayState,
   type TraySubscription,
 } from "./tray-model";
-import { TRAY_POPOVER_WIDTH, TRAY_STATE_EVENT } from "./tray-popover-window";
+import {
+  TRAY_FAILED_TODAY_PAGE,
+  TRAY_POPOVER_WIDTH,
+  TRAY_PRIVACY_OVERVIEW_PAGE,
+  TRAY_STATE_EVENT,
+} from "./tray-popover-window";
 
 const COPY_FEEDBACK_MS = 1_500;
 const CLOCK_TICK_MS = 30_000;
 /** Subscription window rows shown before the list folds behind a toggle. */
 export const SUBSCRIPTION_FOLD_LIMIT = 10;
+/** Privacy kinds named before the rest fold into a count. */
+const PRIVACY_KIND_LIMIT = 3;
 
 function phaseTone(phase: CorePhase): StatusTone {
   if (phase === "ready") return "positive";
@@ -239,6 +250,138 @@ function Chip({
 }
 
 /**
+ * Whether today's privacy row has anything to say: the switch is off, or a
+ * call reached the check. A day with no checked call leaves the row out.
+ */
+function trayPrivacyShown(privacy: TrayPrivacy): boolean {
+  return (
+    privacy.enabled === false || privacy.checked > 0 || privacy.unchecked > 0
+  );
+}
+
+/**
+ * Today's privacy protection in one row: the values it replaced, restored and
+ * blocked, then the kinds it found most. A clean day or a switched-off policy
+ * takes a single line; the charts live on the safety page.
+ */
+function TrayPrivacyRow({
+  privacy,
+  onOpen,
+}: {
+  privacy: TrayPrivacy;
+  onOpen: () => void;
+}) {
+  const t = useT();
+  const off = privacy.enabled === false;
+  const flagged = privacy.redacted + privacy.warned + privacy.blocked;
+  const failOpen =
+    privacy.unchecked > 0
+      ? t("tray.privacyFailOpen", { count: privacy.unchecked })
+      : null;
+  let status: string;
+  let tone: "figures" | "muted" | "warning";
+  if (off) {
+    status = t("tray.privacyOff");
+    tone = "warning";
+  } else if (flagged > 0) {
+    status = [
+      t("tray.privacyReplacedCount", {
+        value: formatCompactTokens(privacy.replaced),
+      }),
+      t("tray.privacyRestoredCount", {
+        value: formatCompactTokens(privacy.restored),
+      }),
+      privacy.blocked > 0
+        ? t("tray.privacyBlockedCount", {
+            value: formatCompactTokens(privacy.blocked),
+          })
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    tone = "figures";
+  } else if (privacy.checked > 0) {
+    status = t("tray.privacyClean");
+    tone = "muted";
+  } else {
+    status = failOpen ?? "";
+    tone = "warning";
+  }
+  const { rows, hiddenKinds } = privacyKindShares(
+    privacy.kinds,
+    PRIVACY_KIND_LIMIT,
+  );
+  const kinds =
+    !off && flagged > 0 && rows.length > 0
+      ? [
+          ...rows.map(
+            (row) => `${row.label} ${formatCompactTokens(row.count)}`,
+          ),
+          ...(hiddenKinds > 0
+            ? [t("tray.privacyMoreKinds", { count: hiddenKinds })]
+            : []),
+        ].join(" · ")
+      : null;
+  // The status line already carries a failure when nothing else happened.
+  const failOpenLine =
+    !off && failOpen !== null && (flagged > 0 || privacy.checked > 0)
+      ? failOpen
+      : null;
+  const Icon = off ? BadgeAlert : ShieldCheck;
+  return (
+    <div className="grid gap-0.5" data-slot="tray-privacy">
+      <div className="flex min-w-0 items-start gap-2 text-xs">
+        <Icon
+          aria-hidden="true"
+          className={cn(
+            "mt-px size-3.5 shrink-0",
+            off ? "text-warning-foreground" : "text-muted-foreground",
+          )}
+        />
+        {/* The status sits beside the label and drops below it, whole, when
+            a longer language leaves it no room. */}
+        <div className="flex min-w-0 flex-1 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+          <span className="text-muted-foreground">{t("tray.privacy")}</span>
+          <span
+            className={cn(
+              "min-w-0 tabular-nums",
+              tone === "figures" && "font-medium",
+              tone === "muted" && "text-muted-foreground",
+              tone === "warning" && "text-warning-foreground",
+            )}
+            data-slot="tray-privacy-status"
+          >
+            {status}
+          </span>
+        </div>
+        <IconButton
+          className="-my-[3px] shrink-0 text-muted-foreground"
+          label={t("tray.privacyOpen")}
+          onClick={onOpen}
+          size="icon-xs"
+        >
+          <ArrowUpRight aria-hidden="true" />
+        </IconButton>
+      </div>
+      {kinds ? (
+        <p
+          className="truncate pl-5.5 text-micro text-muted-foreground"
+          data-slot="tray-privacy-kinds"
+          title={kinds}
+        >
+          {kinds}
+        </p>
+      ) : null}
+      {failOpenLine ? (
+        <p className="pl-5.5 text-micro text-warning-foreground">
+          {failOpenLine}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * The panel itself, pure over its inputs so the settings page can preview it
  * with a draft of the tray preferences and the same live state.
  */
@@ -368,6 +511,10 @@ export function TrayPopoverPanel({
   }
 
   const showToday = usage.today || usage.cost;
+  const privacy =
+    usage.privacy && digest?.privacy && trayPrivacyShown(digest.privacy)
+      ? digest.privacy
+      : null;
   const subscriptions =
     usage.subscription_windows && digest ? digest.subscriptions : [];
   const subscriptionWindowCount = subscriptions.reduce(
@@ -543,12 +690,26 @@ export function TrayPopoverPanel({
                 <div className="flex items-center gap-2">
                   <SectionKicker>{t("tray.today")}</SectionKicker>
                   {usage.today && digest?.today && digest.today.failed > 0 ? (
-                    <Badge
-                      className="border-destructive/30 text-destructive"
+                    <Button
+                      aria-label={t("tray.failedCountDetail", {
+                        count: digest.today.failed,
+                      })}
+                      className="border-destructive/30 text-destructive hover:bg-danger-wash hover:text-destructive"
+                      onClick={() =>
+                        onAction({
+                          kind: "navigate",
+                          page: TRAY_FAILED_TODAY_PAGE,
+                        })
+                      }
+                      size="xs"
+                      title={t("tray.failedCountDetail", {
+                        count: digest.today.failed,
+                      })}
+                      type="button"
                       variant="outline"
                     >
                       {t("tray.failedCount", { count: digest.today.failed })}
-                    </Badge>
+                    </Button>
                   ) : null}
                 </div>
                 <div className="flex items-center gap-1 text-micro text-muted-foreground">
@@ -621,11 +782,29 @@ export function TrayPopoverPanel({
             </div>
           ) : null}
 
+          {/* A row of today's block, so it shares its divider. */}
+          {privacy ? (
+            <TrayPrivacyRow
+              onOpen={() =>
+                onAction({
+                  kind: "navigate",
+                  // The safety page shows its statistics only once a call
+                  // was checked; before that, the plain page opens.
+                  page:
+                    privacy.checked + privacy.unchecked > 0
+                      ? TRAY_PRIVACY_OVERVIEW_PAGE
+                      : "safety",
+                })
+              }
+              privacy={privacy}
+            />
+          ) : null}
+
           {subscriptions.length > 0 ? (
             <div
               className={cn(
                 "grid gap-1.5",
-                (showToday || chips.length > 0) && "border-t pt-4",
+                (showToday || chips.length > 0 || privacy) && "border-t pt-4",
               )}
             >
               {/* One grid, so the bars, percents and resets line up across plans. */}
@@ -871,15 +1050,32 @@ export function TrayPopoverWindow() {
     const report = () => {
       frame = 0;
       const height = Math.ceil(root.getBoundingClientRect().height);
-      if (height > 0) void trayPopoverResize(height).catch(() => {});
+      if (height > 0)
+        void trayPopoverResize(height, window.devicePixelRatio).catch(() => {});
     };
-    const observer = new ResizeObserver(() => {
+    const schedule = () => {
       if (frame === 0) frame = window.requestAnimationFrame(report);
-    });
+    };
+    const observer = new ResizeObserver(schedule);
     observer.observe(root);
+    // Windows folds its text size setting into the pixel ratio, which can
+    // change while the panel keeps its size in CSS pixels.
+    const watchResolution = () => {
+      const query = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio}dppx)`,
+      );
+      query.addEventListener("change", onResolutionChange, { once: true });
+      return query;
+    };
+    let resolution = watchResolution();
+    function onResolutionChange() {
+      resolution = watchResolution();
+      schedule();
+    }
     report();
     return () => {
       observer.disconnect();
+      resolution.removeEventListener("change", onResolutionChange);
       if (frame !== 0) window.cancelAnimationFrame(frame);
     };
   }, []);

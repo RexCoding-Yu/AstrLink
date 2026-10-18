@@ -101,6 +101,71 @@ func TestUsageSummaryCompleteWindowAndOutcomeSemantics(t *testing.T) {
 	}
 }
 
+// The tray opens its daily failure count as the session list filtered by call
+// status over the same window. Every counted failure must sit in a listed
+// conversation, including one that recovered and now reads as succeeded.
+func TestUsageSummaryFailuresListAsFailedSessions(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "failed-sessions.db"))
+	defer store.Close()
+	ctx := context.Background()
+	zone, _ := time.LoadLocation("Asia/Tokyo")
+	from := time.Date(2026, 9, 19, 0, 0, 0, 0, zone)
+	to := from.AddDate(0, 0, 1)
+	insert := func(id, session string, status contract.RequestStatus, at time.Time, parent string) {
+		t.Helper()
+		sessionID := contract.SessionID(session)
+		record := contract.RequestRecord{ID: contract.RequestID(id), SessionID: &sessionID, StartedAt: at, Status: status,
+			InputProtocol: contract.ProtocolOpenAIResponses, Audit: contract.NotCapturedAuditSummary()}
+		if parent != "" {
+			parentID := contract.RequestID(parent)
+			record.ParentRequestID, record.AttemptIndex = &parentID, 1
+		}
+		if err := store.InsertRequestRecord(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(hours int) time.Time { return from.Add(time.Duration(hours) * time.Hour) }
+	insert("request_recovered_1", "session_recovered", contract.RequestStatusFailed, at(1), "")
+	insert("request_recovered_2", "session_recovered", contract.RequestStatusSucceeded, at(2), "")
+	insert("request_failing_1", "session_failing", contract.RequestStatusFailed, at(3), "")
+	insert("request_failing_2", "session_failing", contract.RequestStatusFailed, at(4), "")
+	// A policy block is its own outcome, and a retried attempt is not a call.
+	insert("request_blocked", "session_blocked", contract.RequestStatusBlocked, at(5), "")
+	insert("request_retried", "session_retried", contract.RequestStatusSucceeded, at(6), "")
+	insert("request_retried_attempt", "session_retried", contract.RequestStatusFailed, at(6).Add(time.Minute), "request_retried")
+	insert("request_yesterday", "session_yesterday", contract.RequestStatusFailed, from.Add(-time.Hour), "")
+	// Model discovery is not a model call: neither counted nor listed.
+	discovery := contract.RequestRecord{ID: "request_discovery", StartedAt: at(7), Status: contract.RequestStatusFailed,
+		InputProtocol: contract.ProtocolOpenAIModels, Audit: contract.NotCapturedAuditSummary()}
+	if err := store.InsertRequestRecord(ctx, discovery); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := store.GetUsageSummary(ctx, storage.UsageSummaryOptions{From: from, To: to, TimeZone: "Asia/Tokyo", Bucket: "day"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Totals.FailedRequests != 3 || summary.Totals.Requests != 2 {
+		t.Fatalf("totals=%+v", summary.Totals)
+	}
+	failed := contract.RequestStatusFailed
+	page, err := store.ListRequestSessions(ctx, storage.RequestSessionListOptions{Kind: "inference", From: &from, To: &to, Status: &failed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[contract.SessionID]contract.SessionStatus{}
+	for _, session := range page.Items {
+		listed[session.ID] = session.Status
+	}
+	want := map[contract.SessionID]contract.SessionStatus{
+		"session_failing":   contract.SessionStatusFailed,
+		"session_recovered": contract.SessionStatusSucceeded,
+	}
+	if !reflect.DeepEqual(listed, want) {
+		t.Fatalf("listed=%v want=%v", listed, want)
+	}
+}
+
 func TestUsageSummaryDSTRepeatingHour(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "dst.db"))
 	defer store.Close()

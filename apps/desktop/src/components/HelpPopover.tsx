@@ -6,8 +6,12 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { cn } from "@/lib/utils";
 
-/** Supporting explanations stay available without consuming working height. */
+/**
+ * Supporting explanations stay available without consuming working height.
+ * The wide size holds a small illustration beside its text.
+ */
 export function HelpPopover({
   label,
   children,
@@ -16,6 +20,7 @@ export function HelpPopover({
   onOpenChange,
   onTriggerClick,
   triggerClassName,
+  size = "default",
   triggerRef,
 }: {
   label: string;
@@ -26,6 +31,7 @@ export function HelpPopover({
   onTriggerClick?: MouseEventHandler<HTMLButtonElement>;
   /** Extra classes for the trigger, e.g. to align it with a control's baseline. */
   triggerClassName?: string;
+  size?: "default" | "wide";
   triggerRef?: Ref<HTMLButtonElement>;
 }) {
   return (
@@ -45,9 +51,11 @@ export function HelpPopover({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className={
-          inDialog ? "z-110 text-xs leading-relaxed" : "text-xs leading-relaxed"
-        }
+        className={cn(
+          "text-xs leading-relaxed",
+          inDialog && "z-110",
+          size === "wide" && "w-[26rem] p-3",
+        )}
       >
         {children}
       </PopoverContent>

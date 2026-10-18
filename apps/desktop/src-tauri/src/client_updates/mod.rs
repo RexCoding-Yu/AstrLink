@@ -1,10 +1,12 @@
 mod process;
 #[cfg(any(target_os = "macos", test))]
 mod proxy;
+mod wsl;
 
 use std::{
     cmp::Ordering,
     collections::HashSet,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -15,6 +17,7 @@ use process::{CommandSpec, Environment};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use wsl::Wsl;
 
 const EVENT: &str = "local-client-status";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
@@ -121,9 +124,19 @@ impl std::fmt::Display for ClientVersion {
     }
 }
 
+/// A client to update, on this computer or in a WSL distribution.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash)]
+pub struct ClientTarget {
+    id: ClientId,
+    /// The WSL distribution the client lives in; `None` for this computer.
+    wsl: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ClientStatus {
     id: ClientId,
+    /// The WSL distribution the client lives in; `None` for this computer.
+    wsl: Option<String>,
     phase: String,
     current_version: Option<String>,
     latest_version: Option<String>,
@@ -137,9 +150,10 @@ pub struct ClientStatus {
 }
 
 impl ClientStatus {
-    fn new(id: ClientId) -> Self {
+    fn new(id: ClientId, wsl: Option<String>) -> Self {
         Self {
             id,
+            wsl,
             phase: "idle".into(),
             current_version: None,
             latest_version: None,
@@ -158,13 +172,19 @@ impl ClientStatus {
         self.error_code = Some(error.code.into());
         self.error_detail = Some(error.detail);
     }
+    fn at(&self, wsl: Option<&str>, ids: &[ClientId]) -> bool {
+        self.wsl.as_deref() == wsl && ids.contains(&self.id)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ClientSnapshot {
     revision: u64,
     busy: bool,
+    /// This computer's clients, then those found in WSL distributions.
     clients: Vec<ClientStatus>,
+    /// WSL distributions left unchecked because they were not running.
+    wsl_unchecked: Vec<String>,
 }
 
 impl Default for ClientSnapshot {
@@ -172,7 +192,8 @@ impl Default for ClientSnapshot {
         Self {
             revision: 0,
             busy: false,
-            clients: ClientId::ALL.map(ClientStatus::new).to_vec(),
+            clients: ClientId::ALL.map(|id| ClientStatus::new(id, None)).to_vec(),
+            wsl_unchecked: vec![],
         }
     }
 }
@@ -262,7 +283,69 @@ fn executable(path: &Path) -> bool {
     true
 }
 
-fn find_programs(path: &std::ffi::OsStr, name: &str) -> Vec<PathBuf> {
+/// A program on PATH and the file it resolves to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Program {
+    path: PathBuf,
+    resolved: PathBuf,
+}
+
+impl Environment {
+    /// Whether clients here use Windows layouts and npm's .cmd shims.
+    fn windows(&self) -> bool {
+        self.wsl.is_none() && cfg!(windows)
+    }
+    fn distribution(&self) -> Option<String> {
+        self.wsl.as_ref().map(|wsl| wsl.distribution.clone())
+    }
+    /// The programs named `name` on PATH, in order, each target once.
+    fn programs(&self, name: &str) -> Vec<Program> {
+        match &self.wsl {
+            None => find_programs(&self.path, name),
+            Some(wsl) => wsl::programs(self, wsl, name),
+        }
+    }
+    /// `path` and the file it resolves to, if it is an executable file.
+    fn program(&self, path: &Path) -> Option<Program> {
+        match &self.wsl {
+            None => executable(path)
+                .then(|| dunce::canonicalize(path).ok())
+                .flatten()
+                .map(|resolved| Program {
+                    path: path.into(),
+                    resolved,
+                }),
+            Some(wsl) => wsl::program(self, wsl, path),
+        }
+    }
+    fn read(&self, path: &Path) -> Option<String> {
+        match &self.wsl {
+            None => fs::read_to_string(path).ok(),
+            Some(wsl) => fs::read_to_string(wsl.shared(path)?).ok(),
+        }
+    }
+    fn executable(&self, path: &Path) -> bool {
+        match &self.wsl {
+            None => executable(path),
+            Some(_) => wsl::is_file(self, path, true),
+        }
+    }
+    fn is_file(&self, path: &Path) -> bool {
+        match &self.wsl {
+            None => path.is_file(),
+            Some(_) => wsl::is_file(self, path, false),
+        }
+    }
+    /// A path argument as the client's system spells it.
+    fn path_arg(&self, path: &Path) -> OsString {
+        match &self.wsl {
+            None => path.into(),
+            Some(_) => wsl::linux(path).into(),
+        }
+    }
+}
+
+fn find_programs(path: &std::ffi::OsStr, name: &str) -> Vec<Program> {
     let mut found = Vec::new();
     let mut seen = HashSet::new();
     for directory in std::env::split_paths(path).filter(|p| p.is_absolute()) {
@@ -276,8 +359,11 @@ fn find_programs(path: &std::ffi::OsStr, name: &str) -> Vec<PathBuf> {
             let file = directory.join(name);
             if executable(&file) {
                 if let Ok(resolved) = dunce::canonicalize(&file) {
-                    if seen.insert(resolved) {
-                        found.push(file);
+                    if seen.insert(resolved.clone()) {
+                        found.push(Program {
+                            path: file,
+                            resolved,
+                        });
                     }
                 }
             }
@@ -307,13 +393,14 @@ fn cmd_shim_target(shim: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
-fn manifest_name(directory: &Path) -> Option<String> {
-    let raw = fs::read_to_string(directory.join("package.json")).ok()?;
+fn manifest_name(environment: &Environment, directory: &Path) -> Option<String> {
+    let raw = environment.read(&directory.join("package.json"))?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     value["name"].as_str().map(str::to_owned)
 }
 
-fn installation_method(id: ClientId, resolved: &Path, home: &Path) -> InstallMethod {
+fn installation_method(environment: &Environment, id: ClientId, resolved: &Path) -> InstallMethod {
+    let home = &environment.home;
     // Check package-manager ownership before native layouts. Never replace a
     // Homebrew or npm install with a second, unrelated installation. Homebrew
     // comes first because its formulae may wrap an npm layout.
@@ -350,7 +437,7 @@ fn installation_method(id: ClientId, resolved: &Path, home: &Path) -> InstallMet
         else {
             continue;
         };
-        if manifest_name(ancestor).as_deref() != Some(*package) {
+        if manifest_name(environment, ancestor).as_deref() != Some(*package) {
             continue;
         }
         // pnpm/Bun/Yarn stores are not npm global installations. Only Pi's own
@@ -376,7 +463,7 @@ fn installation_method(id: ClientId, resolved: &Path, home: &Path) -> InstallMet
             .and_then(Path::parent)
             .and_then(Path::parent);
         if let Some(prefix) = prefix {
-            if !cfg!(windows) && !prefix.ends_with("lib") {
+            if !environment.windows() && !prefix.ends_with("lib") {
                 return InstallMethod::Unknown;
             }
             let prefix = if prefix.ends_with("lib") {
@@ -400,7 +487,7 @@ fn installation_method(id: ClientId, resolved: &Path, home: &Path) -> InstallMet
         }
         ClientId::Codex => {
             for directory in resolved.ancestors().skip(1).take(3) {
-                if let Ok(raw) = fs::read_to_string(directory.join("codex-package.json")) {
+                if let Some(raw) = environment.read(&directory.join("codex-package.json")) {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                         if value["variant"] == "codex"
                             && value["layoutVersion"] == 1
@@ -418,9 +505,7 @@ fn installation_method(id: ClientId, resolved: &Path, home: &Path) -> InstallMet
             let marker = resolved
                 .parent()
                 .and_then(Path::parent)
-                .and_then(|agent| {
-                    fs::read_to_string(agent.join("install/managed-install.json")).ok()
-                })
+                .and_then(|agent| environment.read(&agent.join("install/managed-install.json")))
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
             if marker.is_some_and(|v| {
                 v["kind"] == "pi-managed-install"
@@ -436,10 +521,12 @@ fn installation_method(id: ClientId, resolved: &Path, home: &Path) -> InstallMet
 }
 
 fn detect(environment: &Environment, id: ClientId) -> Option<Installation> {
-    let mut paths = find_programs(&environment.path, id.name()).into_iter();
-    let executable = paths.next()?;
-    let mut resolved = dunce::canonicalize(&executable).ok()?;
-    if cfg!(windows) && executable.extension().is_some_and(|s| s == "cmd") {
+    let mut programs = environment.programs(id.name()).into_iter();
+    let Program {
+        path: executable,
+        mut resolved,
+    } = programs.next()?;
+    if environment.windows() && executable.extension().is_some_and(|s| s == "cmd") {
         if let Some(target) = cmd_shim_target(&executable)
             .filter(|t| t.is_file())
             .and_then(|t| dunce::canonicalize(t).ok())
@@ -447,7 +534,7 @@ fn detect(environment: &Environment, id: ClientId) -> Option<Installation> {
             resolved = target;
         }
     }
-    let method = installation_method(id, &resolved, &environment.home);
+    let method = installation_method(environment, id, &resolved);
     // `pi` is a generic command name. Only report a launcher or package that is
     // verifiably Pi; standalone binaries ship package.json beside themselves.
     if id == ClientId::Pi
@@ -456,7 +543,7 @@ fn detect(environment: &Environment, id: ClientId) -> Option<Installation> {
             .ancestors()
             .skip(1)
             .take(4)
-            .filter_map(manifest_name)
+            .filter_map(|directory| manifest_name(environment, directory))
             .any(|name| id.packages().contains(&name.as_str()))
     {
         return None;
@@ -465,7 +552,9 @@ fn detect(environment: &Environment, id: ClientId) -> Option<Installation> {
         method,
         executable,
         resolved,
-        others: paths.map(|p| p.to_string_lossy().into_owned()).collect(),
+        others: programs
+            .map(|p| p.path.to_string_lossy().into_owned())
+            .collect(),
     })
 }
 
@@ -485,24 +574,57 @@ fn current_version(
     parse_version(id, &process::run(environment, &command, PROBE_TIMEOUT)?)
 }
 
-fn node_program(environment: &Environment, prefix: &Path) -> Option<PathBuf> {
-    let sibling = if cfg!(windows) {
+/// Node.js beside an npm prefix, else the first on PATH. Bun also answers to
+/// `node` through a link of that name; it is used only when Node.js is absent.
+fn node_program(environment: &Environment, prefix: &Path) -> Option<Program> {
+    let sibling = if environment.windows() {
         prefix.join("node.exe")
     } else {
         prefix.join("bin/node")
     };
-    if executable(&sibling) {
-        Some(sibling)
-    } else {
-        find_programs(&environment.path, "node").into_iter().next()
+    let mut programs: Vec<_> = environment
+        .program(&sibling)
+        .into_iter()
+        .chain(environment.programs("node"))
+        .collect();
+    programs.sort_by_key(|program| bun(&program.resolved));
+    programs.into_iter().next()
+}
+
+fn bun(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("bun"))
+}
+
+/// Pi under Bun takes itself for a Bun install and refuses to update an npm
+/// one, and its launcher's `env node` may find Bun. Run its entry with Node.js.
+fn pi_npm_command(
+    environment: &Environment,
+    prefix: &Path,
+    install: &Installation,
+) -> Result<CommandSpec, ClientError> {
+    let script = install.resolved.extension().is_some_and(|s| {
+        ["js", "cjs", "mjs"]
+            .iter()
+            .any(|e| s.eq_ignore_ascii_case(e))
+    });
+    if !script {
+        return client_command(environment, install);
     }
+    let node = node_program(environment, prefix)
+        .filter(|node| !bun(&node.resolved))
+        .ok_or_else(|| ClientError::new("unsupported", "Node.js is unavailable"))?;
+    Ok(CommandSpec {
+        program: node.path,
+        args: vec![environment.path_arg(&install.resolved)],
+    })
 }
 
 fn client_command(
     environment: &Environment,
     install: &Installation,
 ) -> Result<CommandSpec, ClientError> {
-    if cfg!(windows) && install.executable.extension().is_some_and(|s| s == "cmd") {
+    if environment.windows() && install.executable.extension().is_some_and(|s| s == "cmd") {
         return shim_command(environment, &install.executable, &install.resolved);
     }
     Ok(CommandSpec::new(&install.executable, &[]))
@@ -527,7 +649,7 @@ fn shim_command(
                 .and_then(|prefix| node_program(environment, prefix))
                 .ok_or_else(|| ClientError::new("unsupported", "Node.js is unavailable"))?;
             Ok(CommandSpec {
-                program: node,
+                program: node.path,
                 args: vec![target.as_os_str().into()],
             })
         }
@@ -539,9 +661,9 @@ fn shim_command(
 }
 
 /// Cursor's `update` command reads its release channel from cli-config.json.
-fn cursor_channel(home: &Path) -> String {
-    let channel = fs::read_to_string(home.join(".cursor/cli-config.json"))
-        .ok()
+fn cursor_channel(environment: &Environment) -> String {
+    let channel = environment
+        .read(&environment.home.join(".cursor/cli-config.json"))
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v["channel"].as_str().map(str::to_owned));
     match channel.as_deref() {
@@ -562,12 +684,15 @@ fn update_command(
         InstallMethod::Native | InstallMethod::Npm { .. } | InstallMethod::Package(_)
             if id == ClientId::Pi =>
         {
-            let mut command = client_command(environment, install)?;
+            let mut command = match &install.method {
+                InstallMethod::Npm { prefix } => pi_npm_command(environment, prefix, install)?,
+                _ => client_command(environment, install)?,
+            };
             command.args.extend(["update".into(), "--self".into()]);
             Ok(command)
         }
         InstallMethod::Native => {
-            if id == ClientId::Cursor && cursor_channel(&environment.home) == "static" {
+            if id == ClientId::Cursor && cursor_channel(environment) == "static" {
                 return Err(ClientError::new(
                     "unsupported",
                     "Updates are disabled for the static channel",
@@ -583,7 +708,7 @@ fn update_command(
             cask,
         } => {
             let brew = root.join("bin/brew");
-            if !executable(&brew) {
+            if !environment.executable(&brew) {
                 return Err(ClientError::new("unsupported", "Homebrew is unavailable"));
             }
             Ok(CommandSpec::new(
@@ -596,39 +721,46 @@ fn update_command(
             ))
         }
         InstallMethod::Npm { prefix } => {
-            let npm = if cfg!(windows) {
+            let npm = if environment.windows() {
                 prefix.join("node_modules/npm/bin/npm-cli.js")
             } else {
                 prefix.join("lib/node_modules/npm/bin/npm-cli.js")
             };
-            let npm = if npm.is_file() {
+            let npm = if environment.is_file(&npm) {
                 npm
             } else {
-                find_programs(&environment.path, "npm")
+                environment
+                    .programs("npm")
                     .into_iter()
                     .filter_map(|p| {
                         // Node's Windows npm.cmd runs the npm-cli.js beside it.
-                        if p.extension().is_some_and(|s| s == "cmd") {
-                            p.parent()
+                        if p.path.extension().is_some_and(|s| s == "cmd") {
+                            p.path
+                                .parent()
                                 .map(|d| d.join("node_modules/npm/bin/npm-cli.js"))
                         } else {
-                            dunce::canonicalize(p).ok()
+                            Some(p.resolved)
                         }
                     })
-                    .find(|p| p.ends_with("npm/bin/npm-cli.js") && p.is_file())
+                    .find(|p| p.ends_with("npm/bin/npm-cli.js") && environment.is_file(p))
                     .ok_or_else(|| ClientError::new("unsupported", "npm is unavailable"))?
             };
             let node = node_program(environment, prefix)
                 .ok_or_else(|| ClientError::new("unsupported", "Node.js is unavailable"))?;
+            let package = id.packages()[0];
             Ok(CommandSpec {
-                program: node,
+                program: node.path,
                 args: vec![
-                    npm.into_os_string(),
+                    environment.path_arg(&npm),
                     "install".into(),
                     "--global".into(),
                     "--prefix".into(),
-                    prefix.as_os_str().into(),
-                    format!("{}@{latest}", id.packages()[0]).into(),
+                    environment.path_arg(prefix),
+                    // npm 12 skips install scripts missing from allowScripts
+                    // and still exits 0. Claude Code's postinstall replaces
+                    // the bin/claude.exe stub with its native binary.
+                    format!("--allow-scripts={package}").into(),
+                    format!("{package}@{latest}").into(),
                 ],
             })
         }
@@ -639,12 +771,27 @@ fn update_command(
     }
 }
 
+/// Where clients install that a PATH may miss: a GUI app's on macOS, or one a
+/// login shell could not report.
+fn usual_directories(home: &Path) -> [PathBuf; 7] {
+    [
+        home.join(".local/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".volta/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ]
+}
+
 fn load_environment(home: PathBuf, use_system_proxy: bool) -> Result<Environment, ClientError> {
     let mut environment = Environment {
         home,
         path: std::env::var_os("PATH").unwrap_or_default(),
         use_system_proxy,
         proxy_env: None,
+        wsl: None,
     };
     // GUI apps on macOS do not inherit a terminal's PATH (nvm/mise/asdf).
     // This fixed script only prints PATH; no frontend data becomes shell code.
@@ -673,15 +820,7 @@ fn load_environment(home: PathBuf, use_system_proxy: bool) -> Result<Environment
     let mut paths: Vec<PathBuf> = std::env::split_paths(&environment.path)
         .filter(|p| p.is_absolute())
         .collect();
-    for path in [
-        environment.home.join(".local/bin"),
-        environment.home.join(".npm-global/bin"),
-        environment.home.join(".volta/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-    ] {
+    for path in usual_directories(&environment.home) {
         if path.is_absolute() && !paths.contains(&path) {
             paths.push(path);
         }
@@ -709,15 +848,15 @@ struct LatestSource {
     body: Option<serde_json::Value>,
 }
 
-fn latest_source(id: ClientId, install: &Installation, home: &Path) -> LatestSource {
+fn latest_source(environment: &Environment, id: ClientId, install: &Installation) -> LatestSource {
     let url = match (&install.method, id) {
         (InstallMethod::Brew { package, cask, .. }, _) => format!(
             "https://formulae.brew.sh/api/{}/{package}.json",
             if *cask { "cask" } else { "formula" }
         ),
         (InstallMethod::Native, ClientId::Claude) => {
-            let stable = fs::read_to_string(home.join(".claude/settings.json"))
-                .ok()
+            let stable = environment
+                .read(&environment.home.join(".claude/settings.json"))
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                 .is_some_and(|v| v["autoUpdatesChannel"] == "stable");
             format!(
@@ -729,7 +868,7 @@ fn latest_source(id: ClientId, install: &Installation, home: &Path) -> LatestSou
         (_, ClientId::Cursor) => {
             return LatestSource {
                 url: CURSOR_LATEST_URL.into(),
-                body: Some(serde_json::json!({ "channel": cursor_channel(home) })),
+                body: Some(serde_json::json!({ "channel": cursor_channel(environment) })),
             }
         }
         (_, ClientId::Pi) => PI_LATEST_URL.into(),
@@ -803,27 +942,47 @@ async fn fetch_latest(
     parse_latest(&String::from_utf8_lossy(&bytes), &install.method, id)
 }
 
+/// Runs blocking work, such as a client process or wsl.exe, off the async
+/// runtime.
+async fn blocking<T: Send + 'static>(
+    task: impl FnOnce() -> Result<T, ClientError> + Send + 'static,
+) -> Result<T, ClientError> {
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .unwrap_or_else(|e| Err(ClientError::new("command", e)))
+}
+
 async fn inspect(
     environment: &Environment,
     client: &reqwest::Client,
     id: ClientId,
 ) -> (ClientStatus, Option<(Installation, ClientVersion)>) {
-    let mut status = ClientStatus::new(id);
+    let mut status = ClientStatus::new(id, environment.distribution());
     status.checked_at = Some(chrono::Utc::now().to_rfc3339());
-    let Some(install) = detect(environment, id) else {
-        status.phase = "not_installed".into();
-        return (status, None);
+    // Detection reads files and starts processes, wsl.exe among them.
+    let env = environment.clone();
+    let detected = blocking(move || {
+        Ok(detect(&env, id).map(|install| {
+            let current = current_version(&env, id, &install);
+            let source = latest_source(&env, id, &install);
+            (install, current, source)
+        }))
+    })
+    .await;
+    let (install, current, source) = match detected {
+        Ok(Some(detected)) => detected,
+        Ok(None) => {
+            status.phase = "not_installed".into();
+            return (status, None);
+        }
+        Err(e) => {
+            status.fail(e);
+            return (status, None);
+        }
     };
     status.executable = Some(install.executable.to_string_lossy().into_owned());
     status.install_method = install.method.label().into();
     status.other_installations.clone_from(&install.others);
-    let environment_copy = environment.clone();
-    let install_copy = install.clone();
-    let current = tauri::async_runtime::spawn_blocking(move || {
-        current_version(&environment_copy, id, &install_copy)
-    })
-    .await
-    .unwrap_or_else(|e| Err(ClientError::new("command", e)));
     let current = match current {
         Ok(v) => v,
         Err(e) => {
@@ -832,14 +991,7 @@ async fn inspect(
         }
     };
     status.current_version = Some(current.to_string());
-    let latest = match fetch_latest(
-        client,
-        &latest_source(id, &install, &environment.home),
-        &install,
-        id,
-    )
-    .await
-    {
+    let latest = match fetch_latest(client, &source, &install, id).await {
         Ok(v) => v,
         Err(e) => {
             status.fail(e);
@@ -849,9 +1001,15 @@ async fn inspect(
     status.latest_version = Some(latest.to_string());
     let available = latest.newer_than(&current);
     status.phase = if available { "available" } else { "up_to_date" }.into();
-    status.can_update = available && update_command(environment, id, &install, &latest).is_ok();
-    if available && !status.can_update {
-        status.phase = "manual".into();
+    if available {
+        let env = environment.clone();
+        let plan = (install.clone(), latest.clone());
+        status.can_update = blocking(move || update_command(&env, id, &plan.0, &plan.1))
+            .await
+            .is_ok();
+        if !status.can_update {
+            status.phase = "manual".into();
+        }
     }
     (status, Some((install, latest)))
 }
@@ -917,7 +1075,7 @@ impl ClientUpdateManager {
     fn start(
         self: &Arc<Self>,
         app: AppHandle,
-        update: Vec<ClientId>,
+        update: Vec<ClientTarget>,
     ) -> Result<ClientSnapshot, String> {
         let Ok(guard) = self.operation.clone().try_lock_owned() else {
             return Ok(self.snapshot());
@@ -936,7 +1094,11 @@ impl ClientUpdateManager {
         self.publish(&app, |s| {
             s.busy = true;
             for status in &mut s.clients {
-                if update.is_empty() || update.contains(&status.id) {
+                if update.is_empty()
+                    || update
+                        .iter()
+                        .any(|target| status.at(target.wsl.as_deref(), &[target.id]))
+                {
                     status.phase = if update.is_empty() {
                         "checking"
                     } else {
@@ -955,57 +1117,170 @@ impl ClientUpdateManager {
         // a listener; it never cancels a package-manager update.
         tauri::async_runtime::spawn(async move {
             let _guard = guard;
-            let environment = tauri::async_runtime::spawn_blocking(move || {
-                load_environment(home, use_system_proxy)
-            })
-            .await
-            .unwrap_or_else(|e| Err(ClientError::new("command", e)));
-            match environment {
-                Ok(environment) => {
-                    for id in ClientId::ALL {
-                        if !update.is_empty() && !update.contains(&id) {
-                            continue;
-                        }
-                        let (mut status, plan) = inspect(&environment, &client, id).await;
-                        if update.contains(&id) && status.can_update {
-                            if let Some((install, latest)) = plan {
-                                status.phase = "updating".into();
-                                status.can_update = false;
-                                manager.replace(&app, status.clone());
-                                let env = environment.clone();
-                                let result = tauri::async_runtime::spawn_blocking(move || {
-                                    perform_update(&env, id, &install, &latest)
-                                })
-                                .await
-                                .unwrap_or_else(|e| Err(ClientError::new("command", e)));
-                                match result {
-                                    Ok(version) => {
-                                        status.current_version = Some(version.to_string());
-                                        status.phase = "updated".into();
-                                        status.checked_at = Some(chrono::Utc::now().to_rfc3339());
-                                    }
-                                    Err(error) => status.fail(error),
-                                }
-                            }
-                        }
-                        manager.replace(&app, status);
-                    }
+            let local = if update.is_empty() {
+                ClientId::ALL.to_vec()
+            } else {
+                update
+                    .iter()
+                    .filter(|target| target.wsl.is_none())
+                    .map(|target| target.id)
+                    .collect()
+            };
+            let check_local = async {
+                if !local.is_empty() {
+                    let environment =
+                        blocking(move || load_environment(home, use_system_proxy)).await;
+                    manager
+                        .check(&app, &client, None, environment, &local, !update.is_empty())
+                        .await;
                 }
-                Err(error) => manager.publish(&app, |s| {
-                    for item in &mut s.clients {
-                        if ["checking", "updating"].contains(&item.phase.as_str()) {
-                            item.fail(ClientError::new(error.code, &error.detail));
-                        }
-                    }
-                }),
-            }
+            };
+            tokio::join!(
+                check_local,
+                manager.check_wsl(&app, &client, &update, use_system_proxy)
+            );
             manager.publish(&app, |s| s.busy = false);
         });
         Ok(initial)
     }
+    /// Checks `ids` in one place, this computer or a WSL distribution, and
+    /// with `update` set updates those that can be.
+    async fn check(
+        &self,
+        app: &AppHandle,
+        client: &reqwest::Client,
+        wsl: Option<&str>,
+        environment: Result<Environment, ClientError>,
+        ids: &[ClientId],
+        update: bool,
+    ) {
+        let environment = match environment {
+            Ok(environment) => environment,
+            Err(error) => {
+                return self.publish(app, |s| {
+                    for item in &mut s.clients {
+                        if item.at(wsl, ids)
+                            && ["checking", "updating"].contains(&item.phase.as_str())
+                        {
+                            item.fail(ClientError::new(error.code, &error.detail));
+                        }
+                    }
+                });
+            }
+        };
+        for &id in ids {
+            let (mut status, plan) = inspect(&environment, client, id).await;
+            if update && status.can_update {
+                if let Some((install, latest)) = plan {
+                    status.phase = "updating".into();
+                    status.can_update = false;
+                    self.replace(app, status.clone());
+                    let env = environment.clone();
+                    match blocking(move || perform_update(&env, id, &install, &latest)).await {
+                        Ok(version) => {
+                            status.current_version = Some(version.to_string());
+                            status.phase = "updated".into();
+                            status.checked_at = Some(chrono::Utc::now().to_rfc3339());
+                        }
+                        Err(error) => status.fail(error),
+                    }
+                }
+            }
+            self.replace(app, status);
+        }
+    }
+    /// Checks clients in WSL distributions. A refresh lists what each running
+    /// distribution has and never starts a stopped one. An update reaches the
+    /// distribution the user chose, which starts it if stopped.
+    async fn check_wsl(
+        &self,
+        app: &AppHandle,
+        client: &reqwest::Client,
+        update: &[ClientTarget],
+        use_system_proxy: bool,
+    ) {
+        let distributions = blocking(|| Ok(crate::wsl::distributions()))
+            .await
+            .unwrap_or_default();
+        if !update.is_empty() {
+            let mut places: Vec<(&str, Vec<ClientId>)> = Vec::new();
+            for target in update {
+                let Some(name) = target.wsl.as_deref() else {
+                    continue;
+                };
+                match places.iter_mut().find(|(place, _)| *place == name) {
+                    Some((_, ids)) => ids.push(target.id),
+                    None => places.push((name, vec![target.id])),
+                }
+            }
+            for (name, ids) in places {
+                let environment = if distributions.iter().any(|d| d.name == name) {
+                    let name = name.to_string();
+                    blocking(move || wsl::environment(Wsl::new(&name)?, use_system_proxy)).await
+                } else {
+                    Err(ClientError::new(
+                        "changed",
+                        format!("WSL distribution {name} is no longer available"),
+                    ))
+                };
+                self.check(app, client, Some(name), environment, &ids, true)
+                    .await;
+            }
+            return;
+        }
+        let running = distributions
+            .iter()
+            .filter(|d| d.running)
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>();
+        self.publish(app, |s| {
+            s.wsl_unchecked = distributions
+                .iter()
+                .filter(|d| !d.running)
+                .map(|d| d.name.clone())
+                .collect();
+            s.clients
+                .retain(|c| c.wsl.as_ref().map_or(true, |name| running.contains(name)));
+        });
+        for name in running {
+            let distribution = name.clone();
+            let found = match blocking(move || {
+                wsl::environment(Wsl::new(&distribution)?, use_system_proxy)
+            })
+            .await
+            {
+                Ok(environment) => {
+                    let mut found = Vec::new();
+                    for id in ClientId::ALL {
+                        let (status, _) = inspect(&environment, client, id).await;
+                        if status.phase != "not_installed" {
+                            found.push(status);
+                        }
+                    }
+                    Some(found)
+                }
+                Err(error) => {
+                    eprintln!("unable to check clients in WSL {name}: {}", error.detail);
+                    None
+                }
+            };
+            self.publish(app, |s| {
+                s.clients
+                    .retain(|c| c.wsl.as_deref() != Some(name.as_str()));
+                match found {
+                    Some(found) => s.clients.extend(found),
+                    None => s.wsl_unchecked.push(name.clone()),
+                }
+            });
+        }
+    }
     fn replace(&self, app: &AppHandle, status: ClientStatus) {
         self.publish(app, |s| {
-            if let Some(item) = s.clients.iter_mut().find(|c| c.id == status.id) {
+            if let Some(item) = s
+                .clients
+                .iter_mut()
+                .find(|c| c.id == status.id && c.wsl == status.wsl)
+            {
                 *item = status;
             }
         });
@@ -1029,12 +1304,12 @@ pub fn refresh_local_clients(
 pub fn update_local_clients(
     app: AppHandle,
     manager: State<'_, Arc<ClientUpdateManager>>,
-    ids: Vec<ClientId>,
+    targets: Vec<ClientTarget>,
 ) -> Result<ClientSnapshot, String> {
-    if ids.is_empty() || ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+    if targets.is_empty() || targets.iter().collect::<HashSet<_>>().len() != targets.len() {
         return Err("Invalid client selection".into());
     }
-    manager.start(app, ids)
+    manager.start(app, targets)
 }
 
 #[cfg(test)]

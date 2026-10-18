@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import { parseAuditSettings } from "./audit-settings-model";
 import { applyLocale } from "./i18n";
 import { parseLocalDataStatus } from "./local-data-model";
+import { parseRequestRecordPage } from "./request-record-model";
 import { parseRawAccessList } from "./raw-access-model";
 import { parseRawSealingStatus } from "./raw-sealing-model";
 
@@ -42,6 +44,12 @@ describe("host data errors", () => {
     expect(() => parseLocalDataStatus({ services: 1 })).toThrow(
       "Invalid local data status ($.services): unsupported field",
     );
+    expect(() => parseRequestRecordPage({ items: {} })).toThrow(
+      "Invalid request record data ($.items): expected an array",
+    );
+    expect(() => parseAuditSettings([])).toThrow(
+      "Invalid audit settings data ($): expected an object",
+    );
 
     await applyLocale("zh-CN");
     expect(() => parseRawSealingStatus({ ...status, configured: 1 })).toThrow(
@@ -52,6 +60,9 @@ describe("host data errors", () => {
     ).toThrow("原文封存数据无效（$.unlock_idle_seconds）：应为不小于 1 的整数");
     expect(() => parseLocalDataStatus({ services: 1 })).toThrow(
       "本地数据状态无效（$.services）：不支持的字段",
+    );
+    expect(() => parseRequestRecordPage({ items: {} })).toThrow(
+      "请求记录数据无效（$.items）：应为数组",
     );
   });
 });

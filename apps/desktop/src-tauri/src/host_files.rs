@@ -23,8 +23,7 @@ pub fn lock() -> MutexGuard<'static, ()> {
 
 #[derive(Default)]
 pub struct WriteOptions<'a> {
-    /// Tightens the file to owner-only access after writing (Unix).
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Tightens the file to owner-only access (Unix, and WSL homes).
     pub secret: bool,
     /// The contents the edit was computed from, `None` for a missing file.
     /// The write is abandoned when the file no longer holds them.
@@ -77,15 +76,21 @@ pub fn write_text(path: &Path, contents: &str, options: WriteOptions) -> Result<
             .create_new(true)
             .write(true)
             .open(&temporary)?;
+        // Access is settled before the contents land, so they never sit in a
+        // file others can read.
+        if !crate::wsl::settle_share_mode(&temporary, &target, options.secret)
+            .map_err(io::Error::other)?
+        {
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions)?;
+            }
+            #[cfg(unix)]
+            if options.secret {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+        }
         file.write_all(contents.as_bytes())?;
-        if let Some(permissions) = permissions {
-            file.set_permissions(permissions)?;
-        }
-        #[cfg(unix)]
-        if options.secret {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
         file.sync_all()?;
         drop(file);
         if let Some(expected) = options.expected {

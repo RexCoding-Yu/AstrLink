@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,6 +90,113 @@ func TestRecoverySettingsRecordsAndAffinitySurviveReopen(t *testing.T) {
 	}
 	if got.ModelRedirects == nil || len(got.ModelRedirects) != 0 {
 		t.Fatalf("legacy document redirects = %#v", got.ModelRedirects)
+	}
+}
+
+func TestRoutingSettingsWithoutThinkingAndPromptKeysLoadDefaults(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "thinking.db"))
+	defer store.Close()
+	ctx := context.Background()
+	// A document saved before these settings existed.
+	if _, err := store.db.ExecContext(ctx, `UPDATE routing_settings SET document_json = ? WHERE id = 1`,
+		`{"codex_identity_enforcement":false,"allow_unmatched_failover":true,"strategy":"retry_first","max_attempts":6}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetRoutingSettings(ctx)
+	if err != nil || got.SystemPromptEnabled || got.SystemPromptPrefix != "" || got.SystemPromptSuffix != "" ||
+		got.ReasoningMode != contract.ReasoningModePassthrough || got.ReasoningLevel != contract.ReasoningLevelMedium ||
+		got.AdaptivePreset != contract.AdaptivePresetEveryday || got.AdaptiveMin != contract.ReasoningLevelLow ||
+		got.AdaptiveMax != contract.ReasoningLevelMax || got.CodexIdentityEnforcement {
+		t.Fatalf("legacy document = %+v %v", got, err)
+	}
+	got.SystemPromptEnabled, got.SystemPromptPrefix = true, "Answer briefly."
+	got.ReasoningMode, got.ReasoningLevel = contract.ReasoningModeAdaptive, contract.ReasoningLevelLow
+	got.AdaptivePreset, got.AdaptiveMin, got.AdaptiveMax = contract.AdaptivePresetCustom, contract.ReasoningLevelOff, contract.ReasoningLevelHigh
+	if err := store.UpdateRoutingSettings(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded, err := store.GetRoutingSettings(ctx); err != nil || !reflect.DeepEqual(reloaded, got) {
+		t.Fatalf("reloaded = %+v %v", reloaded, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE routing_settings SET document_json = ? WHERE id = 1`,
+		`{"reasoning_level":"ultra","allow_unmatched_failover":true,"strategy":"retry_first","max_attempts":6}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetRoutingSettings(ctx); !errors.Is(err, storage.ErrInvalidRecord) {
+		t.Fatalf("unknown stored level err=%v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE routing_settings SET document_json = ? WHERE id = 1`,
+		`{"adaptive_min":"high","adaptive_max":"low","allow_unmatched_failover":true,"strategy":"retry_first","max_attempts":6}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetRoutingSettings(ctx); !errors.Is(err, storage.ErrInvalidRecord) {
+		t.Fatalf("inverted stored range err=%v", err)
+	}
+	settings := contract.DefaultRoutingSettings()
+	settings.AdaptiveMin, settings.AdaptiveMax = contract.ReasoningLevelMax, contract.ReasoningLevelLow
+	if err := store.UpdateRoutingSettings(ctx, settings); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("saving an inverted range: err = %v", err)
+	}
+}
+
+func TestRoutingSettingsLoadEarlierReasoningNames(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "reasoning-names.db"))
+	defer store.Close()
+	ctx := context.Background()
+	const rest = `"allow_unmatched_failover":true,"strategy":"retry_first","max_attempts":6}`
+	for _, test := range []struct {
+		document string
+		edit     func(*contract.RoutingSettings)
+	}{
+		{`{"reasoning_mode":"follow","reasoning_level":"high",` + rest, func(want *contract.RoutingSettings) {
+			want.ReasoningMode, want.ReasoningLevel = contract.ReasoningModePassthrough, contract.ReasoningLevelHigh
+		}},
+		// An adaptive document from before the ranges reads as the everyday
+		// preset; its level stays for the fixed mode.
+		{`{"reasoning_mode":"auto","reasoning_level":"low","system_prompt_enabled":true,"system_prompt_prefix":"Answer briefly.",` + rest,
+			func(want *contract.RoutingSettings) {
+				want.ReasoningMode, want.ReasoningLevel = contract.ReasoningModeAdaptive, contract.ReasoningLevelLow
+				want.SystemPromptEnabled, want.SystemPromptPrefix = true, "Answer briefly."
+			}},
+		{`{"reasoning_mode":"adaptive","reasoning_level":"high",` + rest, func(want *contract.RoutingSettings) {
+			want.ReasoningMode, want.ReasoningLevel = contract.ReasoningModeAdaptive, contract.ReasoningLevelHigh
+		}},
+		// The single key that came before the mode and level is ignored.
+		{`{"reasoning_override":"max",` + rest, func(*contract.RoutingSettings) {}},
+		{`{"reasoning_override":"","reasoning_mode":"auto",` + rest, func(want *contract.RoutingSettings) {
+			want.ReasoningMode = contract.ReasoningModeAdaptive
+		}},
+	} {
+		if _, err := store.db.ExecContext(ctx, `UPDATE routing_settings SET document_json = ? WHERE id = 1`, test.document); err != nil {
+			t.Fatal(err)
+		}
+		want := contract.DefaultRoutingSettings()
+		want.AllowUnmatchedFailover, want.Strategy, want.MaxAttempts = true, contract.RetryFirst, 6
+		test.edit(&want)
+		got, err := store.GetRoutingSettings(ctx)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s loaded as %+v, %v\nwant %+v", test.document, got, err, want)
+		}
+		// The next save writes the current names and drops the removed key.
+		if err := store.UpdateRoutingSettings(ctx, got); err != nil {
+			t.Fatal(err)
+		}
+		var document string
+		if err := store.db.QueryRowContext(ctx, `SELECT document_json FROM routing_settings WHERE id = 1`).Scan(&document); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(document, `"reasoning_mode":"`+string(want.ReasoningMode)+`"`) || strings.Contains(document, "reasoning_override") ||
+			!strings.Contains(document, `"adaptive_preset":"everyday","adaptive_min":"low","adaptive_max":"max"`) {
+			t.Fatalf("saved document = %s", document)
+		}
+	}
+	// Writes take only the current names.
+	settings := contract.DefaultRoutingSettings()
+	for _, mode := range []contract.ReasoningMode{"follow", "auto"} {
+		settings.ReasoningMode = mode
+		if err := store.UpdateRoutingSettings(ctx, settings); !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Fatalf("saving %q: err = %v", mode, err)
+		}
 	}
 }
 

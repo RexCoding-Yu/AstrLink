@@ -140,6 +140,29 @@ describe("service model", () => {
     });
     expect(copilot.subscription?.provider).toBe("github_copilot");
     expect(supportsResponsesWebSocket(copilot)).toBe(false);
+    const droid = parseService({
+      id: "service_droid_personal",
+      name: "Droid",
+      kind: "droid_subscription",
+      enabled: true,
+      models: ["claude-opus-4-6", "gpt-5.4", "glm-5.3"],
+      capabilities: [
+        { protocol: "anthropic.messages", mode: "native", streaming: true },
+        { protocol: "openai.responses", mode: "native", streaming: true },
+        { protocol: "openai.chat", mode: "native", streaming: true },
+        { protocol: "openai.models", mode: "native", streaming: false },
+      ],
+      subscription: {
+        provider: "factory_droid",
+        status: "connected",
+        account_hint: "fact***-7",
+        credential_ref: "local://subscription/service_droid_personal",
+      },
+      created_at: createdAt,
+      updated_at: createdAt,
+    });
+    expect(droid.subscription?.provider).toBe("factory_droid");
+    expect(supportsResponsesWebSocket(droid)).toBe(false);
   });
 
   it("parses a provider's own redirect rules", () => {
@@ -293,6 +316,39 @@ describe("service model", () => {
         }),
       ),
     ).toThrow(/credential_hint/);
+  });
+
+  it("reads a provider's privacy trust as a boolean Core omits when false", () => {
+    const service = (extra: Record<string, unknown>) => ({
+      id: "service_gateway",
+      name: "new-api",
+      kind: "newapi",
+      enabled: true,
+      models: [],
+      capabilities: [],
+      http: {
+        base_url: "https://gateway.example/v1",
+        auth: { scheme: "bearer" },
+      },
+      created_at: createdAt,
+      updated_at: createdAt,
+      ...extra,
+    });
+    expect(
+      parseService(service({ privacy_trusted: true })).privacy_trusted,
+    ).toBe(true);
+    expect(
+      Object.hasOwn(
+        parseService(service({ privacy_trusted: false })),
+        "privacy_trusted",
+      ),
+    ).toBe(false);
+    expect(Object.hasOwn(parseService(service({})), "privacy_trusted")).toBe(
+      false,
+    );
+    expect(() => parseService(service({ privacy_trusted: "yes" }))).toThrow(
+      /privacy_trusted/,
+    );
   });
 
   it("requires the connection variant selected by kind", () => {

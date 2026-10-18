@@ -13,6 +13,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getPrivacyModelReleases: vi.fn(),
   getPrivacyPolicy: vi.fn(),
   getPrivacyRegexBuiltinRules: vi.fn(),
+  getPrivacySummary: vi.fn(),
   getRawSealingStatus: vi.fn(),
   installPrivacyModel: vi.fn(),
   listenRawSealingChanged: vi.fn(async () => () => {}),
@@ -35,6 +36,8 @@ vi.mock("./notify", () => ({ notify: notifyMocks }));
 
 import { SafetyPolicy } from "./SafetyPolicy";
 import { defaultPrivacyKindRules } from "./privacy-policy-model";
+import { emptyPrivacySummary } from "./privacy-summary-model";
+import type { UsageWindow } from "./usage-range";
 import type {
   PrivacyCatalogModel,
   PrivacyLabelMapping,
@@ -43,6 +46,7 @@ import type {
   PrivacyPolicyRecord,
 } from "./privacy-policy-model";
 import type { RawSealingState } from "./raw-sealing-model";
+import { settleClosedLayer } from "./lib/test-layer-settle";
 
 function rawSealing(overrides: Partial<RawSealingState> = {}): RawSealingState {
   return {
@@ -306,6 +310,9 @@ describe("SafetyPolicy", () => {
     bridgeMocks.getPrivacyModelReleases.mockResolvedValue({ items: [] });
     bridgeMocks.listPrivacyModelInstallations.mockResolvedValue({ items: [] });
     bridgeMocks.getRawSealingStatus.mockResolvedValue(rawSealing());
+    bridgeMocks.getPrivacySummary.mockImplementation(
+      async (window: UsageWindow) => emptyPrivacySummary(window),
+    );
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -318,13 +325,118 @@ describe("SafetyPolicy", () => {
     container.remove();
   });
 
-  async function renderPolicy(session = "session-1"): Promise<void> {
+  async function renderPolicy(
+    session = "session-1",
+    initialView?: "models" | "overview",
+  ): Promise<void> {
     await act(async () => {
-      root.render(<SafetyPolicy coreSessionKey={session} isReady />);
+      root.render(
+        <SafetyPolicy
+          coreSessionKey={session}
+          initialView={initialView}
+          isReady
+        />,
+      );
       await Promise.resolve();
     });
     await flush();
   }
+
+  function tabLabels(): string[] {
+    return [...container.querySelectorAll('[role="tab"]')].map(
+      (tab) => tab.textContent ?? "",
+    );
+  }
+
+  function selectedTab(): string | null {
+    return (
+      container.querySelector('[role="tab"][aria-selected="true"]')
+        ?.textContent ?? null
+    );
+  }
+
+  function checkedSummary(window: UsageWindow) {
+    const summary = emptyPrivacySummary(window);
+    summary.totals = {
+      ...summary.totals,
+      requests: 3,
+      allowed: 2,
+      redacted: 1,
+      replaced: 2,
+    };
+    return summary;
+  }
+
+  it("leaves the overview out until a call went through the privacy check", async () => {
+    await renderPolicy();
+
+    expect(tabLabels()).not.toContain("概览");
+    expect(selectedTab()).toBe("检测与还原");
+    expect(
+      container.querySelector('[role="combobox"][aria-label="统计范围"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-slot="privacy-overview"]'),
+    ).toBeNull();
+    // One look over the last year decides; the empty range is never charted.
+    expect(bridgeMocks.getPrivacySummary).toHaveBeenCalledTimes(1);
+    expect(bridgeMocks.getPrivacySummary.mock.calls[0][0].preset).toBe("1y");
+  });
+
+  it("opens on the overview once the last year has checked calls", async () => {
+    bridgeMocks.getPrivacySummary.mockImplementation(
+      async (window: UsageWindow) => checkedSummary(window),
+    );
+    await renderPolicy();
+
+    expect(tabLabels()[0]).toBe("概览");
+    expect(selectedTab()).toBe("概览");
+    expect(
+      bridgeMocks.getPrivacySummary.mock.calls.map(([window]) => window.preset),
+    ).toEqual(["1y", "7d"]);
+    expect(
+      container.querySelector('[role="combobox"][aria-label="统计范围"]'),
+    ).not.toBeNull();
+
+    await openPolicySection("检测与还原");
+    expect(
+      container.querySelector('[role="combobox"][aria-label="统计范围"]'),
+    ).toBeNull();
+  });
+
+  it("opens the overview the tray asks for, also on a page already open", async () => {
+    // An earlier visit found nothing, but the tray has seen checked calls.
+    await renderPolicy();
+    expect(tabLabels()).not.toContain("概览");
+
+    await renderPolicy("session-1", "overview");
+    expect(tabLabels()[0]).toBe("概览");
+    expect(selectedTab()).toBe("概览");
+    expect(
+      container.querySelector('[data-slot="privacy-overview"]'),
+    ).not.toBeNull();
+  });
+
+  it("adds the overview beside the open tab when the first call is checked", async () => {
+    vi.useFakeTimers();
+    bridgeMocks.getPrivacyPolicy.mockResolvedValue(
+      policyRecord({ enabled: true }),
+    );
+    await renderPolicy();
+    expect(tabLabels()).not.toContain("概览");
+
+    bridgeMocks.getPrivacySummary.mockImplementation(
+      async (window: UsageWindow) => checkedSummary(window),
+    );
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(tabLabels()[0]).toBe("概览");
+    expect(selectedTab()).toBe("检测与还原");
+  });
 
   it("keeps the raw password one click away in the page header", async () => {
     bridgeMocks.getRawSealingStatus.mockResolvedValue(
@@ -444,7 +556,7 @@ describe("SafetyPolicy", () => {
     expect(notice()).toBeNull();
     expect(enabled?.disabled).toBe(false);
     expect(notifyMocks.success).toHaveBeenCalledWith(
-      "安全策略已保存，本地模型已关闭。",
+      "安全策略已保存，新请求立即生效。本地模型已关闭。",
     );
   });
 
@@ -473,7 +585,9 @@ describe("SafetyPolicy", () => {
       pending.resolve(policyRecord({ enabled: false }));
       await Promise.resolve();
     });
-    expect(notifyMocks.success).toHaveBeenCalledWith("安全策略已保存。");
+    expect(notifyMocks.success).toHaveBeenCalledWith(
+      "安全策略已保存，新请求立即生效。",
+    );
   });
 
   it("keeps rendering when switching a catalog quantization variant", async () => {
@@ -1499,7 +1613,7 @@ describe("SafetyPolicy", () => {
     await act(async () => button("取消").click());
     expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
     expect(trigger.closest("label")?.textContent).toContain(ready.name);
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    await settleClosedLayer();
     expect(document.activeElement?.id).toBe(trigger.id);
 
     await act(async () => trigger.click());
@@ -1612,7 +1726,9 @@ describe("SafetyPolicy", () => {
       detector: "local_model",
       local_model_id: ready.id,
     });
-    expect(notifyMocks.success).toHaveBeenCalledWith("安全策略已保存。");
+    expect(notifyMocks.success).toHaveBeenCalledWith(
+      "安全策略已保存，新请求立即生效。",
+    );
   });
 
   it("shows an in-app confirmation and feedback when deleting a model", async () => {
@@ -1725,6 +1841,184 @@ describe("SafetyPolicy", () => {
     expect(bridgeMocks.updatePrivacyPolicy).toHaveBeenCalledWith(etag, {
       kind_rules: expected,
     });
+  });
+
+  it("chooses per kind which warnings notify under warn and continue", async () => {
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({ request_action: "warn" }),
+    );
+    bridgeMocks.updatePrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({ request_action: "warn" }),
+    );
+    await renderPolicy();
+    expect(container.textContent).toContain("把不需要通知的类型设为「仅记录」");
+    await openPolicySection("脱敏规则");
+
+    expect(sectionButton("逐类型检测与通知", "重置此组设置").disabled).toBe(
+      true,
+    );
+    expect(
+      container.querySelector('[aria-label="邮箱 占位符形态"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[role="switch"][aria-label="检测邮箱"]')
+        ?.getAttribute("aria-checked"),
+    ).toBe("true");
+    // A kind that is not detected has nothing to notify about.
+    expect(
+      container
+        .querySelector('[aria-label="URL 通知方式"]')
+        ?.getAttribute("data-disabled"),
+    ).not.toBeNull();
+
+    await chooseOption('[aria-label="邮箱 通知方式"]', "仅记录");
+    await flush();
+    await settleClosedLayer();
+
+    expect(bridgeMocks.updatePrivacyPolicy).toHaveBeenCalledWith(etag, {
+      kind_rules: defaultPrivacyKindRules().map((rule) =>
+        rule.kind === "email" ? { ...rule, notify: false } : rule,
+      ),
+    });
+  });
+
+  function sectionButton(heading: string, label: string): HTMLButtonElement {
+    const panel = [
+      ...container.querySelectorAll<HTMLElement>('[data-slot="panel"]'),
+    ].find(
+      (candidate) => candidate.querySelector("h2")?.textContent === heading,
+    );
+    const match = panel?.querySelector<HTMLButtonElement>(
+      `button[aria-label="${label}"]`,
+    );
+    if (!match) throw new Error(`Missing ${label} in ${heading}`);
+    return match;
+  }
+
+  it("restores per-kind redaction defaults only after confirmation", async () => {
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({
+        kind_rules: defaultPrivacyKindRules().map((rule) =>
+          rule.kind === "url" ? { ...rule, enabled: true } : rule,
+        ),
+      }),
+    );
+    bridgeMocks.updatePrivacyPolicy.mockResolvedValueOnce(policyRecord());
+    await renderPolicy();
+    await openPolicySection("脱敏规则");
+
+    await act(async () => sectionButton("逐类型脱敏", "重置此组设置").click());
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("将逐类型脱敏恢复默认？");
+    expect(dialog?.textContent).toContain("URL、IP 地址、私人日期关闭");
+    expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
+
+    await act(async () => button("恢复默认").click());
+    await flush();
+    await settleClosedLayer();
+
+    expect(bridgeMocks.updatePrivacyPolicy).toHaveBeenCalledWith(etag, {
+      kind_rules: defaultPrivacyKindRules(),
+    });
+    expect(sectionButton("逐类型脱敏", "重置此组设置").disabled).toBe(true);
+  });
+
+  it("restores request and response defaults and leaves them on cancel", async () => {
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({
+        placeholder_notice: false,
+        skip_tool_declarations: true,
+        inspect_additional_tools: true,
+      }),
+    );
+    bridgeMocks.updatePrivacyPolicy.mockResolvedValueOnce(policyRecord());
+    await renderPolicy();
+
+    await act(async () => sectionButton("请求与响应", "重置此组设置").click());
+    const rows = [...document.querySelectorAll('[role="alertdialog"] li')].map(
+      (row) => row.textContent,
+    );
+    expect(rows).toEqual([
+      "响应还原占位符开启",
+      "还原工具调用参数开启",
+      "注入占位符约定说明开启",
+      "跳过函数调用检查关闭",
+      "跳过 additional_tools 检查开启",
+    ]);
+    await act(async () => button("取消").click());
+    await settleClosedLayer();
+    expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
+
+    await act(async () => sectionButton("请求与响应", "重置此组设置").click());
+    await act(async () => button("恢复默认").click());
+    await flush();
+    await settleClosedLayer();
+
+    expect(bridgeMocks.updatePrivacyPolicy).toHaveBeenCalledWith(etag, {
+      response_restore: true,
+      restore_tool_arguments: true,
+      placeholder_notice: true,
+      skip_tool_declarations: false,
+      inspect_additional_tools: false,
+    });
+    expect(sectionButton("请求与响应", "重置此组设置").disabled).toBe(true);
+  });
+
+  it("adds back only the missing default allowlist entries", async () => {
+    let current = policyRecord({
+      allowlist_rules: [
+        { type: "literal", value: "build-01" },
+        { type: "domain_suffix", value: "GitHub.com" },
+        { type: "cidr", value: "10.0.0.0/8" },
+      ],
+    });
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(current);
+    bridgeMocks.updatePrivacyPolicy.mockImplementation(async (_etag, patch) => {
+      current = { ...current, policy: { ...current.policy, ...patch } };
+      return current;
+    });
+    await renderPolicy();
+    await openPolicySection("脱敏规则");
+    await setInput('input[type="search"]', "build");
+
+    await act(async () => sectionButton("免脱敏名单", "补回默认条目").click());
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("将补回以下 7 条默认条目");
+    const added = [
+      "localhost",
+      "githubusercontent.com",
+      "127.0.0.0/8",
+      "::1/128",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "169.254.0.0/16",
+    ];
+    expect(
+      [...(dialog?.querySelectorAll("li") ?? [])].map((row) => row.textContent),
+    ).toEqual(added);
+
+    await act(async () => button("补回").click());
+    await flush();
+    await settleClosedLayer();
+
+    expect(bridgeMocks.updatePrivacyPolicy).toHaveBeenCalledWith(etag, {
+      allowlist_rules: [
+        { type: "literal", value: "build-01" },
+        { type: "domain_suffix", value: "GitHub.com" },
+        { type: "cidr", value: "10.0.0.0/8" },
+        { type: "domain_suffix", value: "localhost" },
+        { type: "domain_suffix", value: "githubusercontent.com" },
+        ...added.slice(2).map((value) => ({ type: "cidr", value })),
+      ],
+    });
+    expect(notifyMocks.success).toHaveBeenLastCalledWith(
+      "已补回 7 条默认条目，新请求立即生效。",
+    );
+    expect(
+      container.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe("");
+    expect(sectionButton("免脱敏名单", "补回默认条目").disabled).toBe(true);
   });
 
   it("locks the placeholder style of kinds where the shape is a safety property", async () => {

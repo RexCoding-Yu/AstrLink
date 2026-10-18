@@ -10,7 +10,7 @@
 
 # AstrLink
 
-**English** | [简体中文](README.zh-CN.md)
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
 **A local privacy gateway for AI agents: sensitive content is detected and
 redacted locally before it reaches any model provider.**

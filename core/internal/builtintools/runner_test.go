@@ -283,6 +283,96 @@ func TestProviderImagesBackendUsesOnlyTheProviderHook(t *testing.T) {
 	}
 }
 
+func TestProviderSearchBackendSendsCodexSearchCommands(t *testing.T) {
+	config := contract.BuiltinTool{Enabled: true, Backend: "service_search", ServiceID: "newapi_main", Model: "gpt-5.5"}
+	for _, invalid := range []struct {
+		kind   string
+		config contract.BuiltinTool
+	}{
+		{"image_generation", contract.BuiltinTool{Enabled: true, Backend: "service_search", ServiceID: "newapi_main", Model: "gpt-5.5"}},
+		{"web_search", contract.BuiltinTool{Enabled: true, Backend: "service_search", ServiceID: "newapi_main"}},
+		{"web_search", contract.BuiltinTool{Enabled: true, Backend: "service_search", Model: "gpt-5.5"}},
+	} {
+		if invalid.config.Validate(invalid.kind) == nil {
+			t.Fatalf("%s accepted %+v", invalid.kind, invalid.config)
+		}
+	}
+	var bodies []Object
+	executor := Executor{
+		Client: &http.Client{Transport: roundTrip(func(*http.Request) (*http.Response, error) {
+			t.Fatal("provider search backend used the external tool client")
+			return nil, nil
+		})},
+		Search: func(_ context.Context, got contract.BuiltinTool, body Object) (Object, error) {
+			if got.ServiceID != config.ServiceID {
+				t.Fatalf("provider = %q", got.ServiceID)
+			}
+			bodies = append(bodies, body)
+			return Object{"output": "Results [turn0search0]", "results": []any{
+				Object{"type": "text_result", "ref_id": "turn0search0", "url": "https://go.dev/doc/", "title": "Go docs"},
+				Object{"type": "text_result", "ref_id": "turn0search1", "url": "file:///etc/passwd"},
+			}}, nil
+		},
+	}
+	options := Object{"type": "web_search", "search_context_size": "high", "filters": Object{"allowed_domains": []any{"go.dev"}}, "user_location": Object{"type": "approximate", "country": "US"}}
+	result, err := executor.Execute(context.Background(), config, Invocation{Kind: "web_search", Arguments: Object{"action": "search", "query": "go release notes"}, Options: options})
+	if err != nil || len(result.Items) != 1 {
+		t.Fatal(result, err)
+	}
+	// Only public pages become sources, and the model gets each one's URL
+	// beside the reference ID the output uses.
+	if len(result.Sources) != 1 || result.Sources[0]["url"] != "https://go.dev/doc/" || !strings.Contains(result.Output, `"ref_id":"turn0search0","title":"Go docs","url":"https://go.dev/doc/"`) || !strings.Contains(result.Output, `"output":"Results [turn0search0]"`) {
+		t.Fatal(result.Sources, result.Output)
+	}
+	if action := Map(result.Items[0]["action"]); action["type"] != "search" || action["query"] != "go release notes" {
+		t.Fatal(result.Items[0])
+	}
+	for _, call := range []Object{
+		{"action": "open", "url": "https://go.dev/doc/"},
+		{"action": "find", "url": "https://go.dev/doc/", "pattern": "generics"},
+	} {
+		if _, err := executor.Execute(context.Background(), config, Invocation{Kind: "web_search", Arguments: call, Options: Object{"type": "web_search"}}); err != nil {
+			t.Fatal(call, err)
+		}
+	}
+	want := []string{
+		`{"commands":{"search_query":[{"q":"go release notes"}]},"model":"gpt-5.5","settings":{"filters":{"allowed_domains":["go.dev"]},"search_context_size":"high","user_location":{"country":"US","type":"approximate"}}}`,
+		`{"commands":{"open":[{"ref_id":"https://go.dev/doc/"}]},"model":"gpt-5.5"}`,
+		`{"commands":{"find":[{"pattern":"generics","ref_id":"https://go.dev/doc/"}]},"model":"gpt-5.5"}`,
+	}
+	ids := map[string]bool{}
+	for index, body := range bodies {
+		id := String(body["id"])
+		if len(id) != 36 || id[14] != '4' || ids[id] {
+			t.Fatalf("session ID %q", id)
+		}
+		ids[id] = true
+		delete(body, "id")
+		if got := Text(body); index >= len(want) || got != want[index] {
+			t.Fatalf("request %d = %s", index, got)
+		}
+	}
+	if len(bodies) != len(want) {
+		t.Fatal(len(bodies))
+	}
+	for _, call := range []Object{
+		{"action": "open", "url": "turn0search0"},
+		{"action": "find", "url": "https://go.dev/doc/"},
+		{"action": "search", "query": " "},
+		{"action": "click", "url": "https://go.dev/doc/"},
+	} {
+		if _, err := executor.Execute(context.Background(), config, Invocation{Kind: "web_search", Arguments: call, Options: Object{"type": "web_search"}}); err == nil {
+			t.Fatalf("%v was sent", call)
+		}
+	}
+	executor.Search = func(context.Context, contract.BuiltinTool, Object) (Object, error) {
+		return Object{"results": []any{}}, nil
+	}
+	if _, err := executor.Execute(context.Background(), config, Invocation{Kind: "web_search", Arguments: Object{"action": "search", "query": "go"}, Options: Object{"type": "web_search"}}); err == nil {
+		t.Fatal("an answer without output was accepted")
+	}
+}
+
 func TestStateExpiryAndBudget(t *testing.T) {
 	now := time.Now()
 	store := &Store{Now: func() time.Time { return now }, Limit: 500}

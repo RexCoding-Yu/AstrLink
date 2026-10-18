@@ -1,4 +1,4 @@
-import { i18n } from "./i18n";
+import { currentLocale, i18n } from "./i18n";
 import {
   displayRequestStatus,
   isModelDiscoveryProtocol,
@@ -262,6 +262,14 @@ export function startOfLocalHour(date: Date): Date {
 
 export function startOfTodayIso(now: Date): string {
   return startOfLocalDay(now).toISOString();
+}
+
+/** Today from local midnight to the next, the day the tray's figures cover. */
+export function localDayWindow(now: Date): Pick<UsageWindow, "from" | "to"> {
+  const from = startOfLocalDay(now);
+  const to = new Date(from);
+  to.setDate(to.getDate() + 1);
+  return { from: from.toISOString(), to: to.toISOString() };
 }
 
 /**
@@ -715,8 +723,5 @@ function compareUsageThenName(
     return right.total_tokens - left.total_tokens;
   }
   if (right.requests !== left.requests) return right.requests - left.requests;
-  return left.name.localeCompare(
-    right.name,
-    i18n.language === "zh-CN" ? "zh" : "en",
-  );
+  return left.name.localeCompare(right.name, currentLocale());
 }

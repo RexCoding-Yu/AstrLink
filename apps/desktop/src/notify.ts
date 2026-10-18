@@ -1,8 +1,29 @@
 import { toast } from "sonner";
 
+export interface NotifyAction {
+  label: string;
+  onClick: () => void;
+}
+
+// A toast with a button stays long enough to reach it.
+const ACTION_DURATION_MS = 8_000;
+// A toast with steps to follow stays long enough to read them.
+const STEPS_DURATION_MS = 12_000;
+
 export const notify = {
-  success(message: string) {
-    toast.success(message);
+  success(message: string, action?: NotifyAction) {
+    if (!action) {
+      toast.success(message);
+      return;
+    }
+    toast.success(message, {
+      action: { label: action.label, onClick: action.onClick },
+      duration: ACTION_DURATION_MS,
+    });
+  },
+  /** A success that says what to do next, somewhere else. */
+  successWithSteps(message: string) {
+    toast.success(message, { duration: STEPS_DURATION_MS });
   },
   error(message: string) {
     toast.error(message);

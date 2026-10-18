@@ -1,7 +1,12 @@
 import { i18n } from "./i18n";
 
 /** The host data that failed to parse; the message names it. */
-export type DataSubject = "rawSealing" | "rawAccess" | "localData";
+export type DataSubject =
+  | "rawSealing"
+  | "rawAccess"
+  | "localData"
+  | "requestRecord"
+  | "auditSettings";
 
 /** Why a value was rejected. */
 export type DataProblem =
@@ -23,7 +28,17 @@ export type DataProblem =
   | "unknownScope"
   | "unknownOutcome"
   | "unsupportedField"
-  | "belowMinimumLength";
+  | "belowMinimumLength"
+  | "integer"
+  | "integerBetween"
+  | "number"
+  | "nonNegativeNumber"
+  | "exceedsTotal"
+  | "tooMany"
+  | "empty"
+  | "missing"
+  | "unknownReason"
+  | "unexpectedValue";
 
 /**
  * Throws for host data that failed validation. The UI shows these messages

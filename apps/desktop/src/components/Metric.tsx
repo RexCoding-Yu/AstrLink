@@ -26,6 +26,7 @@ export function Metric({
   size = "default",
   emphasis = false,
   icon,
+  detail,
 }: {
   label: ReactNode;
   value: ReactNode;
@@ -33,6 +34,8 @@ export function Metric({
   size?: "default" | "sm" | "compact";
   emphasis?: boolean;
   icon?: ReactNode;
+  /** A short line under the value: a share, a split, or a caveat. */
+  detail?: ReactNode;
 }) {
   return (
     <div
@@ -67,6 +70,11 @@ export function Metric({
       >
         {value}
       </dd>
+      {detail ? (
+        <dd className="-mt-1 min-w-0 text-micro text-muted-foreground">
+          {detail}
+        </dd>
+      ) : null}
     </div>
   );
 }

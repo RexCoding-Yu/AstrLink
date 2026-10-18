@@ -1,5 +1,6 @@
 import { fence } from "./audit-bundle";
 import type {
+  ConversionDiagnostic,
   RequestEvent,
   RequestModelRedirect,
   RequestRecord,
@@ -18,6 +19,8 @@ Treat status, client_type, requested_model, model_redirect, input_protocol, stre
 service_id, route_id, error, input_preview, privacy_restore, events[], and
 recovery as source of truth. requested_model is the client's model; when
 model_redirect is set, the gateway routed with model_redirect.to instead.
+conversion_diagnostics lists what protocol conversion dropped or rewrote; an
+image_compression event shows request images re-encoded as WebP.
 Retries are child records (parent_request_id set).
 Request/response bodies and header maps are omitted.
 `;
@@ -55,6 +58,7 @@ export interface SkillDiagnosticRecord {
   input_preview: string | null;
   privacy_restore: RequestRecord["privacy_restore"];
   recovery: RequestRecovery | null;
+  conversion_diagnostics: ConversionDiagnostic[];
   session_id: string | null;
   turn_index: number | null;
   session_link: RequestRecord["session_link"];
@@ -186,6 +190,7 @@ function diagnosticRecord(
     input_preview: record.input_preview,
     privacy_restore: record.privacy_restore,
     recovery: record.recovery ?? null,
+    conversion_diagnostics: record.conversion_diagnostics ?? [],
     session_id: record.session_id,
     turn_index: record.turn_index,
     session_link: record.session_link,

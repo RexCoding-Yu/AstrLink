@@ -49,7 +49,11 @@ func BuiltinCatalog() contract.PrivacyModelCatalogResponse {
 }
 
 func builtinCatalogEntries() []contract.PrivacyModelCatalogItem {
-	return []contract.PrivacyModelCatalogItem{astrLinkGuardCatalogEntry(), {
+	return []contract.PrivacyModelCatalogItem{astrLinkGuardCatalogEntry()}
+}
+
+func legacyPPLXINT4CatalogEntry() contract.PrivacyModelCatalogItem {
+	return contract.PrivacyModelCatalogItem{
 		ID: CatalogPPLXPIITracer, Name: "AstrLink PII-Tracer 0.6B INT4",
 		Summary:  "PII-Tracer adapted by AstrLink with INT4 weights and calibrated error correction. Detects personal information and credentials locally.",
 		Source:   contract.PrivacyModelCatalogSourceCommunity,
@@ -62,7 +66,7 @@ func builtinCatalogEntries() []contract.PrivacyModelCatalogItem {
 			BytesTotal: 471_931_100, EstimatedRAMBytes: 2_147_483_648,
 			Supported: true, Recommended: true,
 		}},
-	}}
+	}
 }
 
 func legacyPPLXFP32CatalogEntry() contract.PrivacyModelCatalogItem {
@@ -87,6 +91,7 @@ func legacyPPLXFP32CatalogEntry() contract.PrivacyModelCatalogItem {
 func legacyCatalogEntries() []contract.PrivacyModelCatalogItem {
 	cpuOnly := "cpu_only"
 	return []contract.PrivacyModelCatalogItem{
+		legacyPPLXINT4CatalogEntry(),
 		legacyPPLXFP32CatalogEntry(),
 		{
 			ID: CatalogSheltronEttin32M, Name: "Privacy Filter Ettin 32M",

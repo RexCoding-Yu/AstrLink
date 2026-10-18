@@ -1,3 +1,5 @@
+import { invalidData, type DataProblem } from "./ipc-data-error";
+
 export interface AuditSettings {
   request_body_enabled: boolean;
   response_content_enabled: boolean;
@@ -24,27 +26,27 @@ export interface AuditSettingsPatch {
 
 type JsonObject = Record<string, unknown>;
 
-function invalid(path: string, message: string): never {
-  throw new Error(`审计设置数据无效（${path}）：${message}`);
+function invalid(path: string, problem: DataProblem): never {
+  return invalidData("auditSettings", path, problem);
 }
 
 function objectAt(value: unknown, path: string): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return invalid(path, "应为对象");
+    return invalid(path, "object");
   }
   return value as JsonObject;
 }
 
 function boolAt(value: unknown, path: string): boolean {
   if (typeof value !== "boolean") {
-    return invalid(path, "应为布尔值");
+    return invalid(path, "boolean");
   }
   return value;
 }
 
 function intAt(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    return invalid(path, "应为整数");
+    return invalid(path, "integer");
   }
   return value;
 }

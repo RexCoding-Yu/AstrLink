@@ -10,6 +10,8 @@ pub enum Locale {
     En,
     #[serde(rename = "zh-CN")]
     ZhCN,
+    #[serde(rename = "ja")]
+    Ja,
 }
 
 impl Locale {
@@ -19,13 +21,17 @@ impl Locale {
         Self::from_preferred(sys_locale::get_locales())
     }
 
-    /// Walks BCP 47 (or POSIX) tags in preference order; any Chinese variant
-    /// maps to the only Chinese catalog, and unsupported languages are skipped.
+    /// Walks BCP 47 (or POSIX) tags in preference order. Any Chinese variant
+    /// maps to the simplified Chinese catalog, Japanese maps to Japanese, and
+    /// unsupported languages are skipped.
     fn from_preferred(tags: impl IntoIterator<Item = String>) -> Self {
         for tag in tags {
             let language = tag.split(['-', '_', '.']).next().unwrap_or_default();
             if language.eq_ignore_ascii_case("zh") {
                 return Self::ZhCN;
+            }
+            if language.eq_ignore_ascii_case("ja") {
+                return Self::Ja;
             }
             if language.eq_ignore_ascii_case("en") {
                 return Self::En;
@@ -37,11 +43,16 @@ impl Locale {
 
 fn catalog(locale: Locale) -> &'static Value {
     static EN: OnceLock<Value> = OnceLock::new();
+    static JA: OnceLock<Value> = OnceLock::new();
     static ZH: OnceLock<Value> = OnceLock::new();
     match locale {
         Locale::En => EN.get_or_init(|| {
             serde_json::from_str(include_str!("../../src/i18n/locales/en.json"))
                 .expect("en.json is valid")
+        }),
+        Locale::Ja => JA.get_or_init(|| {
+            serde_json::from_str(include_str!("../../src/i18n/locales/ja.json"))
+                .expect("ja.json is valid")
         }),
         Locale::ZhCN => ZH.get_or_init(|| {
             serde_json::from_str(include_str!("../../src/i18n/locales/zh-CN.json"))
@@ -89,6 +100,10 @@ mod tests {
             "网关尚未就绪。"
         );
         assert_eq!(
+            t(Locale::Ja, "host.sidecar.notReady", &[]),
+            "ゲートウェイはまだ準備できていません。"
+        );
+        assert_eq!(
             t(Locale::En, "host.sidecar.notReady", &[]),
             "The gateway is not ready yet."
         );
@@ -108,7 +123,15 @@ mod tests {
             ),
             "网关运行中 · 127.0.0.1:8317"
         );
-        // Every key the tray icon renders must exist in both catalogs; a
+        assert_eq!(
+            t(
+                Locale::Ja,
+                "host.tray.status.ready",
+                &[("address", "127.0.0.1:8317")]
+            ),
+            "ゲートウェイ実行中 · 127.0.0.1:8317"
+        );
+        // Every key the tray icon renders must exist in every catalog; a
         // missing one would surface as a raw key in the tooltip.
         for key in [
             "host.tray.show",
@@ -137,7 +160,7 @@ mod tests {
             "host.tray.hiddenBody",
             "host.preferences.trayPagesDuplicate",
         ] {
-            for locale in [Locale::En, Locale::ZhCN] {
+            for locale in [Locale::En, Locale::Ja, Locale::ZhCN] {
                 assert!(
                     lookup(catalog(locale), key).is_some(),
                     "{key} missing for {locale:?}"
@@ -153,7 +176,8 @@ mod tests {
         assert_eq!(pick(&["zh_CN.UTF-8"]), Locale::ZhCN);
         assert_eq!(pick(&["zh-Hant-TW"]), Locale::ZhCN);
         assert_eq!(pick(&["en-GB", "zh-CN"]), Locale::En);
-        assert_eq!(pick(&["ja-JP", "zh-Hans", "en"]), Locale::ZhCN);
+        assert_eq!(pick(&["ja-JP", "zh-Hans", "en"]), Locale::Ja);
+        assert_eq!(pick(&["ja_JP.UTF-8"]), Locale::Ja);
         assert_eq!(pick(&["fr-FR", "C"]), Locale::En);
         assert_eq!(pick(&[]), Locale::En);
     }

@@ -87,7 +87,7 @@ describe("planning a provider import", () => {
       needsKey: false,
       models: [],
     });
-    expect(result.capabilities).toHaveLength(8);
+    expect(result.capabilities).toHaveLength(11);
 
     expect(
       plan({ kind: "kimi_coding", base_url: "https://api.kimi.ai/coding" }),

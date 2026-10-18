@@ -539,6 +539,9 @@ WHERE request_id NOT IN (SELECT id FROM request_records)`)
 	if err != nil {
 		return storagecontract.SweepResult{}, err
 	}
+	if err = deleteOrphanedStandIns(ctx, transaction); err != nil {
+		return storagecontract.SweepResult{}, err
+	}
 
 	if err = transaction.Commit(); err != nil {
 		return storagecontract.SweepResult{}, fmt.Errorf("commit audit sweep: %w", err)

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -21,8 +22,11 @@ import (
 
 const (
 	DefaultInferenceListen = "127.0.0.1:18317"
-	DefaultControlListen   = "127.0.0.1:0"
-	inferenceReadTimeout   = 60 * time.Second
+	// NetworkInferenceHost is the inference host that answers every interface
+	// of this machine. Any other inference host must be the IPv4 loopback.
+	NetworkInferenceHost = "0.0.0.0"
+	DefaultControlListen = "127.0.0.1:0"
+	inferenceReadTimeout = 60 * time.Second
 )
 
 type Config struct {
@@ -35,8 +39,10 @@ type Config struct {
 
 type Dependencies struct {
 	InferenceHandler http.Handler
-	// NewInferenceHandler builds the production Host gate from the bound address.
-	NewInferenceHandler func(address string) (http.Handler, error)
+	// NewInferenceHandler builds the production gate. address is the
+	// 127.0.0.1 authority programs on this machine use; networkExposed
+	// reports that the same port also answers other machines.
+	NewInferenceHandler func(address string, networkExposed bool) (http.Handler, error)
 	ControlHandler      http.Handler
 	// RetentionSweep deletes expired request records and audit blobs.
 	// Nil disables the startup/hourly retention loop (headless mode).
@@ -52,7 +58,7 @@ func DefaultConfig(coreVersion, buildCommit string) Config {
 }
 
 func (config Config) Validate() error {
-	if err := validateLoopbackAddress(config.InferenceListen); err != nil {
+	if err := validateInferenceAddress(config.InferenceListen); err != nil {
 		return fmt.Errorf("inference listen address: %w", err)
 	}
 	if err := validateLoopbackAddress(config.ControlListen); err != nil {
@@ -64,6 +70,26 @@ func (config Config) Validate() error {
 	return nil
 }
 
+// NetworkExposed reports whether the inference plane answers every interface
+// instead of only this machine.
+func (config Config) NetworkExposed() bool {
+	host, _, err := net.SplitHostPort(config.InferenceListen)
+	return err == nil && host == NetworkInferenceHost
+}
+
+// validateInferenceAddress accepts the IPv4 loopback or the every-interface
+// host. The control plane never leaves loopback; see validateLoopbackAddress.
+func validateInferenceAddress(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("split host and port: %w", err)
+	}
+	if host != "127.0.0.1" && host != NetworkInferenceHost {
+		return fmt.Errorf("address %q must use 127.0.0.1 or %s", address, NetworkInferenceHost)
+	}
+	return validatePort(address, port)
+}
+
 func validateLoopbackAddress(address string) error {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -72,11 +98,41 @@ func validateLoopbackAddress(address string) error {
 	if host != "127.0.0.1" {
 		return fmt.Errorf("address %q must use 127.0.0.1", address)
 	}
+	return validatePort(address, port)
+}
+
+func validatePort(address, port string) error {
 	parsedPort, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || parsedPort > 65535 {
 		return fmt.Errorf("address %q has an invalid port", address)
 	}
 	return nil
+}
+
+// inferenceBindAddress maps the every-interface host to the wildcard bind,
+// which Go serves dual-stack where IPv6 is available, so `localhost` and the
+// machine's IPv6 addresses answer as well.
+func inferenceBindAddress(address string, exposed bool) string {
+	_, port, err := net.SplitHostPort(address)
+	if !exposed || err != nil {
+		return address
+	}
+	return ":" + port
+}
+
+// exposedLoopbackAuthority returns the 127.0.0.1 authority and the client URL
+// for an every-interface listener. `localhost` is advertised only when the
+// bind is dual-stack, so a resolver answering ::1 first still reaches this Core.
+func exposedLoopbackAuthority(bound net.Addr) (authority, clientURL string) {
+	host, port, err := net.SplitHostPort(bound.String())
+	if err != nil {
+		return bound.String(), "http://" + bound.String()
+	}
+	authority = net.JoinHostPort("127.0.0.1", port)
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() && ip.To4() == nil {
+		return authority, "http://localhost:" + port
+	}
+	return authority, "http://" + authority
 }
 
 // Run binds both planes, emits exactly one ready event to readyWriter, and
@@ -94,13 +150,18 @@ func RunWithDependencies(ctx context.Context, config Config, readyWriter io.Writ
 
 type listenFunc func(network, address string) (net.Listener, error)
 
+// exposedPortProbe checks an every-interface port before it is bound; tests
+// that script every bind replace it.
+var exposedPortProbe = probeExposedPort
+
 // run serves IPv4 only; tests that script every bind use it.
 func run(ctx context.Context, config Config, readyWriter io.Writer, listen listenFunc) error {
 	return runWithDependencies(ctx, config, readyWriter, listen, nil, Dependencies{})
 }
 
 // listenIPv6 binds the inference port on [::1] as well, so clients can use
-// `localhost`, which most resolvers answer with ::1 first. Nil skips it.
+// `localhost`, which most resolvers answer with ::1 first. Nil skips it. An
+// every-interface bind is dual-stack already and does not use it.
 func runWithDependencies(
 	ctx context.Context,
 	config Config,
@@ -116,8 +177,18 @@ func runWithDependencies(
 		return err
 	}
 
-	inferenceListener, err := listen("tcp", config.InferenceListen)
-	if config.InferencePortFallback && errors.Is(err, addressInUse) {
+	exposed := config.NetworkExposed()
+	if exposed {
+		if _, port, splitErr := net.SplitHostPort(config.InferenceListen); splitErr == nil {
+			if err := exposedPortProbe(port); err != nil {
+				return fmt.Errorf("listen on inference plane: %w", err)
+			}
+		}
+	}
+	inferenceListener, err := listen("tcp", inferenceBindAddress(config.InferenceListen, exposed))
+	// Other machines are configured with the saved port, so an exposed
+	// listener never moves to a random one.
+	if config.InferencePortFallback && !exposed && errors.Is(err, addressInUse) {
 		// Bind directly instead of probing and releasing a port: the listener
 		// remains owned until shutdown, so another process cannot claim it.
 		inferenceListener, err = listen("tcp", "127.0.0.1:0")
@@ -129,9 +200,18 @@ func runWithDependencies(
 		return fmt.Errorf("listen on inference plane: %w", err)
 	}
 	defer inferenceListener.Close()
-	inferenceIPv6, clientInferenceURL := listenIPv6Loopback(listenIPv6, inferenceListener.Addr())
-	if inferenceIPv6 != nil {
-		defer inferenceIPv6.Close()
+	// Programs on this machine always get a 127.0.0.1 authority; an exposed
+	// listener answers it as well.
+	inferenceAddress := inferenceListener.Addr().String()
+	var inferenceIPv6 net.Listener
+	var clientInferenceURL string
+	if exposed {
+		inferenceAddress, clientInferenceURL = exposedLoopbackAuthority(inferenceListener.Addr())
+	} else {
+		inferenceIPv6, clientInferenceURL = listenIPv6Loopback(listenIPv6, inferenceListener.Addr())
+		if inferenceIPv6 != nil {
+			defer inferenceIPv6.Close()
+		}
 	}
 
 	controlListener, err := listen("tcp", config.ControlListen)
@@ -142,7 +222,7 @@ func runWithDependencies(
 
 	inferenceHandler := dependencies.InferenceHandler
 	if dependencies.NewInferenceHandler != nil {
-		inferenceHandler, err = dependencies.NewInferenceHandler(inferenceListener.Addr().String())
+		inferenceHandler, err = dependencies.NewInferenceHandler(inferenceAddress, exposed)
 		if err != nil {
 			return fmt.Errorf("configure production inference gate: %w", err)
 		}
@@ -158,13 +238,7 @@ func runWithDependencies(
 	defer cancelRequests()
 	baseContext := func(net.Listener) context.Context { return requestContext }
 
-	if dependencies.RetentionSweep != nil {
-		if err := dependencies.RetentionSweep(requestContext); err != nil && !errors.Is(err, context.Canceled) {
-			// Best-effort at startup; continue serving even if the first sweep fails.
-			_ = err
-		}
-		go runRetentionSweepLoop(requestContext, dependencies.RetentionSweep)
-	}
+	startRetentionSweep(requestContext, dependencies.RetentionSweep)
 
 	inferenceServer := &http.Server{
 		Handler:           inferenceHandler,
@@ -178,79 +252,127 @@ func runWithDependencies(
 		BaseContext:       baseContext,
 	}
 
-	servers := []*http.Server{inferenceServer, controlServer}
-	var controlSocket net.Listener
+	planes := []plane{
+		{name: "inference", server: inferenceServer, listener: inferenceListener},
+		{name: "control", server: controlServer, listener: controlListener},
+	}
 	if config.ControlSocketPath != "" {
-		controlSocket, err = listenControlSocket(config.ControlSocketPath)
+		socketPlane, closeSocket, err := controlSocketPlane(config.ControlSocketPath, controlHandler, baseContext)
 		if err != nil {
-			return fmt.Errorf("listen on local control socket: %w", err)
+			return err
 		}
-		defer func() {
-			_ = controlSocket.Close()
-			_ = os.Remove(config.ControlSocketPath)
-		}()
-		servers = append(servers, &http.Server{
-			Handler:           controlapi.LocalSocketHandler(controlHandler),
-			ReadHeaderTimeout: 5 * time.Second,
-			BaseContext:       baseContext,
-		})
-	}
-
-	serverErrors := make(chan error, 4)
-	var serveGroup sync.WaitGroup
-	serve := func(name string, server *http.Server, listener net.Listener) {
-		defer serveGroup.Done()
-		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			serverErrors <- fmt.Errorf("serve %s plane: %w", name, serveErr)
-		}
-	}
-	serveGroup.Add(2)
-	go serve("inference", inferenceServer, inferenceListener)
-	go serve("control", controlServer, controlListener)
-	if controlSocket != nil {
-		serveGroup.Add(1)
-		go serve("control socket", servers[2], controlSocket)
+		defer closeSocket()
+		planes = append(planes, socketPlane)
 	}
 	if inferenceIPv6 != nil {
-		serveGroup.Add(1)
-		go serve("inference IPv6", inferenceServer, inferenceIPv6)
+		planes = append(planes, plane{name: "inference IPv6", server: inferenceServer, listener: inferenceIPv6})
 	}
+	running := startPlanes(planes)
 
 	ready := contract.ReadyEvent{
 		Event:                   "ready",
 		CoreVersion:             config.Version.CoreVersion,
 		ControlAPIVersion:       config.Version.ControlAPIVersion,
 		ProtocolContractVersion: config.Version.ProtocolContractVersion,
-		InferenceURL:            "http://" + inferenceListener.Addr().String(),
+		InferenceURL:            "http://" + inferenceAddress,
 		ClientInferenceURL:      clientInferenceURL,
 		ControlURL:              "http://" + controlListener.Addr().String(),
 	}
 	if err := ready.Validate(); err != nil {
 		cancelRequests()
-		return shutdownAndCollect(
-			servers,
-			&serveGroup,
-			serverErrors,
-			fmt.Errorf("validate ready event: %w", err),
-		)
+		return running.stop(fmt.Errorf("validate ready event: %w", err))
 	}
 	if err := json.NewEncoder(readyWriter).Encode(ready); err != nil {
 		cancelRequests()
-		return shutdownAndCollect(
-			servers,
-			&serveGroup,
-			serverErrors,
-			fmt.Errorf("write ready event: %w", err),
-		)
+		return running.stop(fmt.Errorf("write ready event: %w", err))
 	}
+	return running.wait(ctx, cancelRequests)
+}
 
+// plane is one listener and the server answering it. Two planes may share
+// a server, as the IPv4 and IPv6 inference listeners do.
+type plane struct {
+	name     string
+	server   *http.Server
+	listener net.Listener
+}
+
+// runningPlanes tracks the serving goroutines of one run.
+type runningPlanes struct {
+	servers []*http.Server
+	group   sync.WaitGroup
+	errors  chan error
+}
+
+func startPlanes(planes []plane) *runningPlanes {
+	running := &runningPlanes{errors: make(chan error, len(planes))}
+	for _, current := range planes {
+		if !slices.Contains(running.servers, current.server) {
+			running.servers = append(running.servers, current.server)
+		}
+	}
+	running.group.Add(len(planes))
+	for _, current := range planes {
+		go func() {
+			defer running.group.Done()
+			if serveErr := current.server.Serve(current.listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				running.errors <- fmt.Errorf("serve %s plane: %w", current.name, serveErr)
+			}
+		}()
+	}
+	return running
+}
+
+// wait blocks until ctx ends or a plane fails, then shuts every plane down.
+func (running *runningPlanes) wait(ctx context.Context, cancelRequests context.CancelFunc) error {
 	var triggerErr error
 	select {
 	case <-ctx.Done():
-	case triggerErr = <-serverErrors:
+	case triggerErr = <-running.errors:
 	}
 	cancelRequests()
-	return shutdownAndCollect(servers, &serveGroup, serverErrors, triggerErr)
+	return running.stop(triggerErr)
+}
+
+func (running *runningPlanes) stop(primaryErr error) error {
+	return shutdownAndCollect(running.servers, &running.group, running.errors, primaryErr)
+}
+
+// controlSocketPlane serves the same-uid control socket. closeSocket removes
+// the socket file; call it only after the plane stopped.
+func controlSocketPlane(
+	path string,
+	controlHandler http.Handler,
+	baseContext func(net.Listener) context.Context,
+) (socketPlane plane, closeSocket func(), err error) {
+	listener, err := listenControlSocket(path)
+	if err != nil {
+		return plane{}, nil, fmt.Errorf("listen on local control socket: %w", err)
+	}
+	return plane{
+			name: "control socket",
+			server: &http.Server{
+				Handler:           controlapi.LocalSocketHandler(controlHandler),
+				ReadHeaderTimeout: 5 * time.Second,
+				BaseContext:       baseContext,
+			},
+			listener: listener,
+		}, func() {
+			_ = listener.Close()
+			_ = os.Remove(path)
+		}, nil
+}
+
+// startRetentionSweep runs sweep once now and then hourly. Nil disables it.
+func startRetentionSweep(ctx context.Context, sweep func(context.Context) error) {
+	if sweep == nil {
+		return
+	}
+	if err := sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		// Best-effort at startup; continue serving even if the first sweep fails.
+		_ = err
+	}
+	go runRetentionSweepLoop(ctx, sweep)
 }
 
 // listenIPv6Loopback binds the inference port on ::1 and returns the URL

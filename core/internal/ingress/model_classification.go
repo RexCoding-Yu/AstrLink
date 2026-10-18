@@ -21,8 +21,8 @@ import (
 // do not apply here, and reusing it would make the two exemption sets drift
 // apart. The flag buys the same per-point exemptions in ServeHTTP: inference
 // boundary, record-session reuse, no second record, no recursive model
-// routing, and no second privacy preflight — the parent request's preflight
-// already sanitized the text this sub-call carries.
+// routing, and no privacy check of its own — model routing already passed the
+// text this sub-call carries through the parent request's policy.
 type classifierInternalKey struct{}
 
 type classifierInternal struct {

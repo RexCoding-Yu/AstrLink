@@ -511,8 +511,32 @@ func visibleResponseTextRefs(
 		appendAnthropicRefs(&refs, object, frame)
 	case contract.ProtocolGoogleGenerateContent:
 		appendGeminiRefs(&refs, object, frame)
+	case contract.ProtocolRerank:
+		appendRerankRefs(&refs, object, frame)
 	}
 	return refs
+}
+
+// appendRerankRefs covers the documents a rerank response returns when the
+// request asked for them, as a string or as an object with text.
+func appendRerankRefs(
+	refs *[]visibleTextRef,
+	root map[string]any,
+	frame int,
+) {
+	results, _ := root["results"].([]any)
+	for position, value := range results {
+		result, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		channel := "rerank:" + memberID(result, "index", position)
+		if document, ok := result["document"].(map[string]any); ok {
+			appendStringRef(refs, document, "text", channel, frame)
+		} else {
+			appendStringRef(refs, result, "document", channel, frame)
+		}
+	}
 }
 
 func appendErrorMessageRef(

@@ -68,7 +68,7 @@ var subscriptionRiskJitter = func() time.Duration {
 
 func subscriptionRiskKind(kind contract.ServiceKind) bool {
 	return kind == contract.ServiceKindClaudeSubscription || kind == contract.ServiceKindCodexSubscription ||
-		kind == contract.ServiceKindCopilotSubscription
+		kind == contract.ServiceKindCopilotSubscription || kind == contract.ServiceKindDroidSubscription
 }
 
 func subscriptionRiskStatus(status int) bool {
@@ -97,9 +97,9 @@ func classifySubscriptionRisk(
 		return classifyClaudeRisk(status, header, details, structured, now)
 	case contract.ServiceKindCodexSubscription:
 		return classifyCodexRisk(status, header, details, structured, now)
-	case contract.ServiceKindCopilotSubscription:
-		// Copilot publishes no account-risk codes; a rejected GitHub token
-		// is re-checked so a revoked one asks for a new sign-in.
+	case contract.ServiceKindCopilotSubscription, contract.ServiceKindDroidSubscription:
+		// Neither publishes account-risk codes; a rejected token is
+		// re-checked so a revoked one asks for a new sign-in.
 		return subscriptionRiskSignal{unauthorized: status == http.StatusUnauthorized}
 	default:
 		return subscriptionRiskSignal{}
@@ -178,6 +178,25 @@ func claudeRateLimitRisk(header http.Header, message string, now time.Time) subs
 		return subscriptionRiskSignal{}
 	}
 	return subscriptionRiskSignal{scope: subscriptionRiskModel, cooldown: until.Sub(now)}
+}
+
+// claudeExtraUsageRejection reports Anthropic's 400 for a request it counts as
+// third-party app usage, which draws on extra usage the account does not
+// have. The account is healthy and stays in service, but no Claude
+// subscription may retry the request: one with extra usage would accept it
+// and bill the user.
+func claudeExtraUsageRejection(response *http.Response, inspect func() ([]byte, bool)) bool {
+	data, complete := inspect()
+	if !complete {
+		return false
+	}
+	body, err := transport.DecodeBody(data, strings.Join(response.Header.Values("Content-Encoding"), ","), subscriptionRiskInspectBytes)
+	if err != nil {
+		return false
+	}
+	details, _ := parseSubscriptionError(body, time.Now())
+	message := strings.ToLower(details.message)
+	return strings.Contains(message, "draw from your extra usage") || strings.Contains(message, "out of extra usage")
 }
 
 func classifyCodexRisk(

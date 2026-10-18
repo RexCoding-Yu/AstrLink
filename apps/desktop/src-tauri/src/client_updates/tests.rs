@@ -30,7 +30,6 @@ impl Fixture {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
-    #[cfg(unix)]
     fn environment(&self) -> Environment {
         Environment {
             home: self.0.clone(),
@@ -42,6 +41,7 @@ impl Fixture {
             .unwrap(),
             use_system_proxy: false,
             proxy_env: None,
+            wsl: None,
         }
     }
 }
@@ -99,14 +99,14 @@ fn identifies_npm_and_brew_without_confusing_native_installations() {
     );
     let binary = npm.parent().unwrap().join("bin/codex.js");
     assert_eq!(
-        installation_method(ClientId::Codex, &binary, &fixture.0),
+        installation_method(&fixture.environment(), ClientId::Codex, &binary),
         InstallMethod::Npm {
             prefix: fixture.0.join("node")
         }
     );
     let homebrew = PathBuf::from("/opt/homebrew/Caskroom/claude-code@latest/2.1.280/claude");
     assert_eq!(
-        installation_method(ClientId::Claude, &homebrew, &fixture.0),
+        installation_method(&fixture.environment(), ClientId::Claude, &homebrew),
         InstallMethod::Brew {
             root: "/opt/homebrew".into(),
             package: "claude-code@latest".into(),
@@ -115,22 +115,26 @@ fn identifies_npm_and_brew_without_confusing_native_installations() {
     );
     assert!(matches!(
         installation_method(
+            &fixture.environment(),
             ClientId::Codex,
-            Path::new("/usr/local/Cellar/codex/1.0/bin/codex"),
-            &fixture.0
+            Path::new("/usr/local/Cellar/codex/1.0/bin/codex")
         ),
         InstallMethod::Brew { cask: false, .. }
     ));
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Claude,
-            &fixture.0.join(".local/share/claude/versions/2.1.0"),
-            &fixture.0
+            &fixture.0.join(".local/share/claude/versions/2.1.0")
         ),
         InstallMethod::Native
     );
     assert_eq!(
-        installation_method(ClientId::Codex, &fixture.0.join("random/codex"), &fixture.0),
+        installation_method(
+            &fixture.environment(),
+            ClientId::Codex,
+            &fixture.0.join("random/codex")
+        ),
         InstallMethod::Unknown
     );
 }
@@ -144,9 +148,9 @@ fn excludes_other_package_managers_and_project_node_modules() {
     );
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Codex,
-            &package.parent().unwrap().join("bin/codex.js"),
-            &fixture.0
+            &package.parent().unwrap().join("bin/codex.js")
         ),
         InstallMethod::Unknown
     );
@@ -158,9 +162,9 @@ fn excludes_other_package_managers_and_project_node_modules() {
         );
         assert_eq!(
             installation_method(
+                &fixture.environment(),
                 ClientId::Codex,
-                &project.parent().unwrap().join("bin/codex.js"),
-                &fixture.0
+                &project.parent().unwrap().join("bin/codex.js")
             ),
             InstallMethod::Unknown
         );
@@ -173,21 +177,21 @@ fn identifies_cursor_and_pi_installations() {
     let fixture = Fixture::new();
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Cursor,
             &fixture
                 .0
-                .join(".local/share/cursor-agent/versions/2026.09.28-64d2043/cursor-agent"),
-            &fixture.0
+                .join(".local/share/cursor-agent/versions/2026.09.28-64d2043/cursor-agent")
         ),
         InstallMethod::Native
     );
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Cursor,
             Path::new(
                 "/opt/homebrew/Caskroom/cursor-cli/2026.09.28-64d2043/dist-package/cursor-agent"
-            ),
-            &fixture.0
+            )
         ),
         InstallMethod::Brew {
             root: "/opt/homebrew".into(),
@@ -202,9 +206,9 @@ fn identifies_cursor_and_pi_installations() {
     );
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Pi,
-            &formula.parent().unwrap().join("dist/cli.js"),
-            &fixture.0
+            &formula.parent().unwrap().join("dist/cli.js")
         ),
         InstallMethod::Brew {
             root: fixture.0.join("brew"),
@@ -218,9 +222,9 @@ fn identifies_cursor_and_pi_installations() {
     );
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Pi,
-            &legacy.parent().unwrap().join("dist/cli.js"),
-            &fixture.0
+            &legacy.parent().unwrap().join("dist/cli.js")
         ),
         InstallMethod::Npm {
             prefix: fixture.0.join("node")
@@ -232,9 +236,9 @@ fn identifies_cursor_and_pi_installations() {
     );
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Pi,
-            &bun.parent().unwrap().join("dist/cli.js"),
-            &fixture.0
+            &bun.parent().unwrap().join("dist/cli.js")
         ),
         InstallMethod::Package("bun")
     );
@@ -244,9 +248,9 @@ fn identifies_cursor_and_pi_installations() {
     );
     assert_eq!(
         installation_method(
+            &fixture.environment(),
             ClientId::Pi,
-            &fixture.0.join(".pi/agent/bin/pi"),
-            &fixture.0
+            &fixture.0.join(".pi/agent/bin/pi")
         ),
         InstallMethod::Native
     );
@@ -395,6 +399,7 @@ fn follows_npm_shims_on_windows_without_verbatim_paths() {
         path: std::env::join_paths([&npm, &nodejs]).unwrap(),
         use_system_proxy: false,
         proxy_env: None,
+        wsl: None,
     };
 
     let pi = detect(&environment, ClientId::Pi).unwrap();
@@ -442,6 +447,63 @@ fn follows_npm_shims_on_windows_without_verbatim_paths() {
         nodejs.join(r"node_modules\npm\bin\npm-cli.js")
     );
     assert_eq!(command.args[4], npm.as_os_str());
+}
+
+#[test]
+fn recognizes_windows_programs_by_their_pe_header() {
+    let fixture = Fixture::new();
+    // Claude Code's npm stub, left when its postinstall did not run.
+    let stub = fixture.write(
+        "npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        "echo \"Error: claude native binary not installed.\" >&2\nexit 1\n",
+    );
+    assert!(!process::windows_image(&stub).unwrap());
+    let mut image = vec![0; 0x84];
+    image[..2].copy_from_slice(b"MZ");
+    image[60..64].copy_from_slice(&0x80u32.to_le_bytes());
+    image[0x80..].copy_from_slice(b"PE\0\0");
+    let path = fixture.0.join("program.exe");
+    fs::write(&path, &image).unwrap();
+    assert!(process::windows_image(&path).unwrap());
+    let mut dos = image.clone();
+    dos[0x80..].copy_from_slice(b"NE\0\0");
+    // Empty, DOS header only, cut-off signature, and a 16-bit NE image.
+    for bytes in [&[][..], &image[..64], &image[..0x82], &dos[..]] {
+        fs::write(&path, bytes).unwrap();
+        assert!(!process::windows_image(&path).unwrap());
+    }
+    assert!(process::windows_image(&fixture.0.join("missing.exe")).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn never_starts_a_file_that_is_not_a_windows_program() {
+    let fixture = Fixture::new();
+    let environment = Environment {
+        home: fixture.0.clone(),
+        path: std::env::var_os("PATH").unwrap_or_default(),
+        use_system_proxy: false,
+        proxy_env: None,
+        wsl: None,
+    };
+    let stub = fixture.write("claude.exe", "exit 1\n");
+    // CreateProcess itself would fail with "command" after showing the dialog.
+    let error = process::run(
+        &environment,
+        &CommandSpec::new(&stub, &["--version"]),
+        PROBE_TIMEOUT,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "damaged");
+    assert!(process::windows_image(&std::env::current_exe().unwrap()).unwrap());
+    let shell = std::env::var_os("ComSpec").unwrap();
+    let output = process::run(
+        &environment,
+        &CommandSpec::new(shell, &["/d", "/c", "echo ok"]),
+        PROBE_TIMEOUT,
+    )
+    .unwrap();
+    assert_eq!(output.trim(), "ok");
 }
 
 #[test]
@@ -501,16 +563,20 @@ fn claude_version_check_respects_the_selected_native_channel() {
         method: InstallMethod::Native,
         others: vec![],
     };
-    assert!(latest_source(ClientId::Claude, &install, &fixture.0)
-        .url
-        .ends_with("/latest"));
+    assert!(
+        latest_source(&fixture.environment(), ClientId::Claude, &install)
+            .url
+            .ends_with("/latest")
+    );
     fixture.write(
         ".claude/settings.json",
         r#"{"autoUpdatesChannel":"stable"}"#,
     );
-    assert!(latest_source(ClientId::Claude, &install, &fixture.0)
-        .url
-        .ends_with("/stable"));
+    assert!(
+        latest_source(&fixture.environment(), ClientId::Claude, &install)
+            .url
+            .ends_with("/stable")
+    );
 }
 
 #[test]
@@ -522,14 +588,14 @@ fn cursor_and_pi_version_checks_use_their_release_services() {
         method: InstallMethod::Native,
         others: vec![],
     };
-    let pi = latest_source(ClientId::Pi, &install, &fixture.0);
+    let pi = latest_source(&fixture.environment(), ClientId::Pi, &install);
     assert_eq!((pi.url.as_str(), pi.body), (PI_LATEST_URL, None));
-    let cursor = latest_source(ClientId::Cursor, &install, &fixture.0);
+    let cursor = latest_source(&fixture.environment(), ClientId::Cursor, &install);
     assert_eq!(cursor.url, CURSOR_LATEST_URL);
     assert_eq!(cursor.body, Some(serde_json::json!({ "channel": "prod" })));
     fixture.write(".cursor/cli-config.json", r#"{"channel":"lab"}"#);
     assert_eq!(
-        latest_source(ClientId::Cursor, &install, &fixture.0).body,
+        latest_source(&fixture.environment(), ClientId::Cursor, &install).body,
         Some(serde_json::json!({ "channel": "lab" }))
     );
     let cask = Installation {
@@ -540,7 +606,7 @@ fn cursor_and_pi_version_checks_use_their_release_services() {
         },
         ..install
     };
-    let source = latest_source(ClientId::Cursor, &cask, &fixture.0);
+    let source = latest_source(&fixture.environment(), ClientId::Cursor, &cask);
     assert_eq!(
         (source.url.as_str(), source.body),
         ("https://formulae.brew.sh/api/cask/cursor-cli.json", None)
@@ -611,7 +677,10 @@ fn respects_path_order_and_deduplicates_symlinks() {
         fixture.0.join("second"),
     ])
     .unwrap();
-    let paths = find_programs(&path, "codex");
+    let paths = find_programs(&path, "codex")
+        .into_iter()
+        .map(|program| program.path)
+        .collect::<Vec<_>>();
     assert_eq!(paths, [first, fixture.0.join("second/codex")]);
 }
 
@@ -630,6 +699,83 @@ fn fake_codex(fixture: &Fixture, update: &str) -> Installation {
     fs::create_dir_all(fixture.0.join("bin")).unwrap();
     symlink(script, fixture.0.join("bin/codex")).unwrap();
     detect(&fixture.environment(), ClientId::Codex).unwrap()
+}
+
+/// Stands in for wsl.exe: runs the command after `--exec` from the fixture,
+/// which plays the distribution user's home.
+#[cfg(unix)]
+fn fake_wsl(fixture: &Fixture) -> Wsl {
+    let home = fixture.0.display();
+    let launcher = fixture.script(
+        "wsl",
+        &format!(
+            "#!/bin/sh\ncd '{home}' || exit 1\nwhile [ \"$1\" != --exec ]; do shift; done\nshift\n\
+             exec env SHELL=/bin/sh HOME='{home}' \"$@\"\n"
+        ),
+    );
+    Wsl {
+        distribution: "Ubuntu".into(),
+        launcher,
+        share: "/".into(),
+        mount_root: fixture.0.join("mnt").display().to_string(),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn reads_the_home_and_login_path_in_wsl() {
+    let fixture = Fixture::new();
+    let environment = wsl::environment(fake_wsl(&fixture), false).unwrap();
+    assert_eq!(environment.home, fixture.0);
+    let path = environment.path.to_string_lossy();
+    let local_bin = fixture.0.join(".local/bin");
+    assert!(path.split(':').any(|d| Path::new(d) == local_bin), "{path}");
+}
+
+#[cfg(unix)]
+#[test]
+fn checks_and_updates_clients_in_wsl_apart_from_windows_drives() {
+    let fixture = Fixture::new();
+    let local = fake_codex(&fixture, "echo 'codex-cli 1.1.0' > version");
+    // This computer's npm shim, which WSL appends to PATH.
+    fixture.script("mnt/c/npm/codex", "#!/bin/sh\necho 'codex-cli 9.0.0'\n");
+    let cursor = fixture.script("my tools/cursor-agent", "#!/bin/sh\n");
+    let environment = Environment {
+        path: std::env::join_paths([
+            fixture.0.join("mnt/c/npm"),
+            fixture.0.join("bin"),
+            fixture.0.join("my tools"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
+        .unwrap(),
+        wsl: Some(fake_wsl(&fixture)),
+        ..fixture.environment()
+    };
+    let install = detect(&environment, ClientId::Codex).unwrap();
+    assert_eq!(install.executable, fixture.0.join("bin/codex"));
+    assert_eq!(install.resolved, local.resolved);
+    assert_eq!(install.method, InstallMethod::Native);
+    assert!(install.others.is_empty());
+    assert_eq!(
+        environment
+            .programs("cursor-agent")
+            .into_iter()
+            .map(|program| program.path)
+            .collect::<Vec<_>>(),
+        [cursor]
+    );
+    assert!(environment.executable(&fixture.0.join("bin/codex")));
+    assert!(!environment.executable(&fixture.0.join("version")));
+    assert!(environment.is_file(&fixture.0.join("version")));
+    let result = perform_update(
+        &environment,
+        ClientId::Codex,
+        &install,
+        &version(ClientId::Codex, "1.1.0"),
+    )
+    .unwrap();
+    assert_eq!(result, version(ClientId::Codex, "1.1.0"));
 }
 
 #[cfg(unix)]
@@ -707,41 +853,46 @@ fn refuses_to_update_when_the_selected_installation_changes() {
 
 #[cfg(unix)]
 #[test]
-fn npm_update_targets_the_detected_prefix_and_pins_the_version() {
+fn npm_update_targets_the_detected_prefix_and_allows_the_package_scripts() {
     let fixture = Fixture::new();
     fixture.script("node/bin/node", "#!/bin/sh\nexit 0\n");
-    fixture.write("node/lib/node_modules/npm/bin/npm-cli.js", "");
-    let install = Installation {
-        executable: fixture.0.join("node/bin/codex"),
-        resolved: PathBuf::new(),
-        method: InstallMethod::Npm {
-            prefix: fixture.0.join("node"),
-        },
-        others: vec![],
-    };
-    let command = update_command(
-        &fixture.environment(),
-        ClientId::Codex,
-        &install,
-        &version(ClientId::Codex, "0.158.0"),
-    )
-    .unwrap();
-    assert_eq!(command.program, fixture.0.join("node/bin/node"));
-    assert_eq!(command.args[4], fixture.0.join("node").as_os_str());
-    assert_eq!(command.args[5], "@openai/codex@0.158.0");
+    let npm = fixture.write("node/lib/node_modules/npm/bin/npm-cli.js", "");
+    let prefix = fixture.0.join("node");
+    for (id, latest, package) in [
+        (ClientId::Codex, "0.158.0", "@openai/codex"),
+        (ClientId::Claude, "2.1.299", "@anthropic-ai/claude-code"),
+    ] {
+        let install = Installation {
+            executable: prefix.join("bin").join(id.name()),
+            resolved: PathBuf::new(),
+            method: InstallMethod::Npm {
+                prefix: prefix.clone(),
+            },
+            others: vec![],
+        };
+        let command =
+            update_command(&fixture.environment(), id, &install, &version(id, latest)).unwrap();
+        assert_eq!(command.program, prefix.join("bin/node"));
+        assert_eq!(
+            command.args,
+            [
+                npm.clone().into_os_string(),
+                "install".into(),
+                "--global".into(),
+                "--prefix".into(),
+                prefix.clone().into_os_string(),
+                format!("--allow-scripts={package}").into(),
+                format!("{package}@{latest}").into(),
+            ]
+        );
+    }
 }
 
 #[cfg(unix)]
 #[test]
 fn pi_delegates_updates_and_cursor_respects_the_static_channel() {
     let fixture = Fixture::new();
-    for method in [
-        InstallMethod::Native,
-        InstallMethod::Package("pnpm"),
-        InstallMethod::Npm {
-            prefix: fixture.0.join("node"),
-        },
-    ] {
+    for method in [InstallMethod::Native, InstallMethod::Package("pnpm")] {
         let install = Installation {
             executable: fixture.0.join("bin/pi"),
             resolved: PathBuf::new(),
@@ -775,6 +926,72 @@ fn pi_delegates_updates_and_cursor_respects_the_static_channel() {
             .code,
         "unsupported"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn pi_npm_updates_run_under_node_when_bun_answers_to_node() {
+    let fixture = Fixture::new();
+    let bun = fixture.script(".bun/bin/bun", "#!/bin/sh\n");
+    for directory in ["bin", "prefix/bin"] {
+        fs::create_dir_all(fixture.0.join(directory)).unwrap();
+    }
+    std::os::unix::fs::symlink(&bun, fixture.0.join("bin/node")).unwrap();
+    let entry = fixture.write(
+        "prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+        "",
+    );
+    let pi = Installation {
+        executable: fixture.0.join("prefix/bin/pi"),
+        resolved: entry.clone(),
+        method: InstallMethod::Npm {
+            prefix: fixture.0.join("prefix"),
+        },
+        others: vec![],
+    };
+    let latest = version(ClientId::Pi, "1.2.0");
+    let mut environment = fixture.environment();
+    environment.path = fixture.0.join("bin").into();
+    assert_eq!(
+        update_command(&environment, ClientId::Pi, &pi, &latest)
+            .unwrap_err()
+            .code,
+        "unsupported"
+    );
+    // npm itself runs under Bun when nothing else answers to `node`.
+    fixture.write("prefix/lib/node_modules/npm/bin/npm-cli.js", "");
+    let codex = Installation {
+        executable: fixture.0.join("prefix/bin/codex"),
+        resolved: PathBuf::new(),
+        method: pi.method.clone(),
+        others: vec![],
+    };
+    let command = update_command(
+        &environment,
+        ClientId::Codex,
+        &codex,
+        &version(ClientId::Codex, "0.158.0"),
+    )
+    .unwrap();
+    assert_eq!(command.program, fixture.0.join("bin/node"));
+
+    let node = fixture.script("node/bin/node", "#!/bin/sh\n");
+    environment.path =
+        std::env::join_paths([fixture.0.join("bin"), fixture.0.join("node/bin")]).unwrap();
+    let command = update_command(&environment, ClientId::Pi, &pi, &latest).unwrap();
+    assert_eq!(command.program, node);
+    assert_eq!(
+        command.args,
+        [entry.into_os_string(), "update".into(), "--self".into()]
+    );
+    // Node.js beside the prefix comes before PATH, unless it is Bun.
+    std::os::unix::fs::symlink(&bun, fixture.0.join("prefix/bin/node")).unwrap();
+    let command = update_command(&environment, ClientId::Pi, &pi, &latest).unwrap();
+    assert_eq!(command.program, node);
+    fs::remove_file(fixture.0.join("prefix/bin/node")).unwrap();
+    let sibling = fixture.script("prefix/bin/node", "#!/bin/sh\n");
+    let command = update_command(&environment, ClientId::Pi, &pi, &latest).unwrap();
+    assert_eq!(command.program, sibling);
 }
 
 #[tokio::test]

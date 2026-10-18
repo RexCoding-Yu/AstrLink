@@ -423,7 +423,7 @@ func controlAPITestPort(t *testing.T) int {
 }
 
 func TestPayAsYouGoServicesPersistAsHTTP(t *testing.T) {
-	for _, kind := range []contract.ServiceKind{"deepseek", "qwen", "moonshot", "glm", "minimax", "doubao", "xai"} {
+	for _, kind := range []contract.ServiceKind{"deepseek", "qwen", "moonshot", "glm", "minimax", "doubao", "xai", "magpie"} {
 		t.Run(string(kind), func(t *testing.T) {
 			store, handler := newServiceHandler(t, "service_api")
 			service := createServiceForTest(t, handler, fmt.Sprintf(`{"name":"API","kind":%q,"models":["model-test"],"http":{"base_url":"https://api.example/v1","auth":{"scheme":"bearer"},"credential":{"secret":"api-secret"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`, kind))
@@ -520,6 +520,60 @@ func TestServiceResponsesWebSocketDefaultsAndPersistence(t *testing.T) {
 		if response.Code != 422 {
 			t.Fatalf("accepted null: %d", response.Code)
 		}
+	}
+}
+
+func TestServicePrivacyTrustPersistsAcrossUpdates(t *testing.T) {
+	ctx := context.Background()
+	store, handler := newServiceHandler(t, "service_trusted_api", "service_trusted_codex", "service_trusted_null", "service_trusted_text")
+	api := createServiceForTest(t, handler, `{"name":"API","kind":"openai","privacy_trusted":true,"http":{"base_url":"https://api.example/v1","auth":{"scheme":"none"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`)
+	if !api.PrivacyTrusted {
+		t.Fatal("created trust lost")
+	}
+	codex := createServiceForTest(t, handler, `{"name":"Codex","kind":"codex_subscription"}`)
+	if codex.PrivacyTrusted {
+		t.Fatal("a provider must not be trusted by default")
+	}
+	for _, body := range []string{
+		`{"name":"Bad","kind":"codex_subscription","privacy_trusted":null}`,
+		`{"name":"Bad","kind":"codex_subscription","privacy_trusted":"yes"}`,
+	} {
+		if response := serviceRequestForTest(t, handler, http.MethodPost, ServicesPath, "application/json", body, ""); response.Code != 422 {
+			t.Fatalf("accepted %s: %d %s", body, response.Code, response.Body.String())
+		}
+	}
+
+	record, err := store.GetService(ctx, codex.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := serviceRequestForTest(t, handler, http.MethodPatch, ServicesPath+"/"+string(codex.ID), "application/merge-patch+json", `{"privacy_trusted":true}`, record.ETag)
+	if response.Code != 200 {
+		t.Fatalf("patch %d %s", response.Code, response.Body.String())
+	}
+	saved, err := store.GetService(ctx, codex.ID)
+	if err != nil || !saved.Service.PrivacyTrusted {
+		t.Fatalf("persisted trust %v %v", saved, err)
+	}
+	// A token refresh rewrites the subscription document from its account.
+	account, err := saved.Service.SubscriptionAccountView()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutSubscriptionAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := store.GetService(ctx, codex.ID)
+	if err != nil || !refreshed.Service.PrivacyTrusted {
+		t.Fatalf("trust after account update %v %v", refreshed, err)
+	}
+	response = serviceRequestForTest(t, handler, http.MethodPatch, ServicesPath+"/"+string(codex.ID), "application/merge-patch+json", `{"privacy_trusted":null}`, refreshed.ETag)
+	if response.Code != 422 {
+		t.Fatalf("accepted null: %d", response.Code)
+	}
+	response = serviceRequestForTest(t, handler, http.MethodPatch, ServicesPath+"/"+string(codex.ID), "application/merge-patch+json", `{"privacy_trusted":false}`, refreshed.ETag)
+	if response.Code != 200 || strings.Contains(response.Body.String(), "privacy_trusted") {
+		t.Fatalf("revoke %d %s", response.Code, response.Body.String())
 	}
 }
 

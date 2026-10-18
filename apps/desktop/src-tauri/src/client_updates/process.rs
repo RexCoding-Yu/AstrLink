@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::ClientError;
+use super::{wsl::Wsl, ClientError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CommandSpec {
@@ -30,6 +30,59 @@ pub(super) struct Environment {
     pub path: OsString,
     pub use_system_proxy: bool,
     pub proxy_env: Option<Vec<(String, String)>>,
+    /// The WSL distribution the clients live in; `None` for this computer.
+    /// Inside one, `home`, `path`, and every client path are Linux paths.
+    pub wsl: Option<Wsl>,
+}
+
+const PROXY_VARIABLES: [&str; 11] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "npm_config_proxy",
+    "npm_config_https_proxy",
+    "npm_config_noproxy",
+];
+
+/// What every client command changes in its environment: variables to
+/// remove, then variables to set. PATH comes from the environment itself.
+pub(super) fn changes(
+    environment: &Environment,
+) -> (&'static [&'static str], Vec<(String, String)>) {
+    let removed: &[&str] = if !environment.use_system_proxy || environment.proxy_env.is_some() {
+        &PROXY_VARIABLES
+    } else {
+        &[]
+    };
+    let mut set = vec![
+        ("NO_COLOR", "1"),
+        ("CI", "1"),
+        ("DISABLE_AUTOUPDATER", "1"),
+        ("HOMEBREW_NO_INSTALL_CLEANUP", "1"),
+    ];
+    if !environment.use_system_proxy {
+        set.extend([
+            ("NO_PROXY", "*"),
+            ("no_proxy", "*"),
+            ("npm_config_proxy", ""),
+            ("npm_config_https_proxy", ""),
+        ]);
+    }
+    let mut set: Vec<_> = set
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    if environment.use_system_proxy {
+        if let Some(proxy_env) = &environment.proxy_env {
+            set.extend(proxy_env.iter().cloned());
+        }
+    }
+    (removed, set)
 }
 
 // Every subprocess has closed stdin, bounded output, a deadline and its own
@@ -67,49 +120,68 @@ fn capture(mut stream: impl Read) -> Vec<u8> {
     output
 }
 
+/// Whether `path` holds a PE image. CreateProcess treats any other .exe as a
+/// 16-bit DOS program, which 64-bit Windows refuses with a modal
+/// "Unsupported 16-Bit Application" dialog on top of the error. Claude Code's
+/// npm package keeps a text stub at bin/claude.exe when its postinstall did
+/// not run or its platform package was not downloaded.
+#[cfg(any(windows, test))]
+pub(super) fn windows_image(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let mut header = Vec::with_capacity(64);
+    (&mut file).take(64).read_to_end(&mut header)?;
+    if header.len() < 64 || !header.starts_with(b"MZ") {
+        return Ok(false);
+    }
+    let offset = u32::from_le_bytes([header[60], header[61], header[62], header[63]]);
+    file.seek(SeekFrom::Start(offset.into()))?;
+    let mut signature = Vec::with_capacity(4);
+    file.take(4).read_to_end(&mut signature)?;
+    Ok(signature == b"PE\0\0")
+}
+
 pub(super) fn run(
     environment: &Environment,
     spec: &CommandSpec,
     deadline: Duration,
 ) -> Result<String, ClientError> {
+    let wrapped;
+    let spec = match &environment.wsl {
+        Some(wsl) => {
+            wrapped = super::wsl::command(environment, wsl, spec);
+            &wrapped
+        }
+        None => spec,
+    };
+    // A file that cannot be read is left to CreateProcess, which reports it
+    // without a dialog.
+    #[cfg(windows)]
+    if matches!(windows_image(&spec.program), Ok(false)) {
+        return Err(ClientError::new(
+            "damaged",
+            format!("{} is not a Windows program", spec.program.display()),
+        ));
+    }
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
-        .current_dir(&environment.home)
-        .env("PATH", &environment.path)
-        .env("NO_COLOR", "1")
-        .env("CI", "1")
-        .env("DISABLE_AUTOUPDATER", "1")
-        .env("HOMEBREW_NO_INSTALL_CLEANUP", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if !environment.use_system_proxy || environment.proxy_env.is_some() {
-        for name in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "NO_PROXY",
-            "no_proxy",
-            "npm_config_proxy",
-            "npm_config_https_proxy",
-            "npm_config_noproxy",
-        ] {
+    if environment.wsl.is_some() {
+        // wsl.exe writes its own messages in UTF-16 otherwise. The command
+        // it runs gets its environment from `env`.
+        command.env("WSL_UTF8", "1");
+    } else {
+        let (removed, set) = changes(environment);
+        command
+            .current_dir(&environment.home)
+            .env("PATH", &environment.path);
+        for name in removed {
             command.env_remove(name);
         }
-    }
-    if environment.use_system_proxy {
-        if let Some(proxy_env) = &environment.proxy_env {
-            command.envs(proxy_env.iter().cloned());
-        }
-    } else {
-        command.env("NO_PROXY", "*").env("no_proxy", "*");
-        command
-            .env("npm_config_proxy", "")
-            .env("npm_config_https_proxy", "");
+        command.envs(set);
     }
     #[cfg(unix)]
     {
@@ -181,6 +253,7 @@ mod tests {
             path: "/usr/bin:/bin".into(),
             use_system_proxy: false,
             proxy_env: None,
+            wsl: None,
         }
     }
 

@@ -1,3 +1,5 @@
+import { isInferenceListen, type InferenceListen } from "./preferences-model";
+import { isWebEdition } from "./edition";
 import { i18n } from "./i18n";
 
 export const SUPPORTED_CONTROL_API_VERSION = "v1";
@@ -78,6 +80,16 @@ export interface InferencePortFallback {
   active_port: number;
 }
 
+/** One address other devices reach this machine by, from `/control/v1/network-addresses`. */
+export interface NetworkAddress {
+  interface: string;
+  ip: string;
+}
+
+export interface NetworkAddressesResponse {
+  addresses: NetworkAddress[];
+}
+
 export interface CoreSnapshot {
   phase: CorePhase;
   pid: number | null;
@@ -87,6 +99,10 @@ export interface CoreSnapshot {
   capabilities: CapabilitiesResponse | null;
   last_error: string | null;
   inference_port_fallback: InferencePortFallback | null;
+  /** Interfaces the running Core answers; `null` while stopped. Changes only on restart. */
+  inference_listen_active: InferenceListen | null;
+  /** Saved launch settings (port, listen address, proxy, limits) wait for a gateway restart. */
+  restart_pending: boolean;
   recovery_attempt: number;
   recovery_scheduled_in_ms: number | null;
 }
@@ -123,6 +139,9 @@ const requiredAlphaProtocols = [
   { id: "openai.completions", primary: false, streaming: true },
   { id: "openai.models", primary: false, streaming: false },
   { id: "google.models", primary: false, streaming: false },
+  { id: "openai.embeddings", primary: false, streaming: false },
+  { id: "google.embeddings", primary: false, streaming: false },
+  { id: "rerank", primary: false, streaming: false },
 ] as const;
 
 function invalid(path: string, detail: string): never {
@@ -238,7 +257,11 @@ function parseReady(value: unknown, path: string): ReadyAnnouncement {
     128,
   );
   const controlURL = stringAt(ready.control_url, `${path}.control_url`, 128);
-  if (!loopbackURLPattern.test(inferenceURL)) {
+  if (
+    !(isWebEdition
+      ? inferenceURL === window.location.origin
+      : loopbackURLPattern.test(inferenceURL))
+  ) {
     invalid(`${path}.inference_url`, "expected a canonical IPv4 loopback URL");
   }
   if (
@@ -251,7 +274,11 @@ function parseReady(value: unknown, path: string): ReadyAnnouncement {
       "expected inference_url or localhost on the same port",
     );
   }
-  if (!loopbackURLPattern.test(controlURL)) {
+  if (
+    !(isWebEdition
+      ? controlURL === window.location.origin
+      : loopbackURLPattern.test(controlURL))
+  ) {
     invalid(`${path}.control_url`, "expected a canonical IPv4 loopback URL");
   }
   return {
@@ -504,6 +531,42 @@ function parseLastError(value: unknown, path: string): string | null {
   return value;
 }
 
+function parseInferenceListen(value: unknown, path: string): InferenceListen {
+  if (!isInferenceListen(value)) {
+    return invalid(path, "unknown inference listen scope");
+  }
+  return value;
+}
+
+const MAX_NETWORK_ADDRESSES = 64;
+
+export function parseNetworkAddresses(
+  value: unknown,
+): NetworkAddressesResponse {
+  const root = objectAt(value, "$");
+  exactKeys(root, ["addresses"], "$");
+  if (
+    !Array.isArray(root.addresses) ||
+    root.addresses.length > MAX_NETWORK_ADDRESSES
+  ) {
+    return invalid(
+      "$.addresses",
+      `expected an array of at most ${MAX_NETWORK_ADDRESSES} addresses`,
+    );
+  }
+  return {
+    addresses: root.addresses.map((item, index) => {
+      const path = `$.addresses[${index}]`;
+      const address = objectAt(item, path);
+      exactKeys(address, ["interface", "ip"], path);
+      return {
+        interface: stringAt(address.interface, `${path}.interface`, 64),
+        ip: stringAt(address.ip, `${path}.ip`, 64),
+      };
+    }),
+  };
+}
+
 function parsePortFallback(
   value: unknown,
   path: string,
@@ -540,6 +603,8 @@ export function parseAppSnapshot(value: unknown): AppSnapshot {
       "ready",
       "last_error",
       "inference_port_fallback",
+      "inference_listen_active",
+      "restart_pending",
       "health",
       "version",
       "capabilities",
@@ -566,6 +631,12 @@ export function parseAppSnapshot(value: unknown): AppSnapshot {
       "$.inference_port_fallback",
       parsePortFallback,
     ),
+    inference_listen_active: nullable(
+      snapshot.inference_listen_active,
+      "$.inference_listen_active",
+      parseInferenceListen,
+    ),
+    restart_pending: booleanAt(snapshot.restart_pending, "$.restart_pending"),
     health: nullable(snapshot.health, "$.health", parseHealth),
     version: nullable(snapshot.version, "$.version", parseVersion),
     capabilities: nullable(
@@ -609,7 +680,7 @@ export function parseAppSnapshot(value: unknown): AppSnapshot {
   }
   if (
     parsed.phase === "ready" &&
-    (!parsed.pid ||
+    ((!isWebEdition && !parsed.pid) ||
       !parsed.ready ||
       !parsed.health ||
       !parsed.version ||
@@ -633,6 +704,8 @@ export const browserSnapshot = (): AppSnapshot => ({
   capabilities: null,
   last_error: "The native bridge is unavailable. Open this UI with Tauri.",
   inference_port_fallback: null,
+  inference_listen_active: null,
+  restart_pending: false,
   recovery_attempt: 0,
   recovery_scheduled_in_ms: null,
 });
@@ -651,6 +724,8 @@ export function failedSnapshot(
     capabilities: null,
     last_error: message,
     inference_port_fallback: null,
+    inference_listen_active: null,
+    restart_pending: false,
     recovery_attempt: current?.recovery_attempt ?? 0,
     recovery_scheduled_in_ms: null,
   };

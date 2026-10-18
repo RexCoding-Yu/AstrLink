@@ -11,9 +11,10 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
+	"github.com/QuantumNous/astrlink/core/internal/systemprompt"
 )
 
-const claudeCodeBanner = "You are Claude Code, Anthropic's official CLI for Claude."
+const claudeCodeBanner = systemprompt.ClaudeCodeBanner
 
 const (
 	claudeMaxCacheBreakpoints = 4
@@ -165,6 +166,25 @@ func ensureClaudeCodeBanner(body map[string]json.RawMessage) (bool, error) {
 			}
 		} else if json.Unmarshal(system, &blocks) != nil {
 			return false, fmt.Errorf("invalid Claude subscription system prompt")
+		}
+	}
+	// A prompt that opens with the banner, such as one extended by the global
+	// system prompt, keeps it as the banner block below instead of carrying a
+	// second copy.
+	if len(blocks) > 0 {
+		var first map[string]json.RawMessage
+		if json.Unmarshal(blocks[0], &first) == nil && first != nil {
+			kind, _ := claudeString(first["type"])
+			text, _ := claudeString(first["text"])
+			if rest, ok := strings.CutPrefix(text, claudeCodeBanner); kind == "text" && ok && strings.TrimLeft(rest, " \t\r\n") != rest {
+				if rest = strings.TrimLeft(rest, " \t\r\n"); rest == "" {
+					blocks = blocks[1:]
+				} else if encodeClaudeField(first, "text", rest) == nil {
+					if block, err := json.Marshal(first); err == nil {
+						blocks[0] = block
+					}
+				}
+			}
 		}
 	}
 	for _, block := range blocks {

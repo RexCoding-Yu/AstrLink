@@ -170,6 +170,10 @@ func (prober *Prober) probeSubscription(
 		accountauth.ApplyGrokAPIHeaders(headers, tokens, prober.subscriptions.GrokClientVersion(probeContext))
 		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, false, "")
 	}
+	if account.Provider == contract.SubscriptionProviderFactoryDroid {
+		// Factory publishes no model endpoint; the list is the one it documents.
+		return normalizeProbeIDs(subscription.DroidModels())
+	}
 	if account.Provider == contract.SubscriptionProviderGitHubCopilot {
 		ids, err := prober.subscriptions.CopilotModels(probeContext, tokens)
 		if err != nil {
@@ -356,7 +360,7 @@ func serviceSupportsDiscovery(service contract.Service, protocol contract.Protoc
 
 func kindSupportsDiscovery(kind contract.ServiceKind, protocol contract.ProtocolID) bool {
 	switch kind {
-	case contract.ServiceKindNewAPI, contract.ServiceKindCustom:
+	case contract.ServiceKindNewAPI, contract.ServiceKindMagpie, contract.ServiceKindCustom:
 		return protocol == contract.ProtocolOpenAIModels || protocol == contract.ProtocolGoogleModels
 	case contract.ServiceKindGemini:
 		return protocol == contract.ProtocolGoogleModels

@@ -4,7 +4,7 @@ import { RoutingSteps } from "./components/RoutingSteps";
 import { RequestRoutingProcess } from "./components/RequestRoutingProcess";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { LockKeyhole } from "@/components/icons";
+import { ChevronRight, LockKeyhole } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { ConversationIndicator } from "@/components/ConversationIndicator";
 import { ModelLabel } from "@/components/ModelLabel";
@@ -34,18 +34,28 @@ import {
 } from "./request-service-model";
 import {
   clientDisconnectNote,
+  confidencePercent,
   extractPrivacyHits,
+  formatImageBytes,
+  imageCompressionModeLabel,
+  imageCompressionSavedPercent,
   inspectorChainRows,
   inspectorPart,
   inspectorTitle,
+  placeholderExplanationText,
   policyDecision,
+  policyKindsNeedTable,
+  policyKindTable,
+  recordedPrivacyFindings,
   recordedPrivacyHits,
+  restoredText,
   type InspectorPart,
   type PolicyDecision,
   type PrivacyHitGroup,
   type TrajectoryChip,
   type TrajectoryRow,
 } from "./request-trajectory-model";
+import { PolicyKindTable } from "./PolicyKindTable";
 import { protocolEntryPath } from "./service-presets";
 import { chipDotClass } from "./trajectory-chip";
 import {
@@ -57,7 +67,7 @@ import {
 } from "./TrajectoryResponse";
 
 /** The parts backed by a captured body, as opposed to record metadata. */
-type BodyPart = Exclude<InspectorPart, "route" | "redirect">;
+type BodyPart = Exclude<InspectorPart, "route" | "redirect" | "compression">;
 
 /**
  * One selected call. Header chips are tabs; only the active section body is
@@ -322,7 +332,10 @@ function InspectorSection({
   const part = inspectorPart(row.chip);
   const title = inspectorTitle(row.chip);
   const captured =
-    part === "route" || part === "redirect" || omitCapturedBody
+    part === "route" ||
+    part === "redirect" ||
+    part === "compression" ||
+    omitCapturedBody
       ? null
       : auditPart(auditContent, part);
   const disconnectNote = clientDisconnectNote(record);
@@ -364,6 +377,8 @@ function InspectorSection({
         </>
       ) : part === "redirect" ? (
         <RedirectInspector redirect={row.redirect ?? record.model_redirect} />
+      ) : part === "compression" ? (
+        <CompressionInspector row={row} />
       ) : (
         <BodyInspector
           auditContent={auditContent}
@@ -500,6 +515,59 @@ function RedirectInspector({
       ) : null}
       <p className="text-xs leading-6 text-muted-foreground">
         {t("trajectory.modelRedirectHint")}
+      </p>
+    </div>
+  );
+}
+
+/** The sizes image compression changed; the body it sent is on the upstream tab. */
+function CompressionInspector({ row }: { row: TrajectoryRow }) {
+  const t = i18n.t.bind(i18n);
+  const value = row.compression;
+  const saved = value ? imageCompressionSavedPercent(value) : null;
+  return (
+    <div className="space-y-2" data-testid="compression-inspector">
+      {value ? (
+        <dl className="grid gap-2 text-xs">
+          <InspectorField
+            label={t("trajectory.imageCompressionMode")}
+            value={imageCompressionModeLabel(value)}
+          />
+          <InspectorField
+            label={t("trajectory.imageCompressionReplaced")}
+            value={t("trajectory.imageCompressionReplacedValue", {
+              count: value.images,
+              compressed: value.compressed,
+            })}
+          />
+          <InspectorField
+            label={t("trajectory.imageCompressionBefore")}
+            value={formatImageBytes(value.beforeBytes)}
+          />
+          <InspectorField
+            label={t("trajectory.imageCompressionAfter")}
+            value={
+              saved === null
+                ? formatImageBytes(value.afterBytes)
+                : `${formatImageBytes(value.afterBytes)} · ${t(
+                    "trajectory.imageCompressionSaved",
+                    { percent: saved },
+                  )}`
+            }
+          />
+        </dl>
+      ) : (
+        <p className="break-words font-mono text-xs text-foreground">
+          {row.summary}
+        </p>
+      )}
+      {value && value.compressed === 0 ? (
+        <p className="text-xs leading-6 text-muted-foreground">
+          {t("trajectory.imageCompressionKeptHint")}
+        </p>
+      ) : null}
+      <p className="text-xs leading-6 text-muted-foreground">
+        {t("trajectory.imageCompressionHint")}
       </p>
     </div>
   );
@@ -672,7 +740,8 @@ function ClientInspector({
  * What the privacy policy did to the request. Only a redaction changes what
  * goes upstream, so only then does the tab carry a body: the request as sent,
  * with each replaced value marked. Any other outcome would repeat the client
- * tab's body under another name.
+ * tab's body under another name. A warning or a block names what it found
+ * instead, from the record's findings.
  */
 function PolicyInspector({
   row,
@@ -691,13 +760,31 @@ function PolicyInspector({
   const scrollerRef = useRef<HTMLDivElement>(null);
   const decision = policyDecision(row, record.privacy_restore);
   const redacted = decision === "redact";
-  const hits = recordedPrivacyHits(record.privacy_restore);
+  const replacedHits = recordedPrivacyHits(record.privacy_restore);
+  const hits =
+    replacedHits.length > 0
+      ? replacedHits
+      : recordedPrivacyFindings(record.privacy_findings);
+  const kinds = policyKindTable(
+    hits,
+    record.privacy_findings,
+    record.privacy_ignored,
+  );
+  const tabulated = policyKindsNeedTable(kinds.rows);
+  // Above a redacted body the kinds would take the top of the pane on every
+  // call, and one redaction can span many kinds, so they all fold into the
+  // table there.
+  const foldable = redacted && kinds.rows.length > 0;
+  const [tableOpen, setTableOpen] = useState(false);
+  const showTable = foldable ? tableOpen : tabulated;
   const mappings = record.privacy_restore?.mapping_count ?? 0;
-  const segments = row.summary.split(" · ");
+  const explainedBy = row.policy?.explainedBy ?? null;
   const body = redacted ? (auditContent?.upstream_request_body ?? null) : null;
   // Progress and failure codes are Core's own words; the badge says the rest.
   const detail =
-    decision === "inspecting" || decision === "unfinished" ? row.summary : null;
+    !row.policy && (decision === "inspecting" || decision === "unfinished")
+      ? row.summary
+      : null;
   const hint = policyHint(decision);
   const revealKind = (kind: string) => {
     scrollerRef.current
@@ -722,16 +809,25 @@ function PolicyInspector({
             {t("trajectory.policyReplaced", { count: mappings })}
           </span>
         ) : null}
-        {hits.length > 0 ? (
-          <PrivacyHitList
-            hits={hits}
-            inline
-            onSelectKind={body ? revealKind : undefined}
-          />
+        {hits.length > 0 && !foldable && !tabulated ? (
+          <PrivacyHitList hits={hits} inline />
         ) : null}
-        {segments.includes("notice") ? (
-          <span className="text-muted-foreground">
-            {t("trajectory.policyNotice")}
+        {kinds.threshold !== null ? (
+          <span
+            className="text-muted-foreground"
+            data-testid="policy-threshold"
+          >
+            {t("trajectory.policyThreshold", {
+              threshold: confidencePercent(kinds.threshold),
+            })}
+          </span>
+        ) : null}
+        {explainedBy ? (
+          <span
+            className="text-muted-foreground"
+            data-testid="policy-explanation"
+          >
+            {placeholderExplanationText(explainedBy)}
           </span>
         ) : null}
         {detail ? (
@@ -739,7 +835,32 @@ function PolicyInspector({
             {detail}
           </code>
         ) : null}
+        {foldable ? (
+          <Button
+            aria-expanded={tableOpen}
+            className="h-auto gap-1 px-0 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+            data-testid="policy-kinds-toggle"
+            onClick={() => setTableOpen((open) => !open)}
+            type="button"
+            variant="ghost"
+          >
+            <ChevronRight
+              aria-hidden="true"
+              className={cn(
+                "size-3.5 shrink-0 transition-transform",
+                tableOpen && "rotate-90",
+              )}
+            />
+            {t("trajectory.policyKindDetails")}
+          </Button>
+        ) : null}
       </div>
+      {showTable ? (
+        <PolicyKindTable
+          onSelectKind={body ? revealKind : undefined}
+          rows={kinds.rows}
+        />
+      ) : null}
       {hint ? (
         <p
           className="text-xs leading-6 text-muted-foreground"
@@ -785,6 +906,7 @@ function policyTone(
     case "block":
       return "blocked";
     case "allow":
+    case "trusted":
       return "neutral";
     case "unfinished":
       return status === "failed" ? "negative" : "neutral";
@@ -795,6 +917,8 @@ function policyHint(decision: PolicyDecision): string | null {
   switch (decision) {
     case "allow":
       return i18n.t("trajectory.policyAllowHint");
+    case "trusted":
+      return i18n.t("trajectory.policyTrustedHint");
     case "warn":
       return i18n.t("trajectory.policyWarnHint");
     case "block":
@@ -824,11 +948,8 @@ function RestoreSummary({
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
         {restore
-          ? t("trajectory.restoreRatio", {
-              restored: restore.restored_count,
-              mapped: restore.mapping_count,
-            })
-          : t("trajectory.restoreChip")}
+          ? `${t("trajectory.policyReplaced", { count: restore.mapping_count })} · ${restoredText(restore.restored_count, restore.tool_argument_restored_count)}`
+          : t("trajectory.restoreUnrecorded")}
       </p>
       {channels !== null ? (
         <p
@@ -854,11 +975,9 @@ function RestoreSummary({
 function PrivacyHitList({
   hits,
   inline = false,
-  onSelectKind,
 }: {
   hits: PrivacyHitGroup[];
   inline?: boolean;
-  onSelectKind?: (kind: string) => void;
 }) {
   return (
     <ul
@@ -867,21 +986,9 @@ function PrivacyHitList({
     >
       {hits.map((hit) => (
         <li key={hit.kind}>
-          {onSelectKind ? (
-            <Button
-              className="h-auto px-0 text-xs font-medium"
-              data-kind={hit.kind}
-              onClick={() => onSelectKind(hit.kind)}
-              type="button"
-              variant="link"
-            >
-              {hit.label} ×{hit.count}
-            </Button>
-          ) : (
-            <div className="text-xs font-medium">
-              {hit.label} ×{hit.count}
-            </div>
-          )}
+          <div className="text-xs font-medium">
+            {hit.label} ×{hit.count}
+          </div>
           {hit.placeholders.length > 0 ? (
             <ul className="mt-0.5 grid gap-0.5">
               {hit.placeholders.map((placeholder) => (

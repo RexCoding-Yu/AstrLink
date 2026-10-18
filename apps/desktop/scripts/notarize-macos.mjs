@@ -11,6 +11,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
+export const staplerRetryDelaysMs = [10_000, 30_000, 60_000];
+
 const desktopDirectory = fileURLToPath(new URL("../", import.meta.url));
 const submissionPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const config = JSON.parse(
@@ -57,6 +59,7 @@ export function notarizeMacOS({
   submissionID,
   timeout = "30m",
   runCommand = run,
+  retryDelaysMs = staplerRetryDelaysMs,
 }) {
   if (!/^[A-Z0-9]{10}$/.test(teamID ?? "")) {
     throw new Error(
@@ -161,11 +164,30 @@ export function notarizeMacOS({
   if (issues?.length)
     console.warn("Apple notarization issues:", JSON.stringify(issues, null, 2));
 
+  // Stapler fetches tickets from Apple's CloudKit service, whose connection
+  // sometimes drops after the submission was accepted. Retry network errors
+  // only; any other stapler failure stops the release at once.
+  const stapler = (action, file) => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return runCommand("xcrun", ["stapler", action, file]);
+      } catch (error) {
+        const delay = retryDelaysMs[attempt];
+        if (delay === undefined || !/NSURLErrorDomain/.test(error.message))
+          throw error;
+        console.warn(
+          `stapler ${action} lost its connection to Apple; retrying in ${delay / 1000} s.`,
+        );
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      }
+    }
+  };
+
   // A DMG submission also produces a ticket for the enclosed app. Staple the
   // standalone app before archiving it, and the DMG before calculating hashes.
   for (const file of [app, dmg]) {
-    runCommand("xcrun", ["stapler", "staple", file]);
-    runCommand("xcrun", ["stapler", "validate", file]);
+    stapler("staple", file);
+    stapler("validate", file);
     runCommand("codesign", ["--verify", "--deep", "--strict", file]);
   }
   runCommand("spctl", ["--assess", "--type", "execute", "--verbose=2", app]);

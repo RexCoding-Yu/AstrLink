@@ -132,6 +132,19 @@ describe("reasoning effort metadata", () => {
   });
 });
 
+describe("privacy warning marker", () => {
+  it("reads whether a session had a warned call, absent on older Cores", () => {
+    expect(
+      parseRequestSession({ ...fullSession, privacy_warned: true })
+        .privacy_warned,
+    ).toBe(true);
+    expect(parseRequestSession(fullSession).privacy_warned).toBeUndefined();
+    expect(() =>
+      parseRequestSession({ ...fullSession, privacy_warned: "yes" }),
+    ).toThrow(/privacy_warned/);
+  });
+});
+
 describe("model redirect metadata", () => {
   const redirect = { from: "gpt-4.1", to: "claude-sonnet-4-5" };
 
@@ -173,10 +186,10 @@ describe("model redirect metadata", () => {
     ]) {
       expect(() =>
         parseRequestRecord({ ...fullRecord, model_redirect }),
-      ).toThrow("模型重定向无效");
+      ).toThrow("model_redirect）：格式无效");
       expect(() =>
         parseRequestSession({ ...fullSession, model_redirect }),
-      ).toThrow("模型重定向无效");
+      ).toThrow("model_redirect）：格式无效");
     }
     // 256 runes is the limit, counted as characters rather than UTF-16 units.
     const wide = "模".repeat(256);
@@ -295,11 +308,11 @@ describe("routing decision metadata", () => {
     for (const [routing_decision, message] of [
       ["priority", "应为对象"],
       [{ selected: "priority" }, "应为数组"],
-      [{ selected: "cheapest", skipped: [] }, "选择原因无效"],
-      [{ selected: null, skipped: [] }, "选择原因无效"],
+      [{ selected: "cheapest", skipped: [] }, "selected）：未知原因"],
+      [{ selected: null, skipped: [] }, "selected）：未知原因"],
       [
         { skipped: [{ service_id: "service_a", reason: "slow" }] },
-        "跳过原因无效",
+        "reason）：未知原因",
       ],
       [{ skipped: [{ reason: "disabled" }] }, "应为字符串"],
       [{ skipped: ["service_a"] }, "应为对象"],
@@ -463,7 +476,7 @@ describe("model routing decision metadata", () => {
         ...fullRecord,
         model_routing: { ...decision, selection_source: "session_binding" },
       }),
-    ).toThrow("选择来源无效");
+    ).toThrow("selection_source）：取值无效");
   });
 
   it("leaves the key out for historical records without one", () => {
@@ -481,7 +494,7 @@ describe("model routing decision metadata", () => {
         ...fullRecord,
         model_routing: { ...decision, schema_version: 2 },
       }),
-    ).toThrow("模型路由 schema 版本不支持");
+    ).toThrow("schema_version）：取值无效");
     expect(() =>
       parseRequestRecord({
         ...fullRecord,
@@ -491,14 +504,17 @@ describe("model routing decision metadata", () => {
           rule_priority: undefined,
         },
       }),
-    ).toThrow("命中规则时必须给出规则 ID");
+    ).toThrow("rule_id）：缺少字段");
   });
 
   it("rejects wire values it cannot explain", () => {
     for (const [patch, message] of [
-      [{ selection_source: "cheapest" }, "选择来源无效"],
-      [{ execution: { status: "running", attempt_count: 1 } }, "执行状态无效"],
-      [{ fields: {} }, "应为数组"],
+      [{ selection_source: "cheapest" }, "selection_source）：取值无效"],
+      [
+        { execution: { status: "running", attempt_count: 1 } },
+        "execution.status）：未知状态",
+      ],
+      [{ fields: {} }, "fields）：应为数组"],
       [
         {
           privacy_attempts: [
@@ -511,7 +527,7 @@ describe("model routing decision metadata", () => {
             },
           ],
         },
-        "隐私决定无效",
+        "decision）：未知决定",
       ],
       [
         {
@@ -568,7 +584,7 @@ describe("model routing decision metadata", () => {
             },
           ],
         }),
-      ).toThrow("事件类型无效");
+      ).toThrow("kind）：未知类型");
     }
   });
 });
@@ -611,8 +627,8 @@ describe("conversion diagnostics", () => {
     for (const [conversion_diagnostics, message] of [
       [valid, "应为数组"],
       [["tools[0]"], "应为对象"],
-      [[{ ...valid, phase: "routing" }], "转换阶段无效"],
-      [[{ ...valid, severity: "fatal" }], "影响程度无效"],
+      [[{ ...valid, phase: "routing" }], "phase）：取值无效"],
+      [[{ ...valid, severity: "fatal" }], "severity）：取值无效"],
       [[{ ...valid, code: "" }], "不得为空"],
       [[{ ...valid, path: 0 }], "应为字符串"],
       [Array.from({ length: 65 }, () => valid), "条目过多"],
@@ -765,6 +781,51 @@ describe("request-record IPC contract", () => {
     ]);
   });
 
+  it("parses model confidence and ignored matches", () => {
+    const confidence = { min: 0.81, max: 0.99, threshold: 0.7 };
+    const parsed = parseRequestRecord({
+      ...fullRecord,
+      privacy_findings: [
+        { kind: "email", json_path: "/input/0/content", count: 2, confidence },
+        { kind: "url", json_path: "/input/1/content", count: 1 },
+      ],
+      privacy_ignored: [
+        { kind: "private_person", reason: "low_confidence", count: 2 },
+        { kind: "email", reason: "allowlisted", count: 1, confidence },
+      ],
+    });
+    expect(parsed.privacy_findings).toEqual([
+      { kind: "email", json_path: "/input/0/content", count: 2, confidence },
+      { kind: "url", json_path: "/input/1/content", count: 1 },
+    ]);
+    expect(parsed.privacy_ignored).toEqual([
+      { kind: "private_person", reason: "low_confidence", count: 2 },
+      { kind: "email", reason: "allowlisted", count: 1, confidence },
+    ]);
+    expect(parseRequestRecord(fullRecord)).not.toHaveProperty(
+      "privacy_ignored",
+    );
+
+    const finding = (value: object) => ({
+      ...fullRecord,
+      privacy_findings: [
+        { kind: "email", json_path: "/", count: 1, confidence: value },
+      ],
+    });
+    expect(() =>
+      parseRequestRecord(finding({ ...confidence, threshold: 1.5 })),
+    ).toThrow("$.privacy_findings[0].confidence.threshold");
+    expect(() =>
+      parseRequestRecord(finding({ ...confidence, min: 0.995 })),
+    ).toThrow("$.privacy_findings[0].confidence.min");
+    expect(() =>
+      parseRequestRecord({
+        ...fullRecord,
+        privacy_ignored: [{ kind: "email", reason: "placeholder", count: 1 }],
+      }),
+    ).toThrow("$.privacy_ignored[0].reason");
+  });
+
   it("maps legacy cached_input_tokens to cache_read_tokens", () => {
     const parsed = parseRequestRecord({
       ...fullRecord,
@@ -884,7 +945,7 @@ describe("request-record IPC contract", () => {
     const { id: _id, ...missingId } = fullRecord;
     expect(() => parseRequestRecord(missingId)).toThrow("缺少字段");
     expect(() => parseRequestRecord({ ...fullRecord, status: "ok" })).toThrow(
-      "状态枚举无效",
+      "status）：未知状态",
     );
     expect(() =>
       parseRequestRecordPage({ items: {}, next_cursor: null }),
@@ -1069,7 +1130,7 @@ describe("request-record IPC contract", () => {
     ).toBe("interrupted");
     expect(() =>
       parseRequestSession({ ...fullSession, status: "stopped" }),
-    ).toThrow("状态枚举无效");
+    ).toThrow("status）：未知状态");
   });
 
   it("treats a completed HTTP error as failed", () => {

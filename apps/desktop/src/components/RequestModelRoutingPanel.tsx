@@ -297,8 +297,10 @@ function PrivacyPanel({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {decision.privacy_attempts.map((attempt) => (
-              <TableRow key={attempt.attempt_index}>
+            {/* A provider rejected before it was tried leaves the next
+                attempt's number to the following check, so numbers can repeat. */}
+            {decision.privacy_attempts.map((attempt, position) => (
+              <TableRow key={`${attempt.attempt_index}-${position}`}>
                 <TableCell className="text-xs tabular-nums">
                   {t("modelRouting.privacy.attempt", {
                     index: attempt.attempt_index,

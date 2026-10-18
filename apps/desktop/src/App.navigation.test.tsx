@@ -41,7 +41,12 @@ const bridgeMocks = vi.hoisted(() => ({
   updateServiceOrder: vi.fn(),
   installAgentDebug: vi.fn(),
   isCCSwitchInstalled: vi.fn().mockResolvedValue(false),
-  getClientConfigStatus: vi.fn().mockResolvedValue([]),
+  getClientConfigStatus: vi.fn().mockResolvedValue({
+    clients: [],
+    wsl_unchecked: [],
+    wsl_localhost: false,
+    cc_switch_wsl: { claude: null, codex: null },
+  }),
   previewClientConfigSnippet: vi.fn().mockResolvedValue("{}"),
   copyClientConfigSnippet: vi.fn(),
   uninstallAgentDebug: vi.fn(),
@@ -127,6 +132,7 @@ import { defaultFailurePolicy } from "./failure-policy-model";
 import { defaultClassifierSettings } from "./classifier-settings-model";
 import { defaultPrivacyKindRules } from "./privacy-policy-model";
 import { ONBOARDING_STORAGE_KEY } from "./use-onboarding";
+import { settleClosedLayer } from "./lib/test-layer-settle";
 
 const readySnapshot: AppSnapshot = {
   app_version: "0.1.0",
@@ -174,6 +180,8 @@ const readySnapshot: AppSnapshot = {
   },
   last_error: null,
   inference_port_fallback: null,
+  inference_listen_active: null,
+  restart_pending: false,
   recovery_attempt: 0,
   recovery_scheduled_in_ms: null,
 };
@@ -230,6 +238,9 @@ async function chooseKindCard(option: string): Promise<void> {
     card.click();
     await Promise.resolve();
   });
+  // The closed dialog returns focus in a timeout. Let it land now: on a slow
+  // runner it could land after a popover opens and close it as focus outside.
+  await settleClosedLayer();
 }
 
 /** A raw password unless `overrides` says otherwise. */
@@ -298,6 +309,35 @@ async function pressEscape(): Promise<void> {
     );
   });
 }
+
+describe("tray navigation targets", () => {
+  it("opens known pages and today's failed requests and ignores the rest", () => {
+    expect(trayNavigationTarget("records")).toEqual({ kind: "records" });
+    expect(trayNavigationTarget("settings")).toEqual({ kind: "settings" });
+    expect(trayNavigationTarget("privacyOverview")).toEqual({
+      kind: "safety",
+      view: "overview",
+    });
+    const now = new Date(2026, 9, 12, 15, 30);
+    expect(trayNavigationTarget("failedToday", now)).toEqual({
+      kind: "records",
+      failedWithin: {
+        from: new Date(2026, 9, 12).toISOString(),
+        to: new Date(2026, 9, 13).toISOString(),
+      },
+    });
+    for (const payload of [
+      "explode",
+      "failed",
+      "",
+      null,
+      3,
+      { kind: "records" },
+    ]) {
+      expect(trayNavigationTarget(payload)).toBeNull();
+    }
+  });
+});
 
 describe("App workspace navigation", () => {
   let container: HTMLDivElement;
@@ -490,6 +530,7 @@ describe("App workspace navigation", () => {
       tools: [
         {
           id: "cursor",
+          wsl: null,
           detected: true,
           skills: agentSkills(false),
           cli_access: "prompt",
@@ -499,6 +540,7 @@ describe("App workspace navigation", () => {
         },
         {
           id: "claude",
+          wsl: null,
           detected: false,
           skills: agentSkills(false),
           cli_access: "allow_rules",
@@ -508,6 +550,7 @@ describe("App workspace navigation", () => {
         },
         {
           id: "codex",
+          wsl: null,
           detected: true,
           skills: agentSkills(true),
           cli_access: "exec_policy",
@@ -517,6 +560,7 @@ describe("App workspace navigation", () => {
         },
       ],
       shared_paths: [],
+      wsl_unchecked: [],
     });
     container = document.createElement("div");
     document.body.append(container);
@@ -1004,7 +1048,7 @@ describe("App workspace navigation", () => {
       {
         nav: "提供商路由",
         read: bridgeMocks.getRoutingSettings,
-        content: "Codex 自动审查",
+        content: "请求图片压缩",
       },
       {
         nav: "安全",
@@ -1571,12 +1615,19 @@ describe("App workspace navigation", () => {
     expect(container.textContent).not.toContain("训练中 · 不可启用");
     expect(container.textContent).not.toContain("固定路由与别名");
     expect(container.textContent).not.toContain("还没有固定路由");
-    // 模型路由组 moved to 智能路由, so the provider page keeps five tabs.
+    // 模型路由组 moved to 智能路由; the provider page keeps its own tabs.
     expect(
       [
         ...container.querySelectorAll('[data-slot="tabs-list"] [role="tab"]'),
       ].map((tab) => tab.textContent),
-    ).toEqual(["模型与工具", "恢复与重试", "错误规则", "会话粘性", "转发身份"]);
+    ).toEqual([
+      "请求改写",
+      "重定向",
+      "恢复与重试",
+      "错误规则",
+      "会话粘性",
+      "转发身份",
+    ]);
     expect(container.textContent).not.toContain("mmBERT");
     expect(bridgeMocks.listServices).toHaveBeenCalledTimes(serviceCalls);
     expect(bridgeMocks.getUsageSummary).toHaveBeenCalledTimes(requestCalls);
@@ -1861,6 +1912,9 @@ describe("App workspace navigation", () => {
     expect(workspaceHeading().textContent).toBe("提供商路由与故障转移");
   });
   it("protects default-policy drafts when leaving routing", async () => {
+    // The routing panel autosaves 500 ms after an edit. The draft must stay
+    // unsaved however slowly a runner moves through the steps below.
+    vi.useFakeTimers();
     await renderApp();
     await act(async () => button("提供商路由").click());
     await act(async () => button("恢复与重试").click());
