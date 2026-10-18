@@ -1,0 +1,174 @@
+// Package hostapi connects plugins to the gateway: it sends their HTTP
+// requests on the user's terms, keeps their values and reads their settings
+// from the gateway settings.
+package hostapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
+)
+
+// CredentialReader reads a plugin's credential and the origin it is bound to.
+type CredentialReader interface {
+	PluginCredential(ctx context.Context, plugin, name string) (secret []byte, origin string, err error)
+}
+
+// Fetcher sends plugin requests on the user's terms: only to the origins the
+// user allowed, with plain http beyond this machine only where the user
+// allowed it for that origin, and each credential only to the origin it is
+// bound to. It follows no redirect, sends no User-Agent and nothing of the
+// gateway's, and reads at most plugin.MaxFetchResponseBytes of a response.
+type Fetcher struct {
+	Credentials CredentialReader
+	// Client sends the requests; nil uses the gateway's proxy settings.
+	Client *http.Client
+}
+
+func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, request plugin.HTTPRequest) plugin.HTTPResponse {
+	started := time.Now()
+	fail := func(reason string, status int) plugin.HTTPResponse {
+		return plugin.HTTPResponse{Status: status, Error: reason, Took: time.Since(started)}
+	}
+	origin, err := plugin.NormalizeOrigin(request.URL)
+	if err != nil || !allowed(target.Settings.Origins, origin) {
+		return fail(plugin.FetchDenied, 0)
+	}
+	var body io.Reader
+	contentType := ""
+	switch {
+	case len(request.JSON) > 0:
+		body, contentType = bytes.NewReader(request.JSON), "application/json"
+	case request.Body != nil:
+		body, contentType = strings.NewReader(*request.Body), "text/plain; charset=utf-8"
+	}
+	outgoing, err := http.NewRequestWithContext(ctx, request.Method, request.URL, body)
+	if err != nil {
+		return fail(plugin.FetchDenied, 0)
+	}
+	for name, value := range request.Headers {
+		outgoing.Header.Set(name, value)
+	}
+	if contentType != "" && outgoing.Header.Get("Content-Type") == "" {
+		outgoing.Header.Set("Content-Type", contentType)
+	}
+	if request.Credential != "" {
+		slot, declared := target.Meta.Credential(request.Credential)
+		if !declared || fetcher.Credentials == nil {
+			return fail(plugin.FetchDenied, 0)
+		}
+		secret, bound, err := fetcher.Credentials.PluginCredential(ctx, target.Key, slot.Name)
+		if err != nil {
+			return fail(plugin.FetchDenied, 0)
+		}
+		value := string(secret)
+		clear(secret)
+		if bound != origin {
+			return fail(plugin.FetchDenied, 0)
+		}
+		if slot.Scheme != "" {
+			value = slot.Scheme + " " + value
+		}
+		outgoing.Header.Set(slot.Header, value)
+	}
+	// An empty value keeps net/http from adding its own.
+	outgoing.Header.Set("User-Agent", "")
+	client := fetcher.Client
+	if client == nil {
+		client = networkproxy.WrapClient(&http.Client{})
+	}
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := noRedirect.Do(outgoing)
+	if err != nil {
+		return fail(transportFailure(ctx, err), 0)
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, plugin.MaxFetchResponseBytes+1))
+	if err != nil {
+		return fail(transportFailure(ctx, err), response.StatusCode)
+	}
+	if len(data) > plugin.MaxFetchResponseBytes {
+		return fail(plugin.FetchTooLarge, response.StatusCode)
+	}
+	header := make(map[string]string, len(response.Header))
+	for name, values := range response.Header {
+		if len(values) > 0 {
+			header[strings.ToLower(name)] = values[0]
+		}
+	}
+	return plugin.HTTPResponse{Status: response.StatusCode, Header: header, Body: data, Took: time.Since(started)}
+}
+
+func allowed(origins []plugin.NetworkOrigin, origin string) bool {
+	for _, granted := range origins {
+		if granted.Origin == origin {
+			return granted.AllowPlaintext || !plugin.Plaintext(origin)
+		}
+	}
+	return false
+}
+
+func transportFailure(ctx context.Context, err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return plugin.FetchTimeout
+	}
+	return plugin.FetchNetwork
+}
+
+// Store keeps astrlink.store values in the gateway settings.
+type Store struct {
+	Values storage.PluginStore
+}
+
+func (store Store) Get(ctx context.Context, owner, key string) (json.RawMessage, bool, error) {
+	return store.Values.GetPluginValue(ctx, owner, key)
+}
+
+func (store Store) Set(ctx context.Context, owner, key string, value json.RawMessage) error {
+	return store.Values.PutPluginValue(ctx, owner, key, value)
+}
+
+func (store Store) Delete(ctx context.Context, owner, key string) error {
+	return store.Values.DeletePluginValue(ctx, owner, key)
+}
+
+func (store Store) Keys(ctx context.Context, owner, prefix string) ([]string, error) {
+	return store.Values.PluginValueKeys(ctx, owner, prefix)
+}
+
+// Settings reads the plugins' settings from the gateway settings.
+type Settings struct {
+	Store storage.PluginStore
+}
+
+func (settings Settings) PluginSettings(ctx context.Context) (map[string]plugin.Settings, error) {
+	records, err := settings.Store.ListPluginSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	all := make(map[string]plugin.Settings, len(records))
+	for _, record := range records {
+		origins := make([]plugin.NetworkOrigin, 0, len(record.Origins))
+		for _, origin := range record.Origins {
+			origins = append(origins, plugin.NetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext})
+		}
+		all[record.Key] = plugin.Settings{
+			Enabled:      record.Enabled,
+			Capabilities: record.Capabilities,
+			Config:       record.Config,
+			Origins:      origins,
+			Trusted:      record.Trusted,
+		}
+	}
+	return all, nil
+}

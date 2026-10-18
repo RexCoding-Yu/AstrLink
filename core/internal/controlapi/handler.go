@@ -88,6 +88,10 @@ type Dependencies struct {
 	// Sync is the configuration engine. Optional; without it the sync surface
 	// reports 503.
 	Sync SyncManager
+	// Plugins and PluginStore serve the plugin page. Optional; without them
+	// the plugin routes report 503.
+	Plugins     PluginRegistry
+	PluginStore storage.PluginStore
 }
 
 // RateLimitReleaser restores a service after an operator clears its risk.
@@ -161,6 +165,9 @@ type Handler struct {
 	observers         *observerTracker
 	consoleSessions   ConsoleSessions
 	syncManager       SyncManager
+	plugins           PluginRegistry
+	pluginStore       storage.PluginStore
+	pluginsMu         sync.Mutex
 }
 
 func New(version contract.VersionResponse) *Handler {
@@ -229,6 +236,8 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		shutdown:        dependencies.Shutdown,
 		consoleSessions: dependencies.ConsoleSessions,
 		syncManager:     dependencies.Sync,
+		plugins:         dependencies.Plugins,
+		pluginStore:     dependencies.PluginStore,
 		mux:             http.NewServeMux(),
 		observers:       newObserverTracker(),
 	}
@@ -241,6 +250,8 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 	}
 	handler.mux.HandleFunc(PricingPath+"/", handler.authenticated(handler.pricingResource, RoleObserver))
 	handler.mux.HandleFunc(BuiltinToolsPath, handler.authenticated(handler.builtinToolResource, RoleOperator))
+	handler.mux.HandleFunc(PluginsPath, handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
+	handler.mux.HandleFunc(PluginsPath+"/", handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
 	handler.mux.HandleFunc(RoutingSettingsPath, handler.authenticated(handler.routingSettingsResource, RoleObserver))
 	// Sync configuration names the remote and its credentials, and the
 	// passphrase unlocks the package, so the surface is operator-only. The

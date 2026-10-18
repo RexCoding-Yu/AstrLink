@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/ingress"
 	"github.com/QuantumNous/astrlink/core/internal/localkey"
 	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/plugin/hostapi"
 	"github.com/QuantumNous/astrlink/core/internal/pricing"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/privacymodel"
@@ -266,6 +269,20 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		SubscriptionRisk:         subscriptionRiskReporter{manager: subscriptionManager},
 		Identities:               identities,
 	}
+	// Plugins load from <data-dir>/plugins in the background; until the first
+	// scan ends, requests see none.
+	pluginDirectory := filepath.Join(options.dataDirectory, "plugins")
+	if err := os.MkdirAll(pluginDirectory, 0o700); err != nil {
+		logf("create plugin directory: %v", err)
+	}
+	pluginManager := plugin.NewManager(plugin.ManagerOptions{
+		Dir:      pluginDirectory,
+		Settings: hostapi.Settings{Store: store},
+		Services: plugin.Services{
+			Fetcher: &hostapi.Fetcher{Credentials: store},
+			Store:   hostapi.Store{Values: store},
+		},
+	})
 	handler, err := controlapi.NewWithDependencies(options.version, controlapi.Dependencies{
 		ServiceStore: store,
 		PricingStore: store, PricingManager: pricingManager,
@@ -294,13 +311,21 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Shutdown:           options.shutdown,
 		ConsoleSessions:    options.consoleSessions,
 		Sync:               syncEngine,
+		Plugins:            pluginManager,
+		PluginStore:        store,
 	})
 	if err != nil {
 		return fail("configure persistent control API: %w", err)
 	}
 	monitorCtx, stopMonitors := context.WithCancel(ctx)
 	var monitors sync.WaitGroup
-	monitors.Add(4)
+	monitors.Add(5)
+	go func() {
+		defer monitors.Done()
+		if err := pluginManager.Reload(monitorCtx); err != nil {
+			logf("load plugins: %v", err)
+		}
+	}()
 	go func() { defer monitors.Done(); pricingManager.Run(monitorCtx, logf) }()
 	go func() { defer monitors.Done(); subscriptionManager.RunUsageMonitor(monitorCtx) }()
 	go func() { defer monitors.Done(); rawVault.Run(monitorCtx) }()

@@ -1027,5 +1027,71 @@ END`,
     PRIMARY KEY (session_id, stand_in)
 )`,
 		}},
+		{Version: 53, Name: "plugins_and_request_metadata", Statements: []string{
+			// The user's choices for each plugin. Plugins come from the
+			// builtin set and the plugin directory; a row exists once the
+			// user changed something, and a plugin without one is disabled.
+			`CREATE TABLE plugin_settings (
+    plugin_key TEXT PRIMARY KEY CHECK(length(plugin_key) BETWEEN 1 AND 32),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+    granted_capabilities_json TEXT NOT NULL DEFAULT '[]',
+    network_origins_json TEXT NOT NULL DEFAULT '[]',
+    privacy_trusted INTEGER NOT NULL DEFAULT 0 CHECK(privacy_trusted IN (0, 1)),
+    config_json TEXT NOT NULL DEFAULT '{}' CHECK(length(config_json) <= 65536),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)`,
+			// Credential slots a plugin declares, sealed under dek_secrets like
+			// builtin_tool_credentials. id is <plugin_key>/<name>, the key the
+			// seal binds; origin is the one address the host injects it for.
+			`CREATE TABLE plugin_credentials (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 3 AND 65),
+    plugin_key TEXT NOT NULL REFERENCES plugin_settings(plugin_key) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 32),
+    credential_value BLOB NOT NULL,
+    sealed INTEGER NOT NULL DEFAULT 0 CHECK(sealed IN (0, 1) AND (sealed = 0 OR length(credential_value) >= 30)),
+    origin TEXT NOT NULL CHECK(length(origin) BETWEEN 1 AND 512),
+    hint TEXT NOT NULL DEFAULT '' CHECK(length(hint) <= 8),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (plugin_key, name)
+)`,
+			// astrlink.store: each plugin's own values, such as project to
+			// scope mappings.
+			`CREATE TABLE plugin_kv (
+    plugin_key TEXT NOT NULL REFERENCES plugin_settings(plugin_key) ON DELETE CASCADE,
+    key TEXT NOT NULL CHECK(length(key) BETWEEN 1 AND 256),
+    value_json TEXT NOT NULL CHECK(length(value_json) <= 65536),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_key, key)
+)`,
+			// Request attributes: the user's own and those plugins register.
+			// owner is user or the key of the plugin that registered it.
+			`CREATE TABLE metadata_attributes (
+    key TEXT PRIMARY KEY CHECK(length(key) BETWEEN 1 AND 32),
+    label TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    pattern TEXT NOT NULL,
+    marker TEXT UNIQUE,
+    owner TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)`,
+			// Values kept for an access token (its default) or a session (its
+			// binding). Values from request headers stay in request records.
+			`CREATE TABLE metadata_values (
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('token', 'session')),
+    target_id TEXT NOT NULL,
+    key TEXT NOT NULL REFERENCES metadata_attributes(key) ON DELETE CASCADE,
+    value TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('token_default', 'model_marker', 'user_marker', 'manual')),
+    turn INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (target_kind, target_id, key)
+)`,
+			`ALTER TABLE request_records ADD COLUMN metadata_json TEXT`,
+			`ALTER TABLE request_records ADD COLUMN plugin_records_json TEXT`,
+		}},
 	}
 }
