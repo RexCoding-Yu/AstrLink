@@ -57,6 +57,7 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 			writeError(writer, http.StatusInternalServerError, "plugin_reload_failed", err.Error())
 			return
 		}
+		handler.registerEnabledPluginAttributes(request.Context())
 		handler.writePluginList(writer)
 		return
 	}
@@ -216,6 +217,18 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 		if *update.Enabled && !target.Loaded() {
 			invalid("a plugin that did not load cannot be enabled")
 			return
+		}
+		// Enabling registers the plugin's attributes; one whose key or
+		// marker another owner holds keeps the plugin off.
+		if *update.Enabled && handler.metadata != nil {
+			if err := handler.metadata.RegisterPlugin(ctx, target.Key, target.Attributes()); err != nil {
+				if errors.Is(err, storage.ErrConflict) {
+					writeError(writer, http.StatusConflict, "metadata_attribute_conflict", "an attribute this plugin registers has the key or marker of another attribute")
+					return
+				}
+				writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not register the plugin's attributes")
+				return
+			}
 		}
 		settings.Enabled = *update.Enabled
 	}
@@ -397,4 +410,18 @@ func cleanSummary(text string) string {
 		}
 		return r
 	}, strings.ToValidUTF8(text, "�"))
+}
+
+// registerEnabledPluginAttributes registers again the attributes of every
+// enabled plugin, whose manifest a rescan may have changed. A conflict
+// leaves that plugin's attributes as they were.
+func (handler *Handler) registerEnabledPluginAttributes(ctx context.Context) {
+	if handler.metadata == nil {
+		return
+	}
+	for _, target := range handler.plugins.Current().Plugins() {
+		if target.Enabled() {
+			_ = handler.metadata.RegisterPlugin(ctx, target.Key, target.Attributes())
+		}
+	}
 }

@@ -225,6 +225,8 @@ type recordSession struct {
 	privacyDecision contract.PrivacyDecision
 	privacyFindings []contract.PrivacyFinding
 	privacyIgnored  []contract.PrivacyIgnored
+	// metadata is the request's metadata, resolved when the session starts.
+	metadata contract.RequestMetadata
 	// requestExposure is the label of the stored client body; empty until
 	// it is stored.
 	requestExposure storage.AuditExposure
@@ -561,6 +563,10 @@ func (session *recordSession) recordSnapshot(
 		Events:             append([]contract.RequestEvent(nil), session.events...),
 	}
 	record.ConversionDiagnostics = slices.Clone(session.conversionDiagnostics)
+	if !session.metadata.Empty() {
+		metadata := session.metadata
+		record.Metadata = &metadata
+	}
 	if session.privacyDecision != "" {
 		decision := session.privacyDecision
 		record.PrivacyDecision = &decision

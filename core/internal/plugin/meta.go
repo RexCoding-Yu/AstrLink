@@ -55,10 +55,8 @@ type MetadataAttribute struct {
 }
 
 var (
-	schemePattern       = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,31}$`)
-	attributeKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
-	markerPattern       = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	headerNamePattern   = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
+	schemePattern     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,31}$`)
+	headerNamePattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
 )
 
 // ValidPluginKey reports whether key can name a plugin: a lowercase letter,
@@ -159,31 +157,18 @@ func validateMeta(meta Meta, key string) error {
 	return nil
 }
 
-// validateAttribute checks one registered metadata attribute. Its marker
-// goes to the upstream model in prompts and replies, so like everything a
-// plugin injects it must not name the gateway.
+// validateAttribute checks one registered metadata attribute with the same
+// rules as the user's own. Its marker reaches the upstream model in prompts
+// and replies, so like everything a plugin injects it must not name the
+// gateway.
 func validateAttribute(attribute MetadataAttribute) error {
-	if !attributeKeyPattern.MatchString(attribute.Key) {
-		return fmt.Errorf("key %q must be a lowercase letter followed by up to 31 lowercase letters, digits or underscores", attribute.Key)
-	}
-	if !displayText(attribute.Label, 32, "") {
-		return fmt.Errorf("label must be 1 to 32 characters without control characters")
-	}
-	if len(attribute.Pattern) > 256 || !strings.HasPrefix(attribute.Pattern, "^") || !strings.HasSuffix(attribute.Pattern, "$") {
-		return fmt.Errorf("pattern must be anchored with ^ and $ and at most 256 bytes")
-	}
-	if _, err := regexp.Compile(attribute.Pattern); err != nil {
-		return fmt.Errorf("pattern does not compile: %v", err)
-	}
-	if attribute.Marker != "" {
-		if !markerPattern.MatchString(attribute.Marker) {
-			return fmt.Errorf("marker %q must be a lowercase letter followed by up to 31 lowercase letters, digits or hyphens", attribute.Marker)
-		}
-		if strings.Contains(attribute.Marker, "astrlink") {
-			return fmt.Errorf("marker %q must not name the gateway", attribute.Marker)
-		}
-	}
-	return nil
+	return contract.MetadataAttribute{
+		Key:     attribute.Key,
+		Label:   attribute.Label,
+		Pattern: attribute.Pattern,
+		Marker:  attribute.Marker,
+		Owner:   contract.MetadataOwnerUser,
+	}.Validate()
 }
 
 // displayText reports whether text is 1 to max characters of valid UTF-8

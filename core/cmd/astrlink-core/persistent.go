@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/ingress"
 	"github.com/QuantumNous/astrlink/core/internal/localkey"
+	"github.com/QuantumNous/astrlink/core/internal/metadata"
 	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/hostapi"
@@ -236,7 +237,12 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	}
 	resolver.WithRuntimeProfile(contract.RuntimeProfile{RelayKitAvailable: true, Edges: conversionEngine.Edges()})
 	resolver.WithSubscriptionBaseURL(subscriptionManager.APIBaseURL())
+	requestMetadata := metadata.NewRegistry(store)
+	if err := requestMetadata.Refresh(ctx); err != nil {
+		return fail("load request metadata: %w", err)
+	}
 	gatewayDependencies := ingress.Dependencies{
+		Metadata:         requestMetadata,
 		ProxyCredentials: store,
 		Resolver:         resolver,
 		Authorizer: endpoint.NewServiceAuthorizer(store, subscriptionManager, subscriptionManager.Provider().IdentityPolicy()).
@@ -313,6 +319,8 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Sync:               syncEngine,
 		Plugins:            pluginManager,
 		PluginStore:        store,
+		Metadata:           requestMetadata,
+		MetadataStore:      store,
 	})
 	if err != nil {
 		return fail("configure persistent control API: %w", err)
@@ -324,6 +332,17 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		defer monitors.Done()
 		if err := pluginManager.Reload(monitorCtx); err != nil {
 			logf("load plugins: %v", err)
+			return
+		}
+		// An enabled plugin's manifest may have changed since it registered
+		// its attributes.
+		for _, loaded := range pluginManager.Current().Plugins() {
+			if !loaded.Enabled() {
+				continue
+			}
+			if err := requestMetadata.RegisterPlugin(monitorCtx, loaded.Key, loaded.Attributes()); err != nil {
+				logf("register metadata of plugin %s: %v", loaded.Key, err)
+			}
 		}
 	}()
 	go func() { defer monitors.Done(); pricingManager.Run(monitorCtx, logf) }()

@@ -33,6 +33,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
 )
 
@@ -86,6 +87,15 @@ type Dependencies struct {
 	// Identities is optional. It learns the client identity of recognized
 	// official Claude Code and Codex requests; nil learns nothing.
 	Identities *accountauth.IdentityRegistry
+	// Metadata is optional. It resolves each request's metadata from its
+	// headers, its session's bindings and its access token's defaults.
+	Metadata MetadataResolver
+}
+
+// MetadataResolver resolves a request's metadata; *metadata.Registry
+// satisfies it. session holds the values bound to the request's session.
+type MetadataResolver interface {
+	Resolve(header http.Header, token contract.AccessTokenID, session map[string]storage.MetadataValueRecord) contract.RequestMetadata
 }
 
 type Classifier interface {
@@ -111,6 +121,7 @@ func (function PolicyWarningReporterFunc) ReportPolicyWarning(warning privacy.Wa
 }
 
 type Handler struct {
+	requestMetadata          MetadataResolver
 	builtinStates            builtintools.Store
 	searchRefs               searchRefStore
 	codexTurns               codexTurnStore
@@ -258,6 +269,7 @@ func NewWithDependencies(dependencies Dependencies) *Handler {
 		dependencies.Forwarder = transport.New(nil)
 	}
 	return &Handler{
+		requestMetadata:  dependencies.Metadata,
 		proxyCredentials: dependencies.ProxyCredentials,
 		resolver:         dependencies.Resolver, authorizer: dependencies.Authorizer, forwarder: dependencies.Forwarder,
 		accessTokenAuthenticator: dependencies.AccessTokenAuthenticator, privacyFilter: dependencies.PrivacyFilter,
@@ -902,6 +914,9 @@ func (handler *Handler) startRecordSession(request *http.Request, classified Req
 		session.fingerprinter = handler.sessionFingerprints.get(request.Context(), handler.auditBlobs, handler.recordLogger)
 	}
 	session.resolveSession(request.Context(), handler.requestRecords, handler.recordLogger)
+	if handler.requestMetadata != nil {
+		session.metadata = handler.requestMetadata.Resolve(request.Header, accessTokenID, nil)
+	}
 	// Snapshot the redacted HTTP envelope before any privacy or routing
 	// rewrite mutates the request (ADR 0008).
 	session.captureHTTPRequestMeta(request)

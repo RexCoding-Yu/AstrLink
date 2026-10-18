@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
+	"github.com/QuantumNous/astrlink/core/internal/metadata"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/hostapi"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
@@ -57,9 +59,17 @@ func newPluginHandler(t *testing.T) (*sqlite.Store, *Handler, *plugin.Manager, s
 	if err := manager.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	registry := metadata.NewRegistry(store)
+	if err := registry.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := accesstoken.NewManager(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler, err := NewWithDependencies(contract.DefaultVersionResponse("0.1.0-test", "abc1234"), Dependencies{
-		ServiceStore: store, ControlToken: testControlToken, ObserverToken: testObserverToken,
-		Plugins: manager, PluginStore: store,
+		ServiceStore: store, ControlToken: testControlToken, ObserverToken: testObserverToken, AccessTokenManager: tokens,
+		Plugins: manager, PluginStore: store, Metadata: registry, MetadataStore: store,
 	})
 	if err != nil {
 		t.Fatalf("NewWithDependencies: %v", err)

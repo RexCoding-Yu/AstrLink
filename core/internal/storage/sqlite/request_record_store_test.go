@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -837,5 +838,59 @@ func TestListRequestRecordsSearchesInputPreviewLiterally(t *testing.T) {
 		if fmt.Sprint(got) != fmt.Sprint(append([]contract.RequestID{}, want...)) {
 			t.Fatalf("query %q = %v, want %v", query, got, want)
 		}
+	}
+}
+
+func TestRequestRecordKeepsMetadataAndPluginRecords(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "astrlink.db"))
+	defer store.Close()
+	ctx := context.Background()
+	started := time.Date(2026, 10, 18, 10, 0, 0, 0, time.UTC)
+	ended := started.Add(412 * time.Millisecond)
+	model := "claude-opus-4-5"
+	four, two := 4.0, 2.0
+	record := contract.RequestRecord{
+		ID:             "request_plugin",
+		StartedAt:      started,
+		Status:         contract.RequestStatusPending,
+		InputProtocol:  contract.ProtocolAnthropicMessages,
+		RequestedModel: &model,
+		Audit:          contract.NotCapturedAuditSummary(),
+		Events: []contract.RequestEvent{{
+			Kind: contract.RequestEventPlugin, Plugin: "powercontext", Title: "记忆", StartedAt: started, EndedAt: &ended,
+			Status: contract.RequestStatusSucceeded, Summary: "召回 3/9 · 注入 1.8 KiB · 重放 2 段 · 412 ms",
+		}},
+		Metadata: &contract.RequestMetadata{
+			Values: map[string]contract.MetadataValue{"project": {Value: "astrlink", Source: contract.MetadataSourceSession, SetBy: contract.MetadataSetByModelMarker, Turn: 2}},
+			Events: []contract.MetadataEvent{{Key: "project", Event: contract.MetadataEventBound, Value: "astrlink", SetBy: contract.MetadataSetByModelMarker}},
+		},
+		PluginRecords: []contract.RequestPluginRecord{{
+			Plugin: "powercontext", PluginVersion: "1.0.0", Hook: "prepareTurn",
+			Title: "记忆", Status: contract.PluginRecordOK, Summary: "召回 3/9", ElapsedMs: 412,
+			View:      []contract.PluginViewBlock{{Type: contract.PluginViewTable, Columns: []string{"家族", "请求", "保留"}, Rows: [][]contract.PluginViewCell{{{Text: "atomic-memory"}, {Number: &four}, {Number: &two}}}}},
+			Injection: &contract.PluginInjection{Placement: contract.PluginPlacementTurnMessage, InjectedBytes: 1843, ReplayedBlocks: 2},
+			Network:   contract.PluginNetworkCount{Requests: 3, WaitMs: 402},
+			Observe:   "queued",
+		}},
+	}
+	if err := store.UpsertRequestRecord(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetRequestRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Metadata, record.Metadata) || !reflect.DeepEqual(got.PluginRecords, record.PluginRecords) {
+		t.Fatalf("metadata = %+v\nplugin records = %+v", got.Metadata, got.PluginRecords)
+	}
+	if len(got.Events) != 1 || got.Events[0].Plugin != "powercontext" || got.Events[0].Title != "记忆" {
+		t.Fatalf("events = %+v", got.Events)
+	}
+
+	broken := record
+	broken.ID = "request_broken_event"
+	broken.Events = []contract.RequestEvent{{Kind: contract.RequestEventRouted, Plugin: "powercontext", StartedAt: started, Status: contract.RequestStatusSucceeded}}
+	if err := store.UpsertRequestRecord(ctx, broken); !errors.Is(err, storagecontract.ErrInvalidArgument) {
+		t.Fatalf("a routed event naming a plugin = %v", err)
 	}
 }

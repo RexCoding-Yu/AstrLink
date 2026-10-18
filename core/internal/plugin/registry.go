@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/QuantumNous/astrlink/core/contract"
 )
 
 // MaxConfigBytes bounds a plugin's configuration.
@@ -413,4 +415,16 @@ func asLoadError(source Source, err error) *LoadError {
 		return loadErr
 	}
 	return &LoadError{Code: CodeLoadFailed, File: source.File, Message: cleanText(err.Error(), maxMessageRunes, "")}
+}
+
+// Attributes returns the metadata attributes a plugin registers, as the
+// metadata registry keeps them.
+func (plugin *Plugin) Attributes() []contract.MetadataAttribute {
+	attributes := make([]contract.MetadataAttribute, 0, len(plugin.Meta.Metadata))
+	for _, attribute := range plugin.Meta.Metadata {
+		attributes = append(attributes, contract.MetadataAttribute{
+			Key: attribute.Key, Label: attribute.Label, Pattern: attribute.Pattern, Marker: attribute.Marker, Owner: plugin.Key,
+		})
+	}
+	return attributes
 }

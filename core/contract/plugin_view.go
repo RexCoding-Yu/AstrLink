@@ -225,3 +225,86 @@ func (record PluginRecord) Validate() error {
 	}
 	return ValidatePluginView(record.View)
 }
+
+// MaxRequestPluginRecords bounds the plugin records kept with one request.
+const MaxRequestPluginRecords = 16
+
+// Why a plugin hook gave a request nothing: the plugin's own reasons, such
+// as no_project or short_query, and the host's.
+const (
+	PluginSkipTimeout            = "timeout"
+	PluginSkipPluginError        = "plugin_error"
+	PluginSkipPrivacyBlocked     = "privacy_blocked"
+	PluginSkipPrivacyUnavailable = "privacy_unavailable"
+)
+
+// Where an injected block went.
+const (
+	PluginPlacementSystem      = "system_append"
+	PluginPlacementTurnMessage = "turn_message_prefix"
+)
+
+// RequestPluginRecord is a plugin's part in a request: what the plugin
+// reported, and what the host observed and did with it.
+type RequestPluginRecord struct {
+	Plugin        string `json:"plugin"`
+	PluginVersion string `json:"plugin_version"`
+	Hook          string `json:"hook"`
+	// Title, Status, Summary and View are the plugin's own.
+	Title     string             `json:"title"`
+	Status    PluginRecordStatus `json:"status"`
+	Summary   string             `json:"summary"`
+	View      []PluginViewBlock  `json:"view,omitempty"`
+	Truncated bool               `json:"truncated,omitempty"`
+	// SkippedReason says why the hook gave the request nothing.
+	SkippedReason string `json:"skipped_reason,omitempty"`
+	ElapsedMs     int    `json:"elapsed_ms"`
+	// Injection is what the host added to the request for the plugin.
+	Injection *PluginInjection   `json:"injection,omitempty"`
+	Network   PluginNetworkCount `json:"network"`
+	// Observe tells what became of the turn's capture: queued,
+	// skipped_privacy, skipped_binding_turn, skipped_continuation,
+	// queue_full or disabled.
+	Observe string `json:"observe,omitempty"`
+}
+
+// PluginInjection is what the host injected into one request for a plugin.
+type PluginInjection struct {
+	Placement      string `json:"placement"`
+	InjectedBytes  int    `json:"injected_bytes"`
+	ReplayedBlocks int    `json:"replayed_blocks"`
+	DroppedItems   int    `json:"dropped_items"`
+}
+
+func (record RequestPluginRecord) Validate() error {
+	if !ValidPluginKey(record.Plugin) {
+		return fmt.Errorf("plugin must be a plugin key")
+	}
+	if err := validateBoundedText("plugin_version", record.PluginVersion, 32, true); err != nil {
+		return err
+	}
+	if err := validateBoundedText("hook", record.Hook, 32, false); err != nil {
+		return err
+	}
+	if err := (PluginRecord{Title: record.Title, Status: record.Status, Summary: record.Summary, View: record.View}).Validate(); err != nil {
+		return err
+	}
+	if err := validateBoundedText("skipped_reason", record.SkippedReason, 64, true); err != nil {
+		return err
+	}
+	if err := validateBoundedText("observe", record.Observe, 64, true); err != nil {
+		return err
+	}
+	if record.ElapsedMs < 0 || record.Network.Requests < 0 || record.Network.Denied < 0 || record.Network.Errors < 0 || record.Network.WaitMs < 0 {
+		return fmt.Errorf("plugin record counts must be non-negative")
+	}
+	if injection := record.Injection; injection != nil {
+		if injection.Placement != PluginPlacementSystem && injection.Placement != PluginPlacementTurnMessage {
+			return fmt.Errorf("unknown injection placement %q", injection.Placement)
+		}
+		if injection.InjectedBytes < 0 || injection.ReplayedBlocks < 0 || injection.DroppedItems < 0 {
+			return fmt.Errorf("injection counts must be non-negative")
+		}
+	}
+	return nil
+}

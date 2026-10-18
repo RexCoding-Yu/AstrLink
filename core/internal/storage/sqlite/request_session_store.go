@@ -451,7 +451,7 @@ const requestSessionSummaryColumns = `
     turn_index, NULL, NULL, NULL, NULL,
     (SELECT COUNT(*) FROM request_records children
      WHERE children.parent_request_id = request_records.id), NULL, NULL, model_redirect_json, NULL, client_type,
-    privacy_decision, NULL, NULL, NULL, NULL`
+    privacy_decision, NULL, NULL, NULL, NULL, NULL, NULL`
 
 // sessionSummaryQuery reads the root turns of sessions, each session's in
 // time order. Without statistics SQLite takes `parent_request_id IS NULL`,

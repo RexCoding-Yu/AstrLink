@@ -60,7 +60,7 @@ func TestValidateMetaRejects(t *testing.T) {
 		{"credential into a proxy header", func(meta *Meta) { meta.Credentials[0].Header = "Proxy-Authorization" }, "credentials[0].header"},
 		{"bad scheme", func(meta *Meta) { meta.Credentials[0].Scheme = "Bearer token" }, "credentials[0].scheme"},
 		{"bad attribute key", func(meta *Meta) { meta.Metadata[0].Key = "Project" }, "metadata[0]: key"},
-		{"unanchored pattern", func(meta *Meta) { meta.Metadata[0].Pattern = "[a-z]+" }, "anchored"},
+		{"unanchored pattern", func(meta *Meta) { meta.Metadata[0].Pattern = "[a-z]+" }, "must start with ^"},
 		{"pattern that does not compile", func(meta *Meta) { meta.Metadata[0].Pattern = "^[a-z$" }, "does not compile"},
 		{"marker naming the gateway", func(meta *Meta) { meta.Metadata[0].Marker = "astrlink-project" }, "must not name the gateway"},
 		{"attribute twice", func(meta *Meta) { meta.Metadata = append(meta.Metadata, meta.Metadata[0]) }, `registers "project" twice`},

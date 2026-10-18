@@ -92,6 +92,10 @@ type Dependencies struct {
 	// the plugin routes report 503.
 	Plugins     PluginRegistry
 	PluginStore storage.PluginStore
+	// Metadata and MetadataStore serve the request attributes. Optional;
+	// without them the metadata routes report 503.
+	Metadata      MetadataRegistry
+	MetadataStore storage.MetadataStore
 }
 
 // RateLimitReleaser restores a service after an operator clears its risk.
@@ -168,6 +172,8 @@ type Handler struct {
 	plugins           PluginRegistry
 	pluginStore       storage.PluginStore
 	pluginsMu         sync.Mutex
+	metadata          MetadataRegistry
+	metadataStore     storage.MetadataStore
 }
 
 func New(version contract.VersionResponse) *Handler {
@@ -238,6 +244,8 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		syncManager:     dependencies.Sync,
 		plugins:         dependencies.Plugins,
 		pluginStore:     dependencies.PluginStore,
+		metadata:        dependencies.Metadata,
+		metadataStore:   dependencies.MetadataStore,
 		mux:             http.NewServeMux(),
 		observers:       newObserverTracker(),
 	}
@@ -252,6 +260,8 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 	handler.mux.HandleFunc(BuiltinToolsPath, handler.authenticated(handler.builtinToolResource, RoleOperator))
 	handler.mux.HandleFunc(PluginsPath, handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
 	handler.mux.HandleFunc(PluginsPath+"/", handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
+	handler.mux.HandleFunc(MetadataAttributesPath, handler.authenticated(handler.metadataAttributesResource, RoleObserver))
+	handler.mux.HandleFunc(MetadataAttributesPath+"/", handler.authenticated(handler.metadataAttributesResource, RoleObserver))
 	handler.mux.HandleFunc(RoutingSettingsPath, handler.authenticated(handler.routingSettingsResource, RoleObserver))
 	// Sync configuration names the remote and its credentials, and the
 	// passphrase unlocks the package, so the surface is operator-only. The
