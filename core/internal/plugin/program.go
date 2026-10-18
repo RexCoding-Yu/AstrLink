@@ -431,12 +431,24 @@ func stackPosition(stack, file string) (line, column int) {
 	return 0, 0
 }
 
+// stackSuffix names the first frame with a source position: a host function
+// that threw sits above the plugin's own frame without one.
 func stackSuffix(stack string) string {
+	first := ""
 	for _, text := range strings.Split(stack, "\n") {
 		text = strings.TrimSpace(text)
-		if strings.HasPrefix(text, "at ") {
+		if !strings.HasPrefix(text, "at ") {
+			continue
+		}
+		if stackFrame.MatchString(text) {
 			return " (" + text + ")"
 		}
+		if first == "" {
+			first = text
+		}
 	}
-	return ""
+	if first == "" {
+		return ""
+	}
+	return " (" + first + ")"
 }

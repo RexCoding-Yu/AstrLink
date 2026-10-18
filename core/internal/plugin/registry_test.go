@@ -342,10 +342,12 @@ export function describeStatus() { return "x".repeat(70000); }
 
 func TestThrownErrorsNameTheirPosition(t *testing.T) {
 	manager := newTestManager(t, map[string]string{
-		"demo": pluginSource("demo", nil, "export function prepareTurn() {\n  return missing.value;\n}\n"),
+		"demo": pluginSource("demo", nil, "export function prepareTurn() {\n  return missing.value;\n}\nexport function describeStatus() {\n  return astrlink.store.get(\"x\");\n}\n"),
 	}, settingsMap{"demo": enabled()}, Services{}, Limits{})
-	outcome := callWithin(t, context.Background(), loadedPlugin(t, manager, "demo"), HookPrepareTurn, nil, CallOptions{})
-	callError(t, outcome, ReasonPluginError, "plugin.js:3:")
+	plugin := loadedPlugin(t, manager, "demo")
+	callError(t, callWithin(t, context.Background(), plugin, HookPrepareTurn, nil, CallOptions{}), ReasonPluginError, "plugin.js:3:")
+	// The host function that threw sits above the plugin's own frame.
+	callError(t, callWithin(t, context.Background(), plugin, HookDescribeStatus, nil, CallOptions{}), ReasonPluginError, "plugin.js:6:")
 }
 
 func TestWaitingOnTheHostDoesNotCountAsScriptTime(t *testing.T) {
