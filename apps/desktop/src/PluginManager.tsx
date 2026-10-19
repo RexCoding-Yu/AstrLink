@@ -1,39 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import {
-  Blocks,
-  Plus,
-  RefreshCw,
-  Shredder as Trash2,
-} from "@/components/icons";
+import { Blocks, RefreshCw } from "@/components/icons";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DataField } from "@/components/DataRow";
 import { EmptyState } from "@/components/EmptyState";
-import { Field } from "@/components/Field";
 import { FormMessage } from "@/components/FormMessage";
 import { HelpPopover } from "@/components/HelpPopover";
 import { IconButton } from "@/components/IconButton";
 import { LoadingState } from "@/components/LoadingState";
 import { Panel, PanelHeader } from "@/components/Panel";
-import { PluginView } from "@/components/PluginView";
 import { SplitWorkspace } from "@/components/SplitWorkspace";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   deletePluginCredential,
@@ -48,20 +31,19 @@ import {
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
 import { PageHeader } from "./PageHeader";
+import { PluginOverview } from "./PluginOverview";
+import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
 import {
-  configBytes,
-  MAX_PLUGIN_CONFIG_BYTES,
-  PLUGIN_TURN_WAITS,
   type PluginDetail,
   type PluginList,
   type PluginLoadError,
+  type PluginSettingsUpdate,
   type PluginStatus,
   type PluginSummary,
-  type PluginTestResult,
 } from "./plugin-model";
 
 type Translate = ReturnType<typeof useT>;
-type DetailTab = "overview" | "network" | "config" | "status";
+type DetailTab = "overview" | "settings" | "status";
 
 /** i18n keys cannot hold the dots of a capability name. */
 function capabilityLabel(capability: string, t: Translate): string {
@@ -94,18 +76,6 @@ function pluginState(plugin: PluginSummary, t: Translate): string {
     : t("plugins.state.disabled");
 }
 
-/** Plain http to a host other than this machine, as Core tells it. */
-function plaintextOrigin(raw: string): boolean {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "http:") return false;
-    const host = url.hostname.replace(/^\[|\]$/g, "");
-    return !(host === "localhost" || host === "::1" || host.startsWith("127."));
-  } catch {
-    return false;
-  }
-}
-
 /** The plugin to show after the list changes: the same one while it is listed, else the first. */
 function keptSelection(current: string | null, list: PluginList) {
   return current && list.plugins.some((plugin) => plugin.key === current)
@@ -113,18 +83,15 @@ function keptSelection(current: string | null, list: PluginList) {
     : (list.plugins[0]?.key ?? null);
 }
 
-function validOrigin(raw: string): boolean {
-  try {
-    const url = new URL(raw);
-    return (
-      (url.protocol === "http:" || url.protocol === "https:") &&
-      url.hostname !== "" &&
-      url.username === "" &&
-      url.password === ""
-    );
-  } catch {
-    return false;
-  }
+/** The origin of the server that sends credential, once Core allows it. */
+function serverOrigin(detail: PluginDetail, credential: string) {
+  const server = detail.settings.find(
+    (setting) => setting.type === "server" && setting.credential === credential,
+  );
+  return server
+    ? detail.network_origins.find((origin) => origin.setting === server.key)
+        ?.origin
+    : undefined;
 }
 
 export function PluginManager({
@@ -144,8 +111,10 @@ export function PluginManager({
   const [status, setStatus] = useState<PluginStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>("overview");
-  const [testResult, setTestResult] = useState<PluginTestResult | null>(null);
   const [testing, setTesting] = useState(false);
+  // Every detail Core sends starts the settings form afresh.
+  const [revision, setRevision] = useState(0);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [enabling, setEnabling] = useState<PluginDetail | null>(null);
@@ -173,6 +142,7 @@ export function PluginManager({
       try {
         const next = await getPlugin(key);
         setDetail(next);
+        setRevision((current) => current + 1);
         setDetailError(null);
         return next;
       } catch (error) {
@@ -198,7 +168,6 @@ export function PluginManager({
   useEffect(() => {
     setDetail(null);
     setStatus(null);
-    setTestResult(null);
     setActionError(null);
     setTab("overview");
     if (!selectedKey) return;
@@ -227,6 +196,24 @@ export function PluginManager({
     }
   }
 
+  /** Shows a detail Core sent and the list row of its state. */
+  function show(next: PluginDetail) {
+    setDetail(next);
+    setRevision((current) => current + 1);
+    setList((current) =>
+      current
+        ? {
+            ...current,
+            plugins: current.plugins.map((plugin) =>
+              plugin.key === next.key
+                ? { ...plugin, ...summaryOf(next) }
+                : plugin,
+            ),
+          }
+        : current,
+    );
+  }
+
   /** Applies a change and refreshes the list row that shows its state. */
   async function apply(change: () => Promise<PluginDetail>) {
     setBusy(true);
@@ -234,6 +221,7 @@ export function PluginManager({
     try {
       const next = await change();
       setDetail(next);
+      setRevision((current) => current + 1);
       setList((current) =>
         current
           ? {
@@ -259,14 +247,51 @@ export function PluginManager({
     setTesting(true);
     setActionError(null);
     try {
-      setTestResult(await testPlugin(key));
+      await testPlugin(key);
       setTab("overview");
-      // The test may change what the plugin's overview and counts show.
-      void loadStatus(key);
+      // The overview shows the test, with what it changed in the counts.
+      await loadStatus(key);
     } catch (error) {
       setActionError(controlErrorMessage(error, t("plugins.testFailed")));
     } finally {
       setTesting(false);
+    }
+  }
+
+  /**
+   * Saves the settings form: the settings first, so the servers' origins
+   * exist, then each new credential, to its server's origin.
+   */
+  async function saveSettings(
+    key: string,
+    update: PluginSettingsUpdate,
+    credentials: CredentialInput[],
+  ) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      let next: PluginDetail | null = null;
+      if (Object.keys(update).length > 0)
+        next = await updatePlugin(key, update);
+      for (const credential of credentials) {
+        const current = next ?? detail;
+        const origin =
+          credential.origin ??
+          (current ? serverOrigin(current, credential.name) : undefined);
+        if (!origin) throw new Error(t("plugins.settings.noOrigin"));
+        next = await savePluginCredential(key, credential.name, {
+          secret: credential.secret,
+          origin,
+        });
+      }
+      if (next) show(next);
+      void loadStatus(key);
+      return true;
+    } catch (error) {
+      setActionError(controlErrorMessage(error, t("plugins.saveFailed")));
+      return false;
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -346,7 +371,7 @@ export function PluginManager({
           variant="page"
         />
       ) : list !== null ? (
-        <SplitWorkspace className="@[720px]:grid-cols-[minmax(15rem,0.8fr)_minmax(0,1.7fr)]">
+        <SplitWorkspace className="grid-rows-[auto_minmax(360px,1fr)] @[720px]:grid-cols-[minmax(15rem,0.8fr)_minmax(0,1.7fr)]">
           <Panel className="flex min-h-0 flex-col overflow-hidden">
             <ul
               aria-label={t("plugins.listLabel")}
@@ -375,16 +400,15 @@ export function PluginManager({
             ) : (
               <PluginDetailPane
                 actionError={actionError}
+                advancedOpen={advancedOpen}
                 busy={busy}
                 detail={detail}
-                onConfig={(config) =>
-                  apply(() => updatePlugin(detail.key, { config }))
-                }
+                onAdvancedOpen={setAdvancedOpen}
                 onCredentialClear={(name) =>
                   apply(() => deletePluginCredential(detail.key, name))
                 }
-                onCredentialSave={(name, input) =>
-                  apply(() => savePluginCredential(detail.key, name, input))
+                onSaveSettings={(update, credentials) =>
+                  saveSettings(detail.key, update, credentials)
                 }
                 onDisable={() =>
                   void apply(() => updatePlugin(detail.key, { enabled: false }))
@@ -393,28 +417,13 @@ export function PluginManager({
                   setGrants(detail.requested_capabilities);
                   setEnabling(detail);
                 }}
-                onOrigins={(origins) =>
-                  apply(() =>
-                    updatePlugin(detail.key, { network_origins: origins }),
-                  )
-                }
                 onRefreshStatus={() => void loadStatus(detail.key)}
                 onTab={setTab}
                 onTest={() => void runTest(detail.key)}
-                onTrusted={(trusted) =>
-                  void apply(() =>
-                    updatePlugin(detail.key, { privacy_trusted: trusted }),
-                  )
-                }
-                onWait={(waitMs) =>
-                  void apply(() =>
-                    updatePlugin(detail.key, { turn_wait_ms: waitMs }),
-                  )
-                }
+                revision={revision}
                 status={status}
                 statusError={statusError}
                 tab={tab}
-                testResult={testResult}
                 testing={testing}
               />
             )}
@@ -498,14 +507,6 @@ function PluginRow({
         <StatusBadge tone={pluginTone(plugin)}>
           {pluginState(plugin, t)}
         </StatusBadge>
-        <Badge className="h-5" variant="outline">
-          {t(`plugins.source.${plugin.source}`)}
-        </Badge>
-        {plugin.needs_network ? (
-          <Badge className="h-5" variant="outline">
-            {t("plugins.needsNetwork")}
-          </Badge>
-        ) : null}
       </span>
       {plugin.error ? (
         <span
@@ -523,55 +524,46 @@ function PluginDetailPane({
   detail,
   status,
   statusError,
-  testResult,
   testing,
   busy,
   actionError,
   tab,
+  revision,
+  advancedOpen,
   onTab,
   onEnable,
   onDisable,
   onTest,
   onRefreshStatus,
-  onOrigins,
-  onTrusted,
-  onWait,
-  onCredentialSave,
+  onAdvancedOpen,
+  onSaveSettings,
   onCredentialClear,
-  onConfig,
 }: {
   detail: PluginDetail;
   status: PluginStatus | null;
   statusError: string | null;
-  testResult: PluginTestResult | null;
   testing: boolean;
   busy: boolean;
   actionError: string | null;
   tab: DetailTab;
+  revision: number;
+  advancedOpen: boolean;
   onTab: (tab: DetailTab) => void;
   onEnable: () => void;
   onDisable: () => void;
   onTest: () => void;
   onRefreshStatus: () => void;
-  onOrigins: (
-    origins: Array<{ origin: string; allow_plaintext: boolean }>,
-  ) => Promise<boolean>;
-  onTrusted: (trusted: boolean) => void;
-  onWait: (waitMs: number) => void;
-  onCredentialSave: (
-    name: string,
-    input: { secret: string; origin: string },
+  onAdvancedOpen: (open: boolean) => void;
+  onSaveSettings: (
+    update: PluginSettingsUpdate,
+    credentials: CredentialInput[],
   ) => Promise<boolean>;
   onCredentialClear: (name: string) => Promise<boolean>;
-  onConfig: (config: Record<string, unknown>) => Promise<boolean>;
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
-  const tabs: DetailTab[] = loaded
-    ? detail.needs_network
-      ? ["overview", "network", "config", "status"]
-      : ["overview", "config", "status"]
-    : [];
+  const tabs: DetailTab[] = loaded ? ["overview", "settings", "status"] : [];
+  const current = tabs.includes(tab) ? tab : "overview";
   return (
     <>
       <PanelHeader
@@ -619,11 +611,16 @@ function PluginDetailPane({
           <StatusBadge tone={pluginTone(detail)}>
             {pluginState(detail, t)}
           </StatusBadge>
+          {loaded ? (
+            <HelpPopover label={t("plugins.about.label")} size="wide">
+              <AboutPlugin detail={detail} />
+            </HelpPopover>
+          ) : null}
         </div>
-        <p className="truncate font-mono text-micro text-muted-foreground">
-          {detail.key}
-          {detail.version ? ` · ${detail.version}` : ""} ·{" "}
-          {t(`plugins.source.${detail.source}`)}
+        <p className="truncate text-micro text-muted-foreground">
+          {[t(`plugins.source.${detail.source}`), detail.version]
+            .filter(Boolean)
+            .join(" · ")}
         </p>
       </PanelHeader>
       {actionError ? (
@@ -648,58 +645,52 @@ function PluginDetailPane({
         <Tabs
           className="min-h-0 min-w-0 flex-1 gap-0"
           onValueChange={(value) => onTab(value as DetailTab)}
-          value={tabs.includes(tab) ? tab : "overview"}
+          value={current}
         >
-          <TabsList
-            aria-label={t("plugins.tabsLabel")}
-            className="mx-3 mt-2 shrink-0"
-            scrollable
-          >
-            {tabs.map((item) => (
-              <TabsTrigger key={item} value={item}>
-                {t(`plugins.tabs.${item}`)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+          <div className="mx-3 mt-2 flex shrink-0 items-center gap-2">
+            <TabsList aria-label={t("plugins.tabsLabel")} scrollable>
+              {tabs.map((item) => (
+                <TabsTrigger key={item} value={item}>
+                  {t(`plugins.tabs.${item}`)}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            <span className="flex-1" />
+            {current !== "settings" ? (
+              <IconButton
+                label={t("common.refresh")}
+                onClick={onRefreshStatus}
+                size="icon-sm"
+                type="button"
+                variant="ghost"
+              >
+                <RefreshCw />
+              </IconButton>
+            ) : null}
+          </div>
           <TabsContent
             className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
             data-tab-scroller
             value="overview"
           >
-            <OverviewTab
+            <PluginOverview
               detail={detail}
-              onRefresh={onRefreshStatus}
               status={status}
               statusError={statusError}
-              testResult={testResult}
             />
           </TabsContent>
-          {detail.needs_network ? (
-            <TabsContent
-              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
-              data-tab-scroller
-              value="network"
-            >
-              <NetworkTab
-                busy={busy}
-                detail={detail}
-                onCredentialClear={onCredentialClear}
-                onCredentialSave={onCredentialSave}
-                onOrigins={onOrigins}
-                onTrusted={onTrusted}
-              />
-            </TabsContent>
-          ) : null}
           <TabsContent
-            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain p-3"
-            data-tab-scroller
-            value="config"
+            className="flex min-h-0 min-w-0 flex-1 flex-col"
+            value="settings"
           >
-            <ConfigTab
+            <PluginSettingsForm
+              advancedOpen={advancedOpen}
               busy={busy}
               detail={detail}
-              onSave={onConfig}
-              onWait={onWait}
+              key={`${detail.key}:${revision}`}
+              onAdvancedOpen={onAdvancedOpen}
+              onClearCredential={onCredentialClear}
+              onSave={onSaveSettings}
             />
           </TabsContent>
           <TabsContent
@@ -715,96 +706,36 @@ function PluginDetailPane({
   );
 }
 
-function OverviewTab({
-  detail,
-  status,
-  statusError,
-  testResult,
-  onRefresh,
-}: {
-  detail: PluginDetail;
-  status: PluginStatus | null;
-  statusError: string | null;
-  testResult: PluginTestResult | null;
-  onRefresh: () => void;
-}) {
+/** What the plugin does and the capabilities it uses, behind the ? by its name. */
+function AboutPlugin({ detail }: { detail: PluginDetail }) {
   const t = useT();
-  const testTone: Record<PluginTestResult["status"], StatusTone> = {
-    ok: "positive",
-    error: "negative",
-    failed: "negative",
-  };
   return (
-    <div className="grid gap-4" data-testid="plugin-overview">
-      {testResult ? (
-        <section className="grid gap-2" data-testid="plugin-test-result">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <StatusBadge tone={testTone[testResult.status]}>
-              {t(`plugins.testStatus.${testResult.status}`)}
-            </StatusBadge>
-            <span className="min-w-0 text-xs break-words">
-              {testResult.summary}
-            </span>
-            <span className="text-micro text-muted-foreground tabular-nums">
-              {testResult.elapsed_ms} ms
-            </span>
-          </div>
-          {testResult.view && testResult.view.length > 0 ? (
-            <PluginView
-              blocks={testResult.view}
-              truncated={testResult.truncated}
-              truncatedLabel={t("plugins.truncated")}
-            />
-          ) : null}
+    <div className="grid gap-3" data-testid="plugin-about">
+      {detail.notice ? (
+        <section className="grid gap-1">
+          <h3 className="text-xs font-medium text-muted-foreground">
+            {t("plugins.about.does")}
+          </h3>
+          <p className="leading-6 whitespace-pre-wrap">{detail.notice}</p>
         </section>
       ) : null}
-      {detail.hooks.includes("describeStatus") ? (
-        <section className="grid gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-xs font-medium">
-              {t("plugins.overviewTitle")}
-            </h3>
-            <IconButton
-              label={t("common.refresh")}
-              onClick={onRefresh}
-              size="icon-sm"
-              type="button"
-              variant="ghost"
-            >
-              <RefreshCw />
-            </IconButton>
-          </div>
-          {statusError ? (
-            <FormMessage tone="error">{statusError}</FormMessage>
-          ) : status === null ? (
-            <LoadingState label={t("plugins.loading")} />
-          ) : status.view_error ? (
-            <FormMessage tone="warning">{status.view_error}</FormMessage>
-          ) : status.view && status.view.length > 0 ? (
-            <PluginView
-              blocks={status.view}
-              truncated={status.truncated}
-              truncatedLabel={t("plugins.truncated")}
-            />
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {/* Core runs describeStatus only with the views capability granted. */}
-              {detail.granted_capabilities.includes("ui.views")
-                ? t("plugins.noOverview")
-                : t("plugins.overviewNeedsViews")}
-            </p>
-          )}
+      {detail.network_purpose ? (
+        <section className="grid gap-1">
+          <h3 className="text-xs font-medium text-muted-foreground">
+            {t("plugins.about.network")}
+          </h3>
+          <p>{detail.network_purpose}</p>
         </section>
       ) : null}
-      <section className="grid gap-2">
-        <h3 className="text-xs font-medium">{t("plugins.grantedTitle")}</h3>
-        <div className="flex flex-wrap gap-1.5">
-          {detail.requested_capabilities.length === 0 ? (
-            <span className="text-xs text-muted-foreground">
-              {t("plugins.noCapabilities")}
-            </span>
-          ) : (
-            detail.requested_capabilities.map((capability) => (
+      <section className="grid gap-1.5">
+        <h3 className="text-xs font-medium text-muted-foreground">
+          {t("plugins.about.capabilities")}
+        </h3>
+        {detail.requested_capabilities.length === 0 ? (
+          <p className="text-muted-foreground">{t("plugins.noCapabilities")}</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {detail.requested_capabilities.map((capability) => (
               <StatusBadge
                 key={capability}
                 tone={
@@ -815,464 +746,10 @@ function OverviewTab({
               >
                 {capabilityLabel(capability, t)}
               </StatusBadge>
-            ))
-          )}
-        </div>
-      </section>
-      {detail.notice ? (
-        <section className="grid gap-1">
-          <h3 className="text-xs font-medium">
-            {t("plugins.enableDialog.notice")}
-          </h3>
-          <p className="text-xs leading-5 whitespace-pre-wrap">
-            {detail.notice}
-          </p>
-        </section>
-      ) : null}
-    </div>
-  );
-}
-
-function NetworkTab({
-  detail,
-  busy,
-  onOrigins,
-  onTrusted,
-  onCredentialSave,
-  onCredentialClear,
-}: {
-  detail: PluginDetail;
-  busy: boolean;
-  onOrigins: (
-    origins: Array<{ origin: string; allow_plaintext: boolean }>,
-  ) => Promise<boolean>;
-  onTrusted: (trusted: boolean) => void;
-  onCredentialSave: (
-    name: string,
-    input: { secret: string; origin: string },
-  ) => Promise<boolean>;
-  onCredentialClear: (name: string) => Promise<boolean>;
-}) {
-  const t = useT();
-  const saved = useMemo(
-    () =>
-      detail.network_origins.map(({ origin, allow_plaintext }) => ({
-        origin,
-        allow_plaintext,
-      })),
-    [detail.network_origins],
-  );
-  const [origins, setOrigins] = useState(saved);
-  const [draft, setDraft] = useState("");
-  const [draftError, setDraftError] = useState<string | null>(null);
-  useEffect(() => setOrigins(saved), [saved]);
-  const dirty = JSON.stringify(origins) !== JSON.stringify(saved);
-
-  function add() {
-    const origin = draft.trim();
-    if (!validOrigin(origin)) {
-      setDraftError(t("plugins.network.invalidOrigin"));
-      return;
-    }
-    setDraftError(null);
-    setOrigins((current) => [...current, { origin, allow_plaintext: false }]);
-    setDraft("");
-  }
-
-  return (
-    <div className="grid gap-5" data-testid="plugin-network">
-      <section className="grid gap-2">
-        <div className="flex items-center gap-1">
-          <h3 className="text-xs font-medium">
-            {t("plugins.network.origins")}
-          </h3>
-          <HelpPopover label={t("plugins.network.originsHelpLabel")}>
-            <p>{t("plugins.network.originsHelp")}</p>
-            {detail.network_purpose ? (
-              <p>
-                {t("plugins.enableDialog.purpose", {
-                  purpose: detail.network_purpose,
-                })}
-              </p>
-            ) : null}
-          </HelpPopover>
-        </div>
-        {origins.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            {t("plugins.network.noOrigins")}
-          </p>
-        ) : (
-          <ul className="grid gap-1.5">
-            {origins.map((entry, index) => {
-              const plaintext = plaintextOrigin(entry.origin);
-              return (
-                <li
-                  className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border px-2.5 py-1.5"
-                  data-testid="plugin-origin"
-                  key={`${entry.origin}:${index}`}
-                >
-                  <code
-                    className="min-w-0 flex-1 truncate font-mono text-xs"
-                    title={entry.origin}
-                  >
-                    {entry.origin}
-                  </code>
-                  {plaintext ? (
-                    <>
-                      <StatusBadge
-                        tone={entry.allow_plaintext ? "pending" : "negative"}
-                      >
-                        {t("plugins.network.plaintext")}
-                      </StatusBadge>
-                      <Label className="flex items-center gap-1.5 text-xs font-normal">
-                        <Checkbox
-                          checked={entry.allow_plaintext}
-                          onCheckedChange={(checked) =>
-                            setOrigins((current) =>
-                              current.map((item, itemIndex) =>
-                                itemIndex === index
-                                  ? {
-                                      ...item,
-                                      allow_plaintext: checked === true,
-                                    }
-                                  : item,
-                              ),
-                            )
-                          }
-                        />
-                        {t("plugins.network.allowPlaintext")}
-                      </Label>
-                      <HelpPopover
-                        label={t("plugins.network.plaintextHelpLabel")}
-                      >
-                        <p>{t("plugins.network.plaintextHelp")}</p>
-                      </HelpPopover>
-                    </>
-                  ) : null}
-                  <IconButton
-                    label={t("plugins.network.remove", {
-                      origin: entry.origin,
-                    })}
-                    onClick={() =>
-                      setOrigins((current) =>
-                        current.filter((_, itemIndex) => itemIndex !== index),
-                      )
-                    }
-                    size="icon-sm"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <Trash2 />
-                  </IconButton>
-                </li>
-              );
-            })}
-          </ul>
+            ))}
+          </div>
         )}
-        <form
-          className="flex min-w-0 gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            add();
-          }}
-        >
-          <Input
-            aria-label={t("plugins.network.originLabel")}
-            className="min-w-0 flex-1 font-mono"
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder="https://memory.example.com:8443"
-            value={draft}
-          />
-          <Button
-            disabled={draft.trim() === ""}
-            size="sm"
-            type="submit"
-            variant="outline"
-          >
-            <Plus />
-            {t("plugins.network.add")}
-          </Button>
-        </form>
-        {draftError ? (
-          <FormMessage tone="error">{draftError}</FormMessage>
-        ) : null}
-        <div>
-          <Button
-            disabled={!dirty || busy}
-            onClick={() => void onOrigins(origins)}
-            size="sm"
-            type="button"
-          >
-            {t("plugins.network.save")}
-          </Button>
-        </div>
       </section>
-
-      <section className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-        <div className="flex items-center gap-1">
-          <Label className="text-xs font-medium" htmlFor="plugin-trusted">
-            {t("plugins.network.trusted")}
-          </Label>
-          <HelpPopover label={t("plugins.network.trustedHelpLabel")}>
-            <p>{t("plugins.network.trustedHelp")}</p>
-          </HelpPopover>
-        </div>
-        <Switch
-          checked={detail.privacy_trusted}
-          disabled={busy}
-          id="plugin-trusted"
-          onCheckedChange={(checked) => onTrusted(checked)}
-        />
-      </section>
-
-      {detail.credentials.length > 0 ? (
-        <section className="grid gap-3">
-          <div className="flex items-center gap-1">
-            <h3 className="text-xs font-medium">
-              {t("plugins.credentials.title")}
-            </h3>
-            <HelpPopover label={t("plugins.credentials.helpLabel")}>
-              <p>{t("plugins.credentials.help")}</p>
-            </HelpPopover>
-          </div>
-          {detail.credentials.map((credential) => (
-            <CredentialEditor
-              busy={busy}
-              credential={credential}
-              key={credential.name}
-              onClear={() => onCredentialClear(credential.name)}
-              onSave={(input) => onCredentialSave(credential.name, input)}
-              origins={detail.network_origins.map((origin) => origin.origin)}
-            />
-          ))}
-        </section>
-      ) : null}
-    </div>
-  );
-}
-
-function CredentialEditor({
-  credential,
-  origins,
-  busy,
-  onSave,
-  onClear,
-}: {
-  credential: PluginDetail["credentials"][number];
-  origins: string[];
-  busy: boolean;
-  onSave: (input: { secret: string; origin: string }) => Promise<boolean>;
-  onClear: () => Promise<boolean>;
-}) {
-  const t = useT();
-  const [secret, setSecret] = useState("");
-  const [origin, setOrigin] = useState(credential.origin ?? origins[0] ?? "");
-  useEffect(() => {
-    setOrigin(credential.origin ?? origins[0] ?? "");
-  }, [credential.origin, origins]);
-  return (
-    <form
-      className="grid gap-2 rounded-md border p-3"
-      data-testid="plugin-credential"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void onSave({ secret, origin }).then((saved) => {
-          if (saved) setSecret("");
-        });
-      }}
-    >
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <strong className="text-xs font-medium">{credential.label}</strong>
-        <StatusBadge tone={credential.configured ? "positive" : "neutral"}>
-          {credential.configured
-            ? credential.hint
-              ? t("plugins.credentials.configured", { hint: credential.hint })
-              : t("plugins.credentials.configuredNoHint")
-            : t("plugins.credentials.unset")}
-        </StatusBadge>
-        {credential.origin ? (
-          <span className="truncate font-mono text-micro text-muted-foreground">
-            {t("plugins.credentials.boundTo", { origin: credential.origin })}
-          </span>
-        ) : null}
-      </div>
-      <div className="grid gap-2 @[560px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <Field label={t("plugins.credentials.origin")}>
-          <Select
-            disabled={origins.length === 0}
-            onValueChange={setOrigin}
-            value={origin}
-          >
-            <SelectTrigger
-              aria-label={t("plugins.credentials.origin")}
-              className="w-full"
-            >
-              <SelectValue placeholder={t("plugins.credentials.needOrigin")} />
-            </SelectTrigger>
-            <SelectContent>
-              {origins.map((item) => (
-                <SelectItem key={item} value={item}>
-                  {item}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-        <Field label={t("plugins.credentials.secret")}>
-          <Input
-            aria-label={t("plugins.credentials.secret")}
-            autoComplete="off"
-            onChange={(event) => setSecret(event.target.value)}
-            type="password"
-            value={secret}
-          />
-        </Field>
-      </div>
-      <div className="flex gap-2">
-        <Button
-          disabled={busy || secret === "" || origin === ""}
-          size="sm"
-          type="submit"
-        >
-          {t("plugins.credentials.save")}
-        </Button>
-        {credential.configured ? (
-          <Button
-            disabled={busy}
-            onClick={() => void onClear()}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            {t("plugins.credentials.clear")}
-          </Button>
-        ) : null}
-      </div>
-    </form>
-  );
-}
-
-function ConfigTab({
-  detail,
-  busy,
-  onSave,
-  onWait,
-}: {
-  detail: PluginDetail;
-  busy: boolean;
-  onSave: (config: Record<string, unknown>) => Promise<boolean>;
-  onWait: (waitMs: number) => void;
-}) {
-  const t = useT();
-  const saved = useMemo(
-    () => JSON.stringify(detail.config, null, 2),
-    [detail.config],
-  );
-  const [text, setText] = useState(saved);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => setText(saved), [saved]);
-  const bytes = configBytes(text);
-
-  function parse(): Record<string, unknown> | null {
-    try {
-      const value: unknown = JSON.parse(text);
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        setError(t("plugins.config.invalid"));
-        return null;
-      }
-      if (bytes > MAX_PLUGIN_CONFIG_BYTES) {
-        setError(t("plugins.config.tooLarge"));
-        return null;
-      }
-      setError(null);
-      return value as Record<string, unknown>;
-    } catch {
-      setError(t("plugins.config.invalid"));
-      return null;
-    }
-  }
-
-  return (
-    <div
-      className="flex min-h-0 flex-1 flex-col gap-2"
-      data-testid="plugin-config"
-    >
-      {detail.hooks.includes("prepareTurn") ||
-      detail.hooks.includes("prepareSession") ? (
-        <section className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-          <div className="flex items-center gap-1">
-            <Label className="text-xs font-medium" htmlFor="plugin-wait">
-              {t("plugins.wait.label")}
-            </Label>
-            <HelpPopover label={t("plugins.wait.helpLabel")}>
-              <p>{t("plugins.wait.help")}</p>
-            </HelpPopover>
-          </div>
-          <Select
-            disabled={busy}
-            onValueChange={(value) => onWait(Number(value))}
-            value={String(detail.turn_wait_ms)}
-          >
-            <SelectTrigger className="w-28" id="plugin-wait">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {PLUGIN_TURN_WAITS.map((waitMs) => (
-                <SelectItem key={waitMs} value={String(waitMs)}>
-                  {t("plugins.wait.seconds", { value: waitMs / 1000 })}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </section>
-      ) : null}
-      <div className="flex items-center gap-1">
-        <h3 className="text-xs font-medium">{t("plugins.config.title")}</h3>
-        <HelpPopover label={t("plugins.config.helpLabel")}>
-          <p>{t("plugins.config.help")}</p>
-        </HelpPopover>
-      </div>
-      <Textarea
-        aria-label={t("plugins.config.title")}
-        className="min-h-48 flex-1 resize-none font-mono text-xs"
-        onChange={(event) => setText(event.target.value)}
-        spellCheck={false}
-        value={text}
-      />
-      {error ? <FormMessage tone="error">{error}</FormMessage> : null}
-      <div className="flex flex-wrap items-center gap-2">
-        <span
-          className={cn(
-            "text-micro tabular-nums text-muted-foreground",
-            bytes > MAX_PLUGIN_CONFIG_BYTES && "text-danger-foreground",
-          )}
-        >
-          {t("plugins.config.size", { size: (bytes / 1024).toFixed(1) })}
-        </span>
-        <span className="flex-1" />
-        <Button
-          onClick={() => {
-            const value = parse();
-            if (value) setText(JSON.stringify(value, null, 2));
-          }}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {t("plugins.config.format")}
-        </Button>
-        <Button
-          disabled={busy || text === saved}
-          onClick={() => {
-            const value = parse();
-            if (value) void onSave(value);
-          }}
-          size="sm"
-          type="button"
-        >
-          {t("plugins.config.save")}
-        </Button>
-      </div>
     </div>
   );
 }

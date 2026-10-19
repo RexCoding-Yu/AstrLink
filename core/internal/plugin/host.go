@@ -257,7 +257,7 @@ func hostRequestInfo(c *call, realm *moejs.Realm, _ []moejs.Value) (moejs.Value,
 }
 
 func hostConfigGet(c *call, realm *moejs.Realm, _ []moejs.Value) (moejs.Value, error) {
-	config := c.plugin.Settings.Config
+	config := c.plugin.config
 	if len(config) == 0 {
 		config = json.RawMessage("{}")
 	}

@@ -29,6 +29,14 @@ type MetadataValueRecord struct {
 	UpdatedAt time.Time
 }
 
+// MetadataValueStat is a value sessions are bound to: how many, and when
+// one of them last made a request, nil when none did.
+type MetadataValueStat struct {
+	Value      string
+	Sessions   int
+	LastUsedAt *time.Time
+}
+
 type MetadataStore interface {
 	ListMetadataAttributes(context.Context) ([]contract.MetadataAttribute, error)
 	// CreateMetadataAttribute returns ErrConflict when the key or the marker
@@ -49,6 +57,9 @@ type MetadataStore interface {
 	MetadataValues(ctx context.Context, targetKind, targetID string) (map[string]MetadataValueRecord, error)
 	// ListMetadataValues returns every value kept for one kind of target.
 	ListMetadataValues(ctx context.Context, targetKind string) ([]MetadataValueRecord, error)
+	// MetadataValueStats returns the values of key sessions are bound to,
+	// the most recently used first, at most limit.
+	MetadataValueStats(ctx context.Context, key string, limit int) ([]MetadataValueStat, error)
 	PutMetadataValue(context.Context, MetadataValueRecord) error
 	DeleteMetadataValue(ctx context.Context, targetKind, targetID, key string) error
 	// ReplaceTokenMetadata makes values the whole of a token's defaults.

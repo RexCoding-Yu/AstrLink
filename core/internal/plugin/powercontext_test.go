@@ -408,7 +408,7 @@ func TestThePowerContextPlugin(t *testing.T) {
 		t.Fatalf("testConnection = %s", test)
 	}
 	status := call(HookDescribeStatus, nil)
-	if !strings.Contains(status, `["demo"]`) || strings.Contains(status, "scp_test") || strings.Contains(status, "待整理") || !strings.Contains(status, "最近写入") {
+	if strings.Contains(status, "scp_test") || strings.Contains(status, "待整理") || !strings.Contains(status, "最近写入") || strings.Contains(status, "询问提示词") {
 		t.Fatalf("describeStatus = %s", status)
 	}
 	for _, request := range server.requests("") {

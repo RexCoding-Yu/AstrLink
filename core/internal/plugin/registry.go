@@ -120,7 +120,10 @@ type Plugin struct {
 	Err      *LoadError
 	Settings Settings
 
-	granted  []string
+	granted []string
+	// config is the configuration the plugin reads: the user's, with the
+	// defaults of the settings it has no value for.
+	config   json.RawMessage
 	program  *program
 	pool     *pool
 	services *Services
@@ -399,6 +402,7 @@ func (manager *Manager) publish(settings map[string]Settings) {
 			plugin.program = result.program
 			plugin.Meta = result.program.meta
 			plugin.granted = result.program.meta.Granted(current.Capabilities)
+			plugin.config = result.program.meta.WithDefaults(current.Config)
 			plugin.pool = newPool(result.program, manager.limits)
 		}
 		plugins = append(plugins, plugin)

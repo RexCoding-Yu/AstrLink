@@ -33,18 +33,46 @@ const memory: PluginDetail = {
   file: "plugin.ts",
   enabled: false,
   state: "loaded",
-  requested_capabilities: ["context.inject", "network", "storage"],
+  requested_capabilities: [
+    "context.inject",
+    "request.read",
+    "network",
+    "storage",
+    "ui.views",
+  ],
   granted_capabilities: [],
   needs_network: true,
   network_purpose: "访问 PowerContext 服务器",
   notice: "启用后，新会话的前几轮会请模型询问项目。",
-  hooks: ["describeStatus", "testConnection"],
-  config: { serverUrl: "http://192.0.2.1:9090" },
-  network_origins: [],
+  hooks: [
+    "prepareSession",
+    "prepareTurn",
+    "observeTurn",
+    "describeStatus",
+    "testConnection",
+  ],
+  config: {
+    serverUrl: "http://192.0.2.1:9090",
+    quotas: { "atomic-memory": 4 },
+  },
+  network_origins: [
+    {
+      origin: "http://192.0.2.1:9090",
+      allow_plaintext: true,
+      plaintext: true,
+      setting: "serverUrl",
+    },
+  ],
   privacy_trusted: false,
   turn_wait_ms: 2500,
   credentials: [
-    { name: "token", label: "PowerContext 令牌", configured: false },
+    {
+      name: "token",
+      label: "PowerContext 令牌",
+      configured: true,
+      hint: "abcd",
+      origin: "http://192.0.2.1:9090",
+    },
   ],
   metadata: [
     {
@@ -52,6 +80,109 @@ const memory: PluginDetail = {
       label: "项目",
       pattern: "^[a-z]+$",
       marker: "memory-project",
+    },
+  ],
+  settings: [
+    {
+      key: "serverUrl",
+      label: "服务器地址",
+      type: "server",
+      group: "连接",
+      required: true,
+      credential: "token",
+    },
+    {
+      key: "quotas.atomic-memory",
+      label: "原子记忆",
+      type: "number",
+      group: "召回",
+      row: "每轮条数",
+      default: 4,
+      min: 0,
+      max: 20,
+      unit: "条",
+    },
+    {
+      key: "quotas.topic-memory",
+      label: "主题记忆",
+      type: "number",
+      group: "召回",
+      row: "每轮条数",
+      default: 3,
+      min: 0,
+      max: 20,
+      unit: "条",
+    },
+    { key: "$wait", group: "召回" },
+    {
+      key: "askProject",
+      label: "没有项目时询问",
+      type: "switch",
+      group: "会话",
+      default: true,
+      help: "会话还没有项目时附上的询问提示词",
+    },
+    { key: "$trusted", group: "隐私" },
+    {
+      key: "minQueryChars",
+      label: "最短问题",
+      type: "number",
+      advanced: true,
+      default: 8,
+      min: 0,
+      max: 200,
+      unit: "字",
+    },
+    { key: "$origins", advanced: true },
+  ],
+  credits: [
+    {
+      name: "PowerContext",
+      owner: "OceanBase",
+      license: "Apache-2.0",
+      url: "https://github.com/oceanbase/powercontext",
+      note: "本插件不是 PowerContext 官方插件。",
+    },
+  ],
+};
+
+const status = {
+  calls: 4,
+  failures: { timeout: 1 },
+  memory_limits: 0,
+  timeouts: 1,
+  network: { requests: 3, denied: 1, errors: 0, wait_ms: 20 },
+  view: [
+    {
+      type: "kv" as const,
+      items: [{ label: "最近写入", value: "astrlink：已写入 · 已整理成记忆" }],
+    },
+  ],
+  last_test: {
+    status: "ok" as const,
+    summary: "PowerContext 1.3.0 · 190 ms",
+    elapsed_ms: 190,
+    network: { requests: 2, denied: 0, errors: 0, wait_ms: 180 },
+    view: [
+      {
+        type: "kv" as const,
+        items: [{ label: "可检索", value: "原子记忆 / 主题记忆" }],
+      },
+    ],
+    tested_at: "2026-10-19T08:00:00Z",
+  },
+  bindings: [
+    {
+      key: "project",
+      label: "项目",
+      values: [
+        {
+          value: "astrlink",
+          sessions: 2,
+          last_used_at: "2026-10-19T07:58:00Z",
+        },
+        { value: "none", sessions: 1 },
+      ],
     },
   ],
 };
@@ -132,6 +263,16 @@ async function chooseOption(selector: string, option: string) {
   });
 }
 
+/** The control a setting row's label names. */
+function control<T extends HTMLElement>(label: string): T {
+  const name = [...document.querySelectorAll("label")].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  const target = name?.htmlFor ? document.getElementById(name.htmlFor) : null;
+  if (!target) throw new Error(`Missing the control of ${label}`);
+  return target as T;
+}
+
 async function type(
   element: HTMLInputElement | HTMLTextAreaElement,
   value: string,
@@ -171,21 +312,11 @@ describe("PluginManager", () => {
             turn_wait_ms: 2500,
             credentials: [],
             metadata: [],
+            settings: [],
+            credits: [],
           },
     );
-    bridgeMocks.getPluginStatus.mockResolvedValue({
-      calls: 4,
-      failures: { timeout: 1 },
-      memory_limits: 0,
-      timeouts: 1,
-      network: { requests: 3, denied: 1, errors: 0, wait_ms: 20 },
-      view: [
-        {
-          type: "kv",
-          items: [{ label: "Scope", value: "scp_7f3a", mono: true }],
-        },
-      ],
-    });
+    bridgeMocks.getPluginStatus.mockResolvedValue(status);
     container = document.createElement("div");
     document.body.append(container);
     reactRoot = createRoot(container);
@@ -238,12 +369,11 @@ describe("PluginManager", () => {
     const rows = document.querySelectorAll('[data-testid="plugin-row"]');
     expect(rows).toHaveLength(2);
     expect(rows[0]?.textContent).toContain("PowerContext 记忆");
-    expect(rows[0]?.textContent).toContain("需要网络");
+    expect(rows[0]?.textContent).not.toContain("内置");
     expect(rows[1]?.textContent).toContain("plugin.ts 第 12 行 · 不支持 async");
-    // The first plugin opens with its overview, as the plugin renders it.
-    expect(
-      document.querySelector('[data-testid="plugin-overview"]')?.textContent,
-    ).toContain("scp_7f3a");
+    // The title says where the plugin comes from, never its key.
+    expect(document.body.textContent).toContain("内置 · 1.0.0");
+    expect(document.body.textContent).not.toContain("powercontext · 1.0.0");
     await click(rows[1] as HTMLElement);
     expect(document.body.textContent).toContain(
       "async functions are not supported",
@@ -251,11 +381,57 @@ describe("PluginManager", () => {
     expect(document.querySelector('[role="tab"]')).toBeNull();
   });
 
+  it("shows the connection, the bound projects, its own status and its credits", async () => {
+    await render();
+    const connection = document.querySelector(
+      '[data-testid="plugin-connection"]',
+    );
+    expect(connection?.textContent).toContain("http://192.0.2.1:9090");
+    expect(connection?.textContent).toContain("明文 HTTP");
+    expect(connection?.textContent).toContain("连接正常");
+    expect(connection?.textContent).toContain("PowerContext 1.3.0 · 190 ms");
+    expect(connection?.textContent).toContain("原子记忆 / 主题记忆");
+    const bindings = document.querySelector('[data-testid="plugin-bindings"]');
+    expect(bindings?.textContent).toContain("已绑定的项目");
+    expect(bindings?.textContent).toContain("astrlink");
+    expect(bindings?.textContent).toContain("不纳入");
+    expect(
+      document.querySelector('[data-testid="plugin-own-status"]')?.textContent,
+    ).toContain("已整理成记忆");
+    const credits = document.querySelector('[data-testid="plugin-credits"]');
+    expect(credits?.textContent).toContain("OceanBase · Apache License 2.0");
+    expect(credits?.textContent).toContain(
+      "本插件不是 PowerContext 官方插件。",
+    );
+    expect(credits?.querySelector("a")?.getAttribute("href")).toBe(
+      "https://github.com/oceanbase/powercontext",
+    );
+    // What the plugin does stays behind the ? by its name.
+    expect(document.body.textContent).not.toContain(
+      "启用后，新会话的前几轮会请模型询问项目。",
+    );
+    await click(
+      document.querySelector(
+        'button[aria-label="关于这个插件"]',
+      ) as HTMLElement,
+    );
+    const about = document.querySelector('[data-testid="plugin-about"]');
+    expect(about?.textContent).toContain(
+      "启用后，新会话的前几轮会请模型询问项目。",
+    );
+    expect(about?.textContent).toContain("界面视图");
+  });
+
   it("grants only the capabilities left ticked when enabling", async () => {
     bridgeMocks.updatePlugin.mockResolvedValue({
       ...memory,
       enabled: true,
-      granted_capabilities: ["context.inject", "network"],
+      granted_capabilities: [
+        "context.inject",
+        "request.read",
+        "network",
+        "ui.views",
+      ],
     });
     await render();
     await click(button("启用"));
@@ -280,125 +456,205 @@ describe("PluginManager", () => {
     await finishExitAnimations();
     expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
       enabled: true,
-      granted_capabilities: ["context.inject", "network"],
+      granted_capabilities: [
+        "context.inject",
+        "request.read",
+        "network",
+        "ui.views",
+      ],
     });
     expect(
       document.querySelector('[data-testid="plugin-row"]')?.textContent,
     ).toContain("运行中");
   });
 
-  it("asks for consent to plain HTTP beyond this machine", async () => {
-    bridgeMocks.updatePlugin.mockImplementation(
-      async (
-        _key: string,
-        update: {
-          network_origins: Array<{ origin: string; allow_plaintext: boolean }>;
-        },
-      ) => ({
-        ...memory,
-        network_origins: update.network_origins.map((origin) => ({
-          ...origin,
-          plaintext: true,
-        })),
-      }),
-    );
+  it("saves the settings form as one configuration", async () => {
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
     await render();
-    await openTab("网络与凭据");
-    const input = document.querySelector<HTMLInputElement>(
-      'input[aria-label="要允许的地址"]',
-    );
-    if (!input) throw new Error("Missing the origin input");
-    await type(input, "ftp://nope");
-    await click(button("添加"));
+    await openTab("设置");
+    const form = document.querySelector('[data-testid="plugin-settings"]');
+    expect(form?.textContent).toContain("每轮条数");
+    expect(control<HTMLInputElement>("主题记忆").value).toBe("3");
+    expect(button("保存").disabled).toBe(true);
+    await type(control<HTMLInputElement>("原子记忆"), "25");
+    await click(button("保存"));
     expect(document.body.textContent).toContain(
-      "请输入带主机的 http 或 https 地址",
+      "「每轮条数 · 原子记忆」要在 0 到 20 之间",
     );
-    await type(input, "http://192.0.2.1:9090");
-    await click(button("添加"));
-    const origin = document.querySelector('[data-testid="plugin-origin"]');
-    expect(origin?.textContent).toContain("明文 HTTP");
-    await click(origin?.querySelector('[role="checkbox"]') as HTMLElement);
-    await click(button("保存地址"));
+    expect(bridgeMocks.updatePlugin).not.toHaveBeenCalled();
+    await type(control<HTMLInputElement>("原子记忆"), "6");
+    await click(control<HTMLButtonElement>("没有项目时询问"));
+    expect(document.body.textContent).toContain("有改动未保存");
+    await click(button("保存"));
+    // Untouched defaults stay out; the consented server keeps its consent.
     expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
-      network_origins: [
-        { origin: "http://192.0.2.1:9090", allow_plaintext: true },
-      ],
+      config: {
+        serverUrl: "http://192.0.2.1:9090",
+        quotas: { "atomic-memory": 6 },
+        askProject: false,
+      },
+      plaintext_consent: ["http://192.0.2.1:9090"],
     });
   });
 
-  it("keeps the configuration a JSON object", async () => {
-    bridgeMocks.updatePlugin.mockResolvedValue({
-      ...memory,
-      config: { serverUrl: "https://memory.example" },
-    });
+  it("asks again for plain HTTP when the server moves", async () => {
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
     await render();
-    await openTab("配置");
-    const editor = document.querySelector<HTMLTextAreaElement>(
-      '[data-testid="plugin-config"] textarea',
+    await openTab("设置");
+    await type(
+      control<HTMLInputElement>("服务器地址"),
+      "http://192.0.2.9:9090",
     );
-    if (!editor) throw new Error("Missing the configuration editor");
-    await type(editor, "[1, 2]");
-    await click(button("保存配置"));
-    expect(document.body.textContent).toContain("配置必须是一个 JSON 对象。");
+    await click(button("保存"));
+    expect(document.body.textContent).toContain(
+      "「服务器地址」是明文 HTTP 地址，勾选「允许明文 HTTP」才能保存",
+    );
     expect(bridgeMocks.updatePlugin).not.toHaveBeenCalled();
-    await type(editor, '{"serverUrl":"https://memory.example"}');
-    await click(button("保存配置"));
+    const consent = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="checkbox"]'),
+    ].find((box) => box.parentElement?.textContent?.includes("允许明文 HTTP"));
+    if (!consent) throw new Error("Missing the plain HTTP consent");
+    await click(consent);
+    await click(button("保存"));
     expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
-      config: { serverUrl: "https://memory.example" },
+      config: {
+        serverUrl: "http://192.0.2.9:9090",
+        quotas: { "atomic-memory": 4 },
+      },
+      plaintext_consent: ["http://192.0.2.9:9090"],
+    });
+  });
+
+  it("takes an origin allowed before the form as the server's", async () => {
+    // A server allowed on the old network tab has no setting mark.
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      network_origins: [
+        {
+          origin: "http://192.0.2.1:9090",
+          allow_plaintext: true,
+          plaintext: true,
+        },
+      ],
+    });
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    await click(button("更多设置"));
+    expect(
+      document.querySelectorAll('[data-testid="plugin-origin"]'),
+    ).toHaveLength(0);
+    const consent = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="checkbox"]'),
+    ].find((box) => box.parentElement?.textContent?.includes("允许明文 HTTP"));
+    expect(consent?.getAttribute("aria-checked")).toBe("true");
+    await type(control<HTMLInputElement>("原子记忆"), "5");
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      config: {
+        serverUrl: "http://192.0.2.1:9090",
+        quotas: { "atomic-memory": 5 },
+      },
+      plaintext_consent: ["http://192.0.2.1:9090"],
+    });
+  });
+
+  it("sends a new token to its server", async () => {
+    bridgeMocks.savePluginCredential.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    expect(document.body.textContent).toContain("已配置 ···· abcd");
+    await click(button("更换"));
+    await type(control<HTMLInputElement>("PowerContext 令牌"), "pc-new-token");
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).not.toHaveBeenCalled();
+    expect(bridgeMocks.savePluginCredential).toHaveBeenCalledWith(
+      "powercontext",
+      "token",
+      { secret: "pc-new-token", origin: "http://192.0.2.1:9090" },
+    );
+  });
+
+  it("edits the same configuration as JSON", async () => {
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    await click(button("更多设置"));
+    expect(control<HTMLInputElement>("最短问题").value).toBe("8");
+    await click(button("以 JSON 编辑"));
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      '[role="dialog"] textarea',
+    );
+    if (!editor) throw new Error("Missing the JSON editor");
+    expect(JSON.parse(editor.value)).toEqual(memory.config);
+    await type(editor, "[1, 2]");
+    await click(button("应用"));
+    expect(document.body.textContent).toContain("配置必须是一个 JSON 对象。");
+    await type(
+      editor,
+      '{"serverUrl":"http://192.0.2.1:9090","quotas":{"atomic-memory":7},"extra":true}',
+    );
+    await click(button("应用"));
+    await finishExitAnimations();
+    expect(control<HTMLInputElement>("原子记忆").value).toBe("7");
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      config: {
+        serverUrl: "http://192.0.2.1:9090",
+        quotas: { "atomic-memory": 7 },
+        extra: true,
+      },
+      plaintext_consent: ["http://192.0.2.1:9090"],
     });
   });
 
   it("lets the user choose how long a request waits for the plugin", async () => {
-    const recalling = {
-      ...memory,
-      hooks: ["prepareSession", "prepareTurn", "observeTurn"],
-    };
-    bridgeMocks.getPlugin.mockResolvedValue(recalling);
     bridgeMocks.updatePlugin.mockResolvedValue({
-      ...recalling,
+      ...memory,
       turn_wait_ms: 3500,
     });
     await render();
-    await openTab("配置");
-    const trigger = document.querySelector("#plugin-wait");
-    expect(trigger?.textContent).toContain("2.5 秒");
-    await chooseOption("#plugin-wait", "3.5 秒");
+    await openTab("设置");
+    const wait = control<HTMLButtonElement>("最长等待");
+    expect(wait.textContent).toContain("2.5 秒");
+    await chooseOption(`#${CSS.escape(wait.id)}`, "3.5 秒");
+    await settleClosedLayer();
+    await click(button("保存"));
     expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
       turn_wait_ms: 3500,
     });
-    await settleClosedLayer();
-    expect(document.querySelector("#plugin-wait")?.textContent).toContain(
-      "3.5 秒",
-    );
   });
 
   it("offers no wait for a plugin that adds nothing to requests", async () => {
-    await render();
-    await openTab("配置");
-    expect(document.querySelector("#plugin-wait")).toBeNull();
-  });
-
-  it("shows what the connection test returned", async () => {
-    bridgeMocks.testPlugin.mockResolvedValue({
-      status: "ok",
-      summary: "PowerContext 1.3.0 · 412 ms",
-      view: [
-        {
-          type: "kv",
-          items: [{ label: "可检索", value: "atomic-memory / topic-memory" }],
-        },
-      ],
-      elapsed_ms: 412,
-      network: { requests: 2, denied: 0, errors: 0, wait_ms: 400 },
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      hooks: ["observeTurn", "testConnection"],
+      settings: [],
     });
     await render();
-    expect(bridgeMocks.getPluginStatus).toHaveBeenCalledTimes(1);
+    await openTab("设置");
+    expect(document.body.textContent).not.toContain("最长等待");
+    // Without settings of its own the gateway's still show.
+    expect(document.body.textContent).toContain("受信任");
+  });
+
+  it("shows the connection test it ran", async () => {
+    bridgeMocks.getPluginStatus.mockResolvedValueOnce({
+      ...status,
+      last_test: undefined,
+    });
+    bridgeMocks.testPlugin.mockResolvedValue(status.last_test);
+    await render();
+    expect(
+      document.querySelector('[data-testid="plugin-connection"]')?.textContent,
+    ).toContain("还没测试");
     await click(button("测试连接"));
-    const result = document.querySelector('[data-testid="plugin-test-result"]');
-    expect(result?.textContent).toContain("连接正常");
-    expect(result?.textContent).toContain("atomic-memory / topic-memory");
-    // The overview and the counts may have changed with the test.
+    expect(bridgeMocks.testPlugin).toHaveBeenCalledWith("powercontext");
+    // The overview reads the test back with what it changed in the counts.
     expect(bridgeMocks.getPluginStatus).toHaveBeenCalledTimes(2);
+    expect(
+      document.querySelector('[data-testid="plugin-connection"]')?.textContent,
+    ).toContain("连接正常");
   });
 
   it("opens the first plugin a rescan finds", async () => {

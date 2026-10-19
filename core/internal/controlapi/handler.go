@@ -189,8 +189,11 @@ type Handler struct {
 	plugins            PluginRegistry
 	pluginStore        storage.PluginStore
 	pluginsMu          sync.Mutex
-	metadata           MetadataRegistry
-	metadataStore      storage.MetadataStore
+	// pluginTests are the last connection test of each plugin.
+	pluginTestsMu sync.Mutex
+	pluginTests   map[string]contract.PluginLastTest
+	metadata      MetadataRegistry
+	metadataStore storage.MetadataStore
 }
 
 func New(version contract.VersionResponse) *Handler {

@@ -34,6 +34,14 @@ interface SearchItem {
   scores?: { retrieval: number };
 }
 
+// The ask's fixed words, also shown on the plugin page.
+const ASK_QUESTION =
+  "本会话还没有选定项目记忆。不要打断当前任务，在本轮回复的末尾问用户：是否把当前项目纳入记忆；纳入的话，项目名用什么（只用小写字母、数字、点、下划线、短横线）。";
+const ASK_ANSWER =
+  "用户回答后（或用户已经说了项目名），在回复开头单独一行原样输出 <memory-project>项目名</memory-project>；不纳入就输出 <memory-project>none</memory-project>。" +
+  "这一行不要放进代码块，也不要加引号、反引号或加粗。用户还没回答时不要输出；对话里已经有这一行，或者你已经问过一次，就不要再问。" +
+  "如果你没法直接问用户（比如你是子代理，或者在无人值守地运行），就不要问，也不要输出这一行。";
+
 export const meta = {
   apiVersion: 1,
   key: "powercontext",
@@ -67,6 +75,168 @@ export const meta = {
     "启用后，新会话还没有项目时，会请模型问一次用户：是否把当前项目纳入记忆、项目名是什么。" +
     "用户回答后，模型的回复里会出现一行 <memory-project>项目名</memory-project>，网关据此绑定本会话。" +
     "之后每轮开始时召回这个项目的记忆，并把用户输入的文字记进 PowerContext。",
+  settings: [
+    {
+      key: "serverUrl",
+      label: "服务器地址",
+      type: "server",
+      group: "连接",
+      required: true,
+      credential: "token",
+      placeholder: "https://memory.example.com",
+      help: "PowerContext 服务器的地址。插件只访问这个地址，令牌也只发往这里。",
+    },
+    {
+      key: "quotas.atomic-memory",
+      label: "原子记忆",
+      type: "number",
+      group: "召回",
+      row: "每轮条数",
+      default: 4,
+      min: 0,
+      max: 20,
+      step: 1,
+      unit: "条",
+      help: "每轮开始时，每类记忆最多取几条放进本轮消息；0 表示不检索这一类。",
+    },
+    {
+      key: "quotas.topic-memory",
+      label: "主题记忆",
+      type: "number",
+      group: "召回",
+      row: "每轮条数",
+      default: 3,
+      min: 0,
+      max: 20,
+      step: 1,
+      unit: "条",
+    },
+    {
+      key: "quotas.skill",
+      label: "技能",
+      type: "number",
+      group: "召回",
+      row: "每轮条数",
+      default: 2,
+      min: 0,
+      max: 20,
+      step: 1,
+      unit: "条",
+    },
+    {
+      key: "quotas.experience",
+      label: "经验",
+      type: "number",
+      group: "召回",
+      row: "每轮条数",
+      default: 0,
+      min: 0,
+      max: 20,
+      step: 1,
+      unit: "条",
+    },
+    { key: "$wait", group: "召回" },
+    {
+      key: "askProject",
+      label: "没有项目时询问",
+      type: "switch",
+      group: "会话",
+      default: true,
+      help:
+        "会话还没有项目时，系统提示词末尾附上这段话：\n" +
+        ASK_QUESTION +
+        ASK_ANSWER,
+    },
+    {
+      key: "resident",
+      label: "附上项目简介",
+      type: "switch",
+      group: "会话",
+      default: true,
+      help: "会话有项目后，把 PowerContext 为这个项目整理的简介放进系统提示词。",
+    },
+    { key: "$trusted", group: "隐私" },
+    {
+      key: "suggestProjects",
+      label: "询问时列出已有项目",
+      type: "number",
+      advanced: true,
+      default: 0,
+      min: 0,
+      max: 20,
+      step: 1,
+      unit: "个",
+      help: "询问项目时附上几个已有的项目名供用户挑选；这些名字会发给模型。",
+    },
+    {
+      key: "minQueryChars",
+      label: "最短问题",
+      type: "number",
+      advanced: true,
+      default: 8,
+      min: 0,
+      max: 200,
+      step: 1,
+      unit: "字",
+      help: "问题少于这么多字时不检索。",
+    },
+    {
+      key: "minScore.topic-memory",
+      label: "主题记忆",
+      type: "number",
+      advanced: true,
+      row: "分数下限",
+      min: 0,
+      max: 1,
+      step: 0.05,
+      placeholder: "不限",
+      help: "检索分数低于下限的结果不放进消息。原子记忆没有分数。",
+    },
+    {
+      key: "minScore.skill",
+      label: "技能",
+      type: "number",
+      advanced: true,
+      row: "分数下限",
+      min: 0,
+      max: 1,
+      step: 0.05,
+      placeholder: "不限",
+    },
+    {
+      key: "minScore.experience",
+      label: "经验",
+      type: "number",
+      advanced: true,
+      row: "分数下限",
+      min: 0,
+      max: 1,
+      step: 0.05,
+      placeholder: "不限",
+    },
+    {
+      key: "minSimilarity",
+      label: "主题记忆",
+      type: "number",
+      advanced: true,
+      row: "相似度下限",
+      min: 0,
+      max: 1,
+      step: 0.05,
+      placeholder: "不限",
+      help: "检索主题记忆时，语义相似度低于下限的不要。",
+    },
+    { key: "$origins", advanced: true },
+  ],
+  credits: [
+    {
+      name: "PowerContext",
+      owner: "OceanBase",
+      license: "Apache-2.0",
+      url: "https://github.com/oceanbase/powercontext",
+      note: "本插件不是 PowerContext 官方插件，只通过它公开的 HTTP 接口通信，不包含它的代码。",
+    },
+  ],
 };
 
 const DEFAULT_QUOTAS: Record<string, number> = {
@@ -124,11 +294,9 @@ function askText(cfg: Config): string {
     .map((key) => key.slice(6))
     .slice(0, cfg.suggestProjects ?? 0);
   return (
-    "本会话还没有选定项目记忆。不要打断当前任务，在本轮回复的末尾问用户：是否把当前项目纳入记忆；纳入的话，项目名用什么（只用小写字母、数字、点、下划线、短横线）。" +
+    ASK_QUESTION +
     (known.length > 0 ? "已有项目：" + known.join("、") + "。" : "") +
-    "用户回答后（或用户已经说了项目名），在回复开头单独一行原样输出 <memory-project>项目名</memory-project>；不纳入就输出 <memory-project>none</memory-project>。" +
-    "这一行不要放进代码块，也不要加引号、反引号或加粗。用户还没回答时不要输出；对话里已经有这一行，或者你已经问过一次，就不要再问。" +
-    "如果你没法直接问用户（比如你是子代理，或者在无人值守地运行），就不要问，也不要输出这一行。"
+    ASK_ANSWER
   );
 }
 
@@ -687,14 +855,11 @@ function ago(at: number): string {
   return Math.floor(minutes / 1440) + " 天前";
 }
 
-// The plugin page's overview: projects and their scopes, and the ask the
-// model receives.
+// The plugin page's own part of the overview: the last capture and the
+// projects whose captures still wait to become memory. The host shows the
+// server, the bound projects and the credits itself.
 export function describeStatus(): AstrLinkPlugin.ViewBlock[] {
-  const cfg = config();
-  const rows = astrlink.store.keys("scope:").map((key) => [key.slice(6)]);
-  const items: Array<{ label: string; value: string; mono?: boolean }> = [
-    { label: "服务器", value: cfg.serverUrl ?? "未设置 serverUrl", mono: true },
-  ];
+  const items: Array<{ label: string; value: string; mono?: boolean }> = [];
   const last = astrlink.store.get("last-write") as {
     at: number;
     project: string;
@@ -711,24 +876,13 @@ export function describeStatus(): AstrLinkPlugin.ViewBlock[] {
       label: "待整理",
       value: waiting + " 个项目有记下的原文还没整理成记忆",
     });
-  const blocks: AstrLinkPlugin.ViewBlock[] = [
-    { type: "kv", items },
-    rows.length > 0
-      ? { type: "table", columns: ["项目"], rows }
-      : { type: "text", text: "还没有绑定过项目。" },
-  ];
-  if (cfg.askProject !== false)
-    blocks.push({
-      type: "kv",
-      items: [{ label: "询问提示词", value: askText(cfg) }],
-    });
-  return blocks;
+  return items.length > 0 ? [{ type: "kv", items }] : [];
 }
 
 export function testConnection(): AstrLinkPlugin.TestConnectionResult {
   const cfg = config();
   if (!cfg.serverUrl)
-    return { status: "error", summary: "请先在配置里填写 serverUrl" };
+    return { status: "error", summary: "请先在设置里填写服务器地址" };
   const [info, capabilities] = astrlink.http.fetch([
     request(cfg, "GET", "/v1/server-info", undefined, 3000),
     request(cfg, "GET", "/v1/capabilities", undefined, 3000),

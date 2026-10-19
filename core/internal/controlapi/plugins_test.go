@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/metadata"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/hostapi"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
@@ -236,5 +237,121 @@ func TestPluginReloadFindsNewPlugins(t *testing.T) {
 	}
 	if response := controlRequest(t, handler, http.MethodGet, PluginsPath+"/missing", "", "", ""); response.Code != http.StatusNotFound {
 		t.Fatalf("missing plugin = %d", response.Code)
+	}
+}
+
+const memoSettingsPlugin = `export const meta = {
+  apiVersion: 1, key: "memo", name: "Memo", version: "1.0.0",
+  capabilities: ["network", "storage", "ui.views"],
+  network: { purpose: "Reach the memo server" },
+  credentials: [{ name: "token", label: "Memo token", header: "Authorization", scheme: "Bearer" }],
+  metadata: [{ key: "topic", label: "Topic", pattern: "^[a-z]+$", marker: "memo-topic" }],
+  settings: [
+    { key: "serverUrl", label: "Server", type: "server", group: "Connection", required: true, credential: "token" },
+    { key: "quotas.atomic", label: "Atomic", type: "number", group: "Recall", row: "Per turn", default: 4, min: 0, max: 20, unit: "items" },
+    { key: "$wait", group: "Recall" },
+    { key: "$origins", advanced: true },
+  ],
+  credits: [{ name: "Memo server", owner: "Example", license: "Apache-2.0", url: "https://example.com/memo", note: "Talks to its HTTP API." }],
+};
+export function testConnection() { return { status: "ok", summary: "Memo is up" }; }
+export function describeStatus() {
+  return [{ type: "kv", items: [{ label: "config", value: JSON.stringify(astrlink.config.get()) }] }];
+}
+`
+
+func TestPluginSettingsFormSavesServersAndChecksValues(t *testing.T) {
+	store, handler, manager, directory := newPluginHandler(t)
+	writePlugin(t, directory, "memo", "plugin.js", memoSettingsPlugin)
+	if err := manager.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	path := PluginsPath + "/memo"
+	patch := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return controlRequest(t, handler, http.MethodPatch, path, "application/json", body, "")
+	}
+
+	detail := decodeBody[contract.PluginDetail](t, controlRequest(t, handler, http.MethodGet, path, "", "", ""))
+	if len(detail.Settings) != 4 || detail.Settings[0].Type != plugin.SettingServer || detail.Settings[0].Credential != "token" ||
+		detail.Settings[1].Row != "Per turn" || string(detail.Settings[1].Default) != "4" || *detail.Settings[1].Max != 20 || detail.Settings[2].Key != plugin.HostSettingWait {
+		t.Fatalf("settings = %+v", detail.Settings)
+	}
+	if len(detail.Credits) != 1 || detail.Credits[0] != (contract.PluginCredit{Name: "Memo server", Owner: "Example", License: "Apache-2.0", URL: "https://example.com/memo", Note: "Talks to its HTTP API."}) {
+		t.Fatalf("credits = %+v", detail.Credits)
+	}
+
+	// Values that do not suit their settings are refused, naming the setting.
+	for body, want := range map[string]string{
+		`{"config":{}}`: "serverUrl",
+		`{"config":{"serverUrl":"https://memory.test:8443/api","quotas":{"atomic":25}}}`: "quotas.atomic",
+		`{"config":{"serverUrl":"ftp://memory.test"}}`:                                   "serverUrl",
+	} {
+		if response := patch(body); response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("PATCH %s = %d %s", body, response.Code, response.Body.String())
+		}
+	}
+
+	// A server's origin joins the user's own, marked with its setting.
+	response := patch(`{"config":{"serverUrl":"https://memory.test:8443/api"},"network_origins":[{"origin":"https://extra.test"}]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d %s", response.Code, response.Body.String())
+	}
+	detail = decodeBody[contract.PluginDetail](t, response)
+	if len(detail.NetworkOrigins) != 2 || detail.NetworkOrigins[0].Origin != "https://extra.test:443" || detail.NetworkOrigins[0].Setting != "" ||
+		detail.NetworkOrigins[1] != (contract.PluginNetworkOrigin{Origin: "https://memory.test:8443", Setting: "serverUrl"}) {
+		t.Fatalf("origins = %+v", detail.NetworkOrigins)
+	}
+	if response := controlRequest(t, handler, http.MethodPut, path+"/credentials/token", "application/json", `{"secret":"memo-secret-0123456789","origin":"https://memory.test:8443"}`, ""); response.Code != http.StatusOK {
+		t.Fatalf("PUT credential = %d %s", response.Code, response.Body.String())
+	}
+
+	// Plain http beyond this machine needs consent; with it the credential
+	// follows the server and the old origin goes.
+	plain := `{"config":{"serverUrl":"http://192.0.2.10:9090"}}`
+	if response := patch(plain); response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "plaintext_consent_required") {
+		t.Fatalf("PATCH without consent = %d %s", response.Code, response.Body.String())
+	}
+	response = patch(`{"config":{"serverUrl":"http://192.0.2.10:9090"},"plaintext_consent":["http://192.0.2.10:9090/"]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PATCH with consent = %d %s", response.Code, response.Body.String())
+	}
+	detail = decodeBody[contract.PluginDetail](t, response)
+	if len(detail.NetworkOrigins) != 2 || detail.NetworkOrigins[1] != (contract.PluginNetworkOrigin{Origin: "http://192.0.2.10:9090", AllowPlaintext: true, Plaintext: true, Setting: "serverUrl"}) ||
+		detail.Credentials[0].Origin != "http://192.0.2.10:9090" || !detail.Credentials[0].Configured {
+		t.Fatalf("after moving the server: origins = %+v, credential = %+v", detail.NetworkOrigins, detail.Credentials[0])
+	}
+	// Consent given once holds for later saves of the same server.
+	if response := patch(`{"config":{"serverUrl":"http://192.0.2.10:9090","quotas":{"atomic":2}}}`); response.Code != http.StatusOK {
+		t.Fatalf("PATCH again = %d %s", response.Code, response.Body.String())
+	}
+
+	// The overview: the plugin reads the defaults it lacks, the last test and
+	// the values sessions are bound to.
+	if response := controlRequest(t, handler, http.MethodPost, path+"/test", "", "", ""); response.Code != http.StatusOK {
+		t.Fatalf("test = %d", response.Code)
+	}
+	// Enabling registers the attribute the binding is kept for.
+	if response := patch(`{"enabled":true,"granted_capabilities":["network","storage","ui.views"]}`); response.Code != http.StatusOK {
+		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
+	}
+	now := time.Now().UTC()
+	if err := store.PutMetadataValue(context.Background(), storage.MetadataValueRecord{
+		TargetKind: storage.MetadataTargetSession, TargetID: "session_1", Key: "topic", Value: "paging",
+		SetBy: contract.MetadataSetByManual, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response = controlRequest(t, handler, http.MethodGet, path+"/status", "", "", "")
+	status := decodeBody[contract.PluginStatus](t, response)
+	if status.LastTest == nil || status.LastTest.Status != contract.PluginTestOK || status.LastTest.Summary != "Memo is up" || status.LastTest.TestedAt.IsZero() {
+		t.Fatalf("last test = %+v", status.LastTest)
+	}
+	if len(status.Bindings) != 1 || status.Bindings[0].Key != "topic" || status.Bindings[0].Label != "Topic" ||
+		len(status.Bindings[0].Values) != 1 || status.Bindings[0].Values[0].Value != "paging" || status.Bindings[0].Values[0].Sessions != 1 {
+		t.Fatalf("bindings = %+v", status.Bindings)
+	}
+	if len(status.View) != 1 || len(status.View[0].Items) != 1 || !strings.Contains(status.View[0].Items[0].Value, `"atomic":2`) {
+		t.Fatalf("view = %+v", status.View)
 	}
 }

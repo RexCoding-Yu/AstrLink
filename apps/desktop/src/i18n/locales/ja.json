@@ -140,7 +140,11 @@
     "discardUnsaved": "未保存の変更を破棄しますか？",
     "today": "今日",
     "yesterday": "昨日",
-    "checking": "確認中…"
+    "checking": "確認中…",
+    "justNow": "たった今",
+    "minutesAgo": "{{count}} 分前",
+    "hoursAgo": "{{count}} 時間前",
+    "daysAgo": "{{count}} 日前"
   },
   "nav": {
     "main": "メインナビゲーション",
@@ -2663,10 +2667,6 @@
     "showLessSubscriptions": "折りたたむ",
     "hourlyChart": "今日の 1 時間ごとのトークン",
     "hourlyPeak": "ピーク {{hour}}:00 · {{tokens}}",
-    "justNow": "たった今",
-    "minutesAgo": "{{count}} 分前",
-    "hoursAgo": "{{count}} 時間前",
-    "daysAgo": "{{count}} 日前",
     "updatedAgo": "更新: {{ago}}",
     "refresh": "更新",
     "version": "AstrLink {{version}}",
@@ -4489,7 +4489,8 @@
     "plugin_reload_failed": "プラグインディレクトリをスキャンできませんでした。",
     "plugin_unavailable": "プラグインの設定を読み込めないか、保存できませんでした。",
     "metadata_unavailable": "メタデータを読み込めないか、保存できませんでした。",
-    "credential_unavailable": "認証情報を保存できませんでした。"
+    "credential_unavailable": "認証情報を保存できませんでした。",
+    "plaintext_consent_required": "サーバーは平文 HTTP です。保存するには「平文 HTTP を許可」をオンにしてください。"
   },
   "webConsole": {
     "title": "AstrLink コンソール",
@@ -4547,7 +4548,6 @@
       "disabled": "停止中",
       "failed": "読み込み失敗"
     },
-    "needsNetwork": "ネットワーク必要",
     "enable": "有効にする",
     "disable": "無効にする",
     "test": "接続テスト",
@@ -4555,8 +4555,7 @@
     "tabsLabel": "プラグインの詳細",
     "tabs": {
       "overview": "概要",
-      "network": "ネットワークと認証情報",
-      "config": "設定",
+      "settings": "設定",
       "status": "稼働状況"
     },
     "testStatus": {
@@ -4565,10 +4564,7 @@
       "failed": "テスト失敗"
     },
     "truncated": "上限を超えたため切り詰めました",
-    "overviewTitle": "プラグインの概要",
-    "noOverview": "プラグインはまだ何も表示していません。",
     "overviewNeedsViews": "有効にするときに「ビュー」を許可すると、ここにプラグインの概要が表示されます。",
-    "grantedTitle": "権限",
     "noCapabilities": "権限の申請なし",
     "capabilities": {
       "contextInject": "コンテキストの注入",
@@ -4594,14 +4590,11 @@
       "load_failed": "トップレベルの実行に失敗しました"
     },
     "network": {
-      "origins": "アクセスを許可するアドレス",
       "originsHelpLabel": "許可するアドレスについて",
       "originsHelp": "プラグインはこれらのアドレスにだけアクセスできます。スキーム・ホスト・ポートが一致する必要があり、パスは自由です。リダイレクトは追いません。",
-      "noOrigins": "アドレスはまだありません",
       "originLabel": "許可するアドレス",
       "invalidOrigin": "ホストを含む http または https のアドレスを入力してください（例: https://memory.example.com:8443）。",
       "add": "追加",
-      "save": "アドレスを保存",
       "remove": "{{origin}} を削除",
       "plaintext": "平文 HTTP",
       "allowPlaintext": "平文 HTTP を許可",
@@ -4617,21 +4610,13 @@
       "help": "認証情報は AstrLink のローカル鍵ストアに保存されます。Core は、紐付けたアドレス宛てのリクエストにだけ追加し、プラグインは値を読めません。",
       "configured": "設定済み ···· {{hint}}",
       "configuredNoHint": "設定済み",
-      "unset": "未設定",
-      "boundTo": "{{origin}} 用",
       "origin": "紐付けるアドレス",
-      "needOrigin": "先に許可するアドレスを追加してください",
       "secret": "値",
-      "save": "認証情報を保存",
       "clear": "削除"
     },
     "config": {
-      "title": "プラグイン設定（JSON）",
-      "helpLabel": "プラグイン設定について",
       "help": "64 KiB までの JSON オブジェクトです。プラグインは読み取るだけで変更できません。認証情報はここに書かず、認証情報の欄を使ってください。",
       "size": "{{size}} KiB / 64 KiB",
-      "format": "整形",
-      "save": "設定を保存",
       "invalid": "設定は 1 つの JSON オブジェクトである必要があります。",
       "tooLarge": "設定が 64 KiB を超えています。"
     },
@@ -4668,6 +4653,47 @@
       "helpLabel": "最大待機について",
       "help": "各ターン最初のリクエストは、プライバシー検査を含めてこの時間までプラグインを待ち、その後は通常どおりモデルに送られます。間に合わなかった結果はこのターンに挿入されません。既定は 2.5 秒です。",
       "seconds": "{{value}} 秒"
+    },
+    "about": {
+      "label": "このプラグインについて",
+      "does": "このプラグインがすること",
+      "network": "ネットワークの用途",
+      "capabilities": "使用する権限"
+    },
+    "overview": {
+      "connection": "接続",
+      "server": "サーバー",
+      "noServer": "未設定",
+      "lastTest": "最新のテスト",
+      "notTested": "未テスト",
+      "bindings": "バインド済みの{{label}}",
+      "sessions": "セッション",
+      "lastUsed": "最終使用",
+      "none": "対象外",
+      "noBindings": "まだ{{label}}にバインドされたセッションはありません",
+      "pluginStatus": "プラグインの状態",
+      "credits": "オープンソース"
+    },
+    "settings": {
+      "save": "保存",
+      "revert": "元に戻す",
+      "unsaved": "未保存の変更があります",
+      "more": "その他の設定",
+      "json": "JSON で編集",
+      "jsonTitle": "設定を JSON で編集",
+      "apply": "適用",
+      "gatewayGroup": "ゲートウェイ",
+      "origins": "その他の許可するアドレス",
+      "required": "「{{label}}」は必須です",
+      "number": "「{{label}}」には数値を入力してください",
+      "between": "「{{label}}」は {{min}} から {{max}} の間にしてください",
+      "atLeast": "「{{label}}」は {{min}} 以上にしてください",
+      "atMost": "「{{label}}」は {{max}} 以下にしてください",
+      "address": "「{{label}}」には http または https のアドレスを入力してください",
+      "consent": "「{{label}}」は平文 HTTP です。保存するには「平文 HTTP を許可」をオンにしてください",
+      "replace": "変更",
+      "keep": "変更しない",
+      "noOrigin": "トークンを保存する前にサーバーのアドレスを入力してください"
     }
   },
   "pluginRecords": {
