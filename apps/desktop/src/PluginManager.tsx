@@ -321,7 +321,20 @@ export function PluginManager({
           {listError}
         </FormMessage>
       ) : null}
-      {list === null && !listError ? (
+      {!isReady && list !== null ? (
+        <FormMessage className="mb-3" tone="notice">
+          {t("plugins.stale")}
+        </FormMessage>
+      ) : null}
+      {!isReady && list === null ? (
+        <EmptyState
+          className="flex-1"
+          description={t("plugins.blockedHint")}
+          illustration={<Blocks className="size-6" />}
+          title={t("plugins.blocked")}
+          variant="page"
+        />
+      ) : list === null && !listError ? (
         <LoadingState className="flex-1" label={t("plugins.loading")} />
       ) : list !== null && plugins.length === 0 ? (
         <EmptyState

@@ -4657,7 +4657,10 @@
       "metadata": "Attributes it registers",
       "marker": "session marker {{marker}}",
       "confirm": "Enable"
-    }
+    },
+    "blocked": "The gateway is not running",
+    "blockedHint": "Plugins load once the gateway is ready. If it has stopped, the overview shows why.",
+    "stale": "The gateway is not ready. Showing the plugins last read."
   },
   "pluginRecords": {
     "none": "No plugin recorded anything for this request.",

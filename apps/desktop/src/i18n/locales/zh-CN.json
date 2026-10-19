@@ -4657,7 +4657,10 @@
       "metadata": "登记的元信息属性",
       "marker": "会话标记 {{marker}}",
       "confirm": "启用"
-    }
+    },
+    "blocked": "网关没有运行",
+    "blockedHint": "网关就绪后才能加载插件。网关停了的话，概览页会显示原因。",
+    "stale": "网关尚未就绪，当前显示上次读取的插件。"
   },
   "pluginRecords": {
     "none": "这个请求没有插件记录。",
