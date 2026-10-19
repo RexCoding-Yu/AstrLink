@@ -138,6 +138,11 @@ export interface ClassifierDryRunResult {
   confidence: number | null;
   fallback_reason: string | null;
   duration_ms: number;
+  /**
+   * The classifier timeout the run used, from the classifier settings; null
+   * when the classifier is not configured and nothing was called.
+   */
+  timeout_ms: number | null;
   sanitized_preview: string;
   /** Present only when the request named a group. */
   decision: ClassifierDryRunDecision | null;
@@ -515,6 +520,7 @@ export function parseClassifierDryRunResult(
       category === "" ? null : optionalNumber(root.confidence, "confidence"),
     fallback_reason: optionalString(root.fallback_reason, "fallback_reason"),
     duration_ms: asNumber(root.duration_ms, "duration_ms"),
+    timeout_ms: optionalNumber(root.timeout_ms, "timeout_ms"),
     sanitized_preview: optional(root, "sanitized_preview", asString, ""),
     decision:
       decision === undefined || decision === null

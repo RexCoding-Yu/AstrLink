@@ -435,8 +435,59 @@ func TestClassifierDryRunTimeoutUsesStableCode(t *testing.T) {
 	if strings.Contains(body, `"fallback_reason":"timeout"`) {
 		t.Fatalf("raw provider reason leaked: %s", body)
 	}
+	// The classifier waited as long as its settings say, and the result names
+	// that timeout so the preview can.
+	if !strings.Contains(body, `"timeout_ms":2000`) {
+		t.Fatalf("timeout_ms missing: %s", body)
+	}
 	if len(cloudBodies) != 0 {
 		t.Fatalf("unexpected cloud capture: %v", cloudBodies)
+	}
+}
+
+// The whole dry-run ends at the classifier timeout plus dryRunSlack: a privacy
+// check that never finishes answers dry_run_timeout instead of keeping the
+// caller waiting, and the classifier is never called.
+func TestClassifierDryRunStopsAtClassifierTimeoutPlusSlack(t *testing.T) {
+	previous := dryRunSlack
+	dryRunSlack = 50 * time.Millisecond
+	t.Cleanup(func() { dryRunSlack = previous })
+	var cloudBodies []string
+	cloudServer := newClassifierCloudServer(t, `{}`, &cloudBodies)
+	handler := newClassifierDryRunHandler(t, cloudServer.URL, privacy.Policy{})
+	putClassifierCredential(t, handler)
+	settings := `{"enabled":true,"classifier_source":"inline","inline":{"protocol":"jev","endpoint":"` + cloudServer.URL +
+		`","credential_ref":"local://classifier/default","model":"jev-latest","timeout_ms":100}}`
+	if response := controlRequest(t, handler, http.MethodPut, ClassifierSettingsPath, "application/json", settings, ""); response.Code != http.StatusOK {
+		t.Fatalf("settings put = %d %s", response.Code, response.Body.String())
+	}
+	filter, err := privacy.New(privacy.PolicyProviderFunc(func(context.Context, privacy.Scope) (privacy.Policy, error) {
+		return privacy.Policy{
+			Enabled: true, Mode: privacy.ModeLocalModel, Action: privacy.ActionRedact,
+			LocalModelID: "model_00000000000000000000000000000001",
+		}, nil
+	}), privacy.DetectorFunc(func(ctx context.Context, _ privacy.DetectInput) ([]privacy.Finding, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.privacyFilter = filter
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- controlRequest(t, handler, http.MethodPost, ClassifierSettingsPath+"/dry-run", "application/json", `{"text":"hello"}`, "")
+	}()
+	select {
+	case response := <-done:
+		if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), `"dry_run_timeout"`) {
+			t.Fatalf("dry-run = %d %s", response.Code, response.Body.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dry-run did not stop at the classifier timeout plus the slack")
+	}
+	if len(cloudBodies) != 0 {
+		t.Fatalf("a timed-out dry-run still called the classifier: %v", cloudBodies)
 	}
 }
 

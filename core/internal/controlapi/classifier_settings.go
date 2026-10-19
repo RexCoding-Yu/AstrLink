@@ -31,6 +31,12 @@ const dryRunPreviewRunes = 400
 // dryRunSlots allows one dry-run at a time: each one is a real cloud call.
 var dryRunSlots = make(chan struct{}, 1)
 
+// dryRunSlack is how much longer than the classifier timeout one dry-run may
+// take in all, for the privacy check and the reads around the classifier call.
+// A run that needs more ends in dry_run_timeout instead of keeping the caller
+// waiting. It is a variable so tests need not wait seconds.
+var dryRunSlack = 5 * time.Second
+
 func (handler *Handler) classifierResource(writer http.ResponseWriter, request *http.Request) {
 	if handler.classifierSettings == nil {
 		writeError(writer, http.StatusServiceUnavailable, "classifier_settings_unavailable", "classifier settings are unavailable")
@@ -183,13 +189,16 @@ type classifierDryRunDecision struct {
 }
 
 type classifierDryRunResponse struct {
-	Configured       bool                                    `json:"configured"`
-	Category         string                                  `json:"category,omitempty"`
-	Confidence       float64                                 `json:"confidence,omitempty"`
-	Dimensions       map[string]dryRunDimensionScore         `json:"dimensions,omitempty"`
-	FallbackReason   string                                  `json:"fallback_reason,omitempty"`
-	Privacy          string                                  `json:"privacy,omitempty"`
-	DurationMS       int                                     `json:"duration_ms"`
+	Configured     bool                            `json:"configured"`
+	Category       string                          `json:"category,omitempty"`
+	Confidence     float64                         `json:"confidence,omitempty"`
+	Dimensions     map[string]dryRunDimensionScore `json:"dimensions,omitempty"`
+	FallbackReason string                          `json:"fallback_reason,omitempty"`
+	Privacy        string                          `json:"privacy,omitempty"`
+	DurationMS     int                             `json:"duration_ms"`
+	// TimeoutMS is the classifier timeout this run used, the one the
+	// classifier settings give.
+	TimeoutMS        int                                     `json:"timeout_ms,omitempty"`
 	SanitizedPreview string                                  `json:"sanitized_preview,omitempty"`
 	Decision         *classifierDryRunDecision               `json:"decision,omitempty"`
 	Fields           []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
@@ -234,6 +243,7 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusTooManyRequests, "dry_run_busy", "another dry-run is in progress")
 		return
 	}
+	begun := time.Now()
 	var input classifierDryRunRequest
 	if !decodeControlJSON(writer, request, &input) {
 		return
@@ -269,7 +279,16 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		writeJSON(writer, http.StatusOK, response)
 		return
 	}
-	sanitized, privacyState := handler.dryRunPrivacy(request.Context(), input.Text)
+	// The classifier call keeps the timeout its settings give it; the whole
+	// run gets that timeout plus dryRunSlack and then answers dry_run_timeout.
+	response.TimeoutMS = settings.EffectiveTimeoutMS()
+	ctx, cancel := context.WithDeadline(request.Context(), begun.Add(time.Duration(response.TimeoutMS)*time.Millisecond+dryRunSlack))
+	defer cancel()
+	sanitized, privacyState := handler.dryRunPrivacy(ctx, input.Text)
+	if dryRunExpired(ctx) {
+		writeDryRunTimeout(writer)
+		return
+	}
 	response.Privacy = privacyState
 	response.SanitizedPreview = boundedDryRunPreview(sanitized)
 	if privacyState == "blocked" || privacyState == "inspection_failed" {
@@ -277,7 +296,7 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		writeJSON(writer, http.StatusOK, response)
 		return
 	}
-	group := handler.dryRunGroup(request.Context(), input.GroupID)
+	group := handler.dryRunGroup(ctx, input.GroupID)
 	plan := settings.ResolveCallPlan(group)
 	secrets, _ := handler.serviceStore.(secretstore.SecretStore)
 	if secrets == nil {
@@ -285,14 +304,14 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		writeJSON(writer, http.StatusOK, response)
 		return
 	}
-	secret, secretErr := secrets.Get(request.Context(), classifierCredentialRef)
+	secret, secretErr := secrets.Get(ctx, classifierCredentialRef)
 	if secretErr != nil {
 		response.FallbackReason = autoclassifier.FallbackUnavailable
 		writeJSON(writer, http.StatusOK, response)
 		return
 	}
 	started := time.Now()
-	outcome := cloud.Classify(request.Context(), nil, cloud.Input{
+	outcome := cloud.Classify(ctx, nil, cloud.Input{
 		Protocol:   cloud.Protocol(plan.Protocol),
 		Endpoint:   plan.Endpoint,
 		APIKey:     secret,
@@ -303,6 +322,12 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		TimeoutMS:  plan.TimeoutMS,
 		Dimensions: plan.Dimensions,
 	})
+	// The classifier's own timeout is a result (classifier_timeout); running
+	// out of the whole run's time is not, because nothing ran to completion.
+	if dryRunExpired(ctx) {
+		writeDryRunTimeout(writer)
+		return
+	}
 	response.DurationMS = int(time.Since(started).Milliseconds())
 	response.Confidence = outcome.Confidence
 	// The dry-run fills the same routing-side carrier as the inference
@@ -381,6 +406,16 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 }
 
 func boolPtrDryRun(value bool) *bool { return &value }
+
+// dryRunExpired reports whether a dry-run outlived its own deadline, as
+// opposed to the caller hanging up.
+func dryRunExpired(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+func writeDryRunTimeout(writer http.ResponseWriter) {
+	writeError(writer, http.StatusGatewayTimeout, "dry_run_timeout", "dry-run did not finish within the classifier timeout plus "+dryRunSlack.String())
+}
 
 // dryRunSystemTime resolves the preview's clock. An empty value means "now",
 // sampled once here so every rule in one preview reads the same instant — the
