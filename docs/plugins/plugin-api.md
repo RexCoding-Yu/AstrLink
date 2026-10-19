@@ -41,8 +41,47 @@ AstrLink 负责机制：沙箱、预算、网络、存储，以及把插件的�
 | `credentials`  | 凭据位：`name`、`label`、`header`、可选的 `scheme`（如 `Bearer`）。需要网络能力             |
 | `metadata`     | 启用时登记的元信息属性：`key`、`label`、`pattern`（以 `^` 开头、`$` 结尾）、可选的 `marker` |
 | `notice`       | 启用提醒，最多 1000 个字符，原样显示在启用确认框里                                          |
+| `settings`     | 插件页「设置」表单的字段，按顺序排列，见下文                                                |
+| `credits`      | 插件依托或对接的开源项目，显示在「概览」里，见下文                                          |
 
 清单按严格 JSON 读取：拼错的字段会报错，不会被悄悄忽略。
+
+### 设置项 settings
+
+插件页按 `settings` 生成「设置」表单，最多 64 项。每一项：
+
+- `key`：值在配置里的位置，点号表示下一层，例如
+  `quotas.skill`。两项的位置不能重叠。
+- `label`：最多 32 个字符。`type`：`server`、`text`、`number`、`switch` 或
+  `choice`。
+- `group`：所在分组的标题；`row`：同一 `row`
+  的相邻字段排在一行，行名就是它；`advanced: true` 收进「更多设置」。
+- `help`：放在字段旁的 `?` 里，最多 500 个字符；表单里不放说明小字。
+- `default`：配置里没有值时，`astrlink.config.get()`
+  返回它。`required`：保存时不能为空。
+- `number` 可带 `min`、`max`、`step`、`unit`；`choice` 必须带
+  `options: [{ value, label }]`；`placeholder` 显示在空的输入框里。
+
+`server`
+是插件要连的服务地址，没有默认值，只能由用户填写。保存时 AstrLink 把它的协议、主机和端口加进允许访问的地址，标明来自这个设置；`credential`
+指定的凭据跟着绑到这个地址，地址改了，凭据也跟着改。本机以外的明文 `http://`
+仍要用户在表单里勾选同意，换一个地址要重新同意。
+
+`$wait`、`$trusted`、`$origins`
+三个键放置 AstrLink 自己的设置：最长等待、受信任、其他允许访问的地址，只能带
+`group` 和
+`advanced`。插件没有放置它们时，表单把前两项放在「网关」分组，把地址放进「更多设置」。
+
+保存时 AstrLink 按设置项检查配置：类型、范围、选项、必填，出错时指明是哪一项。
+
+设置项没有声明的键原样保留，插件照常读取；「更多设置」里的「以 JSON 编辑」改的是同一份配置。
+
+### 开源声明 credits
+
+`credits` 列出插件依托或对接的开源项目，最多 8 项：`name`、可选的
+`owner`、可选的 SPDX 许可证标识 `license`（如
+`Apache-2.0`，页面上显示全称）、`url`（只能是 https，用系统浏览器打开）、可选的一句
+`note`（最多 200 个字符）。
 
 ## 能力
 
@@ -64,10 +103,13 @@ AstrLink 负责机制：沙箱、预算、网络、存储，以及把插件的�
 | `prepareSession(session)` | 会话的第一个请求，见下文     | `{ system?, record? }`：追加到系统提示词               |
 | `prepareTurn(turn)`       | 每一轮的第一个调用           | `{ context?, skip?, record? }`：放在本轮用户消息的开头 |
 | `observeTurn(turn)`       | 每轮一次，在请求之外异步执行 | `{ record? }`                                          |
-| `describeStatus()`        | 打开插件页的「概览」、点刷新 | 视图块数组                                             |
+| `describeStatus()`        | 打开插件页的「概览」、点刷新 | 视图块数组：插件自己的状态                             |
 | `testConnection()`        | 点「测试连接」               | `{ status: "ok" \| "error", summary, view? }`          |
 
 每个钩子都是可选的。
+
+插件页的「概览」由 AstrLink 排版：服务器地址和最近一次「测试连接」的结果、会话绑定到插件登记的属性的各个值（会话数和最近使用时间）、`credits`
+里的开源项目。`describeStatus` 只需返回插件自己的状态，例如最近一次写入。
 
 - `prepareSession`
   的结果按会话保存，之后的请求原样复用。会话还缺插件登记的属性值时，每一轮的第一个调用再算一次；取值或插件配置变了以后的第一个调用也会重算。

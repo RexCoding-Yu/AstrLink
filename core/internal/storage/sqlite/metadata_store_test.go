@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -168,5 +169,46 @@ func TestRegisteringAttributesWaitsForOtherWriters(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a write failed beside another: %v", err)
 		}
+	}
+}
+
+func TestMetadataValueStatsCountSessionsAndTheirLastRequest(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "metadata.db"))
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateMetadataAttribute(ctx, contract.MetadataAttribute{Key: "project", Label: "项目", Pattern: "^[a-z]+$", Owner: contract.MetadataOwnerUser}); err != nil {
+		t.Fatal(err)
+	}
+	for session, value := range map[string]string{"session_a": "alpha", "session_b": "alpha", "session_c": "beta", "session_d": "none"} {
+		if err := store.PutMetadataValue(ctx, storagecontract.MetadataValueRecord{
+			TargetKind: storagecontract.MetadataTargetSession, TargetID: session, Key: "project", Value: value, SetBy: contract.MetadataSetByManual,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
+	for index, session := range []string{"session_b", "session_b", "session_c"} {
+		id := contract.SessionID(session)
+		model := "claude"
+		record := contract.RequestRecord{
+			ID: contract.RequestID("request_" + strconv.Itoa(index)), StartedAt: started.Add(time.Duration(index) * time.Minute),
+			Status: contract.RequestStatusPending, InputProtocol: contract.ProtocolAnthropicMessages, RequestedModel: &model,
+			Audit: contract.NotCapturedAuditSummary(), SessionID: &id,
+		}
+		if err := store.UpsertRequestRecord(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := store.MetadataValueStats(ctx, "project", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 3 || stats[0].Value != "beta" || stats[0].Sessions != 1 || !stats[0].LastUsedAt.Equal(started.Add(2*time.Minute)) ||
+		stats[1].Value != "alpha" || stats[1].Sessions != 2 || !stats[1].LastUsedAt.Equal(started.Add(time.Minute)) ||
+		stats[2].Value != "none" || stats[2].LastUsedAt != nil {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if limited, _ := store.MetadataValueStats(ctx, "project", 1); len(limited) != 1 {
+		t.Fatalf("limit 1 = %+v", limited)
 	}
 }

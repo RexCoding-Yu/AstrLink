@@ -21,6 +21,10 @@ const PluginsPath = "/control/v1/plugins"
 // pluginPageBudget bounds a plugin page hook: its run and its network wait.
 const pluginPageBudget = 10 * time.Second
 
+// maxPluginBindingValues bounds the values of one attribute the overview
+// lists.
+const maxPluginBindingValues = 50
+
 // PluginRegistry is the plugin registry; *plugin.Manager satisfies it.
 type PluginRegistry interface {
 	Current() *plugin.Generation
@@ -179,7 +183,7 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 		detail.TurnWaitMs = contract.DefaultPluginTurnWaitMs
 	}
 	for _, origin := range settings.Origins {
-		detail.NetworkOrigins = append(detail.NetworkOrigins, contract.PluginNetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext, Plaintext: plugin.Plaintext(origin.Origin)})
+		detail.NetworkOrigins = append(detail.NetworkOrigins, contract.PluginNetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext, Plaintext: plugin.Plaintext(origin.Origin), Setting: origin.Setting})
 	}
 	stored, err := handler.pluginStore.ListPluginCredentials(ctx, target.Key)
 	if err != nil {
@@ -195,7 +199,29 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	for _, attribute := range target.Meta.Metadata {
 		detail.Metadata = append(detail.Metadata, contract.PluginMetadataAttribute{Key: attribute.Key, Label: attribute.Label, Pattern: attribute.Pattern, Marker: attribute.Marker})
 	}
+	detail.Settings = pluginSettings(target.Meta.Settings)
+	detail.Credits = []contract.PluginCredit{}
+	for _, credit := range target.Meta.Credits {
+		detail.Credits = append(detail.Credits, contract.PluginCredit{Name: credit.Name, Owner: credit.Owner, License: credit.License, URL: credit.URL, Note: credit.Note})
+	}
 	return detail, nil
+}
+
+func pluginSettings(settings []plugin.Setting) []contract.PluginSetting {
+	converted := []contract.PluginSetting{}
+	for _, setting := range settings {
+		field := contract.PluginSetting{
+			Key: setting.Key, Label: setting.Label, Type: setting.Type, Group: setting.Group, Row: setting.Row,
+			Help: setting.Help, Default: setting.Default, Required: setting.Required, Advanced: setting.Advanced,
+			Min: setting.Min, Max: setting.Max, Step: setting.Step, Unit: setting.Unit,
+			Placeholder: setting.Placeholder, Credential: setting.Credential,
+		}
+		for _, option := range setting.Options {
+			field.Options = append(field.Options, contract.PluginSettingOption{Value: option.Value, Label: option.Label})
+		}
+		converted = append(converted, field)
+	}
+	return converted
 }
 
 func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request *http.Request, target *plugin.Plugin) {
@@ -217,6 +243,7 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 	invalid := func(message string) {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_plugin_settings", message)
 	}
+	stored := slices.Clone(settings.Origins)
 	if update.Enabled != nil {
 		if *update.Enabled && !target.Loaded() {
 			invalid("a plugin that did not load cannot be enabled")
@@ -287,9 +314,37 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 		}
 		settings.Config = json.RawMessage(config)
 	}
+	// A configuration fits the settings the plugin declares; its servers
+	// become origins the plugin may reach, with their credentials.
+	var binds map[string]string
+	if target.Loaded() && (update.Config != nil || update.NetworkOrigins != nil || len(update.PlaintextConsent) > 0) {
+		if update.Config != nil {
+			if err := target.Meta.CheckConfig(settings.Config); err != nil {
+				invalid(err.Error())
+				return
+			}
+		}
+		origins, credentials, err := serverOrigins(target.Meta, settings, stored, update.PlaintextConsent)
+		var plaintext *plaintextError
+		switch {
+		case errors.As(err, &plaintext):
+			writeError(writer, http.StatusUnprocessableEntity, "plaintext_consent_required", err.Error())
+			return
+		case err != nil:
+			invalid(err.Error())
+			return
+		}
+		settings.Origins, binds = origins, credentials
+	}
 	if err := handler.pluginStore.PutPluginSettings(ctx, settings); err != nil {
 		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "could not save the plugin's settings")
 		return
+	}
+	for name, origin := range binds {
+		if err := handler.pluginStore.BindPluginCredential(ctx, target.Key, name, origin); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			writeError(writer, http.StatusInternalServerError, "credential_unavailable", "saved, but the credential could not follow its server")
+			return
+		}
 	}
 	if err := handler.plugins.Refresh(ctx); err != nil {
 		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "saved, but the plugins could not apply the settings")
@@ -377,6 +432,12 @@ func (handler *Handler) testPlugin(writer http.ResponseWriter, ctx context.Conte
 			result.View, result.Truncated = view.Parse(reported.View)
 		}
 	}
+	handler.pluginTestsMu.Lock()
+	if handler.pluginTests == nil {
+		handler.pluginTests = map[string]contract.PluginLastTest{}
+	}
+	handler.pluginTests[target.Key] = contract.PluginLastTest{PluginTestResult: result, TestedAt: time.Now().UTC()}
+	handler.pluginTestsMu.Unlock()
 	writeJSON(writer, http.StatusOK, result)
 }
 
@@ -391,6 +452,24 @@ func (handler *Handler) pluginStatus(writer http.ResponseWriter, ctx context.Con
 	}
 	for reason, count := range stats.Failures {
 		status.Failures[reason] = count
+	}
+	handler.pluginTestsMu.Lock()
+	if last, found := handler.pluginTests[target.Key]; found {
+		status.LastTest = &last
+	}
+	handler.pluginTestsMu.Unlock()
+	if handler.metadataStore != nil {
+		for _, attribute := range target.Meta.Metadata {
+			values, err := handler.metadataStore.MetadataValueStats(ctx, attribute.Key, maxPluginBindingValues)
+			if err != nil {
+				continue
+			}
+			bindings := contract.PluginBindings{Key: attribute.Key, Label: attribute.Label, Values: []contract.PluginBindingValue{}}
+			for _, value := range values {
+				bindings.Values = append(bindings.Values, contract.PluginBindingValue{Value: value.Value, Sessions: value.Sessions, LastUsedAt: value.LastUsedAt})
+			}
+			status.Bindings = append(status.Bindings, bindings)
+		}
 	}
 	if target.Has(plugin.HookDescribeStatus) && target.Can(plugin.CapabilityViews) {
 		ctx, cancel := context.WithTimeout(ctx, pluginPageBudget)
@@ -435,4 +514,65 @@ func (handler *Handler) registerEnabledPluginAttributes(ctx context.Context) {
 			_ = handler.metadata.RegisterPlugin(ctx, target.Key, target.Attributes())
 		}
 	}
+}
+
+// plaintextError is a server reached over plain http without the user's
+// consent.
+type plaintextError struct{ setting, origin string }
+
+func (failure *plaintextError) Error() string {
+	return "the server " + failure.origin + " of " + failure.setting + " is plain http; reaching it needs the user's consent"
+}
+
+// serverOrigins returns the origins a plugin may reach: the user's own, and
+// in place of what the server settings had, the origin of each address the
+// configuration gives a server, marked with its setting. Plain http beyond
+// this machine needs consent, given now or for the same origin before. It
+// also returns, for each credential a server sends, the origin to bind it
+// to.
+func serverOrigins(meta plugin.Meta, settings storage.PluginSettingsRecord, stored []storage.PluginOrigin, consent []string) ([]storage.PluginOrigin, map[string]string, error) {
+	origins := []storage.PluginOrigin{}
+	for _, origin := range settings.Origins {
+		if origin.Setting == "" {
+			origins = append(origins, origin)
+		}
+	}
+	consented := func(origin string) bool {
+		for _, given := range consent {
+			if normalized, err := plugin.NormalizeOrigin(given); err == nil && normalized == origin {
+				return true
+			}
+		}
+		allowed := func(existing storage.PluginOrigin) bool { return existing.Origin == origin && existing.AllowPlaintext }
+		return slices.ContainsFunc(stored, allowed) || slices.ContainsFunc(settings.Origins, allowed)
+	}
+	servers := meta.Servers(settings.Config)
+	binds := map[string]string{}
+	for _, setting := range meta.Settings {
+		address, found := servers[setting.Key]
+		if !found {
+			continue
+		}
+		origin, err := plugin.NormalizeOrigin(address)
+		if err != nil || len(origin) > contract.MaxPluginOriginLength {
+			return nil, nil, errors.New("the server of " + setting.Key + " is not an http or https address with a host")
+		}
+		allow := false
+		if plugin.Plaintext(origin) {
+			if !consented(origin) {
+				return nil, nil, &plaintextError{setting: setting.Key, origin: origin}
+			}
+			allow = true
+		}
+		// The server owns its origin, also when the user listed it before.
+		origins = slices.DeleteFunc(origins, func(existing storage.PluginOrigin) bool { return existing.Origin == origin })
+		origins = append(origins, storage.PluginOrigin{Origin: origin, AllowPlaintext: allow, Setting: setting.Key})
+		if setting.Credential != "" {
+			binds[setting.Credential] = origin
+		}
+	}
+	if len(origins) > contract.MaxPluginOrigins {
+		return nil, nil, errors.New("a plugin may reach at most 16 origins")
+	}
+	return origins, binds, nil
 }

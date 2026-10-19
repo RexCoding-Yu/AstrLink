@@ -35,6 +35,8 @@ type PluginOrigin struct {
 	Origin string `json:"origin"`
 	// AllowPlaintext allows plain http to a host other than this machine.
 	AllowPlaintext bool `json:"allow_plaintext,omitempty"`
+	// Setting names the server setting the origin comes from.
+	Setting string `json:"setting,omitempty"`
 }
 
 // PluginCredentialRecord describes a stored credential without its value.
@@ -60,6 +62,9 @@ type PluginStore interface {
 	// PutPluginCredential stores secret, sealed, bound to origin. It creates
 	// the plugin's settings when it has none.
 	PutPluginCredential(ctx context.Context, plugin, name, origin string, secret []byte) error
+	// BindPluginCredential sends a stored credential to another origin;
+	// ErrNotFound when nothing is stored.
+	BindPluginCredential(ctx context.Context, plugin, name, origin string) error
 	// DeletePluginCredential returns ErrNotFound when nothing was stored.
 	DeletePluginCredential(ctx context.Context, plugin, name string) error
 	// PluginCredential returns the secret and its origin, ErrNotFound when

@@ -211,6 +211,39 @@ FROM metadata_values WHERE target_kind = ? ORDER BY target_id, key`, targetKind)
 	return scanMetadataValues(rows)
 }
 
+func (store *Store) MetadataValueStats(ctx context.Context, key string, limit int) ([]storage.MetadataValueStat, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT v.value, COUNT(DISTINCT v.target_id), MAX(r.started_at)
+FROM metadata_values v LEFT JOIN request_records r ON r.session_id = v.target_id
+WHERE v.target_kind = ? AND v.key = ?
+GROUP BY v.value
+ORDER BY MAX(r.started_at) IS NULL, MAX(r.started_at) DESC, v.value
+LIMIT ?`, storage.MetadataTargetSession, key, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read metadata value stats: %w", err)
+	}
+	defer rows.Close()
+	var stats []storage.MetadataValueStat
+	for rows.Next() {
+		var stat storage.MetadataValueStat
+		var last sql.NullString
+		if err := rows.Scan(&stat.Value, &stat.Sessions, &last); err != nil {
+			return nil, fmt.Errorf("read metadata value stats: %w", err)
+		}
+		if last.Valid {
+			used, err := time.Parse(time.RFC3339Nano, last.String)
+			if err != nil {
+				return nil, fmt.Errorf("%w: request started at %q", storage.ErrInvalidRecord, last.String)
+			}
+			stat.LastUsedAt = &used
+		}
+		stats = append(stats, stat)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read metadata value stats: %w", err)
+	}
+	return stats, nil
+}
+
 func scanMetadataValues(rows *sql.Rows) ([]storage.MetadataValueRecord, error) {
 	defer rows.Close()
 	var records []storage.MetadataValueRecord

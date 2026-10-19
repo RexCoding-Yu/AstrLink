@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var (
@@ -119,6 +120,46 @@ type PluginDetail struct {
 	TurnWaitMs  int                       `json:"turn_wait_ms"`
 	Credentials []PluginCredentialStatus  `json:"credentials"`
 	Metadata    []PluginMetadataAttribute `json:"metadata"`
+	// Settings are the fields of the plugin's settings form, in order.
+	Settings []PluginSetting `json:"settings"`
+	// Credits are the open-source projects the plugin credits.
+	Credits []PluginCredit `json:"credits"`
+}
+
+// PluginSetting is a field of a plugin's settings form, as its manifest
+// declares it. A key starting with $ places one of the host's settings.
+type PluginSetting struct {
+	Key         string                `json:"key"`
+	Label       string                `json:"label,omitempty"`
+	Type        string                `json:"type,omitempty"`
+	Group       string                `json:"group,omitempty"`
+	Row         string                `json:"row,omitempty"`
+	Help        string                `json:"help,omitempty"`
+	Default     json.RawMessage       `json:"default,omitempty"`
+	Required    bool                  `json:"required,omitempty"`
+	Advanced    bool                  `json:"advanced,omitempty"`
+	Min         *float64              `json:"min,omitempty"`
+	Max         *float64              `json:"max,omitempty"`
+	Step        *float64              `json:"step,omitempty"`
+	Unit        string                `json:"unit,omitempty"`
+	Placeholder string                `json:"placeholder,omitempty"`
+	Options     []PluginSettingOption `json:"options,omitempty"`
+	Credential  string                `json:"credential,omitempty"`
+}
+
+// PluginSettingOption is one answer of a choice.
+type PluginSettingOption struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+// PluginCredit is an open-source project a plugin credits.
+type PluginCredit struct {
+	Name    string `json:"name"`
+	Owner   string `json:"owner,omitempty"`
+	License string `json:"license,omitempty"`
+	URL     string `json:"url"`
+	Note    string `json:"note,omitempty"`
 }
 
 // PluginNetworkOrigin is an address a plugin may reach.
@@ -128,6 +169,9 @@ type PluginNetworkOrigin struct {
 	// machine; Plaintext tells the page that the origin needs it.
 	AllowPlaintext bool `json:"allow_plaintext"`
 	Plaintext      bool `json:"plaintext"`
+	// Setting names the server setting the origin comes from; the user's
+	// own origins have none.
+	Setting string `json:"setting,omitempty"`
 }
 
 // PluginCredentialStatus is a credential slot the plugin declares and what
@@ -156,6 +200,9 @@ type PluginSettingsUpdate struct {
 	PrivacyTrusted      *bool                       `json:"privacy_trusted,omitempty"`
 	TurnWaitMs          *int                        `json:"turn_wait_ms,omitempty"`
 	Config              json.RawMessage             `json:"config,omitempty"`
+	// PlaintextConsent lists the plain http origins of servers the user
+	// agrees to reach in the clear.
+	PlaintextConsent []string `json:"plaintext_consent,omitempty"`
 }
 
 type PluginNetworkOriginInput struct {
@@ -204,4 +251,31 @@ type PluginStatus struct {
 	Truncated    bool               `json:"truncated,omitempty"`
 	// ViewError is why describeStatus gave no view.
 	ViewError string `json:"view_error,omitempty"`
+	// LastTest is the last connection test since Core started.
+	LastTest *PluginLastTest `json:"last_test,omitempty"`
+	// Bindings are the values sessions are bound to, for each attribute the
+	// plugin registers.
+	Bindings []PluginBindings `json:"bindings,omitempty"`
+}
+
+// PluginLastTest is a connection test and when it ran.
+type PluginLastTest struct {
+	PluginTestResult
+	TestedAt time.Time `json:"tested_at"`
+}
+
+// PluginBindings are the values sessions are bound to for one attribute,
+// the most recently used first.
+type PluginBindings struct {
+	Key    string               `json:"key"`
+	Label  string               `json:"label"`
+	Values []PluginBindingValue `json:"values"`
+}
+
+// PluginBindingValue is a value, how many sessions are bound to it and when
+// one of them last made a request.
+type PluginBindingValue struct {
+	Value      string     `json:"value"`
+	Sessions   int        `json:"sessions"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }

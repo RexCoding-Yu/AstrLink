@@ -213,6 +213,27 @@ func credentialHint(secret []byte) string {
 	return string(runes[len(runes)-4:])
 }
 
+func (store *Store) BindPluginCredential(ctx context.Context, plugin, name, origin string) error {
+	id, err := pluginCredentialID(plugin, name)
+	if err != nil {
+		return err
+	}
+	if origin == "" || len(origin) > 512 {
+		return fmt.Errorf("%w: plugin credential origin", storage.ErrInvalidArgument)
+	}
+	result, err := store.db.ExecContext(ctx, `UPDATE plugin_credentials SET origin = ?, updated_at = ? WHERE id = ?`,
+		origin, store.now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return fmt.Errorf("bind plugin credential: %w", err)
+	}
+	if bound, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("read plugin credential bind result: %w", err)
+	} else if bound == 0 {
+		return fmt.Errorf("%w: plugin credential %s", storage.ErrNotFound, id)
+	}
+	return nil
+}
+
 func (store *Store) DeletePluginCredential(ctx context.Context, plugin, name string) error {
 	id, err := pluginCredentialID(plugin, name)
 	if err != nil {

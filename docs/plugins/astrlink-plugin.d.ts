@@ -36,6 +36,63 @@ declare namespace AstrLinkPlugin {
     metadata?: MetadataAttribute[];
     /** Shown as written in the dialog that enables the plugin; at most 1000 characters. */
     notice?: string;
+    /** The fields of the settings form, in order; at most 64. */
+    settings?: Setting[];
+    /** Open-source projects the plugin page credits; at most 8. */
+    credits?: Credit[];
+  }
+
+  /**
+   * A field of the settings form. `key` is where the value sits in the
+   * configuration, a dot stepping into an object, such as `quotas.skill`.
+   * The keys `$wait`, `$trusted` and `$origins` place the host's own
+   * settings and take only `group` and `advanced`.
+   */
+  type Setting =
+    | {
+        key: "$wait" | "$trusted" | "$origins";
+        group?: string;
+        advanced?: boolean;
+      }
+    | {
+        key: string;
+        /** 1 to 32 characters. */
+        label: string;
+        /**
+         * server is an address the plugin reaches: the host lets the plugin
+         * reach its origin and sends `credential` there. It has no default.
+         */
+        type: "server" | "text" | "number" | "switch" | "choice";
+        /** The heading the field sits under; at most 16 characters. */
+        group?: string;
+        /** Fields of one row sit on one line under its name; they follow one another. */
+        row?: string;
+        /** Shown behind the field's help button; at most 500 characters. */
+        help?: string;
+        /** What astrlink.config.get() returns while the configuration has no value. */
+        default?: string | number | boolean;
+        required?: boolean;
+        /** Under「更多设置」. */
+        advanced?: boolean;
+        min?: number;
+        max?: number;
+        step?: number;
+        unit?: string;
+        placeholder?: string;
+        options?: Array<{ value: string; label: string }>;
+        credential?: string;
+      };
+
+  /** An open-source project the plugin builds on or talks to. */
+  interface Credit {
+    name: string;
+    owner?: string;
+    /** An SPDX identifier, such as Apache-2.0. */
+    license?: string;
+    /** An https address. */
+    url: string;
+    /** At most 200 characters. */
+    note?: string;
   }
 
   /**

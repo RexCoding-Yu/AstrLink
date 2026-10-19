@@ -27,6 +27,10 @@ type Meta struct {
 	Metadata []MetadataAttribute `json:"metadata,omitempty"`
 	// Notice is shown, as written, in the dialog that enables the plugin.
 	Notice string `json:"notice,omitempty"`
+	// Settings are the fields of the plugin's settings form, in order.
+	Settings []Setting `json:"settings,omitempty"`
+	// Credits are the open-source projects the plugin page credits.
+	Credits []Credit `json:"credits,omitempty"`
 }
 
 // NetworkUse explains a plugin's use of the network.
@@ -153,6 +157,12 @@ func validateMeta(meta Meta, key string) error {
 	}
 	if meta.Notice != "" && !displayText(meta.Notice, 1000, "\n") {
 		return invalid("meta.notice must be at most 1000 characters without control characters other than line breaks")
+	}
+	if err := validateSettings(meta); err != nil {
+		return invalid("%v", err)
+	}
+	if err := validateCredits(meta.Credits); err != nil {
+		return invalid("%v", err)
 	}
 	return nil
 }
