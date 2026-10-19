@@ -34,6 +34,10 @@ const SERVICE_MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 // Policy changes may synchronously stop a worker for up to five seconds, and
 // model deletion also waits for download cancellation and filesystem cleanup.
 const PRIVACY_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
+// A classifier dry-run first inspects the text under the privacy policy, which
+// may take as long as a policy dry-run, then calls the classifier once (at most
+// five seconds).
+const CLASSIFIER_DRY_RUN_TIMEOUT: Duration = Duration::from_secs(40);
 // Probe and install may pin a large tokenizer/configuration set over a slow
 // connection. The installation call returns before model-weight downloading.
 const PRIVACY_MODEL_METADATA_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -60,6 +64,7 @@ const PRIVACY_MODEL_PROBE_PATH: &str = "/control/v1/privacy-models/probe";
 const LOCAL_PRIVACY_MODEL_PROBE_PATH: &str = "/control/v1/privacy-models/local/probe";
 const PRIVACY_REGEX_BUILTIN_RULES_PATH: &str = "/control/v1/privacy/regex-builtin-rules";
 const POLICY_DRY_RUN_PATH: &str = "/control/v1/policies/policy_privacy_default/dry-run";
+const CLASSIFIER_DRY_RUN_PATH: &str = "/control/v1/routing/classifier/dry-run";
 const SERVICES_PATH: &str = "/control/v1/services";
 const SERVICE_MODEL_PROBES_PATH: &str = "/control/v1/service-model-probes";
 const SERVICE_PROXY_PROBES_PATH: &str = "/control/v1/service-proxy-probes";
@@ -2859,12 +2864,7 @@ impl CoreManager {
             }
         }
         let (_, body) = self
-            .authenticated_control(
-                Method::POST,
-                "/control/v1/routing/classifier/dry-run",
-                Some(input),
-                None,
-            )
+            .authenticated_control(Method::POST, CLASSIFIER_DRY_RUN_PATH, Some(input), None)
             .await?;
         serde_json::from_slice(&body)
             .map_err(|error| format!("invalid classifier dry-run response: {error}"))
@@ -3002,6 +3002,7 @@ impl CoreManager {
                 Err(error) => {
                     if attempt == 0
                         && !is_builtin_tool_test(&method, path)
+                        && !is_classifier_dry_run(&method, path)
                         && !crate::raw_access::is_proof_request(&method, path)
                         && is_control_transport_error(&error)
                     {
@@ -3298,6 +3299,13 @@ fn is_builtin_tool_test(method: &Method, path: &str) -> bool {
         )
 }
 
+/// A classifier dry-run makes one real classifier call, and Core runs one at a
+/// time. Sending it again after a wait timed out only meets the first run still
+/// holding that slot, which Core answers with `dry_run_busy`.
+fn is_classifier_dry_run(method: &Method, path: &str) -> bool {
+    *method == Method::POST && control_path(path) == CLASSIFIER_DRY_RUN_PATH
+}
+
 /// A lowercase letter, then up to 31 lowercase letters, digits or `extra`.
 fn valid_plugin_name(value: &str, extra: char) -> bool {
     let mut chars = value.chars();
@@ -3496,6 +3504,9 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     }
     if method == Method::POST && path == POLICY_DRY_RUN_PATH {
         return PRIVACY_MUTATION_TIMEOUT;
+    }
+    if is_classifier_dry_run(method, path) {
+        return CLASSIFIER_DRY_RUN_TIMEOUT;
     }
     if (method == Method::PATCH && path == "/control/v1/policies/policy_privacy_default")
         || (method == Method::DELETE && path.starts_with("/control/v1/privacy-models/"))
@@ -6400,10 +6411,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_tool_control_waits_past_two_seconds_and_does_not_repeat_transport_failures() {
+    fn tool_tests_and_classifier_dry_runs_wait_past_two_seconds_and_do_not_repeat_transport_failures(
+    ) {
         use std::io::{BufRead, Read, Write};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        for succeeds in [true, false] {
+        for (dry_run, succeeds) in [(false, true), (false, false), (true, true), (true, false)] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
@@ -6463,14 +6475,20 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap();
-            let result = runtime.block_on(manager.builtin_tool_action("web_search".into(), "test".into(), Some(serde_json::json!({"enabled":true,"backend":"upstream","service_id":"service_test","model":"main"}))));
+            let result = if dry_run {
+                runtime.block_on(
+                    manager.classifier_dry_run(serde_json::json!({"text": "write a unit test"})),
+                )
+            } else {
+                runtime.block_on(manager.builtin_tool_action("web_search".into(), "test".into(), Some(serde_json::json!({"enabled":true,"backend":"upstream","service_id":"service_test","model":"main"}))))
+            };
             stop.store(true, Ordering::SeqCst);
             server.join().unwrap();
             assert_eq!(result.is_ok(), succeeds, "{result:?}");
             assert_eq!(
                 calls.load(Ordering::SeqCst),
                 1,
-                "a tool test must never be automatically retried"
+                "a tool test or classifier dry-run must never be automatically retried"
             );
         }
     }
@@ -6499,6 +6517,30 @@ mod tests {
                 &Method::PUT,
                 "/control/v1/builtin-tools/web_search/credential"
             ),
+            REQUEST_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn classifier_dry_runs_have_their_own_deadline_and_never_retry() {
+        assert_eq!(
+            control_request_timeout(&Method::POST, CLASSIFIER_DRY_RUN_PATH),
+            CLASSIFIER_DRY_RUN_TIMEOUT
+        );
+        assert!(is_classifier_dry_run(
+            &Method::POST,
+            CLASSIFIER_DRY_RUN_PATH
+        ));
+        assert!(!is_classifier_dry_run(
+            &Method::GET,
+            CLASSIFIER_DRY_RUN_PATH
+        ));
+        assert!(!is_classifier_dry_run(
+            &Method::POST,
+            "/control/v1/routing/classifier/credential"
+        ));
+        assert_eq!(
+            control_request_timeout(&Method::GET, "/control/v1/routing/classifier"),
             REQUEST_TIMEOUT
         );
     }
