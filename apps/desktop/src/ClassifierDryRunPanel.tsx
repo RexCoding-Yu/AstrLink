@@ -152,7 +152,15 @@ function ClassifierAnswers({ result }: { result: ClassifierDryRunResult }) {
         lowConfidence={lowConfidence}
         dimensions={result.dimensions}
       />
-      {result.fallback_reason === null ? null : (
+      {result.fallback_reason === "classifier_timeout" ? (
+        // A timeout names the limit the classifier settings set, so the
+        // preview reads as the error it is rather than a generic fallback.
+        <FormMessage tone="error" data-classifier-dry-run-timeout>
+          {t("dryRunTab.classifierTimeout", {
+            ms: result.timeout_ms ?? result.duration_ms,
+          })}
+        </FormMessage>
+      ) : result.fallback_reason === null ? null : (
         <p
           className="text-xs text-warning-foreground"
           data-classifier-dry-run-fallback

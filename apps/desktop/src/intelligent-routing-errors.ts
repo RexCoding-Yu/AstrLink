@@ -37,6 +37,7 @@ export const routingErrorCodes = {
   credential_unavailable: "credentialUnavailable",
   unavailable: "credentialStoreUnavailable",
   dry_run_busy: "dryRunBusy",
+  dry_run_timeout: "dryRunTimeout",
   invalid_dry_run: "invalidDryRun",
   unknown_dry_run_protocol: "unknownDryRunProtocol",
   // Routing settings.

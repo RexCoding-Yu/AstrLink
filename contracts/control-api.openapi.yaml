@@ -2525,7 +2525,9 @@ paths:
         The text passes the same privacy filter as production before it can
         leave, then one provider call runs with the group's effective prompt,
         labels, and timeout. Failures answer 200 with a stable
-        fallback_reason; only one dry-run may run at a time.
+        fallback_reason; only one dry-run may run at a time. The whole run is
+        bounded by the classifier timeout plus five seconds and answers 504
+        dry_run_timeout past that.
       requestBody:
         required: true
         content:
@@ -2545,6 +2547,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /control/v1/model-routing-versions/{group_id}/{version}:
     x-astrlink-implementation-status: implemented
     get:
@@ -5070,6 +5076,12 @@ components:
             description: "Privacy preflight outcome for the sample text (off, allow, warn, redact, blocked).",
           }
         duration_ms: { type: integer, minimum: 0 }
+        timeout_ms:
+          {
+            type: integer,
+            minimum: 1,
+            description: "Classifier timeout this run used, from the classifier settings. Absent when the classifier is not configured.",
+          }
         sanitized_preview:
           {
             type: string,

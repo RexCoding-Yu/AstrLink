@@ -166,6 +166,7 @@ describe("classifier settings model", () => {
           confidence: 0.82,
           fallback_reason: null,
           duration_ms: 120,
+          timeout_ms: 1500,
           sanitized_preview: "write a [EMAIL_1] parser",
         }),
       ).toEqual({
@@ -174,6 +175,7 @@ describe("classifier settings model", () => {
         confidence: 0.82,
         fallback_reason: null,
         duration_ms: 120,
+        timeout_ms: 1500,
         sanitized_preview: "write a [EMAIL_1] parser",
         decision: null,
         fields: [],
@@ -235,6 +237,8 @@ describe("classifier settings model", () => {
       const minimal = parseClassifierDryRunResult({ duration_ms: 0 });
       expect(minimal.fields).toEqual([]);
       expect(minimal.rules).toEqual([]);
+      // An unconfigured classifier was never called, so no timeout applied.
+      expect(minimal.timeout_ms).toBeNull();
     });
 
     it("reads a decision under the names the Go handler emits", () => {

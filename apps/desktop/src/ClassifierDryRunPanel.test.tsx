@@ -120,6 +120,7 @@ function classified(
     confidence: 0.9,
     fallback_reason: null,
     duration_ms: 42,
+    timeout_ms: 1000,
     sanitized_preview: "write a parser for [EMAIL_1]",
     decision: null,
     // 桥接层用 parseClassifierDryRunResult 解析响应，所以这些键在这里总是数组。
@@ -503,6 +504,46 @@ describe("dry run tab", () => {
     expect(
       container.querySelector("[data-classifier-dry-run-rules]"),
     ).toBeNull();
+  });
+
+  it("reports a classifier timeout as an error naming the configured limit", async () => {
+    bridge.getRoutingSettings.mockResolvedValue(routingSettings([codingGroup]));
+    bridge.classifierDryRun.mockResolvedValue(
+      classified({
+        category: "",
+        confidence: null,
+        fallback_reason: "classifier_timeout",
+        duration_ms: 1004,
+        timeout_ms: 1000,
+      }),
+    );
+    await render({ group: "coding-auto" });
+    await runOnce();
+
+    const timeout = container.querySelector<HTMLElement>(
+      "[data-classifier-dry-run-timeout]",
+    );
+    expect(timeout?.textContent).toBe(
+      "分类器超时：1000 ms 内没有回答。依赖它的规则按未知处理。",
+    );
+    expect(
+      container.querySelector("[data-classifier-dry-run-fallback]"),
+    ).toBeNull();
+  });
+
+  it("reports a dry run that ran out of time as an explicit error", async () => {
+    bridge.classifierDryRun.mockRejectedValue(
+      new Error(
+        'POST /control/v1/routing/classifier/dry-run returned 504: {"error":{"code":"dry_run_timeout","message":"dry-run did not finish within the classifier timeout plus 5s"}}',
+      ),
+    );
+    await render();
+    await runOnce();
+
+    expect(container.textContent).toContain(
+      "试运行超过「分类器超时时间 + 5 秒」仍没有完成，已停止。",
+    );
+    expect(bridge.classifierDryRun).toHaveBeenCalledTimes(1);
   });
 
   it("sends only the request facts that were set", async () => {

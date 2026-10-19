@@ -34,10 +34,10 @@ const SERVICE_MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 // Policy changes may synchronously stop a worker for up to five seconds, and
 // model deletion also waits for download cancellation and filesystem cleanup.
 const PRIVACY_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
-// A classifier dry-run first inspects the text under the privacy policy, which
-// may take as long as a policy dry-run, then calls the classifier once (at most
-// five seconds).
-const CLASSIFIER_DRY_RUN_TIMEOUT: Duration = Duration::from_secs(40);
+// Core ends a classifier dry-run at the classifier timeout (at most five
+// seconds) plus five seconds and answers dry_run_timeout, so this deadline
+// only catches a Core that never answers.
+const CLASSIFIER_DRY_RUN_TIMEOUT: Duration = Duration::from_secs(12);
 // Probe and install may pin a large tokenizer/configuration set over a slow
 // connection. The installation call returns before model-weight downloading.
 const PRIVACY_MODEL_METADATA_TIMEOUT: Duration = Duration::from_secs(10 * 60);
