@@ -887,6 +887,39 @@ func TestRequestRecordKeepsMetadataAndPluginRecords(t *testing.T) {
 		t.Fatalf("events = %+v", got.Events)
 	}
 
+	// A capture that ends after the request adds its record, once the
+	// request is no longer pending and while there is room.
+	written := contract.RequestPluginRecord{
+		Plugin: "powercontext", PluginVersion: "1.0.0", Hook: "observeTurn",
+		Title: "记忆写入", Status: contract.PluginRecordOK, Summary: "已写入 · 已整理成记忆", ElapsedMs: 16500,
+	}
+	if err := store.AppendRequestPluginRecords(ctx, record.ID, []contract.RequestPluginRecord{written}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.GetRequestRecord(ctx, record.ID); len(got.PluginRecords) != 1 {
+		t.Fatalf("a pending request got a capture's record: %+v", got.PluginRecords)
+	}
+	completed := record
+	completed.Status, completed.CompletedAt = contract.RequestStatusSucceeded, &ended
+	if err := store.UpsertRequestRecord(ctx, completed); err != nil {
+		t.Fatal(err)
+	}
+	for range contract.MaxRequestPluginRecords {
+		if err := store.AppendRequestPluginRecords(ctx, record.ID, []contract.RequestPluginRecord{written}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err = store.GetRequestRecord(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.PluginRecords) != contract.MaxRequestPluginRecords || !reflect.DeepEqual(got.PluginRecords[0], record.PluginRecords[0]) || !reflect.DeepEqual(got.PluginRecords[1], written) {
+		t.Fatalf("plugin records = %+v", got.PluginRecords)
+	}
+	if err := store.AppendRequestPluginRecords(ctx, record.ID, []contract.RequestPluginRecord{{Plugin: "Bad Key"}}); !errors.Is(err, storagecontract.ErrInvalidArgument) {
+		t.Fatalf("an invalid record = %v", err)
+	}
+
 	broken := record
 	broken.ID = "request_broken_event"
 	broken.Events = []contract.RequestEvent{{Kind: contract.RequestEventRouted, Plugin: "powercontext", StartedAt: started, Status: contract.RequestStatusSucceeded}}

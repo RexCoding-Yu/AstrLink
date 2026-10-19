@@ -259,6 +259,29 @@ WHERE terminal=0`); err != nil {
 	return updated, nil
 }
 
+// AppendRequestPluginRecords adds plugin records to a request record that
+// is no longer pending, such as what a capture reported after the request
+// ended, up to the records a request keeps.
+func (store *Store) AppendRequestPluginRecords(ctx context.Context, id contract.RequestID, records []contract.RequestPluginRecord) error {
+	for _, record := range records {
+		if err := record.Validate(); err != nil {
+			return fmt.Errorf("%w: plugin record: %w", storagecontract.ErrInvalidArgument, err)
+		}
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("%w: plugin record", storagecontract.ErrInvalidArgument)
+		}
+		// One statement: no read that a concurrent writer could outdate.
+		if _, err := store.db.ExecContext(ctx, `UPDATE request_records
+SET plugin_records_json = json_insert(COALESCE(NULLIF(plugin_records_json, ''), '[]'), '$[#]', json(?))
+WHERE id = ? AND status <> 'pending' AND json_array_length(COALESCE(NULLIF(plugin_records_json, ''), '[]')) < ?`,
+			string(encoded), string(id), contract.MaxRequestPluginRecords); err != nil {
+			return fmt.Errorf("append request plugin record: %w", err)
+		}
+	}
+	return nil
+}
+
 func (store *Store) GetRequestRecord(ctx context.Context, id contract.RequestID) (contract.RequestRecord, error) {
 	if err := id.Validate(); err != nil {
 		return contract.RequestRecord{}, fmt.Errorf("%w: %v", storagecontract.ErrInvalidArgument, err)

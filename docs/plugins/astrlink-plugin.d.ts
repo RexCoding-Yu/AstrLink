@@ -170,7 +170,7 @@ declare namespace AstrLinkPlugin {
     body?: string;
     /** A slot of meta.credentials. */
     credential?: string;
-    /** At most 15000; the hook's network budget can end a request sooner. Default 10000. */
+    /** At most 30000; the hook's network budget can end a request sooner. Default 10000. */
     timeoutMs?: number;
   }
 

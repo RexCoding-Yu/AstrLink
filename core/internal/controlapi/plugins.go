@@ -174,6 +174,10 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 		detail.Config = settings.Config
 	}
 	detail.PrivacyTrusted = settings.Trusted
+	detail.TurnWaitMs = settings.TurnWaitMs
+	if detail.TurnWaitMs == 0 {
+		detail.TurnWaitMs = contract.DefaultPluginTurnWaitMs
+	}
 	for _, origin := range settings.Origins {
 		detail.NetworkOrigins = append(detail.NetworkOrigins, contract.PluginNetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext, Plaintext: plugin.Plaintext(origin.Origin)})
 	}
@@ -267,6 +271,13 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 	}
 	if update.PrivacyTrusted != nil {
 		settings.Trusted = *update.PrivacyTrusted
+	}
+	if update.TurnWaitMs != nil {
+		if *update.TurnWaitMs < contract.MinPluginTurnWaitMs || *update.TurnWaitMs > contract.MaxPluginTurnWaitMs {
+			invalid("the wait for a plugin is 1000 to 5000 ms")
+			return
+		}
+		settings.TurnWaitMs = *update.TurnWaitMs
 	}
 	if update.Config != nil {
 		config := bytes.TrimSpace(update.Config)

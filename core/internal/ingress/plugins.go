@@ -41,7 +41,8 @@ func (handler *Handler) beginPlugins(request *http.Request, classified Request, 
 	}
 	accessTokenID, _ := AccessTokenIDFromContext(ctx)
 	run := handler.plugins.Begin(ctx, pluginhost.Input{
-		Protocol: classified.Protocol, Model: classified.Model, Client: string(session.clientType),
+		RequestID: session.id,
+		Protocol:  classified.Protocol, Model: classified.Model, Client: string(session.clientType),
 		Stream: classified.Streaming, Token: accessTokenID, Header: request.Header,
 		Session: string(session.sessionID), Turn: turn, Body: classified.body,
 		Inspect: handler.pluginInspector(session, classified, accessTokenID),
@@ -144,8 +145,9 @@ func (session *recordSession) injectPlugins(body *requestBodySource) {
 	session.notePlugins(session.plugins.Report())
 }
 
-// finishPlugins binds the session to the marker lines of the reply and
-// keeps the plugins' records with the request.
+// finishPlugins binds the session to the marker lines of the reply, queues
+// the captures that waited for it and keeps the plugins' records with the
+// request.
 func (session *recordSession) finishPlugins(ctx context.Context) {
 	if session == nil || session.plugins == nil {
 		return
@@ -158,7 +160,20 @@ func (session *recordSession) finishPlugins(ctx context.Context) {
 			session.metadata.Events = session.metadata.Events[:contract.MaxRequestMetadataEvents]
 		}
 	}
+	captures := session.plugins.Captures()
+	for index, record := range session.pluginRecords {
+		if state, ok := captures[record.Plugin]; ok && record.Observe != "" {
+			session.pluginRecords[index].Observe = state
+		}
+	}
 	session.notePlugins(session.plugins.Report())
+}
+
+// pluginsPersisted tells the plugins that the request record is written.
+func (session *recordSession) pluginsPersisted() {
+	if session != nil && session.plugins != nil {
+		session.plugins.Persisted()
+	}
 }
 
 // notePlugins keeps the plugins' records and their events in the gateway

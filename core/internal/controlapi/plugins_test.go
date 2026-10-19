@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
@@ -131,7 +132,8 @@ func TestPluginSettingsCredentialsAndConnectionTest(t *testing.T) {
 	path := PluginsPath + "/demo"
 
 	detail := decodeBody[contract.PluginDetail](t, controlRequest(t, handler, http.MethodGet, path, "", "", ""))
-	if string(detail.Config) != "{}" || len(detail.Credentials) != 1 || detail.Credentials[0].Configured || detail.NetworkPurpose == "" || detail.Notice == "" || len(detail.Metadata) != 1 || strings.Join(detail.Hooks, ",") != "describeStatus,testConnection" {
+	if string(detail.Config) != "{}" || len(detail.Credentials) != 1 || detail.Credentials[0].Configured || detail.NetworkPurpose == "" || detail.Notice == "" || len(detail.Metadata) != 1 ||
+		strings.Join(detail.Hooks, ",") != "describeStatus,testConnection" || detail.TurnWaitMs != contract.DefaultPluginTurnWaitMs {
 		t.Fatalf("detail = %+v", detail)
 	}
 	for _, body := range []string{
@@ -139,6 +141,8 @@ func TestPluginSettingsCredentialsAndConnectionTest(t *testing.T) {
 		`{"network_origins":[{"origin":"ftp://memory.test"}]}`,
 		`{"config":[1,2]}`,
 		`{"config":null}`,
+		`{"turn_wait_ms":999}`,
+		`{"turn_wait_ms":5001}`,
 	} {
 		if response := controlRequest(t, handler, http.MethodPatch, path, "application/json", body, ""); response.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("PATCH %s = %d %s", body, response.Code, response.Body.String())
@@ -147,15 +151,18 @@ func TestPluginSettingsCredentialsAndConnectionTest(t *testing.T) {
 	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/broken", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("enabling a failed plugin = %d", response.Code)
 	}
-	update := `{"enabled":true,"granted_capabilities":["network","storage","ui.views","network"],"network_origins":[{"origin":"` + server.URL + `/ignored/path","allow_plaintext":true}],"config":{"serverUrl":"` + server.URL + `"}}`
+	update := `{"enabled":true,"granted_capabilities":["network","storage","ui.views","network"],"network_origins":[{"origin":"` + server.URL + `/ignored/path","allow_plaintext":true}],"turn_wait_ms":3500,"config":{"serverUrl":"` + server.URL + `"}}`
 	response := controlRequest(t, handler, http.MethodPatch, path, "application/json", update, "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("PATCH = %d %s", response.Code, response.Body.String())
 	}
 	detail = decodeBody[contract.PluginDetail](t, response)
 	origin, _ := plugin.NormalizeOrigin(server.URL)
-	if !detail.Enabled || strings.Join(detail.GrantedCapabilities, ",") != "network,storage,ui.views" || len(detail.NetworkOrigins) != 1 || detail.NetworkOrigins[0] != (contract.PluginNetworkOrigin{Origin: origin}) {
+	if !detail.Enabled || strings.Join(detail.GrantedCapabilities, ",") != "network,storage,ui.views" || len(detail.NetworkOrigins) != 1 || detail.NetworkOrigins[0] != (contract.PluginNetworkOrigin{Origin: origin}) || detail.TurnWaitMs != 3500 {
 		t.Fatalf("detail after PATCH = %+v", detail)
+	}
+	if loaded := handler.plugins.Current().Plugin("demo"); loaded == nil || loaded.Settings.Wait() != 3500*time.Millisecond {
+		t.Fatalf("the plugin waits %v", loaded.Settings.Wait())
 	}
 
 	credential := path + "/credentials/token"

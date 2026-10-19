@@ -44,6 +44,14 @@ const (
 	MaxPluginOriginLength = 512
 )
 
+// Bounds of how long a request waits for a plugin's prepare hooks, the
+// turn's privacy check included.
+const (
+	DefaultPluginTurnWaitMs = 2500
+	MinPluginTurnWaitMs     = 1000
+	MaxPluginTurnWaitMs     = 5000
+)
+
 // States of a plugin in the plugin list.
 const (
 	PluginStateLoaded = "loaded"
@@ -102,13 +110,15 @@ type PluginDetail struct {
 	PluginSummary
 	NetworkPurpose string `json:"network_purpose,omitempty"`
 	// Notice is shown as written in the dialog that enables the plugin.
-	Notice         string                    `json:"notice,omitempty"`
-	Hooks          []string                  `json:"hooks"`
-	Config         json.RawMessage           `json:"config"`
-	NetworkOrigins []PluginNetworkOrigin     `json:"network_origins"`
-	PrivacyTrusted bool                      `json:"privacy_trusted"`
-	Credentials    []PluginCredentialStatus  `json:"credentials"`
-	Metadata       []PluginMetadataAttribute `json:"metadata"`
+	Notice         string                `json:"notice,omitempty"`
+	Hooks          []string              `json:"hooks"`
+	Config         json.RawMessage       `json:"config"`
+	NetworkOrigins []PluginNetworkOrigin `json:"network_origins"`
+	PrivacyTrusted bool                  `json:"privacy_trusted"`
+	// TurnWaitMs is how long a request waits for the plugin's prepare hooks.
+	TurnWaitMs  int                       `json:"turn_wait_ms"`
+	Credentials []PluginCredentialStatus  `json:"credentials"`
+	Metadata    []PluginMetadataAttribute `json:"metadata"`
 }
 
 // PluginNetworkOrigin is an address a plugin may reach.
@@ -144,6 +154,7 @@ type PluginSettingsUpdate struct {
 	GrantedCapabilities *[]string                   `json:"granted_capabilities,omitempty"`
 	NetworkOrigins      *[]PluginNetworkOriginInput `json:"network_origins,omitempty"`
 	PrivacyTrusted      *bool                       `json:"privacy_trusted,omitempty"`
+	TurnWaitMs          *int                        `json:"turn_wait_ms,omitempty"`
 	Config              json.RawMessage             `json:"config,omitempty"`
 }
 

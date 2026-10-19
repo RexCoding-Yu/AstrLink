@@ -4662,7 +4662,13 @@
     },
     "blocked": "The gateway is not running",
     "blockedHint": "Plugins load once the gateway is ready. If it has stopped, the overview shows why.",
-    "stale": "The gateway is not ready. Showing the plugins last read."
+    "stale": "The gateway is not ready. Showing the plugins last read.",
+    "wait": {
+      "label": "Wait up to",
+      "helpLabel": "About the wait",
+      "help": "The first request of each turn waits this long for the plugin, the privacy check included, then goes to the model as usual; a late result is not injected this turn. 2.5 seconds by default.",
+      "seconds": "{{value}} s"
+    }
   },
   "pluginRecords": {
     "none": "No plugin recorded anything for this request.",
@@ -4681,7 +4687,8 @@
       "timeout": "Timed out",
       "plugin_error": "Plugin error",
       "privacy_blocked": "Blocked by the privacy policy",
-      "privacy_unavailable": "The privacy check was unavailable"
+      "privacy_unavailable": "The privacy check was unavailable",
+      "search_failed": "Some searches failed; nothing matched"
     },
     "injection": "Injected",
     "placement": {
@@ -4698,10 +4705,12 @@
     "observeStates": {
       "queued": "Queued",
       "skipped_privacy": "Skipped by the privacy policy",
-      "skipped_binding_turn": "Skipped: this turn set the project",
+      "skipped_binding_turn": "Skipped: captured once the turn set the project",
       "skipped_continuation": "Skipped: not the turn's first call",
       "queue_full": "Dropped: the queue was full",
-      "disabled": "Off"
+      "disabled": "Off",
+      "awaiting_reply": "Waiting for the reply to set the project",
+      "skipped_unbound": "Skipped: the session has no project"
     },
     "truncated": "Cut to its limits",
     "metadata": "Metadata",

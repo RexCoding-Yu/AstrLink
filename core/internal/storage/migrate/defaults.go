@@ -1078,6 +1078,7 @@ END`,
     granted_capabilities_json TEXT NOT NULL DEFAULT '[]',
     network_origins_json TEXT NOT NULL DEFAULT '[]',
     privacy_trusted INTEGER NOT NULL DEFAULT 0 CHECK(privacy_trusted IN (0, 1)),
+    turn_wait_ms INTEGER NOT NULL DEFAULT 2500 CHECK(turn_wait_ms BETWEEN 1000 AND 5000),
     config_json TEXT NOT NULL DEFAULT '{}' CHECK(length(config_json) <= 65536),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

@@ -168,6 +168,7 @@ func (settings Settings) PluginSettings(ctx context.Context) (map[string]plugin.
 			Config:       record.Config,
 			Origins:      origins,
 			Trusted:      record.Trusted,
+			TurnWait:     time.Duration(record.TurnWaitMs) * time.Millisecond,
 		}
 	}
 	return all, nil

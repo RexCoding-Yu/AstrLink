@@ -313,7 +313,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		},
 	})
 	pluginHost := pluginhost.New(pluginhost.Options{
-		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Logf: logf,
+		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Records: store, Logf: logf,
 	})
 	gatewayDependencies.Plugins = pluginHost
 	// One shared inference handler backs both control-plane seams: the builtin

@@ -29,24 +29,27 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
-// Budgets of a request's plugins.
+// Budgets of a request's plugins. A request waits for each plugin as long
+// as the plugin's settings say, counted from the moment it starts the
+// plugins; the privacy check of the turn's text counts against it.
 const (
-	// TurnBudget is how long a request waits for its plugins, counted from
-	// the moment it starts them. The privacy check of the turn's text counts
-	// against it.
-	TurnBudget = 1500 * time.Millisecond
 	// sessionHookTimeout bounds prepareSession. A request stops waiting at
-	// TurnBudget, but the hook runs on: the block it computes serves the
-	// session's later calls.
+	// the plugin's wait, but the hook runs on: the block it computes serves
+	// the session's later calls.
 	sessionHookTimeout = 10 * time.Second
-	// turnHookSlack is how long prepareTurn may run past the budget, for its
-	// requests to end on their own terms; its result is no use by then.
+	// turnHookSlack is how long prepareTurn may run past the wait; its
+	// result is no use by then.
 	turnHookSlack = 500 * time.Millisecond
+	// turnNetworkMargin is the part of the wait prepareTurn keeps after its
+	// requests end, to build its result.
+	turnNetworkMargin = 100 * time.Millisecond
 	// inspectTimeout bounds the privacy check. Past the budget it still
 	// decides what observeTurn may capture.
 	inspectTimeout = 30 * time.Second
 	// bindingTimeout bounds each read and write of session bindings.
 	bindingTimeout = 500 * time.Millisecond
+	// recordAppendTimeout bounds adding a capture's record to its request.
+	recordAppendTimeout = 5 * time.Second
 )
 
 // ErrBlocked is what Input.Inspect returns when the privacy policy blocks
@@ -59,7 +62,14 @@ type Options struct {
 	Metadata *metadata.Registry
 	// Bindings keeps the sessions' metadata values.
 	Bindings storage.MetadataStore
-	Logf     func(string, ...any)
+	// Records adds what captures report to the records of their requests.
+	Records RecordAppender
+	Logf    func(string, ...any)
+}
+
+// RecordAppender adds plugin records to a request record already written.
+type RecordAppender interface {
+	AppendRequestPluginRecords(ctx context.Context, id contract.RequestID, records []contract.RequestPluginRecord) error
 }
 
 // Host runs the plugins' part in requests. It is safe for concurrent use.
@@ -70,8 +80,9 @@ type Host struct {
 	ledger   *injection.Ledger
 	sessions *sessions
 	observe  *observeQueue
+	records  RecordAppender
 	logf     func(string, ...any)
-	// budget is TurnBudget; tests shorten it.
+	// budget, when set, stands for every plugin's wait; tests shorten it.
 	budget time.Duration
 }
 
@@ -88,8 +99,28 @@ func New(options Options) *Host {
 		ledger:   injection.NewLedger(),
 		sessions: newSessions(),
 		observe:  newObserveQueue(logf),
+		records:  options.Records,
 		logf:     logf,
-		budget:   TurnBudget,
+	}
+}
+
+// turnWait is how long a request waits for candidate.
+func (host *Host) turnWait(candidate *plugin.Plugin) time.Duration {
+	if host.budget > 0 {
+		return host.budget
+	}
+	return candidate.Settings.Wait()
+}
+
+// appendRecords adds records to the written record of request id.
+func (host *Host) appendRecords(id contract.RequestID, records []contract.RequestPluginRecord) {
+	if host.records == nil || id == "" || len(records) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), recordAppendTimeout)
+	defer cancel()
+	if err := host.records.AppendRequestPluginRecords(ctx, id, records); err != nil {
+		host.logf("keep a capture's record with its request: %v", err)
 	}
 }
 
@@ -102,7 +133,10 @@ func (host *Host) Close() {
 
 // Input is a request that may run plugins.
 type Input struct {
-	Protocol contract.ProtocolID
+	// RequestID names the request's record, which captures that end after
+	// it is written add their records to.
+	RequestID contract.RequestID
+	Protocol  contract.ProtocolID
 	// Model is the model the client asked for, before any redirect.
 	Model  string
 	Client string
@@ -147,13 +181,19 @@ type Run struct {
 	reported bool
 	records  []contract.RequestPluginRecord
 	events   []contract.RequestEvent
+	// observed are the records of captures that ended before the request
+	// record was written; persisted is set once it is.
+	observed  []contract.RequestPluginRecord
+	persisted bool
 }
 
 // part is one plugin's part in a run.
 type part struct {
-	plugin      *plugin.Plugin
-	info        plugin.RequestInfo
-	view        SessionView
+	plugin *plugin.Plugin
+	info   plugin.RequestInfo
+	view   SessionView
+	// deadline is when the request stops waiting for the plugin.
+	deadline    time.Time
 	residentKey string
 	// sessionCall is prepareSession's call, nil when the cached block
 	// serves.
@@ -163,8 +203,10 @@ type part struct {
 	settle   bool
 	turnCall *hookCall
 	skip     string
-	// observe is what became of the turn's capture.
+	// observe is what became of the turn's capture; awaited is the view
+	// a capture that waits for the reply runs with.
 	observe string
+	awaited *TurnView
 }
 
 // hookCall is a hook call running in the background.
@@ -237,8 +279,9 @@ func (run *Run) plan(plugins []*plugin.Plugin) {
 			view.Meta = meta
 		}
 		current := &part{
-			plugin: candidate,
-			view:   view,
+			plugin:   candidate,
+			view:     view,
+			deadline: run.began.Add(host.turnWait(candidate)),
 			info: plugin.RequestInfo{
 				Protocol: view.Protocol, Model: view.Model, Client: view.Client, Stream: run.input.Stream,
 				Meta: view.Meta, Session: &plugin.SessionRef{ID: run.input.Session, Turn: run.input.Turn},
@@ -266,9 +309,15 @@ func (run *Run) plan(plugins []*plugin.Plugin) {
 			continue
 		}
 		if candidate.Has(plugin.HookObserveTurn) && read {
-			current.observe = "pending"
-			if state.bindingTurn != "" && state.bindingTurn == run.turnKey {
+			switch {
+			case state.bindingTurn != "" && state.bindingTurn == run.turnKey:
 				current.observe = observeSkippedBindingTurn
+			case unbound:
+				// The reply may bind the session: the capture waits for it
+				// and runs with what it binds.
+				current.observe = observeAwaiting
+			default:
+				current.observe = "pending"
 			}
 		}
 	}
@@ -311,7 +360,7 @@ func (run *Run) work() {
 	defer close(run.ready)
 	needsText := false
 	for _, current := range run.parts {
-		if current.settle && !run.userMarker && (run.prepares(current) || current.observe == "pending") {
+		if current.settle && !run.userMarker && (run.prepares(current) || current.observe == "pending" || current.observe == observeAwaiting) {
 			needsText = true
 		}
 	}
@@ -321,7 +370,7 @@ func (run *Run) work() {
 	checked, skip := run.inspect()
 	run.mutex.Lock()
 	defer run.mutex.Unlock()
-	late := time.Since(run.began) >= run.host.budget
+	now := time.Now()
 	for _, current := range run.parts {
 		if !current.settle || run.userMarker {
 			continue
@@ -339,24 +388,60 @@ func (run *Run) work() {
 			switch {
 			case reason != "":
 				current.skip = reason
-			case late:
+			case !now.Before(current.deadline):
 				current.skip = contract.PluginSkipTimeout
 			default:
 				current.turnCall = run.startTurn(current, turnView)
 			}
 		}
-		if current.observe != "pending" {
-			continue
-		}
 		switch {
+		case current.observe != "pending" && current.observe != observeAwaiting:
 		case reason != "":
 			current.observe = observeSkippedPrivacy
-		case run.host.observe.push(observeJob{plugin: current.plugin, view: turnView, info: current.info}):
-			current.observe = observeQueued
+		case current.observe == observeAwaiting:
+			current.awaited = &turnView
 		default:
-			current.observe = observeQueueFull
+			current.observe = run.queue(current, turnView)
 		}
 	}
+}
+
+// queue queues the plugin's capture of the turn and returns what became of
+// it. The caller holds run.mutex.
+func (run *Run) queue(current *part, view TurnView) string {
+	job := observeJob{plugin: current.plugin, view: view, info: current.info, deliver: run.deliverObserve}
+	if run.host.observe.push(job) {
+		return observeQueued
+	}
+	return observeQueueFull
+}
+
+// deliverObserve keeps what a capture reported with its request: in the
+// request record while it is still to be written, added to the written
+// record otherwise.
+func (run *Run) deliverObserve(record contract.RequestPluginRecord) {
+	run.mutex.Lock()
+	if !run.persisted {
+		run.observed = append(run.observed, record)
+		run.mutex.Unlock()
+		return
+	}
+	run.mutex.Unlock()
+	run.host.appendRecords(run.input.RequestID, []contract.RequestPluginRecord{record})
+}
+
+// Persisted tells the run that its request record is written: the records
+// of captures that end later are added to it.
+func (run *Run) Persisted() {
+	if run == nil {
+		return
+	}
+	run.mutex.Lock()
+	run.persisted = true
+	late := run.observed
+	run.observed = nil
+	run.mutex.Unlock()
+	run.host.appendRecords(run.input.RequestID, late)
 }
 
 // inspect returns the turn's text as a plugin the user does not trust may
@@ -397,13 +482,12 @@ func (run *Run) inspect() (UserText, string) {
 
 func (run *Run) startTurn(current *part, view TurnView) *hookCall {
 	call := &hookCall{done: make(chan struct{})}
-	deadline := run.began.Add(run.host.budget + turnHookSlack)
 	go func() {
 		defer close(call.done)
-		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		ctx, cancel := context.WithDeadline(context.Background(), current.deadline.Add(turnHookSlack))
 		defer cancel()
 		raw, info, err := current.plugin.Call(ctx, plugin.HookPrepareTurn, view, plugin.CallOptions{
-			Request: &current.info, NetworkBudget: time.Until(deadline),
+			Request: &current.info, NetworkBudget: max(time.Until(current.deadline)-turnNetworkMargin, 0),
 		})
 		call.info, call.err = info, err
 		if err == nil {
@@ -462,27 +546,46 @@ func (run *Run) Inject(body []byte) []byte {
 	return applied.Body
 }
 
-// wait waits for the plugins until the turn's budget runs out.
+// wait waits for each plugin until its wait runs out.
 func (run *Run) wait() {
-	ctx, cancel := context.WithDeadline(context.Background(), run.began.Add(run.host.budget))
-	defer cancel()
-	select {
-	case <-run.ready:
-	case <-ctx.Done():
+	last := run.began
+	for _, current := range run.parts {
+		last = later(last, current.deadline)
+	}
+	if !waitUntil(run.ready, last) {
 		return
 	}
 	for _, current := range run.parts {
 		for _, call := range []*hookCall{current.sessionCall, current.turnCall} {
-			if call == nil {
-				continue
-			}
-			select {
-			case <-call.done:
-			case <-ctx.Done():
-				return
+			if call != nil {
+				waitUntil(call.done, current.deadline)
 			}
 		}
 	}
+}
+
+// waitUntil waits for done until deadline and reports whether it came.
+func waitUntil(done <-chan struct{}, deadline time.Time) bool {
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // finished returns the call's result when it came back without error.
@@ -510,8 +613,8 @@ func (run *Run) Report() ([]contract.RequestPluginRecord, []contract.RequestEven
 	if !run.reported {
 		run.report(make([]injected, len(run.parts)), false)
 	}
-	records, events := run.records, run.events
-	run.records, run.events = nil, nil
+	records, events := append(run.records, run.observed...), run.events
+	run.records, run.events, run.observed = nil, nil, nil
 	return records, events
 }
 

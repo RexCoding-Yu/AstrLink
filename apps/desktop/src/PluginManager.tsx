@@ -51,6 +51,7 @@ import { PageHeader } from "./PageHeader";
 import {
   configBytes,
   MAX_PLUGIN_CONFIG_BYTES,
+  PLUGIN_TURN_WAITS,
   type PluginDetail,
   type PluginList,
   type PluginLoadError,
@@ -405,6 +406,11 @@ export function PluginManager({
                     updatePlugin(detail.key, { privacy_trusted: trusted }),
                   )
                 }
+                onWait={(waitMs) =>
+                  void apply(() =>
+                    updatePlugin(detail.key, { turn_wait_ms: waitMs }),
+                  )
+                }
                 status={status}
                 statusError={statusError}
                 tab={tab}
@@ -529,6 +535,7 @@ function PluginDetailPane({
   onRefreshStatus,
   onOrigins,
   onTrusted,
+  onWait,
   onCredentialSave,
   onCredentialClear,
   onConfig,
@@ -550,6 +557,7 @@ function PluginDetailPane({
     origins: Array<{ origin: string; allow_plaintext: boolean }>,
   ) => Promise<boolean>;
   onTrusted: (trusted: boolean) => void;
+  onWait: (waitMs: number) => void;
   onCredentialSave: (
     name: string,
     input: { secret: string; origin: string },
@@ -687,7 +695,12 @@ function PluginDetailPane({
             data-tab-scroller
             value="config"
           >
-            <ConfigTab busy={busy} detail={detail} onSave={onConfig} />
+            <ConfigTab
+              busy={busy}
+              detail={detail}
+              onSave={onConfig}
+              onWait={onWait}
+            />
           </TabsContent>
           <TabsContent
             className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
@@ -1143,10 +1156,12 @@ function ConfigTab({
   detail,
   busy,
   onSave,
+  onWait,
 }: {
   detail: PluginDetail;
   busy: boolean;
   onSave: (config: Record<string, unknown>) => Promise<boolean>;
+  onWait: (waitMs: number) => void;
 }) {
   const t = useT();
   const saved = useMemo(
@@ -1182,6 +1197,35 @@ function ConfigTab({
       className="flex min-h-0 flex-1 flex-col gap-2"
       data-testid="plugin-config"
     >
+      {detail.hooks.includes("prepareTurn") ||
+      detail.hooks.includes("prepareSession") ? (
+        <section className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+          <div className="flex items-center gap-1">
+            <Label className="text-xs font-medium" htmlFor="plugin-wait">
+              {t("plugins.wait.label")}
+            </Label>
+            <HelpPopover label={t("plugins.wait.helpLabel")}>
+              <p>{t("plugins.wait.help")}</p>
+            </HelpPopover>
+          </div>
+          <Select
+            disabled={busy}
+            onValueChange={(value) => onWait(Number(value))}
+            value={String(detail.turn_wait_ms)}
+          >
+            <SelectTrigger className="w-28" id="plugin-wait">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PLUGIN_TURN_WAITS.map((waitMs) => (
+                <SelectItem key={waitMs} value={String(waitMs)}>
+                  {t("plugins.wait.seconds", { value: waitMs / 1000 })}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </section>
+      ) : null}
       <div className="flex items-center gap-1">
         <h3 className="text-xs font-medium">{t("plugins.config.title")}</h3>
         <HelpPopover label={t("plugins.config.helpLabel")}>

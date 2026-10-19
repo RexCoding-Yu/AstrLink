@@ -28,10 +28,16 @@ func TestPluginSettingsRoundTrip(t *testing.T) {
 		Capabilities: []string{"context.inject", "network"},
 		Origins:      []storagecontract.PluginOrigin{{Origin: "http://192.0.2.1:9090", AllowPlaintext: true}},
 		Trusted:      true,
+		TurnWaitMs:   4000,
 		Config:       json.RawMessage(`{"serverUrl":"http://192.0.2.1:9090"}`),
 	}
 	if err := store.PutPluginSettings(ctx, record); err != nil {
 		t.Fatal(err)
+	}
+	for _, wait := range []int{999, 5001} {
+		if err := store.PutPluginSettings(ctx, storagecontract.PluginSettingsRecord{Key: "slow", TurnWaitMs: wait}); !errors.Is(err, storagecontract.ErrInvalidArgument) {
+			t.Fatalf("a wait of %d ms: %v", wait, err)
+		}
 	}
 	if err := store.PutPluginSettings(ctx, storagecontract.PluginSettingsRecord{Key: "team-rules"}); err != nil {
 		t.Fatal(err)
@@ -53,10 +59,10 @@ func TestPluginSettingsRoundTrip(t *testing.T) {
 		t.Fatalf("ListPluginSettings = %+v", records)
 	}
 	got := records[0]
-	if !got.Enabled || !got.Trusted || !slices.Equal(got.Capabilities, record.Capabilities) || !slices.Equal(got.Origins, record.Origins) || string(got.Config) != string(record.Config) || got.CreatedAt.IsZero() {
+	if !got.Enabled || !got.Trusted || got.TurnWaitMs != 4000 || !slices.Equal(got.Capabilities, record.Capabilities) || !slices.Equal(got.Origins, record.Origins) || string(got.Config) != string(record.Config) || got.CreatedAt.IsZero() {
 		t.Fatalf("settings = %+v", got)
 	}
-	if empty := records[1]; empty.Enabled || empty.Capabilities == nil || len(empty.Capabilities) != 0 || string(empty.Config) != "{}" {
+	if empty := records[1]; empty.Enabled || empty.Capabilities == nil || len(empty.Capabilities) != 0 || string(empty.Config) != "{}" || empty.TurnWaitMs != contract.DefaultPluginTurnWaitMs {
 		t.Fatalf("default settings = %+v", empty)
 	}
 }

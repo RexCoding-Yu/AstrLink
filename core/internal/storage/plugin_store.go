@@ -21,10 +21,13 @@ type PluginSettingsRecord struct {
 	// Origins are the addresses the plugin may reach over the network.
 	Origins []PluginOrigin
 	// Trusted skips the privacy check of what the host gives the plugin.
-	Trusted   bool
-	Config    json.RawMessage
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Trusted bool
+	// TurnWaitMs is how long a request waits for the plugin's prepare
+	// hooks; 0 stores the default.
+	TurnWaitMs int
+	Config     json.RawMessage
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // PluginOrigin is an address a plugin may reach: scheme, host and port.

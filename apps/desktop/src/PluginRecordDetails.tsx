@@ -20,6 +20,7 @@ const knownSkipReasons = new Set([
   "no_project",
   "short_query",
   "no_hits",
+  "search_failed",
   "server_unavailable",
   "timeout",
   "plugin_error",
@@ -29,6 +30,8 @@ const knownSkipReasons = new Set([
 
 const knownObserve = new Set([
   "queued",
+  "awaiting_reply",
+  "skipped_unbound",
   "skipped_privacy",
   "skipped_binding_turn",
   "skipped_continuation",
@@ -58,11 +61,11 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
   }
   return (
     <div className="grid min-w-0 gap-4" data-testid="plugin-records">
-      {records.map((entry) => (
+      {records.map((entry, index) => (
         <section
           className="grid min-w-0 gap-2"
           data-testid="plugin-record"
-          key={`${entry.plugin}:${entry.hook}`}
+          key={`${entry.plugin}:${entry.hook}:${index}`}
         >
           <header className="flex min-w-0 flex-wrap items-center gap-2">
             <strong className="truncate text-xs font-medium">

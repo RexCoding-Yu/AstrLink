@@ -2,6 +2,11 @@
 // puts its profile in the system prompt, and captures what the user typed.
 // It talks to PowerContext 1.3 or later through astrlink.http.fetch, which
 // reaches only the origins the user allows and adds the token itself.
+//
+// PowerContext (https://github.com/oceanbase/powercontext) is open source,
+// by OceanBase, under the Apache License 2.0. This is not an official
+// PowerContext plugin: it uses the server's public HTTP API and includes none
+// of PowerContext's code.
 
 interface Config {
   /** Must be one of the origins allowed on the plugin page. */
@@ -20,8 +25,6 @@ interface Config {
   askProject?: boolean;
   /** Known project names to suggest when asking; they reach the upstream model. */
   suggestProjects?: number;
-  /** Ask the server to process a capture at once; PowerContext advises against it. */
-  flushOnCapture?: boolean;
 }
 
 interface SearchItem {
@@ -71,6 +74,12 @@ const DEFAULT_QUOTAS: Record<string, number> = {
   "topic-memory": 3,
   skill: 2,
 };
+const FAMILY_LABELS: Record<string, string> = {
+  "atomic-memory": "原子记忆",
+  "topic-memory": "主题记忆",
+  experience: "经验",
+  skill: "技能",
+};
 const SOURCE_LABELS: Record<string, string> = {
   header: "请求头",
   session: "会话标记",
@@ -83,10 +92,25 @@ const FETCH_ERRORS: Record<string, string> = {
   budget: "超出等待时间",
   too_large: "响应过大",
 };
-// Searches and the profile snapshot run while the request waits, at most
-// 1.5 s in all; the host cuts a request off sooner when that time runs out.
-// Parallel searches queue on the server, so each gets most of the wait.
-const WAIT_TIMEOUT_MS = 1400;
+// Searches and the profile snapshot run while the request waits, as long as
+// the plugin page says; the host ends them in time, so their own limit only
+// bounds a request that hangs.
+const SEARCH_TIMEOUT_MS = 5000;
+// These families embed the query before they search, which can take seconds;
+// a search by words alone runs beside each, for when the embedding is late.
+const TEXT_FALLBACK = ["atomic-memory", "topic-memory"];
+// PowerContext's text search takes at most 64 analyzed terms. 1.3 counts
+// each word of letters or digits once and a run of n Han characters as n
+// characters and n - 1 pairs; counting any other character like Han never
+// finds fewer, which keeps the query in.
+const MAX_QUERY_TERMS = 60;
+// A capture has 30 s: the project's scope, the capture itself, then the
+// processing that turns it into memory, which takes PowerContext 10 s or more.
+const CAPTURE_BUDGET_MS = 28000;
+const FLUSH_ATTEMPTS = 3;
+// A first processing call often fails where the next succeeds, so one call
+// waits at most this long and leaves time to try again.
+const FLUSH_TIMEOUT_MS = 15000;
 
 function config(): Config {
   return astrlink.config.get() as Config;
@@ -113,7 +137,7 @@ function request(
   method: "GET" | "POST",
   path: string,
   json?: unknown,
-  timeoutMs = 1000,
+  timeoutMs = SEARCH_TIMEOUT_MS,
 ): AstrLinkPlugin.HttpRequest {
   const base = (cfg.serverUrl ?? "").replace(/\/+$/, "");
   const sent: AstrLinkPlugin.HttpRequest = {
@@ -208,13 +232,7 @@ export function prepareSession(
   const scope = scopeFor(cfg, project.value);
   if (scope === null) return undefined;
   const response = astrlink.http.fetch(
-    request(
-      cfg,
-      "GET",
-      "/v1/scopes/" + scope + "/artifacts/profile?limit=1",
-      undefined,
-      WAIT_TIMEOUT_MS,
-    ),
+    request(cfg, "GET", "/v1/scopes/" + scope + "/artifacts/profile?limit=1"),
   );
   const items =
     response.status === 200
@@ -249,23 +267,94 @@ function textOf(family: string, content: Record<string, string>): string {
   return content.text ?? "";
 }
 
-function searchBody(cfg: Config, family: string, query: string, limit: number) {
+// textOnly searches by words alone, without the semantic admission that
+// needs an embedding.
+function searchBody(
+  cfg: Config,
+  family: string,
+  query: string,
+  limit: number,
+  textOnly = false,
+) {
   // 1.3 refuses include_scores, min_score and admission for atomic-memory.
-  if (family === "atomic-memory") return { query, limit };
-  const body: Record<string, unknown> = { query, limit, include_scores: true };
-  if (family === "topic-memory" && cfg.minSimilarity !== undefined)
+  const body: Record<string, unknown> = { query, limit };
+  if (textOnly) body.mode = "text";
+  if (family === "atomic-memory") return body;
+  body.include_scores = true;
+  if (family === "topic-memory" && cfg.minSimilarity !== undefined && !textOnly)
     body.admission = { min_semantic_similarity: cfg.minSimilarity };
   return body;
 }
 
-// A short reply ("继续", "好的") searches with the previous input too.
+const SEPARATOR =
+  /[\s\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e\u2000-\u206f\u3000-\u3004\u3008-\u303f\uff00-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]/;
+const ASCII_WORD = /[0-9A-Za-z]/;
+
+// cost is what one character adds to the terms of text, scanned in either
+// direction; run is the kind of the run it continues.
+function cost(char: string, run: string): { terms: number; run: string } {
+  if (SEPARATOR.test(char)) return { terms: 0, run: "" };
+  if (ASCII_WORD.test(char))
+    return { terms: run === "word" ? 0 : 1, run: "word" };
+  return { terms: run === "han" ? 2 : 1, run: "han" };
+}
+
+// bound keeps text within limit terms: its start, and its end, where a long
+// message often says what it asks.
+function bound(text: string, limit: number): { text: string; terms: number } {
+  let head = 0;
+  let used = 0;
+  let run = "";
+  for (; head < text.length; head++) {
+    const next = cost(text[head], run);
+    if (used + next.terms > Math.ceil(limit / 2)) break;
+    used += next.terms;
+    run = next.run;
+  }
+  let total = used;
+  for (let index = head; index < text.length; index++) {
+    const next = cost(text[index], run);
+    total += next.terms;
+    run = next.run;
+  }
+  if (total <= limit) return { text: text.trim(), terms: total };
+  let tail = text.length;
+  run = "";
+  for (let index = text.length - 1; index >= head; index--) {
+    const next = cost(text[index], run);
+    if (used + next.terms > limit) break;
+    used += next.terms;
+    run = next.run;
+    tail = index;
+  }
+  const start = text.slice(0, head).trim();
+  const end = text.slice(tail).trim();
+  return { text: end === "" ? start : start + "\n" + end, terms: used };
+}
+
+// A short reply ("继续", "好的") searches with the previous input too, as much
+// of it as the terms left allow.
 function buildQuery(turn: AstrLinkPlugin.TurnView): string {
   const typed = turn.user.typed.trim();
-  const text =
-    typed.length < 12 && turn.user.previous
-      ? turn.user.previous + "\n" + typed
-      : typed;
-  return text.slice(0, 2000);
+  const own = bound(typed, MAX_QUERY_TERMS);
+  if (typed.length >= 12 || !turn.user.previous) return own.text;
+  const before = bound(turn.user.previous, MAX_QUERY_TERMS - own.terms);
+  return before.text === "" ? own.text : before.text + "\n" + own.text;
+}
+
+// Why a request failed, as the plugin page says it.
+function failure(response: AstrLinkPlugin.HttpResponse): string {
+  if (response.error) return FETCH_ERRORS[response.error] ?? response.error;
+  const error = (
+    response.json as {
+      error?: {
+        message?: string;
+        details?: { errors?: Array<{ msg?: string }> };
+      };
+    } | null
+  )?.error;
+  const detail = error?.details?.errors?.[0]?.msg ?? error?.message ?? "";
+  return "HTTP " + response.status + (detail ? "：" + detail.slice(0, 80) : "");
 }
 
 // The first call of each turn: one search per family, in parallel. The host
@@ -297,38 +386,64 @@ export function prepareTurn(
   }
   const quotas: Record<string, number> = { ...DEFAULT_QUOTAS, ...cfg.quotas };
   const families = Object.keys(quotas).filter((family) => quotas[family] > 0);
-  const batch = families.map((family) =>
-    request(
-      cfg,
-      "POST",
-      "/v1/scopes/" + scope + "/artifacts/" + family + "/search",
-      searchBody(cfg, family, query, quotas[family]),
-      WAIT_TIMEOUT_MS,
-    ),
-  );
-  if (checkVersion) batch.push(request(cfg, "GET", "/v1/server-info"));
+  // Each family's search, and beside the slow ones a search by words alone.
+  const batch: AstrLinkPlugin.HttpRequest[] = [];
+  const searches = families.map((family) => {
+    const path = "/v1/scopes/" + scope + "/artifacts/" + family + "/search";
+    const at =
+      batch.push(
+        request(
+          cfg,
+          "POST",
+          path,
+          searchBody(cfg, family, query, quotas[family]),
+        ),
+      ) - 1;
+    const textAt = TEXT_FALLBACK.includes(family)
+      ? batch.push(
+          request(
+            cfg,
+            "POST",
+            path,
+            searchBody(cfg, family, query, quotas[family], true),
+          ),
+        ) - 1
+      : -1;
+    return { family, at, textAt };
+  });
+  const versionAt = checkVersion
+    ? batch.push(request(cfg, "GET", "/v1/server-info")) - 1
+    : -1;
   const responses = astrlink.http.fetch(batch);
-  if (checkVersion && !noteVersion(responses[families.length]))
+  if (versionAt >= 0 && !noteVersion(responses[versionAt]))
     return { skip: "server_unavailable" };
   const minScore = cfg.minScore ?? {};
   const items: string[] = [];
   const rows: Array<Array<string | number>> = [];
   let failed = 0;
-  families.forEach((family, index) => {
-    const response = responses[index];
+  let byText = 0;
+  searches.forEach(({ family, at, textAt }) => {
+    const label = FAMILY_LABELS[family] ?? family;
+    const full = responses[at];
+    const words = textAt >= 0 ? responses[textAt] : undefined;
+    const response =
+      full.status !== 200 && words?.status === 200 ? words : full;
     if (response.status !== 200) {
       failed++;
       rows.push([
-        family,
+        label,
         quotas[family],
         0,
         0,
         response.took_ms + " ms",
-        response.error
-          ? (FETCH_ERRORS[response.error] ?? response.error)
-          : "HTTP " + response.status,
+        failure(full),
       ]);
       return;
+    }
+    const notes: string[] = [];
+    if (response === words) {
+      byText++;
+      notes.push("完整检索" + failure(full) + "，用了关键词检索的结果");
     }
     const results = (response.json as { results?: SearchItem[] }).results ?? [];
     // Only families that score can be cut by score; atomic-memory relies on
@@ -355,19 +470,15 @@ export function prepareTurn(
         );
     }
     const dropped = results.length - kept.length;
-    const note =
-      family === "atomic-memory"
-        ? "无分数"
-        : dropped > 0
-          ? "低于阈值 " + floor + "，滤掉 " + dropped + " 条"
-          : "";
+    if (dropped > 0)
+      notes.push("低于阈值 " + floor + "，滤掉 " + dropped + " 条");
     rows.push([
-      family,
+      label,
       quotas[family],
       results.length,
       kept.length,
       response.took_ms + " ms",
-      note,
+      notes.join("；"),
     ]);
   });
   const requested = families.reduce((sum, family) => sum + quotas[family], 0);
@@ -380,7 +491,8 @@ export function prepareTurn(
       items.length +
       "/" +
       requested +
-      (failed > 0 ? " · " + failed + " 个检索失败" : ""),
+      (failed > 0 ? " · " + failed + " 个检索失败" : "") +
+      (byText > 0 ? " · " + byText + " 个只用关键词" : ""),
     view: [
       {
         type: "kv",
@@ -393,18 +505,24 @@ export function prepareTurn(
               (SOURCE_LABELS[project.source] ?? project.source) +
               "）",
           },
-          { label: "Scope", value: scope, mono: true },
         ],
       },
       {
         type: "table",
-        columns: ["家族", "请求", "返回", "保留", "耗时", "说明"],
+        columns: ["类型", "请求", "返回", "保留", "耗时", "说明"],
         rows,
       },
     ],
   };
   if (items.length === 0)
-    return { skip: allFailed ? "server_unavailable" : "no_hits", record };
+    return {
+      skip: allFailed
+        ? "server_unavailable"
+        : failed > 0
+          ? "search_failed"
+          : "no_hits",
+      record,
+    };
   return {
     context: { open: "<project-memory>", items, close: "</project-memory>" },
     record,
@@ -412,8 +530,11 @@ export function prepareTurn(
 }
 
 // Once per turn, after the request: what the user typed, never what was
-// injected. The host calls it only after its privacy check, with the checked
-// text.
+// injected. The host calls it after its privacy check, with the checked text,
+// and for a session without a project only once the reply bound one. The
+// project's scope comes first, then the capture, then the processing that
+// turns it into memory; what processing leaves undone, the project's next
+// capture takes up again.
 export function observeTurn(
   turn: AstrLinkPlugin.TurnView,
 ): AstrLinkPlugin.ObserveTurnResult | undefined {
@@ -427,9 +548,12 @@ export function observeTurn(
     text.startsWith("/")
   )
     return undefined;
-  if (!serverReady(cfg)) return undefined;
+  const started = astrlink.clock.now();
+  if (!serverReady(cfg))
+    return written(project.value, "failed", "写入失败：服务器不可用");
   const scope = scopeFor(cfg, project.value);
-  if (scope === null) return undefined;
+  if (scope === null)
+    return written(project.value, "failed", "写入失败：没能在服务器上建项目");
   const response = astrlink.http.fetch(
     request(
       cfg,
@@ -460,37 +584,137 @@ export function observeTurn(
       10000,
     ),
   );
-  if (
-    cfg.flushOnCapture === true &&
-    response.status >= 200 &&
-    response.status < 300
-  )
-    astrlink.http.fetch(
-      request(cfg, "POST", "/v1/memory/flush", { scope_id: scope }, 10000),
+  if (response.status < 200 || response.status >= 300)
+    return written(project.value, "failed", "写入失败：" + failure(response));
+  const position = (response.json as { position?: number } | null)?.position;
+  if (typeof position === "number") {
+    const pending = astrlink.store.get("pending:" + scope);
+    astrlink.store.set(
+      "pending:" + scope,
+      Math.max(position, typeof pending === "number" ? pending : 0),
     );
-  return undefined;
+  }
+  const processed = flush(cfg, scope, started);
+  if (processed.done)
+    return written(project.value, "ok", "已写入 · 已整理成记忆");
+  if (processed.late)
+    return written(
+      project.value,
+      "skipped",
+      "已写入 · 整理超时，下一轮接着整理",
+    );
+  if (processed.error !== "")
+    return written(
+      project.value,
+      "failed",
+      "已写入 · 整理失败：" + processed.error,
+    );
+  return written(
+    project.value,
+    "skipped",
+    "已写入 · 整理还没完成，下一轮接着整理",
+  );
+}
+
+// flush asks the server to turn the scope's waiting captures into memory,
+// until it reports them done or the capture's time runs out.
+function flush(
+  cfg: Config,
+  scope: string,
+  started: number,
+): { done: boolean; error: string; late: boolean } {
+  const pending = astrlink.store.get("pending:" + scope);
+  if (typeof pending !== "number")
+    return { done: true, error: "", late: false };
+  let error = "";
+  let late = false;
+  for (let attempt = 0; attempt < FLUSH_ATTEMPTS; attempt++) {
+    const left = CAPTURE_BUDGET_MS - (astrlink.clock.now() - started);
+    if (left < 2000) break;
+    const response = astrlink.http.fetch(
+      request(
+        cfg,
+        "POST",
+        "/v1/memory/flush",
+        { scope_id: scope },
+        Math.min(left, FLUSH_TIMEOUT_MS),
+      ),
+    );
+    if (response.status !== 200) {
+      error = failure(response);
+      late = response.error === "timeout" || response.error === "budget";
+      continue;
+    }
+    error = "";
+    late = false;
+    const cursor = (response.json as { current_cursor?: number } | null)
+      ?.current_cursor;
+    if (typeof cursor === "number" && cursor >= pending) {
+      astrlink.store.delete("pending:" + scope);
+      return { done: true, error: "", late: false };
+    }
+  }
+  return { done: false, error, late };
+}
+
+// written is the capture's record, and what the overview says of the last one.
+function written(
+  project: string,
+  status: "ok" | "skipped" | "failed",
+  summary: string,
+): AstrLinkPlugin.ObserveTurnResult {
+  astrlink.store.set("last-write", {
+    at: astrlink.clock.now(),
+    project,
+    status,
+    summary,
+  });
+  return {
+    record: {
+      title: "记忆写入",
+      status,
+      summary,
+      view: [{ type: "kv", items: [{ label: "项目", value: project }] }],
+    },
+  };
+}
+
+function ago(at: number): string {
+  const minutes = Math.floor((astrlink.clock.now() - at) / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return minutes + " 分钟前";
+  if (minutes < 1440) return Math.floor(minutes / 60) + " 小时前";
+  return Math.floor(minutes / 1440) + " 天前";
 }
 
 // The plugin page's overview: projects and their scopes, and the ask the
 // model receives.
 export function describeStatus(): AstrLinkPlugin.ViewBlock[] {
   const cfg = config();
-  const rows = astrlink.store
-    .keys("scope:")
-    .map((key) => [key.slice(6), String(astrlink.store.get(key))]);
+  const rows = astrlink.store.keys("scope:").map((key) => [key.slice(6)]);
+  const items: Array<{ label: string; value: string; mono?: boolean }> = [
+    { label: "服务器", value: cfg.serverUrl ?? "未设置 serverUrl", mono: true },
+  ];
+  const last = astrlink.store.get("last-write") as {
+    at: number;
+    project: string;
+    summary: string;
+  } | null;
+  if (last !== null)
+    items.push({
+      label: "最近写入",
+      value: last.project + "：" + last.summary + " · " + ago(last.at),
+    });
+  const waiting = astrlink.store.keys("pending:").length;
+  if (waiting > 0)
+    items.push({
+      label: "待整理",
+      value: waiting + " 个项目有记下的原文还没整理成记忆",
+    });
   const blocks: AstrLinkPlugin.ViewBlock[] = [
-    {
-      type: "kv",
-      items: [
-        {
-          label: "服务器",
-          value: cfg.serverUrl ?? "未设置 serverUrl",
-          mono: true,
-        },
-      ],
-    },
+    { type: "kv", items },
     rows.length > 0
-      ? { type: "table", columns: ["项目", "PowerContext scope"], rows }
+      ? { type: "table", columns: ["项目"], rows }
       : { type: "text", text: "还没有绑定过项目。" },
   ];
   if (cfg.askProject !== false)
@@ -533,7 +757,14 @@ export function testConnection(): AstrLinkPlugin.TestConnectionResult {
     view: [
       {
         type: "kv",
-        items: [{ label: "可检索", value: searchable.join(" / ") }],
+        items: [
+          {
+            label: "可检索",
+            value: searchable
+              .map((family) => FAMILY_LABELS[family])
+              .join(" / "),
+          },
+        ],
       },
     ],
   };

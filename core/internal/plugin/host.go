@@ -24,7 +24,7 @@ const (
 	maxParallelFetches = 8
 	// MaxFetchTimeout bounds one request; the call's network budget and
 	// deadline bound it further.
-	MaxFetchTimeout     = 15 * time.Second
+	MaxFetchTimeout     = 30 * time.Second
 	defaultFetchTimeout = 10 * time.Second
 	// MaxFetchBodyBytes bounds a request body, and MaxFetchResponseBytes a
 	// response body; a Fetcher answers FetchTooLarge past it.

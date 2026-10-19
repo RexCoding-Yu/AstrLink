@@ -410,6 +410,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		session.finishPlugins(request.Context())
 		// Never delay or fail the client response on persistence errors.
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
+		session.pluginsPersisted()
 	}()
 
 	// One read serves model redirects, channel binding and discovery.
