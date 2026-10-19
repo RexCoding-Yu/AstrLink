@@ -177,6 +177,36 @@ describe("PluginManager", () => {
     });
   }
 
+  it("says the gateway is not running instead of loading forever", async () => {
+    await act(async () => {
+      reactRoot.render(
+        <PluginManager coreSessionKey="session-1" isReady={false} />,
+      );
+    });
+    expect(bridgeMocks.listPlugins).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("网关没有运行");
+    expect(document.body.textContent).not.toContain("正在加载插件");
+    // Once the gateway is ready the list loads; when it stops again the list
+    // stays, marked as the last one read.
+    await act(async () => {
+      reactRoot.render(<PluginManager coreSessionKey="session-1" isReady />);
+    });
+    expect(
+      document.querySelectorAll('[data-testid="plugin-row"]'),
+    ).toHaveLength(2);
+    await act(async () => {
+      reactRoot.render(
+        <PluginManager coreSessionKey="session-1" isReady={false} />,
+      );
+    });
+    expect(
+      document.querySelectorAll('[data-testid="plugin-row"]'),
+    ).toHaveLength(2);
+    expect(document.body.textContent).toContain(
+      "网关尚未就绪，当前显示上次读取的插件。",
+    );
+  });
+
   it("lists plugins and shows why one failed to load", async () => {
     await render();
     const rows = document.querySelectorAll('[data-testid="plugin-row"]');
