@@ -45,6 +45,8 @@ export interface PluginNetworkOrigin {
   allow_plaintext: boolean;
   /** Plain http to a host other than this machine: it needs the user's consent. */
   plaintext: boolean;
+  /** The server setting the origin comes from; the user's own have none. */
+  setting?: string;
 }
 
 export interface PluginCredentialStatus {
@@ -74,6 +76,56 @@ export interface PluginDetail extends PluginSummary {
   turn_wait_ms: number;
   credentials: PluginCredentialStatus[];
   metadata: PluginMetadataAttribute[];
+  /** The fields of the plugin's settings form, in order. */
+  settings: PluginSetting[];
+  /** Open-source projects the plugin credits. */
+  credits: PluginCredit[];
+}
+
+/** The host's own settings a plugin may place in its form. */
+export const HOST_SETTINGS = ["$wait", "$trusted", "$origins"] as const;
+export type HostSettingKey = (typeof HOST_SETTINGS)[number];
+
+export type PluginSettingType =
+  | "server"
+  | "text"
+  | "number"
+  | "switch"
+  | "choice";
+
+/**
+ * A field of a plugin's settings form. `key` is where the value sits in the
+ * configuration, a dot stepping into an object; a key of HOST_SETTINGS
+ * places one of the host's settings.
+ */
+export interface PluginSetting {
+  key: string;
+  label?: string;
+  type?: PluginSettingType;
+  group?: string;
+  row?: string;
+  help?: string;
+  default?: unknown;
+  required?: boolean;
+  advanced?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  placeholder?: string;
+  options?: Array<{ value: string; label: string }>;
+  /** The credential slot a server sends. */
+  credential?: string;
+}
+
+/** An open-source project a plugin credits. */
+export interface PluginCredit {
+  name: string;
+  owner?: string;
+  /** An SPDX identifier such as Apache-2.0. */
+  license?: string;
+  url: string;
+  note?: string;
 }
 
 /** The waits the plugin page offers, in milliseconds. */
@@ -89,6 +141,8 @@ export interface PluginSettingsUpdate {
   privacy_trusted?: boolean;
   turn_wait_ms?: number;
   config?: Record<string, unknown>;
+  /** Plain http server origins the user agrees to reach in the clear. */
+  plaintext_consent?: string[];
 }
 
 export type PluginViewItem =
@@ -134,6 +188,17 @@ export interface PluginStatus {
   view?: PluginViewBlock[];
   truncated?: boolean;
   view_error?: string;
+  /** The last connection test since Core started. */
+  last_test?: PluginTestResult & { tested_at: string };
+  /** The values sessions are bound to, for each attribute the plugin registers. */
+  bindings?: PluginBindings[];
+}
+
+/** The values sessions are bound to for one attribute, the most recent first. */
+export interface PluginBindings {
+  key: string;
+  label: string;
+  values: Array<{ value: string; sessions: number; last_used_at?: string }>;
 }
 
 export interface PluginInjection {
@@ -252,6 +317,13 @@ function reader(subject: "plugin" | "metadata") {
   };
   const optionalInteger = (value: unknown, path: string): number | undefined =>
     value === undefined ? undefined : integer(value, path);
+  const optionalNumber = (value: unknown, path: string): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return invalid(subject, path, "number");
+    }
+    return value;
+  };
   const boolean = (value: unknown, path: string): boolean => {
     if (typeof value !== "boolean") return invalid(subject, path, "boolean");
     return value;
@@ -283,6 +355,7 @@ function reader(subject: "plugin" | "metadata") {
     optionalString,
     integer,
     optionalInteger,
+    optionalNumber,
     boolean,
     optionalBoolean,
     array,
@@ -382,6 +455,9 @@ export function parsePluginDetail(value: unknown): PluginDetail {
             `${path}.allow_plaintext`,
           ),
           plaintext: plugin.boolean(origin.plaintext, `${path}.plaintext`),
+          ...(origin.setting === undefined
+            ? {}
+            : { setting: plugin.string(origin.setting, `${path}.setting`) }),
         };
       }),
     privacy_trusted: plugin.boolean(
@@ -417,6 +493,66 @@ export function parsePluginDetail(value: unknown): PluginDetail {
         marker: plugin.optionalString(attribute.marker, `${path}.marker`),
       });
     }),
+    settings: (detail.settings === undefined
+      ? []
+      : plugin.array(detail.settings, "$.settings")
+    ).map((item, index) => parseSetting(item, `$.settings[${index}]`)),
+    credits: (detail.credits === undefined
+      ? []
+      : plugin.array(detail.credits, "$.credits")
+    ).map((item, index) => {
+      const path = `$.credits[${index}]`;
+      const credit = plugin.object(item, path);
+      return defined({
+        name: plugin.string(credit.name, `${path}.name`),
+        owner: plugin.optionalString(credit.owner, `${path}.owner`),
+        license: plugin.optionalString(credit.license, `${path}.license`),
+        url: plugin.string(credit.url, `${path}.url`),
+        note: plugin.optionalString(credit.note, `${path}.note`),
+      });
+    }),
+  });
+}
+
+const settingTypes = ["server", "text", "number", "switch", "choice"] as const;
+
+function parseSetting(value: unknown, path: string): PluginSetting {
+  const setting = plugin.object(value, path);
+  return defined({
+    key: plugin.string(setting.key, `${path}.key`),
+    label: plugin.optionalString(setting.label, `${path}.label`),
+    type:
+      setting.type === undefined
+        ? undefined
+        : plugin.oneOf(setting.type, settingTypes, `${path}.type`),
+    group: plugin.optionalString(setting.group, `${path}.group`),
+    row: plugin.optionalString(setting.row, `${path}.row`),
+    help: plugin.optionalString(setting.help, `${path}.help`),
+    default: setting.default,
+    required: plugin.optionalBoolean(setting.required, `${path}.required`),
+    advanced: plugin.optionalBoolean(setting.advanced, `${path}.advanced`),
+    min: plugin.optionalNumber(setting.min, `${path}.min`),
+    max: plugin.optionalNumber(setting.max, `${path}.max`),
+    step: plugin.optionalNumber(setting.step, `${path}.step`),
+    unit: plugin.optionalString(setting.unit, `${path}.unit`),
+    placeholder: plugin.optionalString(
+      setting.placeholder,
+      `${path}.placeholder`,
+    ),
+    options:
+      setting.options === undefined
+        ? undefined
+        : plugin
+            .array(setting.options, `${path}.options`)
+            .map((item, index) => {
+              const optionPath = `${path}.options[${index}]`;
+              const option = plugin.object(item, optionPath);
+              return {
+                value: plugin.string(option.value, `${optionPath}.value`),
+                label: plugin.string(option.label, `${optionPath}.label`),
+              };
+            }),
+    credential: plugin.optionalString(setting.credential, `${path}.credential`),
   });
 }
 
@@ -546,6 +682,44 @@ export function parsePluginStatus(value: unknown): PluginStatus {
     view: optionalView(status.view, "$.view"),
     truncated: plugin.optionalBoolean(status.truncated, "$.truncated"),
     view_error: plugin.optionalString(status.view_error, "$.view_error"),
+    last_test:
+      status.last_test === undefined
+        ? undefined
+        : {
+            ...parsePluginTestResult(status.last_test),
+            tested_at: plugin.string(
+              plugin.object(status.last_test, "$.last_test").tested_at,
+              "$.last_test.tested_at",
+            ),
+          },
+    bindings:
+      status.bindings === undefined
+        ? undefined
+        : plugin.array(status.bindings, "$.bindings").map((item, index) => {
+            const path = `$.bindings[${index}]`;
+            const bindings = plugin.object(item, path);
+            return {
+              key: plugin.string(bindings.key, `${path}.key`),
+              label: plugin.string(bindings.label, `${path}.label`),
+              values: plugin
+                .array(bindings.values, `${path}.values`)
+                .map((entry, valueIndex) => {
+                  const valuePath = `${path}.values[${valueIndex}]`;
+                  const bound = plugin.object(entry, valuePath);
+                  return defined({
+                    value: plugin.string(bound.value, `${valuePath}.value`),
+                    sessions: plugin.integer(
+                      bound.sessions,
+                      `${valuePath}.sessions`,
+                    ),
+                    last_used_at: plugin.optionalString(
+                      bound.last_used_at,
+                      `${valuePath}.last_used_at`,
+                    ),
+                  });
+                }),
+            };
+          }),
   });
 }
 
@@ -740,3 +914,96 @@ export function configBytes(text: string): number {
 }
 
 export const MAX_PLUGIN_CONFIG_BYTES = 64 * 1024;
+
+/** The value at a setting's key in a configuration; a dot steps into an object. */
+export function settingValue(
+  config: Record<string, unknown>,
+  key: string,
+): unknown {
+  let current: unknown = config;
+  for (const part of key.split(".")) {
+    if (
+      typeof current !== "object" ||
+      current === null ||
+      Array.isArray(current)
+    )
+      return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+/**
+ * A copy of config with value at key, or without the key for undefined; an
+ * object emptied on the way goes too.
+ */
+export function withSettingValue(
+  config: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): Record<string, unknown> {
+  const copy = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+  const parts = key.split(".");
+  const last = parts.pop() as string;
+  const trail: Array<[Record<string, unknown>, string]> = [];
+  let current = copy;
+  for (const part of parts) {
+    const next = current[part];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      if (value === undefined) return copy;
+      current[part] = {};
+    }
+    trail.push([current, part]);
+    current = current[part] as Record<string, unknown>;
+  }
+  if (value !== undefined) {
+    current[last] = value;
+    return copy;
+  }
+  delete current[last];
+  for (const [parent, part] of trail.reverse()) {
+    if (Object.keys(parent[part] as object).length > 0) break;
+    delete parent[part];
+  }
+  return copy;
+}
+
+/** An http or https address with a host and no user info. */
+export function validOrigin(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.hostname !== "" &&
+      url.username === "" &&
+      url.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Plain http to a host other than this machine, as Core tells it. */
+export function plaintextOrigin(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:") return false;
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    return !(host === "localhost" || host === "::1" || host.startsWith("127."));
+  } catch {
+    return false;
+  }
+}
+
+/** A JSON text whose objects list their keys in order, to compare values. */
+export function stableJSON(value: unknown): string {
+  return JSON.stringify(value, (_, item: unknown) =>
+    typeof item === "object" && item !== null && !Array.isArray(item)
+      ? Object.fromEntries(
+          Object.entries(item as Record<string, unknown>).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : item,
+  );
+}

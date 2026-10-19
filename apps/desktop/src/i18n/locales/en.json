@@ -140,7 +140,11 @@
     "discardUnsaved": "Discard unsaved changes?",
     "today": "Today",
     "yesterday": "Yesterday",
-    "checking": "Checking…"
+    "checking": "Checking…",
+    "justNow": "just now",
+    "minutesAgo": "{{count}} min ago",
+    "hoursAgo": "{{count}} h ago",
+    "daysAgo": "{{count}} d ago"
   },
   "nav": {
     "main": "Main navigation",
@@ -2663,10 +2667,6 @@
     "showLessSubscriptions": "Show less",
     "hourlyChart": "Tokens per hour today",
     "hourlyPeak": "Peak {{hour}}:00 · {{tokens}}",
-    "justNow": "just now",
-    "minutesAgo": "{{count}} min ago",
-    "hoursAgo": "{{count}} h ago",
-    "daysAgo": "{{count}} d ago",
     "updatedAgo": "Updated {{ago}}",
     "refresh": "Refresh",
     "version": "AstrLink {{version}}",
@@ -4487,7 +4487,8 @@
     "plugin_reload_failed": "The plugin directory could not be scanned.",
     "plugin_unavailable": "The plugin settings could not be read or saved.",
     "metadata_unavailable": "The metadata could not be read or saved.",
-    "credential_unavailable": "The credential could not be saved."
+    "credential_unavailable": "The credential could not be saved.",
+    "plaintext_consent_required": "The server is plain HTTP; tick Allow plain HTTP to save it."
   },
   "webConsole": {
     "title": "AstrLink console",
@@ -4545,7 +4546,6 @@
       "disabled": "Off",
       "failed": "Failed to load"
     },
-    "needsNetwork": "Needs network",
     "enable": "Enable",
     "disable": "Turn off",
     "test": "Test connection",
@@ -4553,8 +4553,7 @@
     "tabsLabel": "Plugin details",
     "tabs": {
       "overview": "Overview",
-      "network": "Network & credentials",
-      "config": "Configuration",
+      "settings": "Settings",
       "status": "Activity"
     },
     "testStatus": {
@@ -4563,10 +4562,7 @@
       "failed": "Test failed"
     },
     "truncated": "Cut to its limits",
-    "overviewTitle": "From the plugin",
-    "noOverview": "The plugin shows nothing here yet.",
     "overviewNeedsViews": "Grant Views when you enable the plugin to see its overview here.",
-    "grantedTitle": "Capabilities",
     "noCapabilities": "Asks for none",
     "capabilities": {
       "contextInject": "Inject context",
@@ -4592,14 +4588,11 @@
       "load_failed": "The top level failed"
     },
     "network": {
-      "origins": "Allowed addresses",
       "originsHelpLabel": "About allowed addresses",
       "originsHelp": "The plugin can only reach these addresses. Scheme, host and port must match; any path is allowed. Redirects are not followed.",
-      "noOrigins": "No addresses yet",
       "originLabel": "Address to allow",
       "invalidOrigin": "Enter an http or https address with a host, such as https://memory.example.com:8443.",
       "add": "Add",
-      "save": "Save addresses",
       "remove": "Remove {{origin}}",
       "plaintext": "Plain HTTP",
       "allowPlaintext": "Allow plain HTTP",
@@ -4615,21 +4608,13 @@
       "help": "Credentials stay in AstrLink's local key store. Core adds one to a request only when it goes to the address the credential is bound to; the plugin never sees the value.",
       "configured": "Set ···· {{hint}}",
       "configuredNoHint": "Set",
-      "unset": "Not set",
-      "boundTo": "For {{origin}}",
       "origin": "Bound address",
-      "needOrigin": "Add an allowed address first",
       "secret": "Value",
-      "save": "Save credential",
       "clear": "Clear"
     },
     "config": {
-      "title": "Configuration (JSON)",
-      "helpLabel": "About the configuration",
       "help": "One JSON object of at most 64 KiB. The plugin reads it and cannot change it. Credentials do not belong here: use the credential slots.",
       "size": "{{size}} KiB / 64 KiB",
-      "format": "Format",
-      "save": "Save configuration",
       "invalid": "The configuration must be one JSON object.",
       "tooLarge": "The configuration is larger than 64 KiB."
     },
@@ -4666,6 +4651,47 @@
       "helpLabel": "About the wait",
       "help": "The first request of each turn waits this long for the plugin, the privacy check included, then goes to the model as usual; a late result is not injected this turn. 2.5 seconds by default.",
       "seconds": "{{value}} s"
+    },
+    "about": {
+      "label": "About this plugin",
+      "does": "What it does",
+      "network": "Network use",
+      "capabilities": "Permissions it uses"
+    },
+    "overview": {
+      "connection": "Connection",
+      "server": "Server",
+      "noServer": "Not set",
+      "lastTest": "Last test",
+      "notTested": "Not tested",
+      "bindings": "Sessions by {{label}}",
+      "sessions": "Sessions",
+      "lastUsed": "Last used",
+      "none": "Left out",
+      "noBindings": "No session is bound to a {{label}} yet",
+      "pluginStatus": "Plugin status",
+      "credits": "Open source"
+    },
+    "settings": {
+      "save": "Save",
+      "revert": "Revert",
+      "unsaved": "Unsaved changes",
+      "more": "More settings",
+      "json": "Edit as JSON",
+      "jsonTitle": "Edit the configuration as JSON",
+      "apply": "Apply",
+      "gatewayGroup": "Gateway",
+      "origins": "Other allowed addresses",
+      "required": "{{label}} is required",
+      "number": "{{label}} must be a number",
+      "between": "{{label}} must be between {{min}} and {{max}}",
+      "atLeast": "{{label}} must be at least {{min}}",
+      "atMost": "{{label}} must be at most {{max}}",
+      "address": "{{label}} must be an http or https address",
+      "consent": "{{label}} is plain HTTP; tick Allow plain HTTP to save it",
+      "replace": "Replace",
+      "keep": "Keep",
+      "noOrigin": "Fill in the server address before saving the token"
     }
   },
   "pluginRecords": {

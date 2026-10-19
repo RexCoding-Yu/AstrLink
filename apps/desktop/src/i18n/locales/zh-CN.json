@@ -140,7 +140,11 @@
     "discardUnsaved": "放弃未保存的修改？",
     "today": "今天",
     "yesterday": "昨天",
-    "checking": "检查中…"
+    "checking": "检查中…",
+    "justNow": "刚刚",
+    "minutesAgo": "{{count}} 分钟前",
+    "hoursAgo": "{{count}} 小时前",
+    "daysAgo": "{{count}} 天前"
   },
   "nav": {
     "main": "主要导航",
@@ -2663,10 +2667,6 @@
     "showLessSubscriptions": "收起",
     "hourlyChart": "今日各小时 tokens",
     "hourlyPeak": "峰值 {{hour}}:00 · {{tokens}}",
-    "justNow": "刚刚",
-    "minutesAgo": "{{count}} 分钟前",
-    "hoursAgo": "{{count}} 小时前",
-    "daysAgo": "{{count}} 天前",
     "updatedAgo": "更新于{{ago}}",
     "refresh": "刷新",
     "version": "AstrLink {{version}}",
@@ -4487,7 +4487,8 @@
     "plugin_reload_failed": "无法扫描插件目录。",
     "plugin_unavailable": "无法读取或保存插件设置。",
     "metadata_unavailable": "无法读取或保存元信息。",
-    "credential_unavailable": "无法保存凭据。"
+    "credential_unavailable": "无法保存凭据。",
+    "plaintext_consent_required": "服务器是明文 HTTP 地址，勾选「允许明文 HTTP」才能保存。"
   },
   "webConsole": {
     "title": "AstrLink 控制台",
@@ -4545,7 +4546,6 @@
       "disabled": "已停用",
       "failed": "加载失败"
     },
-    "needsNetwork": "需要网络",
     "enable": "启用",
     "disable": "停用",
     "test": "测试连接",
@@ -4553,8 +4553,7 @@
     "tabsLabel": "插件详情",
     "tabs": {
       "overview": "概览",
-      "network": "网络与凭据",
-      "config": "配置",
+      "settings": "设置",
       "status": "运行状态"
     },
     "testStatus": {
@@ -4563,10 +4562,7 @@
       "failed": "测试失败"
     },
     "truncated": "超出上限，已截断",
-    "overviewTitle": "插件提供的概览",
-    "noOverview": "插件这里暂时没有内容。",
     "overviewNeedsViews": "启用时授予「界面视图」，这里才会显示插件提供的概览。",
-    "grantedTitle": "能力",
     "noCapabilities": "没有申请能力",
     "capabilities": {
       "contextInject": "注入上下文",
@@ -4592,14 +4588,11 @@
       "load_failed": "顶层代码执行失败"
     },
     "network": {
-      "origins": "允许访问的地址",
       "originsHelpLabel": "关于允许访问的地址",
       "originsHelp": "插件只能访问这些地址。协议、主机和端口必须一致，路径不限；不跟随重定向。",
-      "noOrigins": "还没有地址",
       "originLabel": "要允许的地址",
       "invalidOrigin": "请输入带主机的 http 或 https 地址，例如 https://memory.example.com:8443。",
       "add": "添加",
-      "save": "保存地址",
       "remove": "移除 {{origin}}",
       "plaintext": "明文 HTTP",
       "allowPlaintext": "允许明文 HTTP",
@@ -4615,21 +4608,13 @@
       "help": "凭据保存在 AstrLink 的本机密钥库里。只有请求发往凭据绑定的地址时，Core 才把它加进请求；插件读不到凭据的值。",
       "configured": "已配置 ···· {{hint}}",
       "configuredNoHint": "已配置",
-      "unset": "未配置",
-      "boundTo": "绑定 {{origin}}",
       "origin": "绑定的地址",
-      "needOrigin": "先添加允许访问的地址",
       "secret": "凭据值",
-      "save": "保存凭据",
       "clear": "清除"
     },
     "config": {
-      "title": "插件配置（JSON）",
-      "helpLabel": "关于插件配置",
       "help": "一整段 JSON 对象，最多 64 KiB。插件只读，改不了它。凭据不要写在这里，请用凭据位。",
       "size": "{{size}} KiB / 64 KiB",
-      "format": "格式化",
-      "save": "保存配置",
       "invalid": "配置必须是一个 JSON 对象。",
       "tooLarge": "配置超过了 64 KiB。"
     },
@@ -4666,6 +4651,47 @@
       "helpLabel": "关于最长等待",
       "help": "每轮的第一个请求最多等插件这么久（含隐私检查），之后照常发给模型，来晚的结果这一轮不注入。默认 2.5 秒。",
       "seconds": "{{value}} 秒"
+    },
+    "about": {
+      "label": "关于这个插件",
+      "does": "这个插件做什么",
+      "network": "网络用途",
+      "capabilities": "用到的权限"
+    },
+    "overview": {
+      "connection": "连接",
+      "server": "服务器",
+      "noServer": "未设置",
+      "lastTest": "最近测试",
+      "notTested": "还没测试",
+      "bindings": "已绑定的{{label}}",
+      "sessions": "会话",
+      "lastUsed": "最近使用",
+      "none": "不纳入",
+      "noBindings": "还没有会话绑定{{label}}",
+      "pluginStatus": "插件状态",
+      "credits": "开源项目"
+    },
+    "settings": {
+      "save": "保存",
+      "revert": "还原",
+      "unsaved": "有改动未保存",
+      "more": "更多设置",
+      "json": "以 JSON 编辑",
+      "jsonTitle": "以 JSON 编辑配置",
+      "apply": "应用",
+      "gatewayGroup": "网关",
+      "origins": "其他允许访问的地址",
+      "required": "「{{label}}」不能为空",
+      "number": "「{{label}}」要填数字",
+      "between": "「{{label}}」要在 {{min}} 到 {{max}} 之间",
+      "atLeast": "「{{label}}」不能小于 {{min}}",
+      "atMost": "「{{label}}」不能大于 {{max}}",
+      "address": "「{{label}}」要填 http 或 https 地址",
+      "consent": "「{{label}}」是明文 HTTP 地址，勾选「允许明文 HTTP」才能保存",
+      "replace": "更换",
+      "keep": "不更换",
+      "noOrigin": "先填好服务器地址，再保存令牌"
     }
   },
   "pluginRecords": {
