@@ -23,6 +23,7 @@ import {
   finishExitAnimations,
   installDialogAnimations,
 } from "./lib/test-dialog-animations";
+import { settleClosedLayer } from "./lib/test-layer-settle";
 
 const memory: PluginDetail = {
   key: "powercontext",
@@ -41,6 +42,7 @@ const memory: PluginDetail = {
   config: { serverUrl: "http://192.0.2.1:9090" },
   network_origins: [],
   privacy_trusted: false,
+  turn_wait_ms: 2500,
   credentials: [
     { name: "token", label: "PowerContext 令牌", configured: false },
   ],
@@ -107,6 +109,29 @@ async function openTab(label: string) {
   });
 }
 
+async function chooseOption(selector: string, option: string) {
+  const trigger = document.querySelector<HTMLButtonElement>(selector);
+  if (trigger === null) throw new Error(`Missing select trigger: ${selector}`);
+  await act(async () => {
+    trigger.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        pointerType: "mouse",
+      }),
+    );
+    await Promise.resolve();
+  });
+  const item = [
+    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ].find((candidate) => candidate.textContent?.trim() === option);
+  if (!item) throw new Error(`Missing select option: ${option}`);
+  await act(async () => {
+    item.click();
+    await Promise.resolve();
+  });
+}
+
 async function type(
   element: HTMLInputElement | HTMLTextAreaElement,
   value: string,
@@ -143,6 +168,7 @@ describe("PluginManager", () => {
             config: {},
             network_origins: [],
             privacy_trusted: false,
+            turn_wait_ms: 2500,
             credentials: [],
             metadata: [],
           },
@@ -320,6 +346,36 @@ describe("PluginManager", () => {
     expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
       config: { serverUrl: "https://memory.example" },
     });
+  });
+
+  it("lets the user choose how long a request waits for the plugin", async () => {
+    const recalling = {
+      ...memory,
+      hooks: ["prepareSession", "prepareTurn", "observeTurn"],
+    };
+    bridgeMocks.getPlugin.mockResolvedValue(recalling);
+    bridgeMocks.updatePlugin.mockResolvedValue({
+      ...recalling,
+      turn_wait_ms: 3500,
+    });
+    await render();
+    await openTab("配置");
+    const trigger = document.querySelector("#plugin-wait");
+    expect(trigger?.textContent).toContain("2.5 秒");
+    await chooseOption("#plugin-wait", "3.5 秒");
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      turn_wait_ms: 3500,
+    });
+    await settleClosedLayer();
+    expect(document.querySelector("#plugin-wait")?.textContent).toContain(
+      "3.5 秒",
+    );
+  });
+
+  it("offers no wait for a plugin that adds nothing to requests", async () => {
+    await render();
+    await openTab("配置");
+    expect(document.querySelector("#plugin-wait")).toBeNull();
   });
 
   it("shows what the connection test returned", async () => {

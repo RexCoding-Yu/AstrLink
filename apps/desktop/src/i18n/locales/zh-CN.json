@@ -4660,7 +4660,13 @@
     },
     "blocked": "网关没有运行",
     "blockedHint": "网关就绪后才能加载插件。网关停了的话，概览页会显示原因。",
-    "stale": "网关尚未就绪，当前显示上次读取的插件。"
+    "stale": "网关尚未就绪，当前显示上次读取的插件。",
+    "wait": {
+      "label": "最长等待",
+      "helpLabel": "关于最长等待",
+      "help": "每轮的第一个请求最多等插件这么久（含隐私检查），之后照常发给模型，来晚的结果这一轮不注入。默认 2.5 秒。",
+      "seconds": "{{value}} 秒"
+    }
   },
   "pluginRecords": {
     "none": "这个请求没有插件记录。",
@@ -4679,7 +4685,8 @@
       "timeout": "超时",
       "plugin_error": "插件出错",
       "privacy_blocked": "被隐私策略拦截",
-      "privacy_unavailable": "隐私检查不可用"
+      "privacy_unavailable": "隐私检查不可用",
+      "search_failed": "有检索失败，没有命中"
     },
     "injection": "注入",
     "placement": {
@@ -4692,14 +4699,16 @@
     "dropped_other": "超预算丢弃 {{count}} 条",
     "network": "网络",
     "networkCount": "{{requests}} 个请求 · 拒绝 {{denied}} · 失败 {{errors}} · 等待 {{wait}} ms",
-    "observe": "捕获",
+    "observe": "写入",
     "observeStates": {
       "queued": "已排队",
       "skipped_privacy": "被隐私策略跳过",
-      "skipped_binding_turn": "跳过：本轮在绑定项目",
+      "skipped_binding_turn": "跳过：本轮已在绑定项目后写入",
       "skipped_continuation": "跳过：不是本轮首个调用",
       "queue_full": "丢弃：队列已满",
-      "disabled": "未开启"
+      "disabled": "未开启",
+      "awaiting_reply": "等回复确定项目",
+      "skipped_unbound": "跳过：会话没有项目"
     },
     "truncated": "超出上限，已截断",
     "metadata": "元信息",

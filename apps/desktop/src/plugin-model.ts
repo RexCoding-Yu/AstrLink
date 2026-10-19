@@ -70,15 +70,24 @@ export interface PluginDetail extends PluginSummary {
   config: Record<string, unknown>;
   network_origins: PluginNetworkOrigin[];
   privacy_trusted: boolean;
+  /** How long a request waits for the plugin's prepare hooks. */
+  turn_wait_ms: number;
   credentials: PluginCredentialStatus[];
   metadata: PluginMetadataAttribute[];
 }
+
+/** The waits the plugin page offers, in milliseconds. */
+export const PLUGIN_TURN_WAITS = [
+  1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000,
+] as const;
+export const DEFAULT_PLUGIN_TURN_WAIT_MS = 2500;
 
 export interface PluginSettingsUpdate {
   enabled?: boolean;
   granted_capabilities?: string[];
   network_origins?: Array<{ origin: string; allow_plaintext: boolean }>;
   privacy_trusted?: boolean;
+  turn_wait_ms?: number;
   config?: Record<string, unknown>;
 }
 
@@ -379,6 +388,9 @@ export function parsePluginDetail(value: unknown): PluginDetail {
       detail.privacy_trusted,
       "$.privacy_trusted",
     ),
+    turn_wait_ms:
+      plugin.optionalInteger(detail.turn_wait_ms, "$.turn_wait_ms") ??
+      DEFAULT_PLUGIN_TURN_WAIT_MS,
     credentials: plugin
       .array(detail.credentials, "$.credentials")
       .map((item, index) => {

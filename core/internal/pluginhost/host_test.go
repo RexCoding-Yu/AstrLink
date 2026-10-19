@@ -43,7 +43,7 @@ export function prepareTurn(turn) {
   };
 }
 export function observeTurn(turn) {
-  astrlink.store.set("seen:" + turn.session.turn, turn.user.typed);
+  astrlink.store.set("seen:" + turn.session.turn, turn.meta.project.value + " " + turn.user.typed);
 }
 `
 
@@ -88,6 +88,19 @@ type harness struct {
 	host     *Host
 	bindings *sqlite.Store
 	writes   chan string
+	// added gets what captures add to written request records.
+	added chan []contract.RequestPluginRecord
+}
+
+// recordSink stands for the request records captures add to.
+type recordSink chan []contract.RequestPluginRecord
+
+func (sink recordSink) AppendRequestPluginRecords(_ context.Context, id contract.RequestID, records []contract.RequestPluginRecord) error {
+	if id != "request_1" {
+		return errors.New("an unknown request " + string(id))
+	}
+	sink <- records
+	return nil
 }
 
 func newHarness(t *testing.T, settings plugin.Settings, sources map[string]string, fetcher plugin.Fetcher) *harness {
@@ -120,9 +133,10 @@ func newHarness(t *testing.T, settings plugin.Settings, sources map[string]strin
 			t.Fatal(err)
 		}
 	}
-	host := New(Options{Plugins: manager, Metadata: registry, Bindings: bindings, Logf: t.Logf})
+	added := make(recordSink, 4)
+	host := New(Options{Plugins: manager, Metadata: registry, Bindings: bindings, Records: added, Logf: t.Logf})
 	t.Cleanup(host.Close)
-	return &harness{host: host, bindings: bindings, writes: store.writes}
+	return &harness{host: host, bindings: bindings, writes: store.writes, added: added}
 }
 
 func allCapabilities() plugin.Settings {
@@ -134,7 +148,8 @@ func allCapabilities() plugin.Settings {
 func (h *harness) begin(t *testing.T, turn int, body string, inspect func(context.Context, []string) ([]string, error)) *Run {
 	t.Helper()
 	run := h.host.Begin(context.Background(), Input{
-		Protocol: contract.ProtocolAnthropicMessages, Model: "claude", Client: "claude_code",
+		RequestID: "request_1",
+		Protocol:  contract.ProtocolAnthropicMessages, Model: "claude", Client: "claude_code",
 		Header: http.Header{}, Session: "session_1", Turn: turn, Body: []byte(body), Inspect: inspect,
 	})
 	if run == nil {
@@ -202,21 +217,30 @@ func TestASessionIsAskedThenBoundThenRecalled(t *testing.T) {
 		t.Fatalf("prepareSession record = %+v", session)
 	}
 	turnRecord := recordOf(t, records, plugin.HookPrepareTurn)
-	if turnRecord.Status != contract.PluginRecordSkipped || turnRecord.SkippedReason != "no_project" || turnRecord.Observe != observeQueued {
+	if turnRecord.Status != contract.PluginRecordSkipped || turnRecord.SkippedReason != "no_project" || turnRecord.Observe != observeAwaiting {
 		t.Fatalf("prepareTurn record = %+v", turnRecord)
 	}
 	if len(events) != 1 || events[0].Kind != contract.RequestEventPlugin || events[0].Plugin != "memo" || events[0].Validate() != nil {
 		t.Fatalf("events = %+v", events)
 	}
-	if write := h.seen(t); write != `seen:1="帮我看看分页逻辑"` {
-		t.Fatalf("observeTurn saw %s", write)
+	// Without a project the capture waits for the reply.
+	select {
+	case write := <-h.writes:
+		t.Fatalf("a turn without a project was captured before the reply: %s", write)
+	case <-time.After(100 * time.Millisecond):
 	}
-	// The reply binds the session.
+	// The reply binds the session; the turn is captured into the project.
 	scanner := run.NewMarkerScanner()
 	scanner.Write("<memo-project>astrlink</memo-project>\n好的，先看分页。")
 	bound := run.Finish(context.Background(), scanner.Close(), true)
 	if len(bound) != 1 || bound[0] != (contract.MetadataEvent{Key: "project", Event: contract.MetadataEventBound, Value: "astrlink", SetBy: contract.MetadataSetByModelMarker}) {
 		t.Fatalf("Finish = %+v", bound)
+	}
+	if captures := run.Captures(); captures["memo"] != observeQueued {
+		t.Fatalf("captures = %+v", captures)
+	}
+	if write := h.seen(t); write != `seen:1="astrlink 帮我看看分页逻辑"` {
+		t.Fatalf("observeTurn saw %s", write)
 	}
 
 	// The turn goes on: the next call settles it again with the project,
@@ -271,7 +295,7 @@ func TestASessionIsAskedThenBoundThenRecalled(t *testing.T) {
 	if turnRecord := recordOf(t, records, plugin.HookPrepareTurn); turnRecord.Injection.ReplayedBlocks != 1 || turnRecord.Observe != observeQueued {
 		t.Fatalf("turn 2 record = %+v", turnRecord)
 	}
-	if write := h.seen(t); write != `seen:2="再补一个测试"` {
+	if write := h.seen(t); write != `seen:2="astrlink 再补一个测试"` {
 		t.Fatalf("observeTurn saw %s", write)
 	}
 	// A model's marker cannot rebind a bound session.
@@ -393,15 +417,16 @@ func (stalled) Fetch(ctx context.Context, _ *plugin.Plugin, _ plugin.HTTPRequest
 func TestASlowTurnGoesOutWithoutItsBlock(t *testing.T) {
 	slow := `export const meta = {
   apiVersion: 1, key: "slow", name: "Slow", version: "1.0.0",
-  capabilities: ["context.inject", "request.read", "network"], network: { purpose: "test" },
+  capabilities: ["context.inject", "request.read"],
 };
 export function prepareTurn(turn) {
-  astrlink.http.fetch({ method: "GET", url: "https://memory.test/slow" });
+  const until = astrlink.clock.now() + 300;
+  while (astrlink.clock.now() < until) {}
   return { context: "late" };
 }
 `
-	h := newHarness(t, allCapabilities(), map[string]string{"slow": slow}, stalled{})
-	h.host.budget = 50 * time.Millisecond
+	h := newHarness(t, allCapabilities(), map[string]string{"slow": slow}, nil)
+	h.host.budget = 100 * time.Millisecond
 	body := messages(user("帮我看看分页逻辑"))
 	run := h.begin(t, 1, body, nil)
 	if sent := run.Inject([]byte(body)); string(sent) != body {
@@ -416,6 +441,119 @@ export function prepareTurn(turn) {
 	run = h.begin(t, 1, later, nil)
 	if sent := run.Inject([]byte(later)); string(sent) != later {
 		t.Fatalf("a later call picked up a block: %s", sent)
+	}
+}
+
+func TestStalledRequestsEndBeforeThePluginsWait(t *testing.T) {
+	fallback := `export const meta = {
+  apiVersion: 1, key: "fallback", name: "Fallback", version: "1.0.0",
+  capabilities: ["context.inject", "request.read", "network"], network: { purpose: "test" },
+};
+export function prepareTurn(turn) {
+  const [slow] = astrlink.http.fetch([{ method: "GET", url: "https://memory.test/slow", timeoutMs: 5000 }]);
+  return { context: "fallback after " + slow.error };
+}
+`
+	h := newHarness(t, allCapabilities(), map[string]string{"fallback": fallback}, stalled{})
+	h.host.budget = 400 * time.Millisecond
+	body := messages(user("帮我看看分页逻辑"))
+	run := h.begin(t, 1, body, nil)
+	started := time.Now()
+	sent := run.Inject([]byte(body))
+	if waited := time.Since(started); waited >= h.host.budget {
+		t.Fatalf("the request waited %v", waited)
+	}
+	if got := gjson.GetBytes(sent, "messages.0.content.0.text").Str; got != "fallback after budget" {
+		t.Fatalf("block = %q in %s", got, sent)
+	}
+}
+
+func TestATurnWithoutAProjectAndNoMarkerIsNotCaptured(t *testing.T) {
+	h := newHarness(t, allCapabilities(), map[string]string{"memo": memoPlugin}, nil)
+	body := messages(user("帮我看看分页逻辑"))
+	run := h.begin(t, 1, body, nil)
+	run.Inject([]byte(body))
+	run.Report()
+	if events := run.Finish(context.Background(), nil, true); len(events) != 0 {
+		t.Fatalf("Finish = %+v", events)
+	}
+	if captures := run.Captures(); captures["memo"] != observeSkippedUnbound {
+		t.Fatalf("captures = %+v", captures)
+	}
+	select {
+	case write := <-h.writes:
+		t.Fatalf("an unbound turn was captured: %s", write)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// gate answers each request once the test lets one through.
+type gate chan struct{}
+
+func (through gate) Fetch(ctx context.Context, _ *plugin.Plugin, _ plugin.HTTPRequest) plugin.HTTPResponse {
+	select {
+	case <-through:
+		return plugin.HTTPResponse{Status: http.StatusOK, Body: []byte(`{}`)}
+	case <-ctx.Done():
+		return plugin.HTTPResponse{Error: plugin.FetchTimeout}
+	}
+}
+
+const notePlugin = `export const meta = {
+  apiVersion: 1, key: "note", name: "Note", version: "1.0.0",
+  capabilities: ["request.read", "network", "ui.views"], network: { purpose: "test" },
+};
+export function observeTurn(turn) {
+  if (turn.user.typed === "失败") throw new Error("boom");
+  const [saved] = astrlink.http.fetch([{ method: "POST", url: "https://memory.test/save", json: { text: turn.user.typed } }]);
+  return { record: { title: "写入", status: saved.status === 200 ? "ok" : "failed", summary: "写入 " + turn.user.typed } };
+}
+`
+
+func TestCapturesKeepTheirRecordsWithTheirRequests(t *testing.T) {
+	through := make(gate)
+	h := newHarness(t, allCapabilities(), map[string]string{"note": notePlugin}, through)
+	body := messages(user("把分页改成游标"))
+	run := h.begin(t, 1, body, nil)
+	run.Inject([]byte(body))
+	run.Report()
+	// A capture that ends before the request record is written goes in it;
+	// one that ends after the last report, once the record is written.
+	early := contract.RequestPluginRecord{Plugin: "note", PluginVersion: "1.0.0", Hook: plugin.HookObserveTurn, Title: "写入", Status: contract.PluginRecordOK}
+	run.deliverObserve(early)
+	if records, _ := run.Report(); len(records) != 1 || records[0].Hook != plugin.HookObserveTurn || records[0].Title != "写入" {
+		t.Fatalf("records = %+v", records)
+	}
+	run.deliverObserve(early)
+	run.Persisted()
+	if added := <-h.added; len(added) != 1 || added[0].Title != "写入" {
+		t.Fatalf("added = %+v", added)
+	}
+	// The capture itself ends after the record is written: its record is
+	// added to it.
+	through <- struct{}{}
+	select {
+	case added := <-h.added:
+		if len(added) != 1 || added[0].Hook != plugin.HookObserveTurn || added[0].Status != contract.PluginRecordOK ||
+			added[0].Summary != "写入 把分页改成游标" || added[0].Network.Requests != 1 || added[0].Validate() != nil {
+			t.Fatalf("added = %+v", added)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the capture's record was not added")
+	}
+	// A capture that fails says so, whether it ends before the record is
+	// written or after.
+	failing := messages(user("把分页改成游标"), assistant("好"), user("失败"))
+	run = h.begin(t, 2, failing, nil)
+	run.Inject([]byte(failing))
+	run.Persisted()
+	select {
+	case added := <-h.added:
+		if len(added) != 1 || added[0].Status != contract.PluginRecordFailed || added[0].SkippedReason != contract.PluginSkipPluginError {
+			t.Fatalf("added = %+v", added)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the failed capture's record was not added")
 	}
 }
 
@@ -475,7 +613,7 @@ func TestASlowPrivacyCheckStillDecidesTheCapture(t *testing.T) {
 		t.Fatalf("record = %+v", record)
 	}
 	close(release)
-	if write := h.seen(t); write != `seen:1="帮我看看分页逻辑"` {
+	if write := h.seen(t); write != `seen:1="astrlink 帮我看看分页逻辑"` {
 		t.Fatalf("observeTurn saw %s", write)
 	}
 }

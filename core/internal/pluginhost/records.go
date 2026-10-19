@@ -13,9 +13,12 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/plugin/view"
 )
 
-// What became of a turn's capture.
+// What became of a turn's capture. A capture awaiting the reply is queued
+// once the reply binds the session, or skipped as unbound.
 const (
 	observeQueued             = "queued"
+	observeAwaiting           = "awaiting_reply"
+	observeSkippedUnbound     = "skipped_unbound"
 	observeSkippedPrivacy     = "skipped_privacy"
 	observeSkippedBindingTurn = "skipped_binding_turn"
 	observeSkippedContinue    = "skipped_continuation"

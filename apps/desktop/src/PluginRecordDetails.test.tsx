@@ -127,6 +127,49 @@ describe("PluginRecordDetails", () => {
     expect(rules?.textContent).not.toContain("个请求");
   });
 
+  it("shows a turn waiting for its project and what the capture wrote", async () => {
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            plugin_records: [
+              {
+                plugin: "powercontext",
+                plugin_version: "1.0.0",
+                hook: "prepareTurn",
+                title: "记忆",
+                status: "skipped",
+                summary: "召回 0/9 · 1 个检索失败",
+                skipped_reason: "search_failed",
+                elapsed_ms: 2400,
+                network: { requests: 5, denied: 0, errors: 1, wait_ms: 2400 },
+                observe: "awaiting_reply",
+              },
+              {
+                plugin: "powercontext",
+                plugin_version: "1.0.0",
+                hook: "observeTurn",
+                title: "记忆写入",
+                status: "ok",
+                summary: "已写入 · 已整理成记忆",
+                elapsed_ms: 16500,
+                network: { requests: 2, denied: 0, errors: 0, wait_ms: 16480 },
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    const [turn, write] = document.querySelectorAll(
+      '[data-testid="plugin-record"]',
+    );
+    expect(turn?.textContent).toContain("有检索失败，没有命中");
+    expect(turn?.textContent).toContain("写入等回复确定项目");
+    expect(write?.textContent).toContain("记忆写入");
+    expect(write?.textContent).toContain("已写入 · 已整理成记忆");
+  });
+
   it("says so when no plugin ran", async () => {
     await act(async () => {
       reactRoot.render(<PluginRecordDetails record={record} />);

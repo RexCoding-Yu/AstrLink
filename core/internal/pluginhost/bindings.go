@@ -2,10 +2,12 @@ package pluginhost
 
 import (
 	"context"
+	"maps"
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/metadata"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
@@ -109,11 +111,15 @@ func (run *Run) NewMarkerScanner() *metadata.MarkerScanner {
 
 // Finish binds the session to what the reply's marker lines say, when the
 // request succeeded and the session has no value yet; a model cannot rebind
-// a session. The next call of the turn then settles the turn again, with the
-// new value, and captures nothing: the user's message most likely answered
-// the question. Finish returns what the reply changed or tried to.
+// a session. The captures that waited for the reply then run with the new
+// value, and the next call of the turn settles the turn again and captures
+// nothing more. Finish returns what the reply changed or tried to.
 func (run *Run) Finish(ctx context.Context, hits []metadata.MarkerHit, succeeded bool) []contract.MetadataEvent {
-	if run == nil || len(hits) == 0 {
+	if run == nil {
+		return nil
+	}
+	defer run.settleAwaited()
+	if len(hits) == 0 {
 		return nil
 	}
 	var events []contract.MetadataEvent
@@ -150,4 +156,72 @@ func (run *Run) Finish(ctx context.Context, hits []metadata.MarkerHit, succeeded
 		host.sessions.mutex.Unlock()
 	}
 	return clampEvents(events)
+}
+
+// settleAwaited queues the captures that waited for the reply, with the
+// values it bound. A plugin whose attributes the session still lacks
+// captures nothing. While the privacy check of the turn's text runs, the
+// captures wait for it.
+func (run *Run) settleAwaited() {
+	if !run.checked() {
+		go func() {
+			<-run.ready
+			run.settleAwaited()
+		}()
+		return
+	}
+	run.mutex.Lock()
+	defer run.mutex.Unlock()
+	for _, current := range run.parts {
+		if current.observe != observeAwaiting {
+			continue
+		}
+		meta, complete := run.boundMeta(current)
+		if !complete || current.awaited == nil {
+			current.observe = observeSkippedUnbound
+			continue
+		}
+		view := *current.awaited
+		view.Meta, current.info.Meta = meta, meta
+		current.observe = run.queue(current, view)
+	}
+}
+
+// boundMeta returns the plugin's view of the session's values with those
+// the reply bound, and whether it now has a value of each of the plugin's
+// attributes.
+func (run *Run) boundMeta(current *part) (map[string]plugin.MetaValue, bool) {
+	meta := maps.Clone(current.view.Meta)
+	if meta == nil {
+		meta = map[string]plugin.MetaValue{}
+	}
+	for _, attribute := range current.plugin.Meta.Metadata {
+		if _, found := meta[attribute.Key]; found {
+			continue
+		}
+		bound, found := run.values[attribute.Key]
+		if !found {
+			return nil, false
+		}
+		meta[attribute.Key] = plugin.MetaValue{Value: bound.Value, Source: contract.MetadataSourceSession}
+	}
+	return meta, true
+}
+
+// Captures returns what became of the turn's capture for each plugin that
+// captures, by plugin key; for those that waited for the reply, what Finish
+// decided.
+func (run *Run) Captures() map[string]string {
+	if run == nil {
+		return nil
+	}
+	run.mutex.Lock()
+	defer run.mutex.Unlock()
+	captures := map[string]string{}
+	for _, current := range run.parts {
+		if current.observe != "" && current.observe != "pending" {
+			captures[current.plugin.Key] = current.observe
+		}
+	}
+	return captures
 }

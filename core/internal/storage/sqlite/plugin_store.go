@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
@@ -20,7 +21,7 @@ const (
 )
 
 func (store *Store) ListPluginSettings(ctx context.Context) ([]storage.PluginSettingsRecord, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, config_json, created_at, updated_at
+	rows, err := store.db.QueryContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json, created_at, updated_at
 FROM plugin_settings ORDER BY plugin_key`)
 	if err != nil {
 		return nil, fmt.Errorf("read plugin settings: %w", err)
@@ -41,7 +42,7 @@ FROM plugin_settings ORDER BY plugin_key`)
 }
 
 func (store *Store) GetPluginSettings(ctx context.Context, plugin string) (storage.PluginSettingsRecord, error) {
-	row := store.db.QueryRowContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, config_json, created_at, updated_at
+	row := store.db.QueryRowContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json, created_at, updated_at
 FROM plugin_settings WHERE plugin_key = ?`, plugin)
 	record, err := scanPluginSettings(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -55,7 +56,7 @@ type scanner interface{ Scan(...any) error }
 func scanPluginSettings(row scanner) (storage.PluginSettingsRecord, error) {
 	var record storage.PluginSettingsRecord
 	var capabilities, origins, config, created, updated string
-	if err := row.Scan(&record.Key, &record.Enabled, &capabilities, &origins, &record.Trusted, &config, &created, &updated); err != nil {
+	if err := row.Scan(&record.Key, &record.Enabled, &capabilities, &origins, &record.Trusted, &record.TurnWaitMs, &config, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return record, err
 		}
@@ -94,12 +95,20 @@ func (store *Store) PutPluginSettings(ctx context.Context, record storage.Plugin
 	if len(config) > storage.MaxPluginValueBytes || !json.Valid(config) {
 		return fmt.Errorf("%w: plugin config must be JSON of at most %d KiB", storage.ErrInvalidArgument, storage.MaxPluginValueBytes>>10)
 	}
+	wait := record.TurnWaitMs
+	if wait == 0 {
+		wait = contract.DefaultPluginTurnWaitMs
+	}
+	if wait < contract.MinPluginTurnWaitMs || wait > contract.MaxPluginTurnWaitMs {
+		return fmt.Errorf("%w: plugin turn wait must be %d to %d ms", storage.ErrInvalidArgument, contract.MinPluginTurnWaitMs, contract.MaxPluginTurnWaitMs)
+	}
 	now := store.now().UTC().Format(time.RFC3339Nano)
-	if _, err := store.db.ExecContext(ctx, `INSERT INTO plugin_settings (plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, config_json, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO plugin_settings (plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plugin_key) DO UPDATE SET enabled = excluded.enabled, granted_capabilities_json = excluded.granted_capabilities_json,
-    network_origins_json = excluded.network_origins_json, privacy_trusted = excluded.privacy_trusted, config_json = excluded.config_json, updated_at = excluded.updated_at`,
-		record.Key, record.Enabled, string(capabilities), string(origins), record.Trusted, string(config), now, now); err != nil {
+    network_origins_json = excluded.network_origins_json, privacy_trusted = excluded.privacy_trusted, turn_wait_ms = excluded.turn_wait_ms,
+    config_json = excluded.config_json, updated_at = excluded.updated_at`,
+		record.Key, record.Enabled, string(capabilities), string(origins), record.Trusted, wait, string(config), now, now); err != nil {
 		return fmt.Errorf("write plugin settings: %w", err)
 	}
 	return nil

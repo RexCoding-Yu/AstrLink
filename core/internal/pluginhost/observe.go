@@ -1,11 +1,16 @@
 package pluginhost
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
+	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/plugin/view"
 )
 
 // The observeTurn queue: 256 captures waiting at most, two running at once,
@@ -21,6 +26,8 @@ type observeJob struct {
 	plugin *plugin.Plugin
 	view   TurnView
 	info   plugin.RequestInfo
+	// deliver keeps the capture's record with its request.
+	deliver func(contract.RequestPluginRecord)
 }
 
 type observeQueue struct {
@@ -88,15 +95,65 @@ func (queue *observeQueue) work() {
 			return
 		case job := <-queue.jobs:
 			ctx, cancel := context.WithTimeout(context.Background(), observeTimeout)
-			_, _, err := job.plugin.Call(ctx, plugin.HookObserveTurn, job.view, plugin.CallOptions{
+			raw, info, err := job.plugin.Call(ctx, plugin.HookObserveTurn, job.view, plugin.CallOptions{
 				Request: &job.info, NetworkBudget: observeTimeout,
 			})
 			cancel()
 			if err != nil {
 				queue.logf("plugin %s observeTurn: %v", job.plugin.Key, err)
 			}
+			if record, ok := observeRecord(job.plugin, raw, info, err); ok && job.deliver != nil {
+				job.deliver(record)
+			}
 		}
 	}
+}
+
+// observeRecord is what a capture reports for its request: the record the
+// plugin gave, or the host's account of a call that failed. A capture that
+// went well without saying so reports nothing.
+func observeRecord(owner *plugin.Plugin, raw json.RawMessage, info plugin.CallInfo, err error) (contract.RequestPluginRecord, bool) {
+	record := contract.RequestPluginRecord{
+		Plugin: owner.Key, PluginVersion: owner.Meta.Version, Hook: plugin.HookObserveTurn,
+		Title: contract.ClampRunes(owner.Meta.Name, contract.MaxPluginRecordTitleRunes), Status: contract.PluginRecordOK,
+		ElapsedMs: int(info.Elapsed.Milliseconds()),
+		Network: contract.PluginNetworkCount{
+			Requests: info.Network.Requests, Denied: info.Network.Denied,
+			Errors: info.Network.Errors, WaitMs: int(info.Network.Wait.Milliseconds()),
+		},
+	}
+	if err != nil {
+		record.Status, record.SkippedReason = contract.PluginRecordFailed, contract.PluginSkipPluginError
+		var failure *plugin.CallError
+		if errors.As(err, &failure) && (failure.Reason == plugin.ReasonTimeout || failure.Reason == plugin.ReasonCanceled) {
+			record.SkippedReason = contract.PluginSkipTimeout
+		}
+		return record, true
+	}
+	var fields struct {
+		Record json.RawMessage `json:"record"`
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return record, false
+	}
+	if json.Unmarshal(trimmed, &fields) != nil {
+		record.Status, record.SkippedReason = contract.PluginRecordFailed, skipInvalidResult
+		return record, true
+	}
+	if len(fields.Record) == 0 || bytes.Equal(fields.Record, []byte("null")) {
+		return record, false
+	}
+	given, ok := view.ParseRecord(fields.Record)
+	if !ok {
+		record.Status, record.SkippedReason = contract.PluginRecordFailed, skipInvalidResult
+		return record, true
+	}
+	record.Title, record.Status, record.Summary = given.Title, given.Status, given.Summary
+	if owner.Can(plugin.CapabilityViews) {
+		record.View, record.Truncated = given.View, given.Truncated
+	}
+	return record, true
 }
 
 func (queue *observeQueue) close() {

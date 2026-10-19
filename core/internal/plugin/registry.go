@@ -38,6 +38,19 @@ type Settings struct {
 	// Trusted skips the privacy check of the text the host hands the
 	// plugin, as a trusted provider skips it.
 	Trusted bool
+	// TurnWait is how long a request waits for the plugin's prepare hooks;
+	// zero is the default.
+	TurnWait time.Duration
+}
+
+// Wait returns how long a request waits for the plugin's prepare hooks,
+// within the bounds the plugin page allows.
+func (settings Settings) Wait() time.Duration {
+	wait := settings.TurnWait
+	if wait == 0 {
+		wait = contract.DefaultPluginTurnWaitMs * time.Millisecond
+	}
+	return min(max(wait, contract.MinPluginTurnWaitMs*time.Millisecond), contract.MaxPluginTurnWaitMs*time.Millisecond)
 }
 
 // NetworkOrigin is an address a plugin may reach: scheme, host and port,
