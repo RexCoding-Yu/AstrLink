@@ -150,6 +150,8 @@ const memory: PluginDetail = {
   excluded_clients: [],
   workspace_binding: true,
   auto_refresh: false,
+  lookup_enabled: true,
+  tools: [],
   storage: [
     {
       label: "项目在服务器上的编号",
@@ -338,6 +340,8 @@ describe("PluginManager", () => {
             excluded_clients: [],
             workspace_binding: true,
             auto_refresh: false,
+            lookup_enabled: true,
+            tools: [],
             storage: [],
             host_storage: [],
           },
@@ -670,6 +674,83 @@ describe("PluginManager", () => {
     expect(bridgeMocks.updatePluginHostSettings).toHaveBeenLastCalledWith({
       injection_budget_bytes: 32768,
     });
+  });
+
+  it("voids the lookup credentials it lists only after asking", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      host_storage: [
+        ...memory.host_storage,
+        { kind: "lookup_credentials", count: 2 },
+      ],
+    });
+    bridgeMocks.clearPluginData.mockResolvedValue(2);
+    await render();
+    const item = [
+      ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
+    ].find((entry) => entry.textContent?.includes("查询凭证")) as HTMLElement;
+    expect(item.textContent).toContain("只在内存里，存的是哈希");
+    expect(item.textContent).toContain("2 条");
+    await click(button("作废", item));
+    expect(bridgeMocks.clearPluginData).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("作废查询凭证？");
+    expect(document.body.textContent).toContain("提示词缓存要重写一次");
+    await click(
+      button(
+        "作废",
+        document.querySelector('[role="alertdialog"]') as HTMLElement,
+      ),
+    );
+    await finishExitAnimations();
+    expect(bridgeMocks.clearPluginData).toHaveBeenCalledWith(
+      "powercontext",
+      "lookups",
+    );
+  });
+
+  it("lists the plugin's lookups behind the switch that turns them off", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      tools: [
+        { name: "search", description: "按一句话检索本项目的记忆。" },
+        {
+          name: "projects",
+          description: "按关键词列出项目。",
+          unbound: true,
+        },
+      ],
+      settings: [...memory.settings, { key: "$lookup", group: "查询" }],
+    });
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    const lookup = control<HTMLButtonElement>("供模型查询");
+    expect(lookup.getAttribute("aria-checked")).toBe("true");
+    const help = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="关于供模型查询"]',
+    );
+    if (!help) throw new Error("Missing the lookup help");
+    await click(help);
+    expect(document.body.textContent).toContain(
+      "search：按一句话检索本项目的记忆。",
+    );
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+    await settleClosedLayer();
+    await click(lookup);
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      lookup_enabled: false,
+    });
+  });
+
+  it("offers no lookup switch for a plugin without lookups", async () => {
+    await render();
+    await openTab("设置");
+    expect(document.body.textContent).not.toContain("供模型查询");
   });
 
   it("lists what is kept for the plugin and clears it after asking", async () => {

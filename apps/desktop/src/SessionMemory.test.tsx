@@ -224,6 +224,22 @@ it("refreshes and pauses only after saying what it costs", async () => {
   expect(button("刷新记忆").disabled).toBe(true);
 });
 
+it("shows how the session's requests tell the model to look up", async () => {
+  bridge.getSessionPlugins.mockResolvedValue([
+    {
+      ...part,
+      lookup:
+        '<lookup name="powercontext">\ncurl -s -G http://127.0.0.1:18317/tools/powercontext/search -H "Authorization: Bearer mk-…"\n</lookup>',
+    },
+  ]);
+  await render();
+  const lookup = container.querySelector("[data-testid=session-memory-lookup]");
+  expect(lookup?.textContent).toContain("Bearer mk-…");
+  expect(container.textContent).toContain(
+    "附在系统提示词里的查询方法（凭证已隐去）",
+  );
+});
+
 it("says when the gateway holds no block for the session", async () => {
   bridge.getSessionPlugins.mockResolvedValue([{ ...part, block: undefined }]);
   await render();

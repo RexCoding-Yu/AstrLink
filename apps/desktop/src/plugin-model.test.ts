@@ -149,6 +149,11 @@ describe("plugin model", () => {
       excluded_clients: ["cursor"],
       workspace_binding: false,
       auto_refresh: true,
+      lookup_enabled: false,
+      tools: [
+        { name: "search", description: "检索本项目的记忆。" },
+        { name: "projects", description: "列出项目。", unbound: true },
+      ],
       storage: [{ label: "项目编号", content: false, retention: "一直保留" }],
       host_storage: [
         { kind: "workspace_bindings", count: 2 },
@@ -160,6 +165,11 @@ describe("plugin model", () => {
     expect(detail.excluded_clients).toEqual(["cursor"]);
     expect(detail.workspace_binding).toBe(false);
     expect(detail.auto_refresh).toBe(true);
+    expect(detail.lookup_enabled).toBe(false);
+    expect(detail.tools).toEqual([
+      { name: "search", description: "检索本项目的记忆。" },
+      { name: "projects", description: "列出项目。", unbound: true },
+    ]);
     expect(detail.storage).toEqual([
       { label: "项目编号", content: false, retention: "一直保留" },
     ]);
@@ -179,6 +189,8 @@ describe("plugin model", () => {
     });
     expect(older.workspace_binding).toBe(true);
     expect(older.auto_refresh).toBe(false);
+    expect(older.lookup_enabled).toBe(true);
+    expect(older.tools).toEqual([]);
     expect(older.host_storage).toEqual([]);
   });
 
@@ -212,11 +224,13 @@ describe("plugin model", () => {
             computed_at: "2026-10-21T10:00:00Z",
           },
           refresh_pending: true,
+          lookup: '<lookup name="powercontext">…</lookup>',
         },
       ],
     });
     expect(part?.block?.trigger).toBe("bound");
     expect(part?.refresh_pending).toBe(true);
+    expect(part?.lookup).toBe('<lookup name="powercontext">…</lookup>');
     expect(
       parsePluginActionResult({
         status: "ok",
@@ -253,6 +267,66 @@ describe("plugin model", () => {
     });
     expect(metadata.choices).toEqual({ project: ["astrlink", "paseo"] });
     expect(parseSessionMetadata({ values: {} })).toEqual({ values: {} });
+  });
+
+  it("reads a lookup by its size and the lookups a block offered", () => {
+    const [lookup, ask] = parseRequestPluginRecords(
+      [
+        {
+          plugin: "powercontext",
+          plugin_version: "2.0.0",
+          hook: "callTool",
+          title: "记忆查询",
+          status: "ok",
+          summary: "检索 · 命中 2 条",
+          elapsed_ms: 300,
+          network: { requests: 2, denied: 0, errors: 0, wait_ms: 290 },
+          lookup: {
+            tool: "search",
+            input_runes: 6,
+            result_bytes: 512,
+            hits: 2,
+          },
+        },
+        {
+          plugin: "powercontext",
+          plugin_version: "2.0.0",
+          hook: "prepareTurn",
+          title: "询问项目",
+          status: "ok",
+          summary: "列出 20 个项目",
+          elapsed_ms: 100,
+          network: { requests: 1, denied: 0, errors: 0, wait_ms: 90 },
+          commands: ["projects"],
+        },
+      ],
+      "$.plugin_records",
+    );
+    expect(lookup?.lookup).toEqual({
+      tool: "search",
+      input_runes: 6,
+      result_bytes: 512,
+      hits: 2,
+    });
+    expect(ask?.commands).toEqual(["projects"]);
+    expect(() =>
+      parseRequestPluginRecords(
+        [
+          {
+            plugin: "powercontext",
+            plugin_version: "2.0.0",
+            hook: "callTool",
+            title: "记忆查询",
+            status: "ok",
+            summary: "",
+            elapsed_ms: 1,
+            network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+            lookup: { tool: "search", input_runes: -1, result_bytes: 0 },
+          },
+        ],
+        "$.plugin_records",
+      ),
+    ).toThrow("$.plugin_records[0].lookup.input_runes");
   });
 
   it("reads why a block was computed and the buttons a record offers", () => {

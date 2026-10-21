@@ -4707,7 +4707,8 @@
       "requestRead": "Read the turn's text",
       "network": "Network",
       "storage": "Plugin storage",
-      "uiViews": "Views"
+      "uiViews": "Views",
+      "modelTools": "Model lookups"
     },
     "loadErrors": {
       "not_found": "No plugin.ts or plugin.js",
@@ -4895,6 +4896,10 @@
         "plugin_values": {
           "label": "Plugin storage",
           "detail": "the plugin's own small data · AstrLink database · kept after the plugin is disabled; can be cleared"
+        },
+        "lookup_credentials": {
+          "label": "Lookup credentials",
+          "detail": "What each session runs lookups with · in memory only, as hashes · no conversation text · void after 24 hours without a request, or when the gateway restarts"
         }
       },
       "declared": "The plugin keeps: {{label}} · {{content}} · {{retention}}",
@@ -4905,13 +4910,22 @@
       "clear": "Clear",
       "clearTitle": {
         "workspaces": "Clear the workspace bindings?",
-        "values": "Clear the plugin storage?"
+        "values": "Clear the plugin storage?",
+        "lookups": "Revoke the lookup credentials?"
       },
       "clearConfirm": {
         "workspaces": "New sessions no longer start with the project of their working directory and are asked again in their first turn. Sessions already bound keep their binding.",
-        "values": "Clears the plugin's own small data, such as the server ids of projects. The plugin gets it again when it needs it; the memory itself is untouched."
+        "values": "Clears the plugin's own small data, such as the server ids of projects. The plugin gets it again when it needs it; the memory itself is untouched.",
+        "lookups": "The plugin's lookup credentials stop working at once, along with the commands the model already has. Each session's next request carries a new one; its system prompt changes, so its prompt cache is written once more."
       },
-      "clearFailed": "Couldn't clear it."
+      "clearFailed": "Couldn't clear it.",
+      "revoke": "Revoke"
+    },
+    "lookup": {
+      "label": "Model lookups",
+      "helpLabel": "About model lookups",
+      "help": "When the model needs details, it can run the plugin's read-only queries with its own shell, in the session's project, at most 3 a turn. The system prompt carries how to run them and the session's credential only when the client runs on the same computer as the gateway and its request offers the model a shell. The plugin needs “Model lookups” granted when it is enabled. Its queries:",
+      "toolSeparator": ": "
     }
   },
   "pluginRecords": {
@@ -4940,7 +4954,11 @@
       "invalid_result": "The plugin returned an invalid result",
       "no_system_channel": "The request has no system prompt to add to",
       "no_opening_message": "The turn has no user message to add to",
-      "injection_failed": "Injection failed; the request went out as it came"
+      "injection_failed": "Injection failed; the request went out as it came",
+      "rate_limited": "Too many lookups",
+      "turn_limit": "The turn's 3 lookups were used",
+      "unbound": "The session has no project yet",
+      "invalid_input": "Wrong input"
     },
     "injection": "Injected",
     "placement": {
@@ -5005,7 +5023,14 @@
     },
     "metadataNew": "new project",
     "metadataNormalized": "written as {{value}}",
-    "actionFailedPlain": "Couldn't do it."
+    "actionFailedPlain": "Couldn't do it.",
+    "lookup": "Lookup",
+    "lookupInput_one": "input of {{count}} character",
+    "lookupInput_other": "input of {{count}} characters",
+    "lookupResult": "result {{size}}",
+    "lookupHits_one": "{{count}} hit",
+    "lookupHits_other": "{{count}} hits",
+    "commands": "Lookups offered"
   },
   "metadata": {
     "title": "Metadata",
@@ -5141,7 +5166,7 @@
       },
       "pause": {
         "title": "Pause {{name}} in this session?",
-        "body": "While paused nothing is loaded or written, and requests go out as they came; what is already in the context stays. The system prompt changes, so the prompt cache is written once more.",
+        "body": "While paused nothing is loaded, offered for lookups or written, and requests go out as they came; the session's lookup credential stops working, and what is already in the context stays. The system prompt changes, so the prompt cache is written once more.",
         "action": "Pause"
       },
       "resume": {
@@ -5149,6 +5174,7 @@
         "body": "Loading and writing resume. The system prompt changes, so the prompt cache is written once more.",
         "action": "Resume"
       }
-    }
+    },
+    "lookup": "How the system prompt tells the model to run lookups (credential hidden)"
   }
 }

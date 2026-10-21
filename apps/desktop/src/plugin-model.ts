@@ -7,6 +7,7 @@ export const PLUGIN_CAPABILITIES = [
   "network",
   "storage",
   "ui.views",
+  "model.tools",
 ] as const;
 
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
@@ -86,10 +87,22 @@ export interface PluginDetail extends PluginSummary {
   workspace_binding: boolean;
   /** The host swaps a session's resident block when newer data changes it. */
   auto_refresh: boolean;
+  /** The model may run the plugin's queries, when model.tools is granted. */
+  lookup_enabled: boolean;
+  /** The queries the plugin offers the model, in the interface language. */
+  tools: PluginTool[];
   /** What the plugin says it keeps in its own store. */
   storage: PluginStorageItem[];
   /** What the host keeps for the plugin, with counts where it can clear them. */
   host_storage: PluginHostStorage[];
+}
+
+/** A read-only query a plugin offers the model. */
+export interface PluginTool {
+  name: string;
+  description: string;
+  /** It runs before the session has the plugin's values, such as listing projects. */
+  unbound?: boolean;
 }
 
 /** Something a plugin keeps, as its manifest declares it. */
@@ -108,6 +121,7 @@ export const PLUGIN_HOST_STORAGE = [
   "request_records",
   "resident_block",
   "plugin_values",
+  "lookup_credentials",
 ] as const;
 export type PluginHostStorageKind = (typeof PLUGIN_HOST_STORAGE)[number];
 
@@ -115,6 +129,9 @@ export interface PluginHostStorage {
   kind: PluginHostStorageKind;
   count?: number;
 }
+
+/** What the plugin page clears of what the host keeps for a plugin. */
+export type PluginClearTarget = "workspaces" | "values" | "lookups";
 
 /** The host's own settings a plugin may place in its form. */
 export const HOST_SETTINGS = [
@@ -124,6 +141,7 @@ export const HOST_SETTINGS = [
   "$clients",
   "$workspace",
   "$refresh",
+  "$lookup",
 ] as const;
 export type HostSettingKey = (typeof HOST_SETTINGS)[number];
 
@@ -172,6 +190,8 @@ export interface SessionPlugin {
     computed_at: string;
   };
   refresh_pending?: boolean;
+  /** How the session's last request told the model to run the plugin's queries, its credential masked. */
+  lookup?: string;
 }
 
 /** A value sessions are bound to, with how many and when one was last used. */
@@ -238,6 +258,7 @@ export interface PluginSettingsUpdate {
   excluded_clients?: string[];
   workspace_binding?: boolean;
   auto_refresh?: boolean;
+  lookup_enabled?: boolean;
   config?: Record<string, unknown>;
   /** Plain http server origins the user agrees to reach in the clear. */
   plaintext_consent?: string[];
@@ -306,6 +327,15 @@ export interface PluginInjection {
   dropped_items: number;
 }
 
+/** A query the model ran: its size only, never what it asked or got. */
+export interface PluginLookup {
+  tool: string;
+  input_runes: number;
+  result_bytes: number;
+  /** How many things the result held, when the plugin counts them. */
+  hits?: number;
+}
+
 /** A plugin's part in a request: what it reported and what the host did. */
 export interface RequestPluginRecord {
   plugin: string;
@@ -325,6 +355,10 @@ export interface RequestPluginRecord {
   trigger?: string;
   /** The plugin's buttons for the record's session. */
   actions?: PluginRecordAction[];
+  /** A query the model ran through the gateway. */
+  lookup?: PluginLookup;
+  /** The queries whose commands the plugin's turn block carried. */
+  commands?: string[];
 }
 
 /** A button on a plugin's record; confirm is asked before the click goes out. */
@@ -637,6 +671,20 @@ export function parsePluginDetail(value: unknown): PluginDetail {
       true,
     auto_refresh:
       plugin.optionalBoolean(detail.auto_refresh, "$.auto_refresh") ?? false,
+    lookup_enabled:
+      plugin.optionalBoolean(detail.lookup_enabled, "$.lookup_enabled") ?? true,
+    tools: (detail.tools === undefined
+      ? []
+      : plugin.array(detail.tools, "$.tools")
+    ).map((item, index) => {
+      const path = `$.tools[${index}]`;
+      const tool = plugin.object(item, path);
+      return defined({
+        name: plugin.string(tool.name, `${path}.name`),
+        description: plugin.string(tool.description, `${path}.description`),
+        unbound: plugin.optionalBoolean(tool.unbound, `${path}.unbound`),
+      });
+    }),
     storage: (detail.storage === undefined
       ? []
       : plugin.array(detail.storage, "$.storage")
@@ -720,6 +768,7 @@ export function parseSessionPlugins(value: unknown): SessionPlugin[] {
         part.refresh_pending,
         `${path}.refresh_pending`,
       ),
+      lookup: plugin.optionalString(part.lookup, `${path}.lookup`),
     });
   });
 }
@@ -947,6 +996,23 @@ export function parseRequestPluginRecords(
   return plugin.array(value, path).map((item, index) => {
     const recordPath = `${path}[${index}]`;
     const record = plugin.object(item, recordPath);
+    let lookup: PluginLookup | undefined;
+    if (record.lookup !== undefined) {
+      const lookupPath = `${recordPath}.lookup`;
+      const raw = plugin.object(record.lookup, lookupPath);
+      lookup = defined({
+        tool: plugin.string(raw.tool, `${lookupPath}.tool`),
+        input_runes: plugin.integer(
+          raw.input_runes,
+          `${lookupPath}.input_runes`,
+        ),
+        result_bytes: plugin.integer(
+          raw.result_bytes,
+          `${lookupPath}.result_bytes`,
+        ),
+        hits: plugin.optionalInteger(raw.hits, `${lookupPath}.hits`),
+      });
+    }
     let injection: PluginInjection | undefined;
     if (record.injection !== undefined) {
       const injectionPath = `${recordPath}.injection`;
@@ -1016,6 +1082,11 @@ export function parseRequestPluginRecords(
                   ),
                 });
               }),
+      lookup,
+      commands:
+        record.commands === undefined
+          ? undefined
+          : plugin.strings(record.commands, `${recordPath}.commands`),
     });
   });
 }

@@ -24,6 +24,7 @@ import {
   plaintextOrigin,
   settingValue,
   type PluginBindings,
+  type PluginClearTarget,
   type PluginCredit,
   type PluginDetail,
   type PluginHostStorage,
@@ -77,7 +78,7 @@ export function PluginOverview({
   status: PluginStatus | null;
   statusError: string | null;
   busy?: boolean;
-  onClear?: (what: "workspaces" | "values") => Promise<boolean>;
+  onClear?: (what: PluginClearTarget) => Promise<boolean>;
   now?: Date;
 }) {
   const t = useT();
@@ -178,12 +179,12 @@ export function PluginOverview({
 }
 
 /** What the host keeps for a plugin, and what can be cleared of it. */
-const clearable: Partial<
-  Record<PluginHostStorage["kind"], "workspaces" | "values">
-> = {
-  workspace_bindings: "workspaces",
-  plugin_values: "values",
-};
+const clearable: Partial<Record<PluginHostStorage["kind"], PluginClearTarget>> =
+  {
+    workspace_bindings: "workspaces",
+    plugin_values: "values",
+    lookup_credentials: "lookups",
+  };
 
 /**
  * What is kept for the plugin, where, whether it holds conversation text and
@@ -196,12 +197,13 @@ function StoredCard({
 }: {
   detail: PluginDetail;
   busy: boolean;
-  onClear?: (what: "workspaces" | "values") => Promise<boolean>;
+  onClear?: (what: PluginClearTarget) => Promise<boolean>;
 }) {
   const t = useT();
-  const [clearing, setClearing] = useState<"workspaces" | "values" | null>(
-    null,
-  );
+  const [clearing, setClearing] = useState<PluginClearTarget | null>(null);
+  // Credentials are voided, not cleared: each session gets a new one.
+  const actionLabel = (what: PluginClearTarget) =>
+    what === "lookups" ? t("plugins.stored.revoke") : t("plugins.stored.clear");
   return (
     <Panel data-testid="plugin-stored">
       <PanelHeader size="sm">
@@ -251,7 +253,7 @@ function StoredCard({
                   type="button"
                   variant="outline"
                 >
-                  {t("plugins.stored.clear")}
+                  {actionLabel(what)}
                 </Button>
               ) : null}
             </li>
@@ -259,7 +261,7 @@ function StoredCard({
         })}
       </ul>
       <ConfirmDialog
-        confirmLabel={t("plugins.stored.clear")}
+        confirmLabel={clearing ? actionLabel(clearing) : ""}
         description={
           <p>
             {clearing ? t(`plugins.stored.clearConfirm.${clearing}`) : null}

@@ -193,6 +193,7 @@ import {
   type MetadataAttributeInput,
   type MetadataValueUsage,
   type PluginActionResult,
+  type PluginClearTarget,
   type PluginDetail,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
@@ -1507,20 +1508,25 @@ export async function runPluginAction(
   );
 }
 
+const clearActions: Record<PluginClearTarget, string> = {
+  workspaces: "clear_workspaces",
+  values: "clear_values",
+  lookups: "revoke_lookups",
+};
+
 /**
  * Clears what the host keeps for a plugin: the workspaces bound to its
- * attributes' values, or its own stored values. Returns how many it removed.
+ * attributes' values, its own stored values, or the credentials of its
+ * lookups, which each session's next request issues anew. Returns how many
+ * it removed.
  */
 export async function clearPluginData(
   key: string,
-  what: "workspaces" | "values",
+  what: PluginClearTarget,
 ): Promise<number> {
   requireNativeBridge();
   return parsePluginClearResult(
-    await invoke<unknown>("plugin_action", {
-      action: what === "workspaces" ? "clear_workspaces" : "clear_values",
-      key,
-    }),
+    await invoke<unknown>("plugin_action", { action: clearActions[what], key }),
   );
 }
 

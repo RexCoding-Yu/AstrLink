@@ -42,6 +42,10 @@ const knownSkipReasons = new Set([
   "no_system_channel",
   "no_opening_message",
   "injection_failed",
+  "rate_limited",
+  "turn_limit",
+  "unbound",
+  "invalid_input",
 ]);
 
 const knownTriggers = new Set([
@@ -182,6 +186,34 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
                     ? ` · ${t("pluginRecords.dropped", { count: entry.injection.dropped_items })}`
                     : ""}
                 </dd>
+              </>
+            ) : null}
+            {entry.lookup ? (
+              <>
+                <dt className="text-muted-foreground">
+                  {t("pluginRecords.lookup")}
+                </dt>
+                <dd className="tabular-nums" data-testid="plugin-record-lookup">
+                  <span className="font-mono">{entry.lookup.tool}</span>
+                  {" · "}
+                  {t("pluginRecords.lookupInput", {
+                    count: entry.lookup.input_runes,
+                  })}
+                  {entry.status === "ok"
+                    ? ` · ${t("pluginRecords.lookupResult", { size: formatBytes(entry.lookup.result_bytes) })}`
+                    : ""}
+                  {entry.lookup.hits !== undefined
+                    ? ` · ${t("pluginRecords.lookupHits", { count: entry.lookup.hits })}`
+                    : ""}
+                </dd>
+              </>
+            ) : null}
+            {entry.commands && entry.commands.length > 0 ? (
+              <>
+                <dt className="text-muted-foreground">
+                  {t("pluginRecords.commands")}
+                </dt>
+                <dd className="font-mono">{entry.commands.join(", ")}</dd>
               </>
             ) : null}
             {entry.network.requests > 0 ? (

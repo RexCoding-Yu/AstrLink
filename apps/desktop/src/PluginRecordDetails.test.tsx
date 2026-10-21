@@ -177,6 +177,71 @@ describe("PluginRecordDetails", () => {
     expect(write?.textContent).toContain("已写入 · 已整理成记忆");
   });
 
+  it("shows the lookups the model ran by their size, and the ones offered", async () => {
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            plugin_records: [
+              {
+                plugin: "powercontext",
+                plugin_version: "2.0.0",
+                hook: "prepareTurn",
+                title: "询问项目",
+                status: "ok",
+                summary: "列出 20 个项目（共 35 个）",
+                elapsed_ms: 120,
+                network: { requests: 2, denied: 0, errors: 0, wait_ms: 110 },
+                commands: ["projects"],
+              },
+              {
+                plugin: "powercontext",
+                plugin_version: "2.0.0",
+                hook: "callTool",
+                title: "记忆查询",
+                status: "ok",
+                summary: "检索 · 命中 3 条",
+                elapsed_ms: 820,
+                network: { requests: 6, denied: 0, errors: 0, wait_ms: 800 },
+                lookup: {
+                  tool: "search",
+                  input_runes: 12,
+                  result_bytes: 2150,
+                  hits: 3,
+                },
+              },
+              {
+                plugin: "powercontext",
+                plugin_version: "2.0.0",
+                hook: "callTool",
+                title: "PowerContext 记忆",
+                status: "skipped",
+                summary: "",
+                skipped_reason: "turn_limit",
+                elapsed_ms: 0,
+                network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+                lookup: { tool: "read", input_runes: 4, result_bytes: 0 },
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    const [ask, search, refused] = document.querySelectorAll(
+      '[data-testid="plugin-record"]',
+    );
+    expect(ask?.textContent).toContain("附上查询projects");
+    expect(search?.textContent).toContain(
+      "search · 参数 12 字 · 结果 2.1 KiB · 3 条结果",
+    );
+    expect(refused?.textContent).toContain("这一轮已经查满 3 次");
+    expect(
+      refused?.querySelector('[data-testid="plugin-record-lookup"]')
+        ?.textContent,
+    ).toBe("read · 参数 4 字");
+  });
+
   it("says so when no plugin ran", async () => {
     await act(async () => {
       reactRoot.render(<PluginRecordDetails record={record} />);

@@ -3501,6 +3501,8 @@ fn plugin_request(
         ),
         "clear_workspaces" => (Method::DELETE, format!("{plugin}/workspaces"), None),
         "clear_values" => (Method::DELETE, format!("{plugin}/values"), None),
+        // Voids the credentials the model runs the plugin's lookups with.
+        "revoke_lookups" => (Method::DELETE, format!("{plugin}/lookup-credentials"), None),
         "save_credential" | "delete_credential" => {
             let name = name
                 .filter(|name| valid_plugin_name(name, '_'))
@@ -6928,6 +6930,7 @@ mod tests {
         for (action, path) in [
             ("clear_workspaces", "workspaces"),
             ("clear_values", "values"),
+            ("revoke_lookups", "lookup-credentials"),
         ] {
             assert_eq!(
                 plugin_request(action, Some("powercontext"), None, None).unwrap(),

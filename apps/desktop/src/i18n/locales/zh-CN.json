@@ -4707,7 +4707,8 @@
       "requestRead": "读取本轮文本",
       "network": "网络",
       "storage": "插件存储",
-      "uiViews": "界面视图"
+      "uiViews": "界面视图",
+      "modelTools": "供模型查询"
     },
     "loadErrors": {
       "not_found": "没有 plugin.ts 或 plugin.js",
@@ -4895,6 +4896,10 @@
         "plugin_values": {
           "label": "插件存储",
           "detail": "插件自己存的小数据 · AstrLink 数据库 · 停用插件后仍保留，可以清除"
+        },
+        "lookup_credentials": {
+          "label": "查询凭证",
+          "detail": "各会话运行查询用的凭证 · 只在内存里，存的是哈希 · 不含对话内容 · 会话 24 小时没有请求或网关重启就作废"
         }
       },
       "declared": "插件声明：{{label}} · {{content}} · {{retention}}",
@@ -4903,15 +4908,24 @@
       "clear": "清除",
       "clearTitle": {
         "workspaces": "清除工作区记录？",
-        "values": "清除插件存储？"
+        "values": "清除插件存储？",
+        "lookups": "作废查询凭证？"
       },
       "clearConfirm": {
         "workspaces": "清除后，新会话不再按工作目录自动接上项目，会在第一轮重新询问。已经绑定的会话不受影响。",
-        "values": "清除插件自己存的小数据，例如项目在服务器上的编号。插件会在下次用到时重新取，记忆本身不受影响。"
+        "values": "清除插件自己存的小数据，例如项目在服务器上的编号。插件会在下次用到时重新取，记忆本身不受影响。",
+        "lookups": "这个插件的查询凭证立即失效，模型已经拿到的查询命令都不能再用。每个会话的下一个请求会换新凭证，系统提示词随之变化，这些会话的提示词缓存要重写一次。"
       },
       "clearFailed": "无法清除。",
       "count_one": "{{count}} 条",
-      "count_other": "{{count}} 条"
+      "count_other": "{{count}} 条",
+      "revoke": "作废"
+    },
+    "lookup": {
+      "label": "供模型查询",
+      "helpLabel": "关于供模型查询",
+      "help": "模型需要细节时，可以用自己的 shell 运行插件的只读查询，查的是会话绑定的项目，每轮最多 3 次。只有客户端和网关在同一台电脑上、请求里带着 shell 工具时，才在系统提示词里附上查询方法和本会话的凭证。启用插件时要勾选「供模型查询」。插件提供的查询：",
+      "toolSeparator": "："
     }
   },
   "pluginRecords": {
@@ -4940,7 +4954,11 @@
       "invalid_result": "插件返回的结果无效",
       "no_system_channel": "请求没有系统提示词可放",
       "no_opening_message": "这一轮没有可放的用户消息",
-      "injection_failed": "注入失败，请求原样发出"
+      "injection_failed": "注入失败，请求原样发出",
+      "rate_limited": "查得太频繁",
+      "turn_limit": "这一轮已经查满 3 次",
+      "unbound": "会话还没有绑定项目",
+      "invalid_input": "参数不对"
     },
     "injection": "注入",
     "placement": {
@@ -5005,7 +5023,14 @@
     },
     "metadataNew": "新建项目",
     "metadataNormalized": "原写法 {{value}}",
-    "actionFailedPlain": "没能完成。"
+    "actionFailedPlain": "没能完成。",
+    "lookup": "查询",
+    "lookupInput_one": "参数 {{count}} 字",
+    "lookupInput_other": "参数 {{count}} 字",
+    "lookupResult": "结果 {{size}}",
+    "lookupHits_one": "{{count}} 条结果",
+    "lookupHits_other": "{{count}} 条结果",
+    "commands": "附上查询"
   },
   "metadata": {
     "title": "元信息",
@@ -5141,7 +5166,7 @@
       },
       "pause": {
         "title": "暂停「{{name}}」在这个会话里的工作？",
-        "body": "暂停后不装载、不写入，请求原样发出；已经在上下文里的内容不会撤回。系统提示词变了，提示词缓存要重写一次。",
+        "body": "暂停后不装载、不附查询方法、不写入，请求原样发出；本会话的查询凭证随即作废，已经在上下文里的内容不会撤回。系统提示词变了，提示词缓存要重写一次。",
         "action": "暂停"
       },
       "resume": {
@@ -5149,6 +5174,7 @@
         "body": "恢复后照常装载和写入。系统提示词变了，提示词缓存要重写一次。",
         "action": "恢复"
       }
-    }
+    },
+    "lookup": "附在系统提示词里的查询方法（凭证已隐去）"
   }
 }

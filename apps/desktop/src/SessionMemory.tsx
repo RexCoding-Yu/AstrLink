@@ -289,6 +289,19 @@ export function SessionMemory({
                 {t("sessionMemory.noBlock")}
               </p>
             )}
+            {part.lookup ? (
+              <>
+                <p className="text-muted-foreground">
+                  {t("sessionMemory.lookup")}
+                </p>
+                <pre
+                  className="max-h-60 overflow-auto rounded-md border bg-muted/40 p-2 font-mono text-micro leading-5 whitespace-pre-wrap"
+                  data-testid="session-memory-lookup"
+                >
+                  {part.lookup}
+                </pre>
+              </>
+            ) : null}
           </div>
         </Panel>
       ))}

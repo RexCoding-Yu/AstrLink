@@ -438,6 +438,8 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/workspaces`, "DELETE")(a);
       case "clear_values":
         return route(`${plugin}/values`, "DELETE")(a);
+      case "revoke_lookups":
+        return route(`${plugin}/lookup-credentials`, "DELETE")(a);
       case "save_credential":
         return route(
           `${plugin}/credentials/${segment(a.name, /^[a-z][a-z0-9_]{0,31}$/)}`,

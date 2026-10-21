@@ -71,6 +71,7 @@ interface Draft {
   excluded: string[];
   workspace: boolean;
   refresh: boolean;
+  lookup: boolean;
   /** The user's own origins, beside those of the servers. */
   origins: Array<{ origin: string; allow_plaintext: boolean }>;
   /**
@@ -104,6 +105,7 @@ const hostKeys: HostSettingKey[] = [
   "$clients",
   "$workspace",
   "$refresh",
+  "$lookup",
   "$origins",
 ];
 
@@ -168,6 +170,8 @@ function hostApplies(detail: PluginDetail, key: HostSettingKey): boolean {
         detail.hooks.includes("prepareSession") &&
         detail.requested_capabilities.includes("context.inject")
       );
+    case "$lookup":
+      return detail.tools.length > 0;
   }
 }
 
@@ -223,6 +227,7 @@ function draftOf(detail: PluginDetail): Draft {
     excluded: detail.excluded_clients,
     workspace: detail.workspace_binding,
     refresh: detail.auto_refresh,
+    lookup: detail.lookup_enabled,
     origins: ownOrigins(detail),
     consent,
     secrets: {},
@@ -435,6 +440,7 @@ export function PluginSettingsForm({
     clientsChanged ||
     draft.workspace !== detail.workspace_binding ||
     draft.refresh !== detail.auto_refresh ||
+    draft.lookup !== detail.lookup_enabled ||
     originsChanged ||
     consentChanged ||
     credentials.length > 0;
@@ -459,6 +465,8 @@ export function PluginSettingsForm({
       update.workspace_binding = draft.workspace;
     if (draft.refresh !== detail.auto_refresh)
       update.auto_refresh = draft.refresh;
+    if (draft.lookup !== detail.lookup_enabled)
+      update.lookup_enabled = draft.lookup;
     if (originsChanged) update.network_origins = draft.origins;
     const consent = servers
       .map((setting) => {
@@ -1090,6 +1098,36 @@ function HostRow({
       );
     case "$refresh":
       return <RefreshRow draft={draft} onDraft={onDraft} />;
+    case "$lookup":
+      return (
+        <SettingRow
+          help={
+            <>
+              <p>{t("plugins.lookup.help")}</p>
+              <ul className="mt-2 grid gap-1">
+                {detail.tools.map((tool) => (
+                  <li key={tool.name}>
+                    <span className="font-mono">{tool.name}</span>
+                    {t("plugins.lookup.toolSeparator")}
+                    {tool.description}
+                  </li>
+                ))}
+              </ul>
+            </>
+          }
+          helpLabel={t("plugins.lookup.helpLabel")}
+          htmlFor={id}
+          label={t("plugins.lookup.label")}
+        >
+          <Switch
+            checked={draft.lookup}
+            id={id}
+            onCheckedChange={(checked) =>
+              onDraft((current) => ({ ...current, lookup: checked }))
+            }
+          />
+        </SettingRow>
+      );
   }
 }
 

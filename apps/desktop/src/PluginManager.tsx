@@ -47,6 +47,7 @@ import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
 import {
   MAX_INJECTION_BUDGET_BYTES,
   MIN_INJECTION_BUDGET_BYTES,
+  type PluginClearTarget,
   type PluginDetail,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
@@ -171,7 +172,7 @@ export function PluginManager({
   }
 
   /** Clears what the host keeps for the plugin, then shows the new counts. */
-  async function clearData(key: string, what: "workspaces" | "values") {
+  async function clearData(key: string, what: PluginClearTarget) {
     setBusy(true);
     setActionError(null);
     try {
@@ -696,7 +697,7 @@ function PluginDetailPane({
     credentials: CredentialInput[],
   ) => Promise<boolean>;
   onCredentialClear: (name: string) => Promise<boolean>;
-  onClearData: (what: "workspaces" | "values") => Promise<boolean>;
+  onClearData: (what: PluginClearTarget) => Promise<boolean>;
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
