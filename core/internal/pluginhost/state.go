@@ -56,6 +56,9 @@ type pluginState struct {
 	// choices are the values the plugin offered the session, by attribute
 	// key, for the user's answer to name one.
 	choices map[string][]string
+	// usage is the usage of the plugin's lookups the session's last
+	// request carried.
+	usage string
 
 	// settled names the turn whose block is settled, "" for none;
 	// turnTitle is the title of the record that settled it, and turnBytes

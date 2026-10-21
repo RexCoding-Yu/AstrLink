@@ -34,6 +34,7 @@ const (
 	HostSettingClients   = "$clients"
 	HostSettingWorkspace = "$workspace"
 	HostSettingRefresh   = "$refresh"
+	HostSettingLookup    = "$lookup"
 )
 
 // Limits of the settings and credits a manifest declares.
@@ -160,8 +161,12 @@ func validateSetting(meta Meta, setting Setting) error {
 			if !slices.Contains(meta.Capabilities, CapabilityInject) {
 				return errors.New("$refresh needs the context.inject capability")
 			}
+		case HostSettingLookup:
+			if len(meta.Tools) == 0 {
+				return errors.New("$lookup needs a query in meta.tools")
+			}
 		default:
-			return fmt.Errorf("%q is not a host setting; the host has $wait, $trusted, $origins, $clients, $workspace and $refresh", setting.Key)
+			return fmt.Errorf("%q is not a host setting; the host has $wait, $trusted, $origins, $clients, $workspace, $refresh and $lookup", setting.Key)
 		}
 		if setting.Label != "" || setting.Type != "" || setting.Row != "" || setting.Help != "" || len(setting.Default) > 0 ||
 			setting.Required || setting.Min != nil || setting.Max != nil || setting.Step != nil || setting.Unit != "" ||

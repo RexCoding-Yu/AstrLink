@@ -190,7 +190,12 @@ type PluginDetail struct {
 	WorkspaceBinding bool `json:"workspace_binding"`
 	// AutoRefresh checks a session's resident block for newer data now and
 	// then, and swaps it when it changed.
-	AutoRefresh bool                      `json:"auto_refresh"`
+	AutoRefresh bool `json:"auto_refresh"`
+	// LookupEnabled lets the model run the plugin's queries through the
+	// lookup outlet, once the user granted model.tools.
+	LookupEnabled bool `json:"lookup_enabled"`
+	// Tools are the queries the plugin offers the model.
+	Tools       []PluginTool              `json:"tools"`
 	Credentials []PluginCredentialStatus  `json:"credentials"`
 	Metadata    []PluginMetadataAttribute `json:"metadata"`
 	// Settings are the fields of the plugin's settings form, in order.
@@ -201,6 +206,15 @@ type PluginDetail struct {
 	// HostStorage what the host keeps for it.
 	Storage     []PluginStorageItem `json:"storage"`
 	HostStorage []PluginHostStorage `json:"host_storage"`
+}
+
+// PluginTool is a query a plugin offers the model: its name and what it
+// says of itself in the interface language.
+type PluginTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Unbound marks a query a session may run before it is bound.
+	Unbound bool `json:"unbound,omitempty"`
 }
 
 // PluginStorageItem is something a plugin says it keeps in its own store.
@@ -219,6 +233,9 @@ const (
 	// Workspaces bound to a value: a keyed fingerprint of the path and its
 	// last element.
 	PluginStoredWorkspaceBindings = "workspace_bindings"
+	// PluginStoredLookupCredentials are the credentials sessions run the
+	// plugin's lookups with: in memory only, as hashes.
+	PluginStoredLookupCredentials = "lookup_credentials"
 	// The plugin's records in request records: counts, sizes, times and
 	// reasons.
 	PluginStoredRecords = "request_records"
@@ -314,6 +331,7 @@ type PluginSettingsUpdate struct {
 	ExcludedClients     *[]string                   `json:"excluded_clients,omitempty"`
 	WorkspaceBinding    *bool                       `json:"workspace_binding,omitempty"`
 	AutoRefresh         *bool                       `json:"auto_refresh,omitempty"`
+	LookupEnabled       *bool                       `json:"lookup_enabled,omitempty"`
 	Config              json.RawMessage             `json:"config,omitempty"`
 	// PlaintextConsent lists the plain http origins of servers the user
 	// agrees to reach in the clear.
@@ -412,6 +430,9 @@ type SessionPlugin struct {
 	Block *SessionPluginBlock `json:"block,omitempty"`
 	// RefreshPending is set while a refresh waits for the next request.
 	RefreshPending bool `json:"refresh_pending,omitempty"`
+	// Lookup is the usage of the plugin's lookups the session's last
+	// request carried, its credential masked; "" for none.
+	Lookup string `json:"lookup,omitempty"`
 }
 
 // SessionPluginBlock is a resident block as it goes into the session's

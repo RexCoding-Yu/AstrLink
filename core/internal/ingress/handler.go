@@ -349,6 +349,12 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	// The policy warning header is owned by this local response boundary.
 	// Strip any client-supplied value so it cannot be spoofed upstream.
 	request.Header.Del(PolicyWarningHeader)
+	// The lookup outlet answers neither browsers nor other machines, so it
+	// comes before the cross-origin headers every other route sends.
+	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && strings.HasPrefix(request.URL.Path, pluginhost.LookupPath) {
+		handler.serveLookup(writer, request)
+		return
+	}
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil {
 		writer.Header().Set("Access-Control-Allow-Origin", "*")
 		writer.Header().Set("Access-Control-Expose-Headers", "*")

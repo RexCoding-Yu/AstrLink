@@ -92,6 +92,7 @@ type harness struct {
 	added    recordSink
 	manager  *plugin.Manager
 	registry *metadata.Registry
+	box      *settingsBox
 }
 
 // recordSink stands for the request records captures add to.
@@ -126,8 +127,9 @@ func newHarness(t *testing.T, settings plugin.Settings, sources map[string]strin
 		builtin[file] = &fstest.MapFile{Data: []byte(source)}
 		all[key] = settings
 	}
+	box := &settingsBox{settings: all}
 	manager := plugin.NewManager(plugin.ManagerOptions{
-		Builtin: builtin, Settings: all, Services: plugin.Services{Store: store, Fetcher: fetcher},
+		Builtin: builtin, Settings: box, Services: plugin.Services{Store: store, Fetcher: fetcher},
 	})
 	if err := manager.Reload(ctx); err != nil {
 		t.Fatal(err)
@@ -147,7 +149,52 @@ func newHarness(t *testing.T, settings plugin.Settings, sources map[string]strin
 		WorkspaceKey: []byte("workspace key"), Logf: t.Logf,
 	})
 	t.Cleanup(host.Close)
-	return &harness{host: host, bindings: bindings, writes: store.writes, added: added, manager: manager, registry: registry}
+	return &harness{host: host, bindings: bindings, writes: store.writes, added: added, manager: manager, registry: registry, box: box}
+}
+
+// settingsBox lets a test change the settings the manager reads.
+type settingsBox struct {
+	mutex    sync.Mutex
+	settings settingsSource
+}
+
+func (box *settingsBox) PluginSettings(ctx context.Context) (map[string]plugin.Settings, error) {
+	box.mutex.Lock()
+	defer box.mutex.Unlock()
+	return box.settings.PluginSettings(ctx)
+}
+
+// reconfigure gives every plugin new settings, as saving the plugin page
+// does.
+func (h *harness) reconfigure(t *testing.T, settings plugin.Settings) {
+	t.Helper()
+	h.box.mutex.Lock()
+	for key := range h.box.settings {
+		h.box.settings[key] = settings
+	}
+	h.box.mutex.Unlock()
+	if err := h.manager.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// markerRun binds sessions the way a user's marker line does.
+type markerRun struct {
+	h *harness
+	t *testing.T
+}
+
+func (runner *markerRun) bind(session, line string) {
+	runner.t.Helper()
+	body := messages(user(line))
+	run := runner.h.host.Begin(context.Background(), Input{
+		RequestID: "request_1", Protocol: contract.ProtocolAnthropicMessages, Model: "claude", Client: "claude_code",
+		Header: http.Header{}, Session: session, Turn: 7, Body: []byte(body),
+	})
+	if run == nil {
+		runner.t.Fatal("Begin = nil")
+	}
+	run.Inject([]byte(body))
 }
 
 // restart is the same gateway after a restart: storage stays, memory goes.

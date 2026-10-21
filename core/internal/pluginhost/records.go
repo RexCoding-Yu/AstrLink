@@ -123,6 +123,16 @@ func parseResult(raw json.RawMessage, owner *plugin.Plugin, registry *metadata.R
 	return result
 }
 
+// parseRecordOf reads a record a plugin returned, without its view unless
+// the plugin may show views.
+func parseRecordOf(raw json.RawMessage, owner *plugin.Plugin) (contract.PluginRecord, bool) {
+	record, ok := view.ParseRecord(raw)
+	if ok && !owner.Can(plugin.CapabilityViews) {
+		record.View = nil
+	}
+	return record, ok
+}
+
 // parseBlock reads a block: a string, or an object of an opening line,
 // items and a closing line. Absent is the empty block.
 func parseBlock(raw json.RawMessage) (injection.Block, bool) {
@@ -167,6 +177,8 @@ type injected struct {
 	// turnTitle is the title the plugin gave the record that settled the
 	// turn block.
 	turnTitle string
+	// commands name the queries whose commands the turn block carried.
+	commands []string
 }
 
 // residentTitle is the title the plugin gave the record of the resident
@@ -294,6 +306,9 @@ func (run *Run) turnRecord(current *part, result injected, failed bool) (contrac
 			Placement: contract.PluginPlacementTurnMessage, InjectedBytes: outcome.TurnBytes,
 			ReplayedBlocks: outcome.Replayed, DroppedItems: result.dropped,
 		}
+	}
+	if outcome.TurnBytes > 0 {
+		record.Commands = result.commands
 	}
 	if record.SkippedReason == "" {
 		switch {

@@ -48,6 +48,13 @@ type pluginHostFixture struct {
 
 func newPluginHostFixture(t *testing.T) pluginHostFixture {
 	t.Helper()
+	return buildPluginHostFixture(t, nil)
+}
+
+// buildPluginHostFixture enables the loader; the other plugins it is given
+// start disabled.
+func buildPluginHostFixture(t *testing.T, others map[string]string) pluginHostFixture {
+	t.Helper()
 	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +62,9 @@ func newPluginHostFixture(t *testing.T) pluginHostFixture {
 	t.Cleanup(func() { _ = store.Close() })
 	directory := t.TempDir()
 	writePlugin(t, directory, "loader", "plugin.js", loaderPlugin)
+	for key, source := range others {
+		writePlugin(t, directory, key, "plugin.js", source)
+	}
 	manager := plugin.NewManager(plugin.ManagerOptions{
 		Dir: directory, Settings: hostapi.Settings{Store: store},
 		Services: plugin.Services{Store: hostapi.Store{Values: store}, Metadata: hostapi.Metadata{Store: store}},
@@ -289,4 +299,124 @@ func TestChangingASessionsProjectCanMoveItsWorkspace(t *testing.T) {
 	if response := controlRequest(t, handler, http.MethodGet, MetadataAttributesPath+"/project/other", "", "", ""); response.Code != http.StatusNotFound {
 		t.Fatalf("an unknown sub-resource = %d", response.Code)
 	}
+}
+
+// finderPlugin offers the model a search of the session's repository.
+const finderPlugin = `export const meta = {
+  apiVersion: 1, key: "finder", name: "Finder", version: "1.0.0",
+  capabilities: ["request.read", "model.tools"],
+  metadata: [{ key: "repo", label: "Repository", pattern: "^[a-z0-9-]{1,32}$", marker: "memo-repo" }],
+  tools: [{ name: "search", description: { en: "Search the repository's memory.", "zh-CN": "检索本仓库的记忆。" },
+    params: [{ name: "query", type: "string", required: true, example: "what to look up" }] }],
+};
+export function callTool(view) { return { text: "found in " + view.meta.repo.value }; }
+`
+
+// sendShell runs a request of session that offers the model a shell, from
+// this machine, and returns the lookup credential it carries.
+func (fixture pluginHostFixture) sendShell(t *testing.T, session string) string {
+	t.Helper()
+	body := `{"model":"claude","tools":[{"name":"Bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"look it up"}]}`
+	run := fixture.host.Begin(context.Background(), pluginhost.Input{
+		RequestID: contract.RequestID("request_" + session), Protocol: contract.ProtocolAnthropicMessages, Model: "claude",
+		Client: "claude_code", Header: http.Header{}, Session: session, Turn: 1, Body: []byte(body), LookupBase: "http://127.0.0.1:18317",
+	})
+	sent := string(run.Inject([]byte(body)))
+	run.Report()
+	at := strings.Index(sent, "Bearer mk-")
+	if at < 0 {
+		t.Fatalf("no credential in %s", sent)
+	}
+	return sent[at+len("Bearer ") : at+len("Bearer mk-")+32]
+}
+
+func (fixture pluginHostFixture) lookup(token string) int {
+	return fixture.host.Lookup(context.Background(), pluginhost.LookupRequest{
+		Plugin: "finder", Tool: "search", Token: token, Input: []byte(`{"query":"x"}`),
+	}).Status
+}
+
+func TestLookupsAreListedSwitchedAndRevoked(t *testing.T) {
+	fixture := buildPluginHostFixture(t, map[string]string{"finder": finderPlugin})
+	handler := fixture.handler
+	enable := `{"enabled":true,"granted_capabilities":["request.read","model.tools"]}`
+	response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", enable, "")
+	detail := decodeBody[contract.PluginDetail](t, response)
+	if response.Code != http.StatusOK || !detail.LookupEnabled || len(detail.Tools) != 1 ||
+		detail.Tools[0] != (contract.PluginTool{Name: "search", Description: "Search the repository's memory."}) {
+		t.Fatalf("detail = %d %s", response.Code, response.Body.String())
+	}
+	controlRequest(t, handler, http.MethodPatch, PluginHostPath, "application/json", `{"language":"zh-CN"}`, "")
+	detail = decodeBody[contract.PluginDetail](t, controlRequest(t, handler, http.MethodGet, PluginsPath+"/finder", "", "", ""))
+	if detail.Tools[0].Description != "检索本仓库的记忆。" {
+		t.Fatalf("tools in the interface language = %+v", detail.Tools)
+	}
+	// Bind the session, then look up under its credential.
+	fixture.send(t, "session_1", 1, "", "<memo-repo>astrlink</memo-repo>")
+	token := fixture.sendShell(t, "session_1")
+	if status := fixture.lookup(token); status != http.StatusOK {
+		t.Fatalf("lookup = %d", status)
+	}
+	// What is kept counts the credentials, which the plugin page voids.
+	detail = decodeBody[contract.PluginDetail](t, controlRequest(t, handler, http.MethodGet, PluginsPath+"/finder", "", "", ""))
+	if held := storedCount(detail, contract.PluginStoredLookupCredentials); held == nil || *held != 1 {
+		t.Fatalf("host storage = %+v", detail.HostStorage)
+	}
+	response = controlRequest(t, handler, http.MethodDelete, PluginsPath+"/finder/lookup-credentials", "", "", "")
+	if revoked := decodeBody[contract.PluginClearResult](t, response); response.Code != http.StatusOK || revoked.Removed != 1 {
+		t.Fatalf("revoke = %d %s", response.Code, response.Body.String())
+	}
+	if status := fixture.lookup(token); status != http.StatusUnauthorized {
+		t.Fatalf("a revoked credential = %d", status)
+	}
+	// Settings that leave the lookups open keep the credential.
+	token = fixture.sendShell(t, "session_1")
+	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"turn_wait_ms":3000}`, "")
+	if status := fixture.lookup(token); status != http.StatusOK {
+		t.Fatalf("after other settings = %d", status)
+	}
+	// Turning the lookups off voids it; so does moving the session.
+	response = controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"lookup_enabled":false}`, "")
+	if detail := decodeBody[contract.PluginDetail](t, response); response.Code != http.StatusOK || detail.LookupEnabled {
+		t.Fatalf("turn off = %d %s", response.Code, response.Body.String())
+	}
+	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"lookup_enabled":true}`, "")
+	if status := fixture.lookup(token); status != http.StatusUnauthorized {
+		t.Fatalf("a credential of lookups turned off = %d", status)
+	}
+	token = fixture.sendShell(t, "session_1")
+	path := RequestSessionsPath + "/session_1/metadata/repo"
+	controlRequest(t, handler, http.MethodPut, path, "application/json", `{"value":"astrlink"}`, "")
+	if status := fixture.lookup(token); status != http.StatusOK {
+		t.Fatalf("the same value kept = %d", status)
+	}
+	controlRequest(t, handler, http.MethodPut, path, "application/json", `{"value":"paseo"}`, "")
+	if status := fixture.lookup(token); status != http.StatusUnauthorized {
+		t.Fatalf("a credential of the old value = %d", status)
+	}
+	token = fixture.sendShell(t, "session_1")
+	if status := fixture.lookup(token); status != http.StatusOK {
+		t.Fatalf("a new credential = %d", status)
+	}
+	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"enabled":false}`, "")
+	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", enable, "")
+	if status := fixture.lookup(token); status != http.StatusUnauthorized {
+		t.Fatalf("a credential of a disabled plugin = %d", status)
+	}
+	request := httptest.NewRequest(http.MethodDelete, PluginsPath+"/finder/lookup-credentials", nil)
+	request.Header.Set("Authorization", "Bearer "+testObserverToken)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("an observer revoked the credentials: %d", recorder.Code)
+	}
+}
+
+func storedCount(detail contract.PluginDetail, kind string) *int {
+	for _, kept := range detail.HostStorage {
+		if kept.Kind == kind {
+			return kept.Count
+		}
+	}
+	return nil
 }

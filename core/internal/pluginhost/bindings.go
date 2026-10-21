@@ -181,6 +181,10 @@ func (run *Run) store(ctx context.Context, hit metadata.MarkerHit, setBy string,
 		return contract.MetadataEvent{}, false
 	}
 	run.values[hit.Key] = record
+	if hit.Value == contract.MetadataNone {
+		// A session left out has nothing to look up.
+		run.host.lookups.revokeSession(run.input.Session)
+	}
 	event := contract.MetadataEvent{Key: hit.Key, Event: contract.MetadataEventBound, Value: hit.Value, SetBy: setBy, New: isNew, Normalized: written}
 	if had {
 		event.Event = contract.MetadataEventRebound

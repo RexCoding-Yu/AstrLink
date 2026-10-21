@@ -172,6 +172,7 @@ func (settings Settings) PluginSettings(ctx context.Context) (map[string]plugin.
 			ExcludedClients:  record.ExcludedClients,
 			WorkspaceBinding: record.WorkspaceBinding,
 			AutoRefresh:      record.AutoRefresh,
+			LookupEnabled:    record.LookupEnabled,
 		}
 	}
 	return all, nil

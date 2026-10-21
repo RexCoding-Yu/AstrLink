@@ -99,7 +99,7 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodPost) {
 			handler.pluginAction(writer, request, target)
 		}
-	case action == "workspaces" || action == "values":
+	case action == "workspaces" || action == "values" || action == "lookup-credentials":
 		handler.clearPluginData(writer, request, target, action)
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
@@ -193,6 +193,12 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	}
 	detail.ExcludedClients = append([]string{}, settings.ExcludedClients...)
 	detail.WorkspaceBinding, detail.AutoRefresh = settings.WorkspaceBinding, settings.AutoRefresh
+	detail.LookupEnabled = settings.LookupEnabled
+	detail.Tools = []contract.PluginTool{}
+	language := handler.pluginPageView().Language
+	for _, tool := range target.Meta.Tools {
+		detail.Tools = append(detail.Tools, contract.PluginTool{Name: tool.Name, Description: tool.Description.In(language), Unbound: tool.Unbound})
+	}
 	for _, origin := range settings.Origins {
 		detail.NetworkOrigins = append(detail.NetworkOrigins, contract.PluginNetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext, Plaintext: plugin.Plaintext(origin.Origin), Setting: origin.Setting})
 	}
@@ -241,6 +247,9 @@ func (handler *Handler) pluginHostStorage(ctx context.Context, target *plugin.Pl
 			}
 			count(contract.PluginStoredWorkspaceBindings, workspaces)
 		}
+	}
+	if len(target.Meta.Tools) > 0 && handler.pluginHost != nil {
+		count(contract.PluginStoredLookupCredentials, handler.pluginHost.LookupCredentials(target.Key))
 	}
 	sessions, err := handler.pluginStore.CountPluginSessions(ctx, target.Key)
 	if err != nil {
@@ -379,6 +388,9 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 	if update.AutoRefresh != nil {
 		settings.AutoRefresh = *update.AutoRefresh
 	}
+	if update.LookupEnabled != nil {
+		settings.LookupEnabled = *update.LookupEnabled
+	}
 	if update.Config != nil {
 		config := bytes.TrimSpace(update.Config)
 		if len(config) > contract.MaxPluginConfigBytes || !json.Valid(config) || config[0] != '{' {
@@ -423,7 +435,13 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "saved, but the plugins could not apply the settings")
 		return
 	}
-	handler.writePluginDetail(writer, ctx, handler.currentPlugin(target))
+	// A plugin disabled, or whose lookups were taken back, voids what the
+	// sessions were issued for them.
+	current := handler.currentPlugin(target)
+	if handler.pluginHost != nil && (!current.Enabled() || !current.Can(plugin.CapabilityTools) || !current.Settings.LookupEnabled) {
+		handler.pluginHost.RevokePluginLookups(target.Key)
+	}
+	handler.writePluginDetail(writer, ctx, current)
 }
 
 // currentPlugin returns the plugin as the newest generation has it.

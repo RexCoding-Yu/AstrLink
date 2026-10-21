@@ -16,7 +16,8 @@ declare namespace AstrLinkPlugin {
     | "request.read" // the hooks see the turn's text and metadata; astrlink.request.info
     | "network" // astrlink.http.fetch, to the origins the user allows
     | "storage" // astrlink.store
-    | "ui.views"; // views in request records and on the plugin page
+    | "ui.views" // views in request records and on the plugin page
+    | "model.tools"; // the model runs meta.tools through the lookup outlet; callTool answers
 
   /** `export const meta`: the manifest the host checks when it loads a plugin. */
   interface Meta {
@@ -42,6 +43,46 @@ declare namespace AstrLinkPlugin {
     credits?: Credit[];
     /** What the plugin keeps in astrlink.store, shown on the plugin page; at most 8. Needs storage. */
     storage?: StorageItem[];
+    /** Read-only queries the model may run; at most 8. Needs model.tools and callTool. */
+    tools?: Tool[];
+  }
+
+  /** A text in each interface language, or one string for all of them. */
+  type Localized = string | Partial<Record<Language, string>>;
+
+  /**
+   * A read-only query the plugin offers the model. The gateway writes how to
+   * run it into the request, in the session's language: the model runs it
+   * with its own shell, against the gateway on the same computer, under a
+   * credential that works for its session and this plugin only.
+   */
+  interface Tool {
+    /** A lowercase letter, then up to 31 lowercase letters, digits and underscores. */
+    name: string;
+    /** What the query finds and when to run it; at most 300 characters in each language. */
+    description: Localized;
+    /** At most 8. */
+    params?: ToolParam[];
+    /**
+     * Runs before the session has a value of each of the plugin's
+     * attributes, such as listing the projects; such a query reaches the
+     * model only through a block that names it, as {{lookup:name}}.
+     */
+    unbound?: boolean;
+  }
+
+  /** A string or number parameter. Strings are trimmed; anything not declared is refused. */
+  interface ToolParam {
+    /** A lowercase letter, then up to 31 lowercase letters, digits and underscores. */
+    name: string;
+    type: "string" | "number";
+    required?: boolean;
+    /** Characters a string takes, at most 2000; 500 by default. */
+    maxLength?: number;
+    min?: number;
+    max?: number;
+    /** What the command shows the model to put there; at most 100 characters. A required parameter needs one. */
+    example?: Localized;
   }
 
   /** One kind of thing a plugin keeps. */
@@ -63,7 +104,9 @@ declare namespace AstrLinkPlugin {
    * addresses it may reach (needs network), `$clients` the clients it is off
    * for, `$workspace` whether a new session takes the value its working
    * directory had (needs metadata), `$refresh` whether the host checks a
-   * session's resident block for newer data (needs context.inject).
+   * session's resident block for newer data (needs context.inject),
+   * `$lookup` whether the model may run the plugin's queries (needs
+   * meta.tools).
    */
   type Setting =
     | {
@@ -73,7 +116,8 @@ declare namespace AstrLinkPlugin {
           | "$origins"
           | "$clients"
           | "$workspace"
-          | "$refresh";
+          | "$refresh"
+          | "$lookup";
         group?: string;
         advanced?: boolean;
       }
@@ -221,7 +265,13 @@ declare namespace AstrLinkPlugin {
     };
   }
 
-  /** A block to inject. Items are added one by one within the budget; the ones past it are dropped. */
+  /**
+   * A block to inject. Items are added one by one within the budget; the
+   * ones past it are dropped. In a prepareTurn block, {{lookup:name}} in an
+   * item becomes the command that runs the plugin's query of that name; an
+   * item whose query the session cannot run, as when the client offers the
+   * model no shell, is dropped.
+   */
   type Block = string | { open?: string; items: string[]; close?: string };
 
   type ViewBlock =
@@ -293,6 +343,25 @@ declare namespace AstrLinkPlugin {
     refresh?: boolean;
     /** Shown after the click; at most 256 characters. */
     message?: string;
+  }
+
+  /** What callTool sees: the query the model ran, its checked input, and the session's bindings. */
+  interface ToolView {
+    name: string;
+    /** The parameters as the tool declares them, after the privacy check of the strings. */
+    input: Record<string, string | number>;
+    session: SessionRef;
+    /** The session's bindings as its last request had them; needs request.read. */
+    meta: Record<string, MetaValue>;
+    language: Language;
+  }
+
+  interface ToolResult {
+    /** What the model reads, at most 8 KiB; the gateway marks it as data, not instructions. */
+    text: string;
+    /** How many things the text holds, for the plugin's statistics. */
+    hits?: number;
+    record?: PluginRecord;
   }
 
   /** What describeStatus and testConnection see. */

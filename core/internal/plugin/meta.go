@@ -34,6 +34,8 @@ type Meta struct {
 	// Storage says what the plugin keeps in astrlink.store, for the plugin
 	// page to show beside what the host keeps for it.
 	Storage []StorageItem `json:"storage,omitempty"`
+	// Tools are the read-only queries the plugin offers the model.
+	Tools []Tool `json:"tools,omitempty"`
 }
 
 // StorageItem is one kind of thing a plugin keeps: what it is, whether it
@@ -188,6 +190,9 @@ func validateMeta(meta Meta, key string) error {
 		if !displayText(item.Label, 100, "") || !displayText(item.Retention, 64, "") {
 			return invalid("meta.storage[%d] needs a label of 1 to 100 and a retention of 1 to 64 characters", index)
 		}
+	}
+	if err := validateTools(meta); err != nil {
+		return invalid("%v", err)
 	}
 	return nil
 }

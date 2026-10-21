@@ -49,6 +49,9 @@ type Settings struct {
 	// AutoRefresh lets the host check a session's resident block for newer
 	// data now and then.
 	AutoRefresh bool
+	// LookupEnabled lets the model run the plugin's queries, when the user
+	// granted model.tools.
+	LookupEnabled bool
 }
 
 // Excludes reports whether the plugin is off for requests of client.

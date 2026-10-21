@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +34,13 @@ type fakePowerContext struct {
 	processing string
 	topicPages int
 	down       bool
+	// found are the search results of each kind of memory; slow kinds
+	// answer only a search by words, failing ones nothing.
+	found   map[string][]string
+	slow    map[string]bool
+	failing map[string]bool
+	// nextScopes is the cursor the list of scopes ends with.
+	nextScopes string
 }
 
 func newFakePowerContext() *fakePowerContext {
@@ -81,13 +90,41 @@ func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTP
 		return reply(200, `{"artifact_families":["memory","atomic-memory","topic-memory","experience","skill","profile"],"memory_extraction":true,"extraction":`+extraction+`}`)
 	case request.Method == "GET" && target.Path == "/v1/scopes":
 		var items []string
-		for title, id := range server.scopes {
+		titles := make([]string, 0, len(server.scopes))
+		for title := range server.scopes {
+			titles = append(titles, title)
+		}
+		sort.Strings(titles)
+		for _, title := range titles {
 			if query.Get("query") != "" && !strings.Contains(title, query.Get("query")) {
 				continue
 			}
-			items = append(items, `{"scope_id":"`+id+`","title":"`+title+`","summary":"s","context_references":[],"external_references":[],"version":1}`)
+			items = append(items, `{"scope_id":"`+server.scopes[title]+`","title":"`+title+`","summary":"s","context_references":[],"external_references":[],"version":1}`)
 		}
-		return reply(200, `{"items":[`+strings.Join(items, ",")+`],"next_cursor":null}`)
+		next := "null"
+		if server.nextScopes != "" && query.Get("cursor") == "" {
+			next = `"` + server.nextScopes + `"`
+		}
+		return reply(200, `{"items":[`+strings.Join(items, ",")+`],"next_cursor":`+next+`}`)
+	case request.Method == "POST" && strings.HasSuffix(target.Path, "/search"):
+		family := strings.TrimSuffix(target.Path[strings.LastIndex(strings.TrimSuffix(target.Path, "/search"), "/")+1:], "/search")
+		var body struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+			Mode  string `json:"mode"`
+		}
+		_ = json.Unmarshal(request.JSON, &body)
+		switch {
+		case server.failing[family]:
+			return reply(422, `{"error":{"code":"unsupported","message":"search mode is not supported"}}`)
+		case server.slow[family] && body.Mode != "text":
+			return HTTPResponse{Error: FetchTimeout, Took: 5 * time.Second}
+		}
+		results := server.found[family]
+		if len(results) > body.Limit {
+			results = results[:body.Limit]
+		}
+		return reply(200, `{"results":[`+strings.Join(results, ",")+`]}`)
 	case request.Method == "POST" && target.Path == "/v1/scopes":
 		var created struct {
 			Title string `json:"title"`
@@ -160,7 +197,7 @@ func newPowerContextHarness(t *testing.T, config string, used sessionsUsing) *po
 	t.Helper()
 	server := newFakePowerContext()
 	store := &memoryStore{}
-	all := []string{CapabilityInject, CapabilityRequest, CapabilityNetwork, CapabilityStorage, CapabilityViews}
+	all := []string{CapabilityInject, CapabilityRequest, CapabilityNetwork, CapabilityStorage, CapabilityViews, CapabilityTools}
 	manager := NewManager(ManagerOptions{
 		Builtin: plugins.Builtin,
 		Settings: settingsMap{"powercontext": {
@@ -358,12 +395,23 @@ func TestThePowerContextPluginSaysWhyItLoadsNothing(t *testing.T) {
 }
 
 type turnResult struct {
-	Context string              `json:"context"`
+	Block struct {
+		Items []string `json:"items"`
+	} `json:"context"`
 	Choices map[string][]string `json:"choices"`
 	Record  struct {
 		Title   string `json:"title"`
 		Summary string `json:"summary"`
 	} `json:"record"`
+	// Context is the block's items one a line, as the host lays them out.
+	Context string `json:"-"`
+}
+
+func decodeTurn(t *testing.T, raw string) turnResult {
+	t.Helper()
+	result := decodeResult[turnResult](t, raw)
+	result.Context = strings.Join(result.Block.Items, "\n")
+	return result
 }
 
 func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
@@ -374,7 +422,7 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 	}
 	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, used)
 	raw := h.call(HookPrepareTurn, powerContextView("", "zh-CN", map[string]any{"workspace": map[string]any{"name": "DataV"}}))
-	result := decodeResult[turnResult](t, raw)
+	result := decodeTurn(t, raw)
 	// The directory's project first, then this computer's by last use (in
 	// New York, 01:00 UTC on the 21st is the 20th), then the server's by
 	// name. A title that is no project name stays out.
@@ -387,7 +435,8 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 	if !strings.HasPrefix(result.Context, want) || !strings.Contains(result.Context, "<memory-project>none</memory-project>") {
 		t.Fatalf("the ask:\n%s\nwant it to start with:\n%s", result.Context, want)
 	}
-	if strings.Join(result.Choices["project"], ",") != "datav,paseo,notes" || result.Record.Summary != "列出 3 个项目" {
+	if strings.Join(result.Choices["project"], ",") != "datav,paseo,notes" || result.Record.Summary != "列出 3 个项目" ||
+		strings.Contains(result.Context, "{{lookup:") {
 		t.Fatalf("result = %+v", result)
 	}
 	// The fixed words never name the gateway.
@@ -406,18 +455,23 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 	// English and Japanese sessions are asked in their language; a list cut
 	// short says how many there are.
 	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test","listProjects":2}`, used)
-	english := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "en", nil)))
+	english := decodeTurn(t, h.call(HookPrepareTurn, powerContextView("", "en", nil)))
 	if !strings.Contains(english.Context, "Existing projects (3 in all; the 2 used most recently):\n1. paseo (last used Oct 20)\n2. notes (last used Dec 30, 2025)\n") ||
 		len(english.Choices["project"]) != 2 {
 		t.Fatalf("english ask:\n%s", english.Context)
 	}
-	japanese := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "ja", nil)))
+	// Past the list cut short, the model may look up the rest: an item of
+	// its own, which the gateway drops where the session cannot run it.
+	if !slices.Contains(english.Block.Items, "If the user names a project not listed above, look up all projects by a keyword with your shell:\n{{lookup:projects}}") {
+		t.Fatalf("english ask items = %q", english.Block.Items)
+	}
+	japanese := decodeTurn(t, h.call(HookPrepareTurn, powerContextView("", "ja", nil)))
 	if !strings.Contains(japanese.Context, "既存のプロジェクト（全 3 件、最近使った 2 件）：\n1. paseo（最終使用 10月20日）") {
 		t.Fatalf("japanese ask:\n%s", japanese.Context)
 	}
 	// Without a list the ask asks for a name.
 	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test","listProjects":0}`, used)
-	plain := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)))
+	plain := decodeTurn(t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)))
 	if !strings.HasPrefix(plain.Context, "本会话还没有选定项目记忆。不要打断当前任务，在本轮回复的末尾问用户：是否把记忆纳入一个项目，纳入的话项目名用什么。\n用户回答后") ||
 		len(plain.Choices["project"]) != 0 || plain.Record.Summary != "没有列出项目" {
 		t.Fatalf("an ask without a list = %+v", plain)
@@ -425,7 +479,7 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 	// With the server down, this computer's projects are still offered.
 	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, used)
 	h.server.down = true
-	offline := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)))
+	offline := decodeTurn(t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)))
 	if strings.Join(offline.Choices["project"], ",") != "paseo,notes" {
 		t.Fatalf("an ask with the server down = %+v", offline)
 	}
@@ -500,5 +554,186 @@ func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 	}
 	if action := h.call(HookOnAction, map[string]any{"action": "refresh", "session": map[string]any{"id": "session_1", "turn": 0}, "meta": map[string]any{}, "language": "ja"}); action != `{"refresh":true,"message":"このセッションの次のリクエストで記憶を読み込み直します。"}` {
 		t.Fatalf("onAction = %s", action)
+	}
+}
+
+type toolResult struct {
+	Text   string `json:"text"`
+	Hits   *int   `json:"hits"`
+	Record struct {
+		Title, Status, Summary string
+	} `json:"record"`
+}
+
+func toolView(name, project, language string, input map[string]any) map[string]any {
+	view := map[string]any{
+		"name": name, "input": input, "language": language,
+		"session": map[string]any{"id": "session_1", "turn": 2}, "meta": map[string]any{},
+	}
+	if project != "" {
+		view["meta"] = map[string]any{"project": map[string]any{"value": project, "source": "session"}}
+	}
+	return view
+}
+
+func newLookupHarness(t *testing.T, config string, used sessionsUsing) *powerContextHarness {
+	t.Helper()
+	h := newPowerContextHarness(t, config, used)
+	h.server.found = map[string][]string{
+		"topic-memory": {
+			`{"family":"topic-memory","artifact_id":"tm_1","revision":2,"lineage":{},"content":{"title":"分页","summary":"列表改成游标分页。","detail":"游标是 base64 编码的 id。\n每页 50 条。"}}`,
+			`{"family":"topic-memory","artifact_id":"tm_2","revision":1,"lineage":{},"content":{"title":"大屏刷新","summary":"大屏改成增量推送。","detail":"推送间隔可配置。"}}`,
+		},
+		"atomic-memory": {
+			`{"family":"atomic-memory","artifact_id":"am_1","revision":1,"lineage":{},"content":{"schema":"powercontext.atomic-memory.v1","kind":"fact","text":"游标分页的边界：最后一页返回空游标。"}}`,
+			`{"family":"atomic-memory","artifact_id":"am_2","revision":1,"lineage":{},"content":{"schema":"powercontext.atomic-memory.v1","kind":"fact","text":"分页参数叫 cursor 和 limit。"}}`,
+			`{"family":"atomic-memory","artifact_id":"am_3","revision":1,"lineage":{},"content":{"schema":"powercontext.atomic-memory.v1","kind":"fact","text":"第三条。"}}`,
+		},
+		"experience": {
+			`{"family":"experience","artifact_id":"ex_1","revision":1,"lineage":{},"content":{"situation":"改分页","action":"先写边界测试","outcome":"少返工","lesson":"改分页先补边界测试。"}}`,
+		},
+		"skill": {
+			`{"family":"skill","artifact_id":"sk_1","revision":1,"lineage":{},"content":{"name":"pagination-review","description":"检查分页实现的清单。","instructions":"…","validation":[]}}`,
+		},
+	}
+	return h
+}
+
+func TestThePowerContextSearchTakesEachKindInTurns(t *testing.T) {
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test","lookupLimit":5}`, nil)
+	result := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": "分页的游标边界"})))
+	// Rank by rank, one kind after another, five in all.
+	want := "- [主题记忆] 分页：列表改成游标分页。\n" +
+		"- [原子记忆] 游标分页的边界：最后一页返回空游标。\n" +
+		"- [经验] 改分页先补边界测试。\n" +
+		"- [技能] pagination-review：检查分页实现的清单。\n" +
+		"- [主题记忆] 大屏刷新：大屏改成增量推送。"
+	if result.Text != want || result.Hits == nil || *result.Hits != 5 || result.Record.Title != "记忆查询" ||
+		result.Record.Status != "ok" || result.Record.Summary != "检索 · 命中 5 条" {
+		t.Fatalf("search = %+v\n%s", result, result.Text)
+	}
+	// Each kind was searched in the project's scope, the slow ones by words
+	// too, and none was asked for more than the limit.
+	searches := h.server.requests("POST", "/search")
+	if len(searches) != 6 {
+		t.Fatalf("searches = %d", len(searches))
+	}
+	for _, sent := range searches {
+		if !strings.Contains(sent.URL, "/v1/scopes/scp_datav/artifacts/") || !strings.Contains(string(sent.JSON), `"query":"分页的游标边界"`) {
+			t.Fatalf("search = %s %s", sent.URL, sent.JSON)
+		}
+	}
+	// The model may ask for fewer, never more than the settings allow.
+	fewer := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "en", map[string]any{"query": "cursor", "limit": 2})))
+	if fewer.Text != "- [topics] 分页: 列表改成游标分页。\n- [atomic memory] 游标分页的边界：最后一页返回空游标。" || fewer.Record.Summary != "search · 2 hits" {
+		t.Fatalf("a search for 2 = %+v", fewer)
+	}
+	// A full search late gives way to the search by words; a kind that
+	// fails leaves the others.
+	h.server.slow = map[string]bool{"topic-memory": true}
+	h.server.failing = map[string]bool{"experience": true}
+	partial := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": "分页"})))
+	if !strings.HasPrefix(partial.Text, "- [主题记忆] 分页：") || partial.Record.Summary != "检索 · 命中 5 条 · 只用了关键词检索 · 1 类检索失败" {
+		t.Fatalf("a partial search = %+v", partial)
+	}
+	// The settings leave kinds out.
+	h = newLookupHarness(t, `{"serverUrl":"https://memory.test","searchTopics":false,"searchExperience":false,"searchSkills":false}`, nil)
+	atomic := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": "分页"})))
+	if strings.Count(atomic.Text, "- [原子记忆]") != 3 || strings.Contains(atomic.Text, "主题") {
+		t.Fatalf("atomic memory only = %+v", atomic)
+	}
+	h = newLookupHarness(t, `{"serverUrl":"https://memory.test","searchTopics":false,"searchAtomic":false,"searchExperience":false,"searchSkills":false}`, nil)
+	if off := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": "分页"}))); off.Record.Status != "skipped" || *off.Hits != 0 {
+		t.Fatalf("every kind off = %+v", off)
+	}
+	if len(h.server.requests("POST", "/search")) != 0 {
+		t.Fatal("a search with every kind off reached the server")
+	}
+}
+
+func TestThePowerContextSearchKeepsToWhatTheServerTakes(t *testing.T) {
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	h.server.found = map[string][]string{}
+	long := strings.Repeat("分页游标", 40)
+	result := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": long})))
+	if result.Text != "没有找到相关的记忆。" || *result.Hits != 0 || result.Record.Summary != "检索 · 没有命中" {
+		t.Fatalf("no hits = %+v", result)
+	}
+	// 1.3 takes at most 64 terms: a long query keeps its start and its end.
+	var sent struct {
+		Query string `json:"query"`
+	}
+	_ = json.Unmarshal(h.server.requests("POST", "/search")[0].JSON, &sent)
+	if runes := []rune(sent.Query); len(runes) > 32 || !strings.HasPrefix(sent.Query, "分页游标") || !strings.HasSuffix(sent.Query, "分页游标") {
+		t.Fatalf("query sent = %q", sent.Query)
+	}
+	// A project the server does not know has no memory, and a lookup does
+	// not make it one.
+	unknown := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "brand-new", "zh-CN", map[string]any{"query": "分页"})))
+	if unknown.Text != "这个项目在记忆服务器上还没有记忆。" || len(h.server.requests("POST", "/v1/scopes")) != 0 {
+		t.Fatalf("an unknown project = %+v", unknown)
+	}
+	h.server.down = true
+	h.store.values = nil
+	down := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "en", map[string]any{"query": "x"})))
+	if down.Record.Status != "failed" || down.Text != "Server unavailable: unreachable" {
+		t.Fatalf("a server down = %+v", down)
+	}
+}
+
+func TestThePowerContextReadGivesATopicInFull(t *testing.T) {
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	// The search finds the closest first; the topic titled so wins.
+	h.server.found["topic-memory"] = []string{h.server.found["topic-memory"][1], h.server.found["topic-memory"][0]}
+	result := decodeResult[toolResult](t, h.call(HookCallTool, toolView("read", "datav", "zh-CN", map[string]any{"topic": "分页"})))
+	if result.Text != "主题：分页\n摘要：列表改成游标分页。\n正文：\n游标是 base64 编码的 id。\n每页 50 条。" || *result.Hits != 1 ||
+		!strings.HasPrefix(result.Record.Summary, "读取主题 · ") {
+		t.Fatalf("read = %+v", result)
+	}
+	searches := h.server.requests("POST", "/artifacts/topic-memory/search")
+	if len(searches) != 1 || !strings.Contains(string(searches[0].JSON), `"mode":"text"`) || !strings.Contains(string(searches[0].JSON), `"limit":3`) {
+		t.Fatalf("searches = %+v", searches)
+	}
+	// No title the same: the closest, said so.
+	closest := decodeResult[toolResult](t, h.call(HookCallTool, toolView("read", "datav", "en", map[string]any{"topic": "刷新"})))
+	if !strings.HasPrefix(closest.Text, "No topic has exactly that title; this is the closest, \"大屏刷新\".\nTopic: 大屏刷新\n") {
+		t.Fatalf("closest = %+v", closest)
+	}
+	// A long text stops within what a lookup returns.
+	h.server.found["topic-memory"] = []string{`{"family":"topic-memory","artifact_id":"tm_9","revision":1,"lineage":{},"content":{"title":"长","summary":"s","detail":"` + strings.Repeat("长", 5000) + `"}}`}
+	long := decodeResult[toolResult](t, h.call(HookCallTool, toolView("read", "datav", "zh-CN", map[string]any{"topic": "长"})))
+	if len(long.Text) > 7600 || !strings.HasSuffix(long.Text, "\n（正文太长，后面截掉了）") {
+		t.Fatalf("a long topic of %d bytes ends %q", len(long.Text), long.Text[len(long.Text)-60:])
+	}
+	h.server.found["topic-memory"] = nil
+	if missing := decodeResult[toolResult](t, h.call(HookCallTool, toolView("read", "datav", "ja", map[string]any{"topic": "x"}))); missing.Text != "そのトピックは見つかりませんでした。" || *missing.Hits != 0 {
+		t.Fatalf("a missing topic = %+v", missing)
+	}
+}
+
+func TestThePowerContextProjectsLookupPages(t *testing.T) {
+	used := sessionsUsing{{Value: "paseo-web", Sessions: 1, LastUsedAt: 1}, {Value: "notes", Sessions: 1, LastUsedAt: 1}}
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, used)
+	h.server.scopes["paseo-api"] = "scp_paseo_api"
+	h.server.nextScopes = "c2"
+	// It runs for a session without a project, and leads with this
+	// computer's projects.
+	result := decodeResult[toolResult](t, h.call(HookCallTool, toolView("projects", "", "zh-CN", map[string]any{"query": "paseo"})))
+	want := "项目（3 个）：\n- paseo-web\n- paseo\n- paseo-api\n" + `还有更多：加上 --data-urlencode "cursor=c2" 再查一次。`
+	if result.Text != want || *result.Hits != 3 || result.Record.Summary != "列出项目 · 3 个" {
+		t.Fatalf("projects = %+v\n%s", result, result.Text)
+	}
+	listed := h.server.requests("GET", "/v1/scopes")
+	if got := listed[len(listed)-1].URL; !strings.Contains(got, "query=paseo") || !strings.Contains(got, "query_field=title") {
+		t.Fatalf("list = %s", got)
+	}
+	// The next page has the server's only.
+	next := decodeResult[toolResult](t, h.call(HookCallTool, toolView("projects", "", "en", map[string]any{"query": "paseo", "cursor": "c2"})))
+	if next.Text != "Projects (2):\n- paseo\n- paseo-api" {
+		t.Fatalf("next page = %+v", next)
+	}
+	none := decodeResult[toolResult](t, h.call(HookCallTool, toolView("projects", "", "zh-CN", map[string]any{"query": "nothing", "cursor": "c2"})))
+	if none.Text != "没有符合的项目。" || *none.Hits != 0 {
+		t.Fatalf("no project = %+v", none)
 	}
 }

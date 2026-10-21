@@ -1,8 +1,8 @@
 // PowerContext memory: loads a project's profile and topic directory into the
 // system prompt when a session has a project, asks once, in the first turn,
-// which project a new session belongs to, and records what the user typed.
-// Turning records into memory and generating profiles is left to the server's
-// own schedules. It talks to PowerContext 1.3 or later through
+// which project a new session belongs to, lets the model look up the
+// project's memory itself, and records what the user typed. Turning records
+// into memory and generating profiles is left to the server's own schedules. It talks to PowerContext 1.3 or later through
 // astrlink.http.fetch, which reaches only the origins the user allows and adds
 // the token itself.
 //
@@ -22,6 +22,13 @@ interface Config {
   askProject?: boolean;
   /** Existing projects the ask lists; they reach the upstream model. */
   listProjects?: number;
+  /** The kinds of memory a lookup searches. */
+  searchAtomic?: boolean;
+  searchTopics?: boolean;
+  searchExperience?: boolean;
+  searchSkills?: boolean;
+  /** Results a search returns at most. */
+  lookupLimit?: number;
 }
 
 interface Listed {
@@ -38,6 +45,10 @@ interface Page<T> {
 interface Scope {
   scope_id: string;
   title: string;
+}
+
+interface SearchItem {
+  content?: Record<string, unknown>;
 }
 
 interface Extraction {
@@ -64,6 +75,7 @@ export const meta = {
     "network",
     "storage",
     "ui.views",
+    "model.tools",
   ],
   network: { purpose: "访问 PowerContext 服务器，地址由用户在插件页授权" },
   credentials: [
@@ -85,6 +97,7 @@ export const meta = {
   notice:
     "启用后，会话有了项目，就把这个项目的画像和最近更新的主题目录放进系统提示词，会话内不变。" +
     "新会话还没有项目时，只在第一轮问一次用户要纳入哪个项目，并列出已有的项目；同一个目录里的新会话会自动接上上次的项目。" +
+    "客户端和网关在同一台电脑上、能执行 shell 时，模型还可以自己查这个项目的记忆，查询只读。" +
     "每轮结束时把用户输入的文字记进 PowerContext，整理成记忆、生成画像由服务器定时完成。",
   settings: [
     {
@@ -147,6 +160,51 @@ export const meta = {
     { key: "$workspace", group: "会话" },
     { key: "$clients", group: "会话" },
     { key: "$wait", group: "会话" },
+    { key: "$lookup", group: "查询" },
+    {
+      key: "searchAtomic",
+      label: "原子记忆",
+      type: "switch",
+      group: "查询",
+      row: "查询范围",
+      default: true,
+    },
+    {
+      key: "searchTopics",
+      label: "主题",
+      type: "switch",
+      group: "查询",
+      row: "查询范围",
+      default: true,
+    },
+    {
+      key: "searchExperience",
+      label: "经验",
+      type: "switch",
+      group: "查询",
+      row: "查询范围",
+      default: true,
+    },
+    {
+      key: "searchSkills",
+      label: "技能",
+      type: "switch",
+      group: "查询",
+      row: "查询范围",
+      default: true,
+    },
+    {
+      key: "lookupLimit",
+      label: "每次返回条数",
+      type: "number",
+      group: "查询",
+      default: 5,
+      min: 1,
+      max: 10,
+      step: 1,
+      unit: "条",
+      help: "模型检索一次最多拿到几条记忆，各类记忆按相关度轮流取。",
+    },
     { key: "$trusted", group: "隐私" },
     { key: "$origins", advanced: true },
   ],
@@ -175,6 +233,70 @@ export const meta = {
     {
       label: "最近一次写入的项目、时间和结果",
       retention: "下一次写入时替换",
+    },
+  ],
+  tools: [
+    {
+      name: "search",
+      description: {
+        "zh-CN":
+          "需要回忆本项目过去的决定、约定、做过的事、经验或技能，而上面的画像和主题目录不够时，按一句话检索本项目的记忆。",
+        en: "When the profile and topics above are not enough to recall this project's past decisions, conventions, work, lessons or skills, search its memory by a sentence.",
+        ja: "上のプロフィールとトピック一覧では、このプロジェクトの過去の決定・取り決め・作業・経験・スキルを思い出しきれないとき、一文でこのプロジェクトの記憶を検索します。",
+      },
+      params: [
+        {
+          name: "query",
+          type: "string",
+          required: true,
+          maxLength: 200,
+          example: {
+            "zh-CN": "要查的内容，一句话",
+            en: "what to look up, in one sentence",
+            ja: "調べたい内容を一文で",
+          },
+        },
+        { name: "limit", type: "number", min: 1, max: 10 },
+      ],
+    },
+    {
+      name: "read",
+      description: {
+        "zh-CN": "要看某个主题的正文时，按主题目录里的标题读取。",
+        en: "To read a topic in full, give its title from the topic list.",
+        ja: "トピックの本文を読むときは、トピック一覧のタイトルを指定します。",
+      },
+      params: [
+        {
+          name: "topic",
+          type: "string",
+          required: true,
+          maxLength: 512,
+          example: {
+            "zh-CN": "主题标题",
+            en: "topic title",
+            ja: "トピックのタイトル",
+          },
+        },
+      ],
+    },
+    {
+      name: "projects",
+      description: {
+        "zh-CN": "按关键词列出记忆服务器上的项目。",
+        en: "List the projects on the memory server by a keyword.",
+        ja: "キーワードで記憶サーバーのプロジェクトを一覧します。",
+      },
+      unbound: true,
+      params: [
+        {
+          name: "query",
+          type: "string",
+          maxLength: 64,
+          example: { "zh-CN": "关键词", en: "keyword", ja: "キーワード" },
+        },
+        { name: "cursor", type: "string", maxLength: 2000 },
+      ],
     },
   ],
 };
@@ -246,6 +368,27 @@ interface Texts {
   fetch: Record<string, string>;
   ago: (minutes: number) => string;
   families: Record<string, string>;
+  askMore: string;
+  lookupTitle: string;
+  searched: (hits: number) => string;
+  byWords: string;
+  partFailed: (count: number) => string;
+  noHits: string;
+  searchOff: string;
+  searchFailed: (reason: string) => string;
+  noMemory: string;
+  readDone: (bytes: number) => string;
+  topicMissing: string;
+  closest: (title: string) => string;
+  topicLabel: string;
+  summaryLabel: string;
+  detailLabel: string;
+  cut: string;
+  projectsDone: (count: number) => string;
+  projectsListed: (count: number) => string;
+  noProjects: string;
+  moreProjects: (cursor: string) => string;
+  narrower: string;
 }
 
 const MONTHS = [
@@ -364,6 +507,30 @@ const TEXTS: Record<Language, Texts> = {
       experience: "经验",
       skill: "技能",
     },
+    askMore: "用户说的项目不在上面时，可以用 shell 按关键词查全部项目：",
+    lookupTitle: "记忆查询",
+    searched: (hits) =>
+      hits > 0 ? "检索 · 命中 " + hits + " 条" : "检索 · 没有命中",
+    byWords: "只用了关键词检索",
+    partFailed: (count) => count + " 类检索失败",
+    noHits: "没有找到相关的记忆。",
+    searchOff: "插件设置里关掉了所有查询范围。",
+    searchFailed: (reason) => "检索失败：" + reason,
+    noMemory: "这个项目在记忆服务器上还没有记忆。",
+    readDone: (bytes) => "读取主题 · " + kilobytes(bytes),
+    topicMissing: "没有找到这个主题。",
+    closest: (title) =>
+      "没有标题完全一致的主题，下面是最接近的「" + title + "」。",
+    topicLabel: "主题",
+    summaryLabel: "摘要",
+    detailLabel: "正文",
+    cut: "（正文太长，后面截掉了）",
+    projectsDone: (count) => "列出项目 · " + count + " 个",
+    projectsListed: (count) => "项目（" + count + " 个）：",
+    noProjects: "没有符合的项目。",
+    moreProjects: (cursor) =>
+      '还有更多：加上 --data-urlencode "cursor=' + cursor + '" 再查一次。',
+    narrower: "还有更多，换个更具体的关键词再查。",
   },
   en: {
     ask: "This session has no project memory selected yet. Do not interrupt the current task; at the end of this reply, ask the user whether to keep memory in a project: one listed below, or a new one.",
@@ -478,6 +645,37 @@ const TEXTS: Record<Language, Texts> = {
       experience: "experience",
       skill: "skills",
     },
+    askMore:
+      "If the user names a project not listed above, look up all projects by a keyword with your shell:",
+    lookupTitle: "Memory lookup",
+    searched: (hits) =>
+      hits > 0
+        ? "search · " + hits + (hits === 1 ? " hit" : " hits")
+        : "search · no hits",
+    byWords: "keyword search only",
+    partFailed: (count) =>
+      count + (count === 1 ? " kind failed" : " kinds failed"),
+    noHits: "No related memory was found.",
+    searchOff:
+      "Every kind of memory is turned off for lookups in the plugin's settings.",
+    searchFailed: (reason) => "The search failed: " + reason,
+    noMemory: "This project has no memory on the memory server yet.",
+    readDone: (bytes) => "topic read · " + kilobytes(bytes),
+    topicMissing: "No such topic was found.",
+    closest: (title) =>
+      'No topic has exactly that title; this is the closest, "' + title + '".',
+    topicLabel: "Topic",
+    summaryLabel: "Summary",
+    detailLabel: "Text",
+    cut: "(The text is long; the rest was cut.)",
+    projectsDone: (count) => "projects · " + count,
+    projectsListed: (count) => "Projects (" + count + "):",
+    noProjects: "No project matches.",
+    moreProjects: (cursor) =>
+      'There are more: run it again with --data-urlencode "cursor=' +
+      cursor +
+      '".',
+    narrower: "There are more; try a narrower keyword.",
   },
   ja: {
     ask: "このセッションにはまだプロジェクトの記憶が選ばれていません。今の作業は中断せず、この返信の最後に、記憶をプロジェクトに入れるか（下の既存のものか、新しく作るか）をユーザーに尋ねてください。",
@@ -596,6 +794,35 @@ const TEXTS: Record<Language, Texts> = {
       experience: "経験",
       skill: "スキル",
     },
+    askMore:
+      "ユーザーの言うプロジェクトが上にないときは、シェルでキーワードを指定して全プロジェクトを検索できます：",
+    lookupTitle: "記憶の検索",
+    searched: (hits) =>
+      hits > 0 ? "検索 · " + hits + " 件ヒット" : "検索 · ヒットなし",
+    byWords: "キーワード検索のみ",
+    partFailed: (count) => count + " 種類の検索に失敗",
+    noHits: "関連する記憶は見つかりませんでした。",
+    searchOff: "プラグインの設定で検索対象がすべてオフになっています。",
+    searchFailed: (reason) => "検索に失敗しました：" + reason,
+    noMemory: "このプロジェクトには記憶サーバー上にまだ記憶がありません。",
+    readDone: (bytes) => "トピックを読み込み · " + kilobytes(bytes),
+    topicMissing: "そのトピックは見つかりませんでした。",
+    closest: (title) =>
+      "タイトルが完全に一致するトピックはありません。最も近い「" +
+      title +
+      "」を示します。",
+    topicLabel: "トピック",
+    summaryLabel: "要約",
+    detailLabel: "本文",
+    cut: "（本文が長いため、後半を省略しました）",
+    projectsDone: (count) => "プロジェクト一覧 · " + count + " 件",
+    projectsListed: (count) => "プロジェクト（" + count + " 件）：",
+    noProjects: "該当するプロジェクトはありません。",
+    moreProjects: (cursor) =>
+      'さらにあります：--data-urlencode "cursor=' +
+      cursor +
+      '" を付けてもう一度実行してください。',
+    narrower: "さらにあります。もっと具体的なキーワードで検索してください。",
   },
 };
 
@@ -611,6 +838,35 @@ const PROFILE_SUMMARY_CHARS = 2000;
 // that are left to the search.
 const TOPIC_PAGES = 2;
 const VERSION_TTL_MS = 600000;
+// The kinds of memory a search covers, in the order their results take
+// turns, and the setting that leaves each out.
+const FAMILIES: Array<[string, keyof Config]> = [
+  ["topic-memory", "searchTopics"],
+  ["atomic-memory", "searchAtomic"],
+  ["experience", "searchExperience"],
+  ["skill", "searchSkills"],
+];
+// These kinds embed the query before they search, which can take seconds:
+// a search by words alone runs beside each and answers when the full one is
+// late.
+const TEXT_FALLBACK = ["atomic-memory", "topic-memory"];
+// How long a lookup waits for a search.
+const SEARCH_TIMEOUT_MS = 5000;
+// PowerContext's text search takes at most 64 analyzed terms. 1.3 counts
+// each word of letters or digits once and a run of n Han characters as n
+// characters and n - 1 pairs; counting any other character like Han never
+// finds fewer, which keeps the query in.
+const MAX_QUERY_TERMS = 60;
+// What a hit shows of its text, in characters.
+const HIT_CHARS = 400;
+// Search results carry a topic's whole text: a read asks for few, and a
+// search for at most this many topics.
+const READ_CANDIDATES = 3;
+const SEARCH_TOPICS = 5;
+// A topic read in full stays within the 8 KiB the gateway passes on.
+const TOPIC_BYTES = 7600;
+// A cursor longer than a lookup parameter takes cannot page.
+const MAX_CURSOR = 2000;
 
 function config(): Config {
   return astrlink.config.get() as Config;
@@ -632,6 +888,19 @@ function utf8(text: string): number {
     bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
   }
   return bytes;
+}
+
+// clipBytes keeps the start of text within max bytes of UTF-8.
+function clipBytes(text: string, max: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const size = utf8(char);
+    if (bytes + size > max) return text.slice(0, end);
+    bytes += size;
+    end += char.length;
+  }
+  return text;
 }
 
 // clip keeps the first max characters of text on one line.
@@ -729,10 +998,10 @@ function failure(text: Texts, response: AstrLinkPlugin.HttpResponse): string {
   return "HTTP " + response.status + (detail ? " " + detail.slice(0, 80) : "");
 }
 
-// Project → scope. A project another computer or tool made on the same
-// server is found by its title; a new one is made with an idempotency key of
-// the name alone, so every computer that picks the name gets one scope.
-function scopeFor(cfg: Config, project: string): string | null {
+// findScope finds the scope a project has on the server by its title, which
+// another computer or tool may have made: its id, undefined when the server
+// has none, null when the server did not answer.
+function findScope(cfg: Config, project: string): string | null | undefined {
   const cached = astrlink.store.get("scope:" + project);
   if (typeof cached === "string") return cached;
   const found = astrlink.http.fetch(
@@ -744,23 +1013,29 @@ function scopeFor(cfg: Config, project: string): string | null {
         "&query_field=title&limit=100",
     ),
   );
-  let scope =
-    found.status === 200
-      ? ((found.json as Page<Scope>).items ?? []).find(
-          (item) => item.title === project,
-        )?.scope_id
-      : undefined;
-  if (scope === undefined) {
-    const created = astrlink.http.fetch(
-      request(cfg, "POST", "/v1/scopes", {
-        title: project,
-        summary: "项目 " + project + " 的记忆",
-        idempotency_key: "astrlink:project:" + project,
-      }),
-    );
-    if (created.status !== 201 && created.status !== 200) return null;
-    scope = (created.json as { scope_id?: string }).scope_id;
-  }
+  if (found.status !== 200) return null;
+  const scope = ((found.json as Page<Scope>).items ?? []).find(
+    (item) => item.title === project,
+  )?.scope_id;
+  if (typeof scope !== "string" || scope === "") return undefined;
+  astrlink.store.set("scope:" + project, scope);
+  return scope;
+}
+
+// Project → scope, made when the server has none, with an idempotency key of
+// the name alone, so every computer that picks the name gets one scope.
+function scopeFor(cfg: Config, project: string): string | null {
+  const found = findScope(cfg, project);
+  if (typeof found === "string") return found;
+  const created = astrlink.http.fetch(
+    request(cfg, "POST", "/v1/scopes", {
+      title: project,
+      summary: "项目 " + project + " 的记忆",
+      idempotency_key: "astrlink:project:" + project,
+    }),
+  );
+  if (created.status !== 201 && created.status !== 200) return null;
+  const scope = (created.json as { scope_id?: string }).scope_id;
   if (typeof scope !== "string" || scope === "") return null;
   astrlink.store.set("scope:" + project, scope);
   return scope;
@@ -1112,6 +1387,10 @@ export function prepareTurn(
             : ""),
       );
     });
+    // Past the list, the model can look up the rest; the gateway drops the
+    // item where the session cannot run the lookup.
+    if (listing.more || listing.total > listing.shown.length)
+      lines.push(text.askMore + "\n{{lookup:projects}}");
     lines.push(
       text.answer,
       text.pick,
@@ -1123,7 +1402,7 @@ export function prepareTurn(
   }
   const offered = listing.shown.map((candidate) => candidate.name);
   return {
-    context: lines.join("\n"),
+    context: { items: lines },
     choices: { project: offered },
     record: {
       title: text.askTitle,
@@ -1235,6 +1514,352 @@ export function onAction(
 ): AstrLinkPlugin.ActionResult {
   if (view.action !== "refresh") return {};
   return { refresh: true, message: texts(view.language).refreshQueued };
+}
+
+// cost is what one character adds to the terms of text, scanned in either
+// direction; run is the kind of the run it continues.
+const SEPARATOR =
+  /[\s\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e\u2000-\u206f\u3000-\u3004\u3008-\u303f\uff00-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]/;
+const ASCII_WORD = /[0-9A-Za-z]/;
+
+function cost(char: string, run: string): { terms: number; run: string } {
+  if (SEPARATOR.test(char)) return { terms: 0, run: "" };
+  if (ASCII_WORD.test(char))
+    return { terms: run === "word" ? 0 : 1, run: "word" };
+  return { terms: run === "han" ? 2 : 1, run: "han" };
+}
+
+// bound keeps text within limit terms: its start, and its end, where a long
+// sentence often says what it asks.
+function bound(text: string, limit: number): string {
+  let head = 0;
+  let used = 0;
+  let run = "";
+  for (; head < text.length; head++) {
+    const next = cost(text[head], run);
+    if (used + next.terms > Math.ceil(limit / 2)) break;
+    used += next.terms;
+    run = next.run;
+  }
+  let total = used;
+  for (let index = head; index < text.length; index++) {
+    const next = cost(text[index], run);
+    total += next.terms;
+    run = next.run;
+  }
+  if (total <= limit) return text.trim();
+  let tail = text.length;
+  run = "";
+  for (let index = text.length - 1; index >= head; index--) {
+    const next = cost(text[index], run);
+    if (used + next.terms > limit) break;
+    used += next.terms;
+    run = next.run;
+    tail = index;
+  }
+  const start = text.slice(0, head).trim();
+  const end = text.slice(tail).trim();
+  return end === "" ? start : start + " " + end;
+}
+
+// looked is a lookup's answer: what the model reads, how many things it
+// holds, and its record, which says no more than counts and reasons.
+function looked(
+  text: Texts,
+  answer: string,
+  hits: number,
+  status: "ok" | "skipped" | "failed",
+  summary: string,
+): AstrLinkPlugin.ToolResult {
+  return {
+    text: answer,
+    hits,
+    record: { title: text.lookupTitle, status, summary },
+  };
+}
+
+function field(content: Record<string, unknown>, key: string): string {
+  const value = content[key];
+  return typeof value === "string" ? value : "";
+}
+
+// hitText is what a hit shows: a topic's title and summary, a memory's text,
+// an experience's lesson, a skill's name and description.
+function hitText(
+  text: Texts,
+  family: string,
+  content: Record<string, unknown>,
+): string {
+  const pair = (title: string, body: string) =>
+    title && body ? title + text.colon + body : title || body;
+  switch (family) {
+    case "topic-memory":
+      return pair(
+        clip(field(content, "title"), 100),
+        clip(field(content, "summary"), HIT_CHARS),
+      );
+    case "experience":
+      return clip(
+        field(content, "lesson") || field(content, "outcome"),
+        HIT_CHARS,
+      );
+    case "skill":
+      return pair(
+        clip(field(content, "name"), 100),
+        clip(field(content, "description"), HIT_CHARS),
+      );
+    default:
+      return clip(field(content, "text"), HIT_CHARS);
+  }
+}
+
+// searchMemory searches each kind of memory the settings leave on at once and
+// takes their results in turns, rank by rank: the kinds' scores do not
+// compare. A full search not back in time gives way to the search by words
+// beside it.
+function searchMemory(
+  cfg: Config,
+  text: Texts,
+  scope: string,
+  query: string,
+  limit: number,
+): AstrLinkPlugin.ToolResult {
+  const families = FAMILIES.filter(([, setting]) => cfg[setting] !== false).map(
+    ([family]) => family,
+  );
+  if (families.length === 0)
+    return looked(text, text.searchOff, 0, "skipped", text.searchOff);
+  const terms = bound(query, MAX_QUERY_TERMS);
+  const batch: AstrLinkPlugin.HttpRequest[] = [];
+  const searches = families.map((family) => {
+    const path = "/v1/scopes/" + scope + "/artifacts/" + family + "/search";
+    const size =
+      family === "topic-memory" ? Math.min(limit, SEARCH_TOPICS) : limit;
+    const at =
+      batch.push(
+        request(
+          cfg,
+          "POST",
+          path,
+          { query: terms, limit: size },
+          SEARCH_TIMEOUT_MS,
+        ),
+      ) - 1;
+    const wordsAt = TEXT_FALLBACK.includes(family)
+      ? batch.push(
+          request(
+            cfg,
+            "POST",
+            path,
+            { query: terms, limit: size, mode: "text" },
+            SEARCH_TIMEOUT_MS,
+          ),
+        ) - 1
+      : -1;
+    return { family, at, wordsAt };
+  });
+  const responses = astrlink.http.fetch(batch);
+  const found: Array<{ family: string; items: SearchItem[] }> = [];
+  let failed = 0;
+  let byWords = 0;
+  let reason = "";
+  for (const { family, at, wordsAt } of searches) {
+    const full = responses[at];
+    const words = wordsAt >= 0 ? responses[wordsAt] : undefined;
+    const response =
+      full.status !== 200 && words?.status === 200 ? words : full;
+    if (response.status !== 200) {
+      failed++;
+      reason = reason || failure(text, full);
+      continue;
+    }
+    if (response === words) byWords++;
+    found.push({
+      family,
+      items: (response.json as { results?: SearchItem[] }).results ?? [],
+    });
+  }
+  if (found.length === 0) {
+    const summary = text.searchFailed(reason);
+    return looked(text, summary, 0, "failed", summary);
+  }
+  const lines: string[] = [];
+  for (let rank = 0; lines.length < limit; rank++) {
+    const row = found.filter((list) => rank < list.items.length);
+    if (row.length === 0) break;
+    for (const list of row) {
+      const shown = hitText(text, list.family, list.items[rank].content ?? {});
+      if (shown !== "" && lines.length < limit)
+        lines.push(
+          "- [" + (text.families[list.family] ?? list.family) + "] " + shown,
+        );
+    }
+  }
+  const notes = [text.searched(lines.length)];
+  if (byWords > 0) notes.push(text.byWords);
+  if (failed > 0) notes.push(text.partFailed(failed));
+  return looked(
+    text,
+    lines.length > 0 ? lines.join("\n") : text.noHits,
+    lines.length,
+    "ok",
+    notes.join(" · "),
+  );
+}
+
+// readTopic finds a topic by a search of its title, words alone: the one
+// titled so, or else the closest, with its whole text within the bytes a
+// lookup returns.
+function readTopic(
+  cfg: Config,
+  text: Texts,
+  scope: string,
+  title: string,
+): AstrLinkPlugin.ToolResult {
+  const response = astrlink.http.fetch(
+    request(
+      cfg,
+      "POST",
+      "/v1/scopes/" + scope + "/artifacts/topic-memory/search",
+      {
+        query: bound(title, MAX_QUERY_TERMS),
+        limit: READ_CANDIDATES,
+        mode: "text",
+      },
+      SEARCH_TIMEOUT_MS,
+    ),
+  );
+  if (response.status !== 200) {
+    const summary = text.searchFailed(failure(text, response));
+    return looked(text, summary, 0, "failed", summary);
+  }
+  const items = (response.json as { results?: SearchItem[] }).results ?? [];
+  const wanted = title.trim().toLowerCase();
+  const exact = items.find(
+    (item) =>
+      field(item.content ?? {}, "title")
+        .trim()
+        .toLowerCase() === wanted,
+  );
+  const chosen = exact ?? items[0];
+  if (chosen === undefined)
+    return looked(text, text.topicMissing, 0, "ok", text.topicMissing);
+  const content = chosen.content ?? {};
+  const named = field(content, "title");
+  const head =
+    (exact ? "" : text.closest(named) + "\n") +
+    text.topicLabel +
+    text.colon +
+    named +
+    "\n" +
+    text.summaryLabel +
+    text.colon +
+    field(content, "summary").trim() +
+    "\n" +
+    text.detailLabel +
+    text.colon +
+    "\n";
+  const detail = field(content, "detail").trim();
+  const room = TOPIC_BYTES - utf8(head);
+  const body =
+    utf8(detail) <= room
+      ? detail
+      : clipBytes(detail, room - utf8(text.cut) - 1) + "\n" + text.cut;
+  const answer = head + body;
+  return looked(text, answer, 1, "ok", text.readDone(utf8(answer)));
+}
+
+// listAllProjects lists the projects on the server whose names contain a
+// keyword, a page at a time; the first page leads with the ones this
+// computer used.
+function listAllProjects(
+  cfg: Config,
+  text: Texts,
+  input: Record<string, string | number>,
+): AstrLinkPlugin.ToolResult {
+  const query = typeof input.query === "string" ? input.query.trim() : "";
+  const cursor = typeof input.cursor === "string" ? input.cursor : "";
+  let path = "/v1/scopes?limit=100";
+  if (query !== "")
+    path += "&query=" + encodeURIComponent(query) + "&query_field=title";
+  if (cursor !== "") path += "&cursor=" + encodeURIComponent(cursor);
+  const response = astrlink.http.fetch(request(cfg, "GET", path));
+  if (response.status !== 200) {
+    const summary = text.serverDown(failure(text, response));
+    return looked(text, summary, 0, "failed", summary);
+  }
+  const page = response.json as Page<Scope>;
+  const names: string[] = [];
+  const add = (name: string) => {
+    if (PROJECT_NAME.test(name) && !names.includes(name)) names.push(name);
+  };
+  if (cursor === "") {
+    let stats: AstrLinkPlugin.ValueStat[] = [];
+    try {
+      stats = astrlink.meta.values("project", 200);
+    } catch {
+      // Without request.read the plugin knows no local project.
+    }
+    const keyword = query.toLowerCase();
+    for (const stat of stats)
+      if (stat.value !== "none" && stat.value.includes(keyword))
+        add(stat.value);
+  }
+  for (const item of page.items ?? []) add(item.title);
+  const lines =
+    names.length > 0
+      ? [text.projectsListed(names.length), ...names.map((name) => "- " + name)]
+      : [text.noProjects];
+  const next = page.next_cursor ?? "";
+  if (next !== "")
+    lines.push(
+      next.length <= MAX_CURSOR ? text.moreProjects(next) : text.narrower,
+    );
+  return looked(
+    text,
+    lines.join("\n"),
+    names.length,
+    "ok",
+    text.projectsDone(names.length),
+  );
+}
+
+// The model's lookups, which it runs with its shell through the gateway
+// under its session's credential: search and read look in the session's
+// project, projects lists the projects. They only read; memory still comes
+// from what observeTurn records.
+export function callTool(
+  view: AstrLinkPlugin.ToolView,
+): AstrLinkPlugin.ToolResult {
+  const cfg = config();
+  const text = texts(view.language);
+  const problem = serverProblem(cfg, text);
+  if (problem !== null) {
+    const summary = text.serverDown(problem);
+    return looked(text, summary, 0, "failed", summary);
+  }
+  if (view.name === "projects") return listAllProjects(cfg, text, view.input);
+  const project = view.meta.project;
+  if (project === undefined || project.value === "none")
+    return looked(text, text.noProject, 0, "skipped", text.noProject);
+  // A lookup never makes a scope: a project the server does not know has
+  // no memory yet.
+  const scope = findScope(cfg, project.value);
+  if (scope === null) {
+    const summary = text.serverDown(text.fetch.network);
+    return looked(text, summary, 0, "failed", summary);
+  }
+  if (scope === undefined)
+    return looked(text, text.noMemory, 0, "ok", text.noMemory);
+  if (view.name === "read")
+    return readTopic(cfg, text, scope, String(view.input.topic ?? ""));
+  const most = Math.min(Math.max(Math.round(cfg.lookupLimit ?? 5), 1), 10);
+  const asked = view.input.limit;
+  const limit =
+    typeof asked === "number"
+      ? Math.min(Math.max(Math.round(asked), 1), most)
+      : most;
+  return searchMemory(cfg, text, scope, String(view.input.query ?? ""), limit);
 }
 
 // processingItems says whether the server turns records into memory on its

@@ -24,6 +24,8 @@ const (
 	MaxPluginRecordActions      = 3
 	MaxPluginActionLabelRunes   = 16
 	MaxPluginActionConfirmRunes = 300
+	// A record names at most as many commands as a plugin declares queries.
+	MaxPluginRecordCommands = 8
 )
 
 type PluginViewBlockType string
@@ -290,6 +292,12 @@ const (
 	// PluginSkipOverBudget: the plugins before this one used up what one
 	// request may carry.
 	PluginSkipOverBudget = "over_budget"
+	// Why a lookup ran no query: its rate, its turn's count, a session
+	// without the values the query needs, or input it does not take.
+	PluginSkipRateLimited = "rate_limited"
+	PluginSkipTurnLimit   = "turn_limit"
+	PluginSkipUnbound     = "unbound"
+	PluginSkipBadInput    = "invalid_input"
 )
 
 // Why the host computed a session's resident block: the session's first
@@ -338,6 +346,22 @@ type RequestPluginRecord struct {
 	Trigger string `json:"trigger,omitempty"`
 	// Actions are the plugin's buttons for the record's session.
 	Actions []PluginRecordAction `json:"actions,omitempty"`
+	// Lookup describes a query the model ran through the lookup outlet,
+	// by its size: what it asked and what it got are not kept.
+	Lookup *PluginLookup `json:"lookup,omitempty"`
+	// Commands name the plugin's queries whose commands its turn block
+	// carried, as an ask that offers the model a look at every project.
+	Commands []string `json:"commands,omitempty"`
+}
+
+// PluginLookup is a query the model ran: which, how long its input was in
+// characters, how many bytes of result it got, and how many hits the
+// plugin said they held.
+type PluginLookup struct {
+	Tool        string `json:"tool"`
+	InputRunes  int    `json:"input_runes"`
+	ResultBytes int    `json:"result_bytes"`
+	Hits        *int   `json:"hits,omitempty"`
 }
 
 // PluginInjection is what the host injected into one request for a plugin.
@@ -374,6 +398,22 @@ func (record RequestPluginRecord) Validate() error {
 	}
 	if record.ElapsedMs < 0 || record.Network.Requests < 0 || record.Network.Denied < 0 || record.Network.Errors < 0 || record.Network.WaitMs < 0 {
 		return fmt.Errorf("plugin record counts must be non-negative")
+	}
+	if len(record.Commands) > MaxPluginRecordCommands {
+		return fmt.Errorf("plugin record names more than %d commands", MaxPluginRecordCommands)
+	}
+	for _, name := range record.Commands {
+		if err := validateBoundedText("plugin record command", name, 32, false); err != nil {
+			return err
+		}
+	}
+	if lookup := record.Lookup; lookup != nil {
+		if err := validateBoundedText("lookup tool", lookup.Tool, 32, false); err != nil {
+			return err
+		}
+		if lookup.InputRunes < 0 || lookup.ResultBytes < 0 || (lookup.Hits != nil && *lookup.Hits < 0) {
+			return fmt.Errorf("lookup counts must be non-negative")
+		}
 	}
 	if injection := record.Injection; injection != nil {
 		if injection.Placement != PluginPlacementSystem && injection.Placement != PluginPlacementTurnMessage {

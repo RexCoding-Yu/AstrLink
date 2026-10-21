@@ -308,6 +308,11 @@ func (handler *Handler) sessionMetadata(writer http.ResponseWriter, request *htt
 			turn = *record.TurnIndex
 		}
 	}
+	previous, err := handler.metadataStore.MetadataValues(request.Context(), storage.MetadataTargetSession, string(id))
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not read the metadata")
+		return
+	}
 	now := time.Now().UTC()
 	if err := handler.metadataStore.PutMetadataValue(request.Context(), storage.MetadataValueRecord{
 		TargetKind: storage.MetadataTargetSession, TargetID: string(id), Key: key, Value: value,
@@ -317,8 +322,13 @@ func (handler *Handler) sessionMetadata(writer http.ResponseWriter, request *htt
 		return
 	}
 	// The session's workspace takes the first value the user picks, and a
-	// later one when the user says so.
+	// later one when the user says so. A session moved to another value
+	// gets new lookup credentials with its next request: the ones issued
+	// would still look up the old.
 	if handler.pluginHost != nil {
+		if previous[key].Value != value {
+			handler.pluginHost.RevokeSessionLookups(string(id))
+		}
 		if _, err := handler.pluginHost.BindWorkspace(request.Context(), string(id), key, value, input.Workspace); err != nil {
 			writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "saved, but the workspace could not take the value")
 			return

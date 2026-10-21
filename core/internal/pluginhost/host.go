@@ -22,6 +22,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,6 +106,7 @@ type Host struct {
 	store        PluginStore
 	ledger       *injection.Ledger
 	sessions     *sessions
+	lookups      *lookups
 	observe      *observeQueue
 	records      RecordAppender
 	workspaceKey []byte
@@ -131,6 +133,7 @@ func New(options Options) *Host {
 		store:        options.Store,
 		ledger:       injection.NewLedger(),
 		sessions:     newSessions(),
+		lookups:      newLookups(),
 		observe:      newObserveQueue(logf),
 		records:      options.Records,
 		workspaceKey: options.WorkspaceKey,
@@ -196,6 +199,10 @@ type Input struct {
 	// of what it finds: then what a plugin the user does not trust keeps
 	// holds placeholders too. nil when no policy applies.
 	Redacts func(ctx context.Context) bool
+	// LookupBase is the address the client reached the gateway at, such as
+	// http://127.0.0.1:18317, when the client runs on this machine: only
+	// then can the model run a lookup. "" otherwise.
+	LookupBase string
 }
 
 // Run is the plugins' part in one request.
@@ -224,6 +231,11 @@ type Run struct {
 	// session: one marker line, or an answer naming an offered value. The
 	// turn gets no turn block and nothing of it is captured.
 	bindsOnly bool
+	// shell is set when the request offers the model a shell to run
+	// lookups with; stamp is what the request tells the session's lookup
+	// credentials.
+	shell bool
+	stamp lookupStamp
 	// turnKey names the request's turn: its index and its opening message.
 	// The index alone is not enough: a session linked through an older
 	// record can give two turns the same index.
@@ -265,6 +277,11 @@ type part struct {
 	// starts is set when the plugin takes part in the session for the
 	// first time.
 	starts bool
+	// bound is set when the session has a value of each of the plugin's
+	// attributes, none excluded; usage is the usage of its lookups the
+	// system prompt carries, "" for none.
+	bound bool
+	usage string
 	// settle is set on the call that settles the plugin's block for the
 	// turn; turnCall is its prepareTurn call, skip why there is none.
 	settle   bool
@@ -298,7 +315,7 @@ func (host *Host) Begin(ctx context.Context, input Input) *Run {
 	}
 	var plugins []*plugin.Plugin
 	for _, candidate := range host.plugins.Current().Plugins() {
-		if candidate.Enabled() && (candidate.Has(plugin.HookPrepareSession) || candidate.Has(plugin.HookPrepareTurn) || candidate.Has(plugin.HookObserveTurn)) {
+		if candidate.Enabled() && takesPart(candidate) {
 			plugins = append(plugins, candidate)
 		}
 	}
@@ -319,6 +336,7 @@ func (host *Host) Begin(ctx context.Context, input Input) *Run {
 		run.plan(plugins)
 		return run
 	}
+	run.shell = input.LookupBase != "" && declaresShell(input.Protocol, input.Body)
 	run.system = host.ledger.Fingerprint(systemText(input.Protocol, input.Body))
 	if run.turn.first != "" {
 		run.first = host.ledger.Fingerprint(run.turn.first)
@@ -334,6 +352,13 @@ func (host *Host) Begin(ctx context.Context, input Input) *Run {
 	run.start(ctx)
 	go run.work()
 	return run
+}
+
+// takesPart reports whether a plugin has a part in requests: a hook that
+// runs in them, or lookups whose usage goes with them.
+func takesPart(candidate *plugin.Plugin) bool {
+	return candidate.Has(plugin.HookPrepareSession) || candidate.Has(plugin.HookPrepareTurn) || candidate.Has(plugin.HookObserveTurn) ||
+		(candidate.Has(plugin.HookCallTool) && len(candidate.Meta.Tools) > 0)
 }
 
 // Metadata is the request's metadata: its values, with the session's
@@ -449,6 +474,12 @@ func (run *Run) plan(plugins []*plugin.Plugin) {
 		session.language = run.settings.Language
 	}
 	compacted := !run.settings.Paused && session.compacted(run.system, run.first)
+	run.stamp = lookupStamp{
+		seen: now, request: run.input.RequestID, turn: run.input.Turn, turnKey: run.turnKey,
+		scope:  LookupScope{Protocol: run.input.Protocol, Model: run.input.Model, Token: run.input.Token},
+		client: run.input.Client, language: session.language, meta: meta,
+	}
+	defer host.lookups.touch(run.input.Session, run.stamp)
 	for _, candidate := range plugins {
 		read := candidate.Can(plugin.CapabilityRequest)
 		view := SessionView{
@@ -495,6 +526,16 @@ func (run *Run) plan(plugins []*plugin.Plugin) {
 		}
 		current.metaKey = metaKey(view.Meta)
 		current.residentKey = residentKey(candidate, view.Language, current.metaKey)
+		current.bound = true
+		for _, attribute := range candidate.Meta.Metadata {
+			if value, found := run.metadata.Values[attribute.Key]; !found || value.Value == contract.MetadataNone {
+				current.bound = false
+			}
+		}
+		if current.bound && run.lookupOpen(current) {
+			token := host.lookups.issue(lookupKey{run.input.Session, candidate.Key}, candidate, run.stamp)
+			current.usage = lookupUsage(run.input.LookupBase, token, candidate, view.Language)
+		}
 		if candidate.Can(plugin.CapabilityInject) && candidate.Has(plugin.HookPrepareSession) {
 			run.planResident(current, state, compacted, now)
 		}
@@ -810,6 +851,12 @@ func (run *Run) Inject(body []byte) []byte {
 			result.record, result.kept = state.record, true
 			result.fresh, state.fresh = state.fresh, false
 		}
+		// The usage of the plugin's lookups follows its block, in a block
+		// of the gateway's own.
+		if current.usage != "" {
+			entry.Resident = strings.TrimPrefix(entry.Resident+"\n\n"+current.usage, "\n\n")
+		}
+		state.usage = current.usage
 		result.turnTitle = state.turnTitle
 		turnBytes := state.turnBytes
 		var choices map[string][]string
@@ -817,7 +864,15 @@ func (run *Run) Inject(body []byte) []byte {
 			entry.Settled = true
 			result.turnTitle, turnBytes = "", 0
 			if called, ok := current.turnCall.finished(); ok && !called.invalid {
-				entry.Turn, result.dropped = called.context.Render(injection.MaxBlockBytes)
+				block := called.context
+				block.Items = withCommands(block.Items, func(name string) (string, bool) {
+					line, ok := run.lookupCommand(current, name)
+					if ok && !slices.Contains(result.commands, name) {
+						result.commands = append(result.commands, name)
+					}
+					return line, ok
+				})
+				entry.Turn, result.dropped = block.Render(injection.MaxBlockBytes)
 				result.turnTitle, turnBytes, choices = called.record.Title, len(entry.Turn), called.choices
 			}
 		}
@@ -963,4 +1018,24 @@ func clampEvents(events []contract.MetadataEvent) []contract.MetadataEvent {
 		events = events[:contract.MaxRequestMetadataEvents]
 	}
 	return slices.Clip(events)
+}
+
+// lookupOpen reports whether the model may run the plugin's lookups in this
+// request: the user turned them on and granted them, and the client, on
+// this machine, offers the model a shell.
+func (run *Run) lookupOpen(current *part) bool {
+	candidate := current.plugin
+	return run.shell && current.off == "" && candidate.Can(plugin.CapabilityTools) &&
+		candidate.Settings.LookupEnabled && candidate.Has(plugin.HookCallTool) && len(candidate.Meta.Tools) > 0
+}
+
+// lookupCommand renders the command of one of the plugin's queries for its
+// blocks, false when the session cannot run it.
+func (run *Run) lookupCommand(current *part, name string) (string, bool) {
+	tool, declared := current.plugin.Meta.Tool(name)
+	if !declared || !run.lookupOpen(current) || (!tool.Unbound && !current.bound) {
+		return "", false
+	}
+	token := run.host.lookups.issue(lookupKey{run.input.Session, current.plugin.Key}, current.plugin, run.stamp)
+	return lookupCommand(run.input.LookupBase, token, current.plugin.Key, tool, current.view.Language), true
 }

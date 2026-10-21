@@ -66,13 +66,16 @@ func (host *Host) UpdateSettings(ctx context.Context, update contract.PluginHost
 	return settings, nil
 }
 
-// SessionPlugins returns the part each enabled plugin that injects has in
-// session: whether the user paused it there, the turn it started in, and the
-// resident block the session carries, which lives in memory only.
+// SessionPlugins returns the part each enabled plugin that injects or offers
+// lookups has in session: whether the user paused it there, the turn it
+// started in, and the resident block and usage the session carries, which
+// live in memory only.
 func (host *Host) SessionPlugins(ctx context.Context, session string) ([]contract.SessionPlugin, error) {
 	var plugins []*plugin.Plugin
 	for _, candidate := range host.plugins.Current().Plugins() {
-		if candidate.Enabled() && candidate.Has(plugin.HookPrepareSession) && candidate.Can(plugin.CapabilityInject) {
+		loads := candidate.Has(plugin.HookPrepareSession) && candidate.Can(plugin.CapabilityInject)
+		looks := candidate.Has(plugin.HookCallTool) && candidate.Can(plugin.CapabilityTools) && len(candidate.Meta.Tools) > 0
+		if candidate.Enabled() && (loads || looks) {
 			plugins = append(plugins, candidate)
 		}
 	}
@@ -98,6 +101,7 @@ func (host *Host) SessionPlugins(ctx context.Context, session string) ([]contrac
 					}
 				}
 				part.RefreshPending = entry.refresh != ""
+				part.Lookup = maskLookup(entry.usage)
 			}
 		}
 		host.sessions.mutex.Unlock()
@@ -122,6 +126,11 @@ func (host *Host) PauseSession(ctx context.Context, key, session string, paused 
 	state := host.sessions.plugin(session, key)
 	state.loaded, state.paused, state.firstTurn = true, record.Paused, record.FirstTurn
 	host.sessions.mutex.Unlock()
+	// A paused session carries no lookups: what was issued stops now, and
+	// resuming issues a new credential.
+	if record.Paused {
+		host.lookups.revoke(lookupKey{session, key})
+	}
 	return nil
 }
 
@@ -286,4 +295,24 @@ func cleanMessage(text string) string {
 		return r
 	}, strings.ToValidUTF8(text, "�"))
 	return contract.ClampRunes(text, maxActionMessageRunes)
+}
+
+// maskLookup hides the credential in a usage the session details show.
+func maskLookup(usage string) string {
+	var masked strings.Builder
+	rest := usage
+	for {
+		start := strings.Index(rest, "Bearer "+lookupPrefix)
+		if start < 0 {
+			masked.WriteString(rest)
+			return masked.String()
+		}
+		token := start + len("Bearer ") + len(lookupPrefix)
+		end := token
+		for end < len(rest) && strings.ContainsRune("0123456789abcdef", rune(rest[end])) {
+			end++
+		}
+		masked.WriteString(rest[:token] + "…")
+		rest = rest[end:]
+	}
 }

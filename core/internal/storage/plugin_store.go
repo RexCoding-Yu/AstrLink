@@ -35,14 +35,16 @@ type PluginSettingsRecord struct {
 	// AutoRefresh swaps a session's resident block when newer data
 	// changes it.
 	AutoRefresh bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// LookupEnabled lets the model run the plugin's queries.
+	LookupEnabled bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // NewPluginSettingsRecord returns the settings of a plugin the user changed
 // nothing for yet.
 func NewPluginSettingsRecord(key string) PluginSettingsRecord {
-	return PluginSettingsRecord{Key: key, WorkspaceBinding: true}
+	return PluginSettingsRecord{Key: key, WorkspaceBinding: true, LookupEnabled: true}
 }
 
 // PluginSessionRecord is a plugin's part in one session: the turn it first

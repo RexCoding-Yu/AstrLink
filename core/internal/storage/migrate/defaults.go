@@ -1140,7 +1140,9 @@ END`,
 			// excluded_clients_json lists the client types the plugin is off
 			// for; workspace_binding binds a new session to the value its
 			// workspace had; auto_refresh lets the host swap a session's
-			// resident block when the plugin's data changed.
+			// resident block when the plugin's data changed; lookup_enabled
+			// lets the model run the plugin's queries through the lookup
+			// outlet.
 			`CREATE TABLE plugin_settings (
     plugin_key TEXT PRIMARY KEY CHECK(length(plugin_key) BETWEEN 1 AND 32),
     enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
@@ -1152,6 +1154,7 @@ END`,
     excluded_clients_json TEXT NOT NULL DEFAULT '[]' CHECK(length(excluded_clients_json) <= 4096),
     workspace_binding INTEGER NOT NULL DEFAULT 1 CHECK(workspace_binding IN (0, 1)),
     auto_refresh INTEGER NOT NULL DEFAULT 0 CHECK(auto_refresh IN (0, 1)),
+    lookup_enabled INTEGER NOT NULL DEFAULT 1 CHECK(lookup_enabled IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )`,
