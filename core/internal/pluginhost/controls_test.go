@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
+	builtinplugins "github.com/QuantumNous/astrlink/core/plugins"
 	"github.com/tidwall/gjson"
 )
 
@@ -631,3 +633,116 @@ func TestALateBlockIsReportedByTheRequestThatCarriesIt(t *testing.T) {
 }
 
 func ptr[T any](value T) *T { return &value }
+
+// memoryServer answers the builtin PowerContext plugin like a PowerContext
+// 1.3.0 server with two projects.
+type memoryServer struct {
+	mutex sync.Mutex
+	paths []string
+}
+
+func (server *memoryServer) Fetch(_ context.Context, _ *plugin.Plugin, request plugin.HTTPRequest) plugin.HTTPResponse {
+	server.mutex.Lock()
+	server.paths = append(server.paths, request.Method+" "+strings.TrimPrefix(request.URL, "https://memory.test"))
+	server.mutex.Unlock()
+	reply := func(status int, body string) plugin.HTTPResponse {
+		return plugin.HTTPResponse{Status: status, Body: []byte(body)}
+	}
+	path := strings.TrimPrefix(request.URL, "https://memory.test")
+	switch {
+	case path == "/v1/server-info":
+		return reply(200, `{"package_version":"1.3.0"}`)
+	case strings.HasPrefix(path, "/v1/scopes?"):
+		return reply(200, `{"items":[{"scope_id":"scp_a","title":"astrlink"},{"scope_id":"scp_p","title":"paseo"}],"next_cursor":null}`)
+	case strings.HasSuffix(path, "/profile-policy"):
+		return reply(200, `{"generation_enabled":true,"version":1}`)
+	case strings.Contains(path, "/artifacts/profile"):
+		return reply(200, `{"items":[{"title":"约定","summary":"用中文沟通"}]}`)
+	case strings.Contains(path, "/artifacts/topic-memory"):
+		return reply(200, `{"items":[{"title":"分页","summary":"改成游标","published_at":"2026-10-20T00:00:00Z"}]}`)
+	case path == "/v1/sources/content":
+		return reply(202, `{"position":1}`)
+	}
+	return reply(404, `{}`)
+}
+
+func TestTheBuiltinMemoryPluginAsksBindsAndLoads(t *testing.T) {
+	settings := allCapabilities()
+	settings.Config = json.RawMessage(`{"serverUrl":"https://memory.test"}`)
+	source, err := fs.ReadFile(builtinplugins.Builtin, "powercontext/plugin.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &memoryServer{}
+	h := newHarness(t, settings, map[string]string{"powercontext/plugin.ts": string(source)}, server)
+	ctx := context.Background()
+	if _, err := h.host.UpdateSettings(ctx, contract.PluginHostSettingsUpdate{Language: ptr(contract.PluginLanguageChinese)}); err != nil {
+		t.Fatal(err)
+	}
+	here := "<env>\nWorking directory: /work/paseo\n</env>"
+	// The first turn asks, at the start of the user's message, offering the
+	// directory's project first; the system prompt stays the client's.
+	turn1 := withSystem(here, user("帮我看看分页逻辑"))
+	run, sent := h.send(t, call{session: "session_1", turn: 1, body: turn1})
+	ask := gjson.GetBytes(sent, "messages.0.content.0.text").Str
+	if !strings.Contains(ask, "已有项目（共 2 个）：\n1. paseo（当前目录）\n2. astrlink\n") || gjson.GetBytes(sent, "system").Str != here {
+		t.Fatalf("turn 1:\n%s", sent)
+	}
+	run.Report()
+	// The user answers with a listed name: the session binds at once and
+	// the same request carries the project's memory.
+	turn2 := withSystem(here, user("帮我看看分页逻辑"), assistant("要纳入哪个项目？1. paseo 2. astrlink"), user("paseo"))
+	run, sent = h.send(t, call{session: "session_1", turn: 2, body: turn2})
+	if value := run.Metadata().Values["project"]; value.Value != "paseo" || value.SetBy != contract.MetadataSetByUserAnswer {
+		t.Fatalf("metadata = %+v", run.Metadata())
+	}
+	system := systemOf(sent)
+	if !strings.Contains(system, "<project-context>\n以下是本项目的历史记忆") || !strings.Contains(system, "- 约定：用中文沟通") || !strings.Contains(system, "- 分页：改成游标") {
+		t.Fatalf("system:\n%s", system)
+	}
+	// The first turn's ask goes back where it was, byte for byte.
+	if gjson.GetBytes(sent, "messages.0.content.0.text").Str != ask {
+		t.Fatalf("the ask was not put back: %s", sent)
+	}
+	records, _ := run.Report()
+	if record := recordOf(t, records, plugin.HookPrepareSession); record.Title != "记忆装载" || record.Trigger != contract.PluginTriggerBound || len(record.Actions) != 1 {
+		t.Fatalf("record = %+v", record)
+	}
+	// A new session in the same directory starts with the project and is
+	// not asked.
+	run, sent = h.send(t, call{session: "session_2", turn: 1, body: turn1})
+	if value := run.Metadata().Values["project"]; value.Value != "paseo" || value.SetBy != contract.MetadataSetByWorkspace {
+		t.Fatalf("metadata = %+v", run.Metadata())
+	}
+	if gjson.GetBytes(sent, "messages.0.content.#").Int() != 1 || !strings.Contains(systemOf(sent), "<project-context>") {
+		t.Fatalf("a session bound by its workspace:\n%s", sent)
+	}
+	server.mutex.Lock()
+	defer server.mutex.Unlock()
+	for _, path := range server.paths {
+		if strings.Contains(path, "flush") {
+			t.Fatalf("the plugin asked the server to process: %v", server.paths)
+		}
+	}
+}
+
+func TestPrepareSessionKnowsWhenItsDataHoldsPlaceholders(t *testing.T) {
+	source := `export const meta = { apiVersion: 1, key: "shy", name: "Shy", version: "1.0.0", capabilities: ["context.inject"] };
+export function prepareSession(view) { return { system: "redacted=" + (view.redacted === true) }; }
+`
+	for _, trusted := range []bool{false, true} {
+		settings := allCapabilities()
+		settings.Trusted = trusted
+		h := newHarness(t, settings, map[string]string{"shy": source}, nil)
+		body := messages(user("帮我看看分页逻辑"))
+		run := h.host.Begin(context.Background(), Input{
+			RequestID: "request_1", Protocol: contract.ProtocolAnthropicMessages, Model: "claude", Client: "claude_code",
+			Header: http.Header{}, Session: "session_1", Turn: 1, Body: []byte(body),
+			Redacts: func(context.Context) bool { return true },
+		})
+		want := "redacted=" + map[bool]string{false: "true", true: "false"}[trusted]
+		if got := systemOf(run.Inject([]byte(body))); got != want {
+			t.Fatalf("trusted %v: system = %q, want %q", trusted, got, want)
+		}
+	}
+}

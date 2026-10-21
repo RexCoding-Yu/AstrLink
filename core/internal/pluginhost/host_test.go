@@ -116,8 +116,14 @@ func newHarness(t *testing.T, settings plugin.Settings, sources map[string]strin
 	store := &pluginStore{values: map[string]json.RawMessage{}, writes: make(chan string, 16)}
 	builtin := fstest.MapFS{}
 	all := settingsSource{}
+	// A source is a plugin.js under its key, or the file a key with a
+	// slash names, such as powercontext/plugin.ts.
 	for key, source := range sources {
-		builtin[key+"/plugin.js"] = &fstest.MapFile{Data: []byte(source)}
+		file := key + "/plugin.js"
+		if strings.Contains(key, "/") {
+			file, key = key, filepath.Dir(key)
+		}
+		builtin[file] = &fstest.MapFile{Data: []byte(source)}
 		all[key] = settings
 	}
 	manager := plugin.NewManager(plugin.ManagerOptions{

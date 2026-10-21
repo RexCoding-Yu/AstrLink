@@ -46,6 +46,7 @@ func (handler *Handler) beginPlugins(request *http.Request, classified Request, 
 		Stream: classified.Streaming, Token: accessTokenID, Header: request.Header,
 		Session: string(session.sessionID), Turn: turn, Body: classified.body,
 		Inspect: handler.pluginInspector(session, classified, accessTokenID),
+		Redacts: handler.pluginRedacts(classified, accessTokenID),
 	})
 	if run == nil {
 		return
@@ -99,6 +100,21 @@ func (handler *Handler) pluginInspector(session *recordSession, classified Reque
 		default:
 			return nil, errors.New("unknown privacy decision")
 		}
+	}
+}
+
+// pluginRedacts reports whether the privacy policy that applies to the
+// request replaces what it finds with placeholders. nil when no policy can
+// apply.
+func (handler *Handler) pluginRedacts(classified Request, accessTokenID contract.AccessTokenID) func(context.Context) bool {
+	filter := handler.privacyFilter
+	if filter == nil {
+		return nil
+	}
+	scope := privacy.Scope{Protocol: classified.Protocol, Model: classified.Model, AccessTokenID: accessTokenID}
+	return func(ctx context.Context) bool {
+		policy, err := filter.ResolvePolicy(ctx, scope)
+		return err == nil && policy.Enabled && policy.Action == privacy.ActionRedact
 	}
 }
 

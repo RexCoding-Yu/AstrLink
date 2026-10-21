@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"slices"
 	"strings"
@@ -110,6 +111,9 @@ type Services struct {
 	Metadata MetadataStats
 	// Now is the clock of astrlink.clock.now; nil means time.Now.
 	Now func() time.Time
+	// Zone is the time zone of astrlink.clock.offset; nil means the
+	// gateway's local one.
+	Zone *time.Location
 }
 
 // RequestInfo is what astrlink.request.info returns: the request a hook runs
@@ -268,7 +272,10 @@ func (bound *instance) install() error {
 		"meta":   map[string]any{"values": define("meta.values", 2, hostMetaValues)},
 		"util":   map[string]any{"sha256": define("util.sha256", 1, hostSHA256)},
 		"log":    define("log", 2, hostLog),
-		"clock":  map[string]any{"now": define("clock.now", 0, hostClockNow)},
+		"clock": map[string]any{
+			"now":    define("clock.now", 0, hostClockNow),
+			"offset": define("clock.offset", 1, hostClockOffset),
+		},
 	})
 }
 
@@ -342,6 +349,33 @@ func hostSHA256(_ *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, e
 func hostClockNow(c *call, _ *moejs.Realm, _ []moejs.Value) (moejs.Value, error) {
 	return moejs.Number(float64(c.now().UnixMilli())), nil
 }
+
+// hostClockOffset returns how many minutes the gateway's time zone is ahead
+// of UTC at a moment, in milliseconds since the Unix epoch, now by default.
+// Date in a plugin keeps to UTC; this is what writes a date as the user
+// reads it.
+func hostClockOffset(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
+	at := c.now()
+	if argument := moejs.Arg(args, 0); !argument.IsUndefined() {
+		number, err := realm.ToNumber(argument)
+		if err != nil {
+			return moejs.Undefined(), err
+		}
+		if math.IsNaN(number) || math.Abs(number) > maxClockMillis {
+			return moejs.Undefined(), realm.RangeError("astrlink.clock.offset takes milliseconds since the Unix epoch")
+		}
+		at = time.UnixMilli(int64(number))
+	}
+	zone := c.plugin.services.Zone
+	if zone == nil {
+		zone = time.Local
+	}
+	_, offset := at.In(zone).Zone()
+	return moejs.Number(float64(offset / 60)), nil
+}
+
+// maxClockMillis is the furthest moment a JavaScript Date holds.
+const maxClockMillis = 8.64e15
 
 func hostLog(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
 	level, err := stringArg(realm, args, 0, "level")

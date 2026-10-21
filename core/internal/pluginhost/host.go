@@ -192,6 +192,10 @@ type Input struct {
 	// see them; ErrBlocked when the policy blocks them, another error when
 	// the check failed. nil when no policy applies.
 	Inspect func(ctx context.Context, texts []string) ([]string, error)
+	// Redacts reports whether the privacy policy puts placeholders in place
+	// of what it finds: then what a plugin the user does not trust keeps
+	// holds placeholders too. nil when no policy applies.
+	Redacts func(ctx context.Context) bool
 }
 
 // Run is the plugins' part in one request.
@@ -576,10 +580,14 @@ func (run *Run) startSession(current *part, trigger string) *hookCall {
 	view := current.view
 	view.Reason = trigger
 	key, meta := current.residentKey, current.metaKey
+	redacts := run.input.Redacts
 	go func() {
 		defer close(call.done)
 		ctx, cancel := context.WithTimeout(context.Background(), sessionHookTimeout)
 		defer cancel()
+		if redacts != nil && !current.plugin.Settings.Trusted {
+			view.Redacted = redacts(ctx)
+		}
 		raw, info, err := current.plugin.Call(ctx, plugin.HookPrepareSession, view, plugin.CallOptions{
 			Request: &current.info, NetworkBudget: sessionHookTimeout,
 		})

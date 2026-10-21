@@ -3,457 +3,502 @@ package plugin
 import (
 	"context"
 	"encoding/json"
-	"strconv"
+	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode"
 
 	"github.com/QuantumNous/astrlink/core/plugins"
 )
 
-// fakePowerContext answers like PowerContext 1.3.0 and keeps what it was sent.
-// With slowSearch set, searches that embed the query time out and those by
-// words alone answer; with downSearch, every search fails; with emptySearch,
-// memory searches find nothing. flushFailures counts the flushes that fail
-// before one succeeds.
+// fakePowerContext answers like PowerContext 1.3.0 and keeps what it was
+// sent. Its scopes are listed by id, as the server does; topicPages splits the
+// topics into pages of that many.
 type fakePowerContext struct {
-	mutex         sync.Mutex
-	seen          []HTTPRequest
-	slowSearch    bool
-	downSearch    bool
-	emptySearch   bool
-	flushFailures int
-	slowFlush     bool
+	mutex sync.Mutex
+	seen  []HTTPRequest
 	// version is what server-info reports, 1.3.0 when empty.
 	version string
-	// position is the journal position of the last capture.
-	position int
+	// scopes are the projects on the server by title; policies the scopes
+	// with a profile policy.
+	scopes   map[string]string
+	policies map[string]bool
+	profile  string
+	topics   []string
+	// processing is what capabilities say of automatic processing: on, off
+	// or absent.
+	processing string
+	topicPages int
+	down       bool
+}
+
+func newFakePowerContext() *fakePowerContext {
+	server := &fakePowerContext{
+		scopes:     map[string]string{"datav": "scp_datav", "paseo": "scp_paseo", "Has Space": "scp_bad"},
+		policies:   map[string]bool{"scp_paseo": true},
+		profile:    `{"title":"沟通约定","summary":"用中文沟通，注释写中文。\n测试用表驱动写法。"}`,
+		processing: "on",
+	}
+	for index := range 30 {
+		server.topics = append(server.topics, fmt.Sprintf(`{"title":"主题 %02d","summary":"%s","published_at":"2026-10-%02dT08:00:00Z"}`,
+			index, strings.Repeat("摘", 90+index), 1+index%28))
+	}
+	return server
 }
 
 func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTPRequest) HTTPResponse {
 	server.mutex.Lock()
+	defer server.mutex.Unlock()
 	server.seen = append(server.seen, request)
-	slow, down, empty := server.slowSearch, server.downSearch, server.emptySearch
-	version := server.version
-	server.mutex.Unlock()
-	if version == "" {
-		version = "1.3.0"
-	}
 	reply := func(status int, body string) HTTPResponse {
 		return HTTPResponse{Status: status, Header: map[string]string{"content-type": "application/json"}, Body: []byte(body), Took: 3 * time.Millisecond}
 	}
-	if strings.HasSuffix(request.URL, "/search") {
-		var search struct {
-			Query string `json:"query"`
-			Mode  string `json:"mode"`
-		}
-		_ = json.Unmarshal(request.JSON, &search)
-		switch {
-		case down:
-			return reply(503, `{"error":{"code":"unavailable","message":"The Server is unavailable."}}`)
-		case slow && search.Mode != "text":
-			return HTTPResponse{Error: FetchBudget, Took: 2400 * time.Millisecond}
-		case strings.Contains(request.URL, "/topic-memory/") && termsOf(search.Query) > 64:
-			return reply(400, `{"error":{"code":"invalid_request","message":"The request violates the API contract.","details":{"errors":[{"msg":"Value error, text search accepts at most 64 analyzed terms"}]}}}`)
-		case empty && !strings.Contains(request.URL, "/skill/"):
-			return reply(200, `{"results":[]}`)
-		}
+	if server.down {
+		return HTTPResponse{Error: FetchNetwork, Took: time.Millisecond}
 	}
-	path := strings.TrimPrefix(request.URL, "https://memory.test")
+	target, _ := url.Parse(request.URL)
+	query := target.Query()
 	switch {
-	case path == "/v1/server-info":
+	case request.Method == "GET" && target.Path == "/v1/server-info":
+		version := server.version
+		if version == "" {
+			version = "1.3.0"
+		}
 		return reply(200, `{"package_version":"`+version+`"}`)
-	case path == "/v1/capabilities":
-		return reply(200, `{"artifact_families":["memory","atomic-memory","topic-memory","experience","skill","profile"]}`)
-	case path == "/v1/scopes":
-		return reply(201, `{"scope_id":"scp_test","title":"demo","summary":"","context_references":[],"external_references":[],"version":1}`)
-	case path == "/v1/scopes/scp_test/artifacts/profile?limit=1":
-		return reply(200, `{"items":[{"title":"约定","summary":"测试用表驱动写法"}],"next_cursor":""}`)
-	case path == "/v1/scopes/scp_test/artifacts/atomic-memory/search":
-		return reply(200, `{"results":[{"family":"atomic-memory","artifact_id":"a1","revision":2,"content":{"text":"分页用游标"},"lineage":{}}]}`)
-	case path == "/v1/scopes/scp_test/artifacts/topic-memory/search":
-		return reply(200, `{"results":[
-			{"family":"topic-memory","artifact_id":"t1","revision":1,"content":{"title":"插件","summary":"宿主用 moejs"},"lineage":{},"scores":{"retrieval":0.8,"channels":{}}},
-			{"family":"topic-memory","artifact_id":"t2","revision":1,"content":{"title":"无关","summary":"低分"},"lineage":{},"scores":{"retrieval":0.1,"channels":{}}}]}`)
-	case path == "/v1/scopes/scp_test/artifacts/skill/search":
-		return reply(200, `{"results":[]}`)
-	case path == "/v1/sources/content":
-		server.mutex.Lock()
-		server.position++
-		position := server.position
-		server.mutex.Unlock()
-		return reply(202, `{"status":"accepted","source":{"name":"content","source_id":"x"},"position":`+strconv.Itoa(position)+`}`)
-	case path == "/v1/memory/flush":
-		server.mutex.Lock()
-		defer server.mutex.Unlock()
-		if server.slowFlush {
-			return HTTPResponse{Error: FetchTimeout, Took: time.Duration(request.TimeoutMS) * time.Millisecond}
+	case request.Method == "GET" && target.Path == "/v1/capabilities":
+		background := `"automatic_processing_enabled":true`
+		if server.processing == "off" {
+			background = `"automatic_processing_enabled":false`
 		}
-		if server.flushFailures > 0 {
-			server.flushFailures--
-			return reply(500, `{"error":{"code":"internal_error","message":"The Server failed.","details":null}}`)
+		extraction := `{"configuration":"configured","background":{"location":"local","state":"running",` + background + `},
+			"observation":{"status":"observed","since":"2026-10-21T00:00:00Z","last_success_at":"2026-10-21T03:04:05Z",
+			"last_failure":{"code":"model_timeout","stage":"inference","occurred_at":"2026-10-20T15:00:00Z"}}}`
+		if server.processing == "" {
+			extraction = "null"
 		}
-		return reply(200, `{"status":"processed","current_cursor":`+strconv.Itoa(server.position)+`,"remaining_work":false}`)
+		return reply(200, `{"artifact_families":["memory","atomic-memory","topic-memory","experience","skill","profile"],"memory_extraction":true,"extraction":`+extraction+`}`)
+	case request.Method == "GET" && target.Path == "/v1/scopes":
+		var items []string
+		for title, id := range server.scopes {
+			if query.Get("query") != "" && !strings.Contains(title, query.Get("query")) {
+				continue
+			}
+			items = append(items, `{"scope_id":"`+id+`","title":"`+title+`","summary":"s","context_references":[],"external_references":[],"version":1}`)
+		}
+		return reply(200, `{"items":[`+strings.Join(items, ",")+`],"next_cursor":null}`)
+	case request.Method == "POST" && target.Path == "/v1/scopes":
+		var created struct {
+			Title string `json:"title"`
+		}
+		_ = json.Unmarshal(request.JSON, &created)
+		server.scopes[created.Title] = "scp_" + created.Title
+		return reply(201, `{"scope_id":"scp_`+created.Title+`","title":"`+created.Title+`","summary":"s","context_references":[],"external_references":[],"version":1}`)
+	case strings.HasSuffix(target.Path, "/profile-policy"):
+		scope := strings.TrimSuffix(strings.TrimPrefix(target.Path, "/v1/scopes/"), "/profile-policy")
+		if request.Method == "PUT" {
+			server.policies[scope] = true
+			return reply(200, `{"scope_id":"`+scope+`","generation_enabled":true,"activation_mode":"automatic","pending_candidate_id":null,"version":1,"updated_at":"2026-10-21T00:00:00Z"}`)
+		}
+		if !server.policies[scope] {
+			return reply(404, `{"error":{"code":"not_found","message":"Not found."}}`)
+		}
+		return reply(200, `{"scope_id":"`+scope+`","generation_enabled":false,"activation_mode":"automatic","pending_candidate_id":null,"version":3,"updated_at":"2026-10-21T00:00:00Z"}`)
+	case strings.HasSuffix(target.Path, "/artifacts/profile"):
+		return reply(200, `{"items":[`+server.profile+`],"next_cursor":null}`)
+	case strings.HasSuffix(target.Path, "/artifacts/topic-memory"):
+		topics := server.topics
+		next := "null"
+		if server.topicPages > 0 {
+			start := 0
+			if cursor := query.Get("cursor"); cursor != "" {
+				fmt.Sscanf(cursor, "page-%d", &start)
+			}
+			end := min(start+server.topicPages, len(topics))
+			if end < len(topics) {
+				next = fmt.Sprintf(`"page-%d"`, end)
+			}
+			topics = topics[start:end]
+		}
+		return reply(200, `{"items":[`+strings.Join(topics, ",")+`],"next_cursor":`+next+`}`)
+	case request.Method == "POST" && target.Path == "/v1/sources/content":
+		return reply(202, `{"status":"accepted","source":{"name":"content","source_id":"x"},"position":7}`)
 	}
-	return reply(404, `{}`)
+	return reply(404, `{"error":{"code":"not_found","message":"Not found."}}`)
 }
 
-// termsOf counts the terms PowerContext 1.3's text search finds: a run of
-// n Han characters gives n characters and n - 1 pairs, a run of other letters
-// and digits one word.
-func termsOf(query string) int {
-	terms, run := 0, ""
-	for _, char := range query {
-		switch {
-		case unicode.Is(unicode.Han, char):
-			terms++
-			if run == "han" {
-				terms++
-			}
-			run = "han"
-		case unicode.IsLetter(char) || unicode.IsDigit(char):
-			if run != "word" {
-				terms++
-			}
-			run = "word"
-		default:
-			run = ""
-		}
-	}
-	return terms
-}
-
-func (server *fakePowerContext) requests(path string) []HTTPRequest {
+func (server *fakePowerContext) requests(method, path string) []HTTPRequest {
 	server.mutex.Lock()
 	defer server.mutex.Unlock()
 	var matched []HTTPRequest
 	for _, request := range server.seen {
-		if strings.HasSuffix(request.URL, path) {
+		target, _ := url.Parse(request.URL)
+		if request.Method == method && strings.HasSuffix(target.Path, path) {
 			matched = append(matched, request)
 		}
 	}
 	return matched
 }
 
-func powerContextView(project string, typed string) map[string]any {
-	view := map[string]any{
-		"protocol": "anthropic.messages", "model": "claude-test", "client": "claude_code", "stream": true,
-		"meta":    map[string]any{},
-		"session": map[string]any{"id": "session_1", "turn": 3},
-		"user":    map[string]any{"text": typed, "typed": typed, "previous": "上一轮问了分页"},
-	}
-	if project != "" {
-		view["meta"] = map[string]any{"project": map[string]any{"value": project, "source": "session"}}
-	}
-	return view
+// sessionsUsing answers astrlink.meta.values: the projects this computer's
+// sessions used.
+type sessionsUsing []ValueStat
+
+func (stats sessionsUsing) ValueStats(context.Context, string, int) ([]ValueStat, error) {
+	return stats, nil
 }
 
-// TestThePowerContextPlugin runs the builtin plugin's hooks against a fake
-// PowerContext 1.3.
-func TestThePowerContextPlugin(t *testing.T) {
-	server := &fakePowerContext{}
+type powerContextHarness struct {
+	t      *testing.T
+	server *fakePowerContext
+	plugin *Plugin
+	store  *memoryStore
+}
+
+func newPowerContextHarness(t *testing.T, config string, used sessionsUsing) *powerContextHarness {
+	t.Helper()
+	server := newFakePowerContext()
+	store := &memoryStore{}
 	all := []string{CapabilityInject, CapabilityRequest, CapabilityNetwork, CapabilityStorage, CapabilityViews}
 	manager := NewManager(ManagerOptions{
 		Builtin: plugins.Builtin,
 		Settings: settingsMap{"powercontext": {
-			Enabled: true, Capabilities: all,
-			Config: json.RawMessage(`{"serverUrl":"https://memory.test","minScore":{"topic-memory":0.5}}`),
+			Enabled: true, Capabilities: all, Config: json.RawMessage(config),
 		}},
-		Services: Services{Fetcher: server, Store: &memoryStore{}},
+		Services: Services{
+			Fetcher: server, Store: store, Metadata: used,
+			Now:  func() time.Time { return time.Date(2026, 10, 21, 22, 30, 0, 0, time.UTC) },
+			Zone: time.FixedZone("EDT", -4*3600),
+		},
 	})
 	if err := manager.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	plugin := loadedPlugin(t, manager, "powercontext")
-	if attributes := plugin.Attributes(); len(attributes) != 1 || attributes[0].Key != "project" || attributes[0].Marker != "memory-project" {
-		t.Fatalf("attributes = %+v", attributes)
-	}
-	call := func(hook string, arg any) string {
-		t.Helper()
-		result, _, err := plugin.Call(context.Background(), hook, arg, CallOptions{NetworkBudget: 5 * time.Second})
-		if err != nil {
-			t.Fatalf("%s: %v", hook, err)
-		}
-		return string(result)
-	}
+	return &powerContextHarness{t: t, server: server, plugin: loadedPlugin(t, manager, "powercontext"), store: store}
+}
 
-	// Without a project the session asks for one, in words that never name
-	// the gateway.
-	ask := call(HookPrepareSession, powerContextView("", ""))
-	if !strings.Contains(ask, "<memory-project>项目名</memory-project>") || strings.Contains(strings.ToLower(ask), "astrlink") {
-		t.Fatalf("prepareSession without a project = %s", ask)
+func (h *powerContextHarness) call(hook string, arg any) string {
+	h.t.Helper()
+	result, _, err := h.plugin.Call(context.Background(), hook, arg, CallOptions{NetworkBudget: 5 * time.Second})
+	if err != nil {
+		h.t.Fatalf("%s: %v", hook, err)
 	}
-	if again := call(HookPrepareSession, powerContextView("", "")); again != ask {
-		t.Fatalf("the ask changed between turns:\n%s\n%s", ask, again)
-	}
+	return string(result)
+}
 
-	resident := call(HookPrepareSession, powerContextView("demo", ""))
-	if !strings.Contains(resident, "<project-context>") || !strings.Contains(resident, "- 约定：测试用表驱动写法") {
-		t.Fatalf("prepareSession with a project = %s", resident)
+func powerContextView(project, language string, extra map[string]any) map[string]any {
+	view := map[string]any{
+		"protocol": "anthropic.messages", "model": "claude-test", "client": "claude_code", "stream": true,
+		"meta": map[string]any{}, "language": language,
+		"session": map[string]any{"id": "session_1", "turn": 1, "first": true},
+		"user":    map[string]any{"text": "帮我把分页改成游标", "typed": "帮我把分页改成游标"},
 	}
-	if scopes := server.requests("/v1/scopes"); len(scopes) != 1 || !strings.Contains(string(scopes[0].JSON), `"idempotency_key":"astrlink:project:demo"`) {
-		t.Fatalf("scope requests = %+v", scopes)
+	if project != "" {
+		view["meta"] = map[string]any{"project": map[string]any{"value": project, "source": "session"}}
 	}
+	for key, value := range extra {
+		view[key] = value
+	}
+	return view
+}
 
-	var turn struct {
-		Context struct {
-			Open  string   `json:"open"`
-			Items []string `json:"items"`
-		} `json:"context"`
-		Skip   string `json:"skip"`
-		Record struct {
-			Summary string `json:"summary"`
-		} `json:"record"`
+type sessionResult struct {
+	System *struct {
+		Open  string   `json:"open"`
+		Items []string `json:"items"`
+		Close string   `json:"close"`
+	} `json:"system"`
+	Record struct {
+		Title   string `json:"title"`
+		Status  string `json:"status"`
+		Summary string `json:"summary"`
+		Actions []struct {
+			ID      string `json:"id"`
+			Label   string `json:"label"`
+			Confirm string `json:"confirm"`
+		} `json:"actions"`
+	} `json:"record"`
+}
+
+func decodeResult[T any](t *testing.T, raw string) T {
+	t.Helper()
+	var value T
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
 	}
-	if err := json.Unmarshal([]byte(call(HookPrepareTurn, powerContextView("demo", "怎么给网关加一个插件系统？"))), &turn); err != nil {
-		t.Fatal(err)
+	return value
+}
+
+func TestThePowerContextPluginLoadsTheProfileAndTheNewestTopics(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test","topicCount":5}`, nil)
+	raw := h.call(HookPrepareSession, powerContextView("datav", "zh-CN", map[string]any{"reason": "start"}))
+	result := decodeResult[sessionResult](t, raw)
+	if result.System == nil {
+		t.Fatalf("prepareSession = %s", raw)
 	}
+	block := result.System.Open + "\n" + strings.Join(result.System.Items, "\n") + "\n" + result.System.Close
 	want := []string{
-		"- [atomic-memory] 分页用游标 (ref atomic-memory/a1#2)",
-		"- [topic-memory] 插件：宿主用 moejs (ref topic-memory/t1#1)",
+		"<project-context>\n以下是本项目的历史记忆，与用户当前指示冲突时以当前指示为准。",
+		"项目画像\n- 沟通约定：用中文沟通，注释写中文。\n测试用表驱动写法。",
+		// The five topics published last, newest first, their summaries cut
+		// at 100 characters.
+		"主题目录（最近更新的 5 个）\n- 主题 27：" + strings.Repeat("摘", 100) + "…\n- 主题 26：",
+		"- 主题 23：",
+		"还有更多主题没有列出。\n</project-context>",
 	}
-	if turn.Context.Open != "<project-memory>" || strings.Join(turn.Context.Items, "\n") != strings.Join(want, "\n") || turn.Record.Summary != "召回 2/9" {
-		t.Fatalf("prepareTurn = %+v", turn)
-	}
-	// atomic-memory refuses scores and admission; the others ask for scores.
-	// Beside each search that embeds the query goes one by words alone.
-	// The two go out together, in no set order.
-	byMode := func(family string) (full, words map[string]any) {
-		t.Helper()
-		searches := server.requests("/" + family + "/search")
-		if len(searches) != 2 {
-			t.Fatalf("%s searches = %+v", family, searches)
-		}
-		for _, search := range searches {
-			var body map[string]any
-			if err := json.Unmarshal(search.JSON, &body); err != nil {
-				t.Fatal(err)
-			}
-			if body["mode"] == "text" {
-				words = body
-			} else {
-				full = body
-			}
-		}
-		if full == nil || words == nil {
-			t.Fatalf("%s searches = %+v", family, searches)
-		}
-		return full, words
-	}
-	atomicBody, atomicText := byMode("atomic-memory")
-	if len(atomicBody) != 2 || atomicBody["query"] != "怎么给网关加一个插件系统？" || atomicBody["limit"] != float64(4) || len(atomicText) != 3 {
-		t.Fatalf("atomic-memory searches = %v, %v", atomicBody, atomicText)
-	}
-	if topicBody, topicText := byMode("topic-memory"); topicBody["include_scores"] != true || topicText["include_scores"] != true || topicText["admission"] != nil {
-		t.Fatalf("topic-memory searches = %v, %v", topicBody, topicText)
-	}
-	if len(server.requests("/skill/search")) != 1 {
-		t.Fatalf("skill search = %+v", server.requests("/skill/search"))
-	}
-	for _, search := range server.requests("/search") {
-		if search.TimeoutMS != 5000 {
-			t.Fatalf("a search waits %d ms", search.TimeoutMS)
+	for _, part := range want {
+		if !strings.Contains(block, part) {
+			t.Fatalf("block lacks %q:\n%s", part, block)
 		}
 	}
-
-	type turnResult struct {
-		Skip   string `json:"skip"`
-		Record struct {
-			Status  string `json:"status"`
-			Summary string `json:"summary"`
-			View    []struct {
-				Rows [][]any `json:"rows"`
-			} `json:"view"`
-		} `json:"record"`
+	if strings.Contains(block, "脱敏占位符") || strings.Contains(block, "主题 22") {
+		t.Fatalf("block = %s", block)
 	}
-	prepare := func(test, typed string) turnResult {
-		t.Helper()
-		var result turnResult
-		if err := json.Unmarshal([]byte(call(HookPrepareTurn, powerContextView("demo", typed))), &result); err != nil {
-			t.Fatalf("%s: %v", test, err)
-		}
-		return result
+	if result.Record.Title != "记忆装载" || result.Record.Status != "ok" || !strings.HasPrefix(result.Record.Summary, "画像 · 主题 5/30 个 · ") ||
+		len(result.Record.Actions) != 1 || result.Record.Actions[0].ID != "refresh" || result.Record.Actions[0].Label != "刷新记忆" {
+		t.Fatalf("record = %+v", result.Record)
 	}
-	set := func(change func(*fakePowerContext)) {
-		server.mutex.Lock()
-		change(server)
-		server.mutex.Unlock()
+	// The project was found on the server by its title, and its profile
+	// policy turned on once.
+	if created := h.server.requests("POST", "/v1/scopes"); len(created) != 0 {
+		t.Fatalf("an existing project was created again: %+v", created)
 	}
-
-	// When the embedding is late, the searches by words alone answer.
-	set(func(server *fakePowerContext) { server.slowSearch = true })
-	if late := prepare("late", "怎么给网关加一个插件系统？"); late.Skip != "" || late.Record.Status != "ok" ||
-		late.Record.Summary != "召回 2/9 · 1 个检索失败 · 2 个只用关键词" || late.Record.View[1].Rows[0][0] != "原子记忆" ||
-		late.Record.View[1].Rows[0][5] != "完整检索超出等待时间，用了关键词检索的结果" {
-		t.Fatalf("prepareTurn with a late embedding = %+v", late)
+	if puts := h.server.requests("PUT", "/profile-policy"); len(puts) != 1 || !strings.Contains(string(puts[0].JSON), `"expected_version":0`) {
+		t.Fatalf("policy writes = %+v", puts)
 	}
-	// Nothing found while a search failed is not a plain miss.
-	set(func(server *fakePowerContext) { server.emptySearch = true })
-	if missed := prepare("missed", "怎么给网关加一个插件系统？"); missed.Skip != "search_failed" || missed.Record.Status != "skipped" {
-		t.Fatalf("prepareTurn with a failed search and no hits = %+v", missed)
+	// The same data renders the same bytes, and the policy is not asked for
+	// again.
+	if again := h.call(HookPrepareSession, powerContextView("datav", "zh-CN", map[string]any{"reason": "manual"})); again != raw {
+		t.Fatalf("the block changed:\n%s\n%s", raw, again)
 	}
-	// Searches that all fail are the server's failure, not a miss.
-	set(func(server *fakePowerContext) {
-		server.slowSearch, server.emptySearch, server.downSearch = false, false, true
-	})
-	if failed := prepare("down", "怎么给网关加一个插件系统？"); failed.Skip != "server_unavailable" || failed.Record.Status != "failed" ||
-		failed.Record.Summary != "召回 0/9 · 3 个检索失败" || failed.Record.View[1].Rows[2][5] != "HTTP 503：The Server is unavailable." {
-		t.Fatalf("prepareTurn with every search failing = %+v", failed)
+	if reads := h.server.requests("GET", "/profile-policy"); len(reads) != 1 {
+		t.Fatalf("policy reads = %d", len(reads))
 	}
-	set(func(server *fakePowerContext) { server.downSearch = false })
-
-	// A long question keeps to the terms PowerContext's text search takes:
-	// its start, and its end, where it says what it asks.
-	long := strings.Repeat("这个回复你是从上下文获取的还是插件塞进来的", 6) + "另外帮我回忆一下 powercontext 的代码注释约定"
-	if bounded := prepare("long", long); bounded.Record.Status != "ok" {
-		t.Fatalf("prepareTurn with a long question = %+v", bounded)
+	// A policy someone set stays as it is.
+	h.call(HookPrepareSession, powerContextView("paseo", "zh-CN", nil))
+	if puts := h.server.requests("PUT", "/profile-policy"); len(puts) != 1 {
+		t.Fatalf("an existing policy was rewritten: %+v", puts)
 	}
-	topic := server.requests("/topic-memory/search")
-	var sent struct {
-		Query string `json:"query"`
-	}
-	if err := json.Unmarshal(topic[len(topic)-1].JSON, &sent); err != nil {
-		t.Fatal(err)
-	}
-	start, end, cut := strings.Cut(sent.Query, "\n")
-	if !cut || termsOf(sent.Query) > 60 || !strings.HasPrefix(long, start) || !strings.HasSuffix(long, end) || !strings.HasSuffix(end, "powercontext 的代码注释约定") {
-		t.Fatalf("long query = %q (%d terms)", sent.Query, termsOf(sent.Query))
-	}
-
-	for _, test := range []struct{ project, typed, skip string }{
-		{"", "怎么给网关加一个插件系统？", "no_project"},
-		{"none", "怎么给网关加一个插件系统？", "no_project"},
-		{"demo", "好", ""}, // a short reply searches with the previous input
-	} {
-		turn.Skip = ""
-		if err := json.Unmarshal([]byte(call(HookPrepareTurn, powerContextView(test.project, test.typed))), &turn); err != nil || turn.Skip != test.skip {
-			t.Fatalf("prepareTurn(%q, %q) skip = %q, want %q", test.project, test.typed, turn.Skip, test.skip)
-		}
-	}
-
-	type writeResult struct {
-		Record struct {
-			Title   string `json:"title"`
-			Status  string `json:"status"`
-			Summary string `json:"summary"`
-		} `json:"record"`
-	}
-	observe := func(typed string) writeResult {
-		t.Helper()
-		var result writeResult
-		if err := json.Unmarshal([]byte(call(HookObserveTurn, powerContextView("demo", typed))), &result); err != nil {
-			t.Fatal(err)
-		}
-		return result
-	}
-	if written := observe("  把分页改成游标  "); written.Record.Title != "记忆写入" || written.Record.Status != "ok" || written.Record.Summary != "已写入 · 已整理成记忆" {
-		t.Fatalf("observeTurn = %+v", written)
-	}
-	if flushes := server.requests("/v1/memory/flush"); len(flushes) != 1 || string(flushes[0].JSON) != `{"scope_id":"scp_test"}` {
-		t.Fatalf("flushes = %+v", flushes)
-	}
-	captures := server.requests("/v1/sources/content")
-	if len(captures) != 1 {
-		t.Fatalf("captures = %+v", captures)
-	}
-	var capture struct {
-		ScopeID  string         `json:"scope_id"`
-		SourceID string         `json:"source_id"`
-		Content  string         `json:"content"`
-		Metadata map[string]any `json:"metadata"`
-	}
-	if err := json.Unmarshal(captures[0].JSON, &capture); err != nil {
-		t.Fatal(err)
-	}
-	if capture.ScopeID != "scp_test" || capture.Content != "把分页改成游标" || !strings.HasPrefix(capture.SourceID, "astrlink:demo:session_1:3:") || capture.Metadata["origin"] != "astrlink" {
-		t.Fatalf("capture = %+v", capture)
-	}
-	if result := call(HookObserveTurn, powerContextView("demo", "/compact")); result != "null" && result != "" {
-		t.Fatalf("observeTurn of a slash command = %s", result)
-	}
-	if len(server.requests("/v1/sources/content")) != 1 {
-		t.Fatal("a slash command was captured")
-	}
-	// Processing that fails leaves the capture waiting; the next capture of
-	// the project processes both.
-	set(func(server *fakePowerContext) { server.flushFailures = 3 })
-	if written := observe("再补一个测试"); written.Record.Status != "failed" || written.Record.Summary != "已写入 · 整理失败：HTTP 500：The Server failed." {
-		t.Fatalf("observeTurn with processing failing = %+v", written)
-	}
-	if status := call(HookDescribeStatus, nil); !strings.Contains(status, "1 个项目有记下的原文还没整理成记忆") || !strings.Contains(status, "demo：已写入 · 整理失败") {
-		t.Fatalf("describeStatus with a capture waiting = %s", status)
-	}
-	if written := observe("补好了，再看看"); written.Record.Status != "ok" || written.Record.Summary != "已写入 · 已整理成记忆" {
-		t.Fatalf("observeTurn after processing failed = %+v", written)
-	}
-	// Processing that runs long is not a failure; each call waits 15 s at
-	// most, so the next one gets its turn.
-	set(func(server *fakePowerContext) { server.slowFlush = true })
-	if written := observe("看一下覆盖率"); written.Record.Status != "skipped" || written.Record.Summary != "已写入 · 整理超时，下一轮接着整理" {
-		t.Fatalf("observeTurn with processing running long = %+v", written)
-	}
-	for _, flush := range server.requests("/v1/memory/flush") {
-		if flush.TimeoutMS > 15000 {
-			t.Fatalf("a flush waits %d ms", flush.TimeoutMS)
-		}
-	}
-	set(func(server *fakePowerContext) { server.slowFlush = false })
-	if written := observe("覆盖率够了"); written.Record.Status != "ok" {
-		t.Fatalf("observeTurn after processing ran long = %+v", written)
-	}
-
-	if test := call(HookTestConnection, nil); !strings.Contains(test, `"status":"ok"`) || !strings.Contains(test, "PowerContext 1.3.0") || !strings.Contains(test, "原子记忆 / 主题记忆 / 经验 / 技能") {
-		t.Fatalf("testConnection = %s", test)
-	}
-	status := call(HookDescribeStatus, nil)
-	if strings.Contains(status, "scp_test") || strings.Contains(status, "待整理") || !strings.Contains(status, "最近写入") || strings.Contains(status, "询问提示词") {
-		t.Fatalf("describeStatus = %s", status)
-	}
-	for _, request := range server.requests("") {
-		if request.Credential != "token" {
-			t.Fatalf("request without the token credential: %+v", request)
+	// Nothing asks the server to process: that is its own schedule's work.
+	for _, path := range []string{"/v1/memory/flush", "/v1/profile/flush", "/v1/topic-memory/flush"} {
+		if posts := h.server.requests("POST", path); len(posts) != 0 {
+			t.Fatalf("%s was called", path)
 		}
 	}
 }
 
-// TestPowerContextChecksTheVersionBesideTheSearches runs prepareTurn for a
-// project whose scope is known while the server's version is not: the check
-// goes out with the searches, and an old server still gets nothing.
-func TestPowerContextChecksTheVersionBesideTheSearches(t *testing.T) {
-	for _, test := range []struct {
-		version, skip string
-	}{
-		{"1.3.0", ""},
-		{"1.2.9", "server_unavailable"},
+func TestThePowerContextBlockFollowsTheSessionsLanguageAndPrivacy(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test","topicCount":2}`, nil)
+	for language, want := range map[string][]string{
+		"en": {"Below is this project's memory", "Project profile\n- 沟通约定: ", "Topics (the 2 updated most recently)", "redaction placeholders", "More topics are not listed here."},
+		"ja": {"以下はこのプロジェクトの過去の記憶です", "プロジェクトのプロフィール", "トピック一覧（最近更新された 2 件）", "マスク用のプレースホルダー"},
 	} {
-		server := &fakePowerContext{version: test.version}
-		store := &memoryStore{values: map[string]json.RawMessage{"powercontext/scope:demo": json.RawMessage(`"scp_test"`)}}
-		all := []string{CapabilityInject, CapabilityRequest, CapabilityNetwork, CapabilityStorage, CapabilityViews}
-		manager := NewManager(ManagerOptions{
-			Builtin: plugins.Builtin,
-			Settings: settingsMap{"powercontext": {
-				Enabled: true, Capabilities: all, Config: json.RawMessage(`{"serverUrl":"https://memory.test"}`),
-			}},
-			Services: Services{Fetcher: server, Store: store},
-		})
-		if err := manager.Reload(context.Background()); err != nil {
-			t.Fatal(err)
+		raw := h.call(HookPrepareSession, powerContextView("datav", language, map[string]any{"redacted": true}))
+		result := decodeResult[sessionResult](t, raw)
+		block := result.System.Open + "\n" + strings.Join(result.System.Items, "\n") + "\n" + result.System.Close
+		for _, part := range want {
+			if !strings.Contains(block, part) {
+				t.Fatalf("%s block lacks %q:\n%s", language, part, block)
+			}
 		}
-		result, _, err := loadedPlugin(t, manager, "powercontext").Call(context.Background(), HookPrepareTurn,
-			powerContextView("demo", "怎么给网关加一个插件系统？"), CallOptions{NetworkBudget: 5 * time.Second})
-		if err != nil {
-			t.Fatal(err)
+		if strings.Contains(strings.ToLower(block), "astrlink") {
+			t.Fatalf("the %s block names the gateway:\n%s", language, block)
 		}
-		var turn struct {
-			Skip string `json:"skip"`
+	}
+}
+
+func TestThePowerContextBlockKeepsToItsBudget(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test","topicCount":50}`, nil)
+	h.server.topicPages = 20
+	for index := range 60 {
+		h.server.topics = append(h.server.topics, fmt.Sprintf(`{"title":"长主题 %02d","summary":"%s","published_at":"2026-11-%02dT08:00:00Z"}`, index, strings.Repeat("长", 300), 1+index%28))
+	}
+	result := decodeResult[sessionResult](t, h.call(HookPrepareSession, powerContextView("datav", "zh-CN", nil)))
+	block := result.System.Open + "\n" + strings.Join(result.System.Items, "\n") + "\n" + result.System.Close
+	if len(block) > 8<<10 || !strings.HasSuffix(block, "还有更多主题没有列出。\n</project-context>") {
+		t.Fatalf("block of %d bytes:\n%.300s…", len(block), block)
+	}
+	// Two pages of 20 were read; the rest is left to the search.
+	if pages := h.server.requests("GET", "/artifacts/topic-memory"); len(pages) != 2 {
+		t.Fatalf("topic pages read = %d", len(pages))
+	}
+	if !strings.Contains(result.Record.Summary, "/40 个") {
+		t.Fatalf("record = %+v", result.Record)
+	}
+}
+
+func TestThePowerContextPluginSaysWhyItLoadsNothing(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	for _, test := range []struct {
+		project, want string
+	}{{"", "会话还没有项目"}, {"none", "本会话不纳入记忆"}} {
+		result := decodeResult[sessionResult](t, h.call(HookPrepareSession, powerContextView(test.project, "zh-CN", nil)))
+		if result.System != nil || result.Record.Status != "skipped" || result.Record.Summary != test.want {
+			t.Fatalf("%q = %+v", test.project, result)
 		}
-		if err := json.Unmarshal(result, &turn); err != nil || turn.Skip != test.skip {
-			t.Fatalf("version %s: prepareTurn = %s", test.version, result)
+	}
+	h.server.profile, h.server.topics = "", nil
+	result := decodeResult[sessionResult](t, h.call(HookPrepareSession, powerContextView("datav", "en", nil)))
+	if result.System != nil || result.Record.Summary != "The project has no profile or topics yet" {
+		t.Fatalf("an empty project = %+v", result)
+	}
+	h.server.version = "1.2.9"
+	h.store.values = nil
+	result = decodeResult[sessionResult](t, h.call(HookPrepareSession, powerContextView("datav", "zh-CN", nil)))
+	if result.System != nil || result.Record.Summary != "服务器不可用：PowerContext 1.2.9 太旧，需要 1.3 或以上" {
+		t.Fatalf("an old server = %+v", result)
+	}
+	h.server.down = true
+	h.store.values = nil
+	result = decodeResult[sessionResult](t, h.call(HookPrepareSession, powerContextView("datav", "zh-CN", nil)))
+	if result.Record.Summary != "服务器不可用：连不上" {
+		t.Fatalf("a server that does not answer = %+v", result)
+	}
+}
+
+type turnResult struct {
+	Context string              `json:"context"`
+	Choices map[string][]string `json:"choices"`
+	Record  struct {
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+	} `json:"record"`
+}
+
+func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
+	used := sessionsUsing{
+		{Value: "paseo", Sessions: 3, LastUsedAt: time.Date(2026, 10, 21, 1, 0, 0, 0, time.UTC).UnixMilli()},
+		{Value: "none", Sessions: 2, LastUsedAt: time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC).UnixMilli()},
+		{Value: "notes", Sessions: 1, LastUsedAt: time.Date(2025, 12, 30, 9, 0, 0, 0, time.UTC).UnixMilli()},
+	}
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, used)
+	raw := h.call(HookPrepareTurn, powerContextView("", "zh-CN", map[string]any{"workspace": map[string]any{"name": "DataV"}}))
+	result := decodeResult[turnResult](t, raw)
+	// The directory's project first, then this computer's by last use (in
+	// New York, 01:00 UTC on the 21st is the 20th), then the server's by
+	// name. A title that is no project name stays out.
+	want := "本会话还没有选定项目记忆。不要打断当前任务，在本轮回复的末尾问用户：是否把记忆纳入一个项目，用下面已有的，还是新建一个。\n" +
+		"已有项目（共 3 个）：\n" +
+		"1. datav（当前目录）\n" +
+		"2. paseo（上次使用 10 月 20 日）\n" +
+		"3. notes（上次使用 2025 年 12 月 30 日）\n" +
+		"用户回答后（说编号或名字都可以），在回复开头单独一行输出 <memory-project>项目名</memory-project>：\n"
+	if !strings.HasPrefix(result.Context, want) || !strings.Contains(result.Context, "<memory-project>none</memory-project>") {
+		t.Fatalf("the ask:\n%s\nwant it to start with:\n%s", result.Context, want)
+	}
+	if strings.Join(result.Choices["project"], ",") != "datav,paseo,notes" || result.Record.Summary != "列出 3 个项目" {
+		t.Fatalf("result = %+v", result)
+	}
+	// The fixed words never name the gateway.
+	if strings.Contains(strings.ToLower(result.Context), "astrlink") {
+		t.Fatalf("the ask names the gateway:\n%s", result.Context)
+	}
+	// A turn that is not the first, or a session with a project, asks
+	// nothing.
+	notFirst := powerContextView("", "zh-CN", nil)
+	notFirst["session"] = map[string]any{"id": "session_1", "turn": 2}
+	for _, view := range []map[string]any{notFirst, powerContextView("datav", "zh-CN", nil), powerContextView("none", "zh-CN", nil)} {
+		if got := h.call(HookPrepareTurn, view); got != "" && got != "null" {
+			t.Fatalf("prepareTurn = %s", got)
 		}
-		if len(server.requests("/v1/server-info")) != 1 || len(server.requests("/v1/scopes")) != 0 || len(server.requests("/search")) != 5 {
-			t.Fatalf("version %s: requests = %+v", test.version, server.requests(""))
-		}
+	}
+	// English and Japanese sessions are asked in their language; a list cut
+	// short says how many there are.
+	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test","listProjects":2}`, used)
+	english := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "en", nil)))
+	if !strings.Contains(english.Context, "Existing projects (3 in all; the 2 used most recently):\n1. paseo (last used Oct 20)\n2. notes (last used Dec 30, 2025)\n") ||
+		len(english.Choices["project"]) != 2 {
+		t.Fatalf("english ask:\n%s", english.Context)
+	}
+	japanese := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "ja", nil)))
+	if !strings.Contains(japanese.Context, "既存のプロジェクト（全 3 件、最近使った 2 件）：\n1. paseo（最終使用 10月20日）") {
+		t.Fatalf("japanese ask:\n%s", japanese.Context)
+	}
+	// Without a list the ask asks for a name.
+	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test","listProjects":0}`, used)
+	plain := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)))
+	if !strings.HasPrefix(plain.Context, "本会话还没有选定项目记忆。不要打断当前任务，在本轮回复的末尾问用户：是否把记忆纳入一个项目，纳入的话项目名用什么。\n用户回答后") ||
+		len(plain.Choices["project"]) != 0 || plain.Record.Summary != "没有列出项目" {
+		t.Fatalf("an ask without a list = %+v", plain)
+	}
+	// With the server down, this computer's projects are still offered.
+	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, used)
+	h.server.down = true
+	offline := decodeResult[turnResult](t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)))
+	if strings.Join(offline.Choices["project"], ",") != "paseo,notes" {
+		t.Fatalf("an ask with the server down = %+v", offline)
+	}
+	// The user may opt out of asking.
+	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test","askProject":false}`, used)
+	if got := h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)); got != "" && got != "null" {
+		t.Fatalf("prepareTurn with asking off = %s", got)
+	}
+}
+
+func TestThePowerContextPluginWritesWithoutProcessing(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	result := decodeResult[struct {
+		Record struct {
+			Title, Status, Summary string
+		} `json:"record"`
+	}](t, h.call(HookObserveTurn, powerContextView("brand-new", "zh-CN", nil)))
+	if result.Record.Title != "记忆写入" || result.Record.Status != "ok" || result.Record.Summary != "已写入" {
+		t.Fatalf("observeTurn = %+v", result)
+	}
+	created := h.server.requests("POST", "/v1/scopes")
+	if len(created) != 1 || !strings.Contains(string(created[0].JSON), `"idempotency_key":"astrlink:project:brand-new"`) {
+		t.Fatalf("scope creations = %+v", created)
+	}
+	sources := h.server.requests("POST", "/v1/sources/content")
+	if len(sources) != 1 || !strings.Contains(string(sources[0].JSON), `"content":"帮我把分页改成游标"`) {
+		t.Fatalf("sources = %+v", sources)
+	}
+	if posts := h.server.requests("POST", "/v1/memory/flush"); len(posts) != 0 {
+		t.Fatalf("a write asked the server to process: %+v", posts)
+	}
+	short := powerContextView("brand-new", "zh-CN", map[string]any{"user": map[string]any{"text": "好", "typed": "好"}})
+	if got := h.call(HookObserveTurn, short); got != "" && got != "null" {
+		t.Fatalf("a short turn was written: %s", got)
+	}
+}
+
+func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	test := decodeResult[struct {
+		Status  string `json:"status"`
+		Summary string `json:"summary"`
+		View    []struct {
+			Items []struct{ Label, Value string } `json:"items"`
+		} `json:"view"`
+	}](t, h.call(HookTestConnection, map[string]any{"language": "zh-CN"}))
+	if test.Status != "ok" || test.Summary != "PowerContext 1.3.0 · 3 ms" || len(test.View) != 1 {
+		t.Fatalf("testConnection = %+v", test)
+	}
+	got := map[string]string{}
+	for _, item := range test.View[0].Items {
+		got[item.Label] = item.Value
+	}
+	// In New York 03:04 UTC on the 21st is 23:04 on the 20th.
+	if got["自动整理"] != "已打开" || got["最近整理成功"] != "10 月 20 日 23:04" || got["最近整理失败"] != "10 月 20 日 11:00 · model_timeout" ||
+		got["可检索"] != "原子记忆 / 主题记忆 / 经验 / 技能" {
+		t.Fatalf("view = %+v", got)
+	}
+	h.server.processing = "off"
+	h.call(HookObserveTurn, powerContextView("datav", "en", nil))
+	status := h.call(HookDescribeStatus, map[string]any{"language": "en"})
+	if !strings.Contains(status, `"Automatic processing","value":"off: no atomic memory is made"`) || !strings.Contains(status, `"Last write","value":"datav · Written · just now"`) {
+		t.Fatalf("describeStatus = %s", status)
+	}
+	h.server.version = "1.4.0"
+	if newer := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(newer, "PowerContext 1.4.0 · 3 ms · this version has not been verified") {
+		t.Fatalf("a newer server = %s", newer)
+	}
+	h.server.version = "1.2.0"
+	if older := h.call(HookTestConnection, map[string]any{"language": "zh-CN"}); !strings.Contains(older, `"status":"error"`) || !strings.Contains(older, "太旧") {
+		t.Fatalf("an older server = %s", older)
+	}
+	if action := h.call(HookOnAction, map[string]any{"action": "refresh", "session": map[string]any{"id": "session_1", "turn": 0}, "meta": map[string]any{}, "language": "ja"}); action != `{"refresh":true,"message":"このセッションの次のリクエストで記憶を読み込み直します。"}` {
+		t.Fatalf("onAction = %s", action)
 	}
 }

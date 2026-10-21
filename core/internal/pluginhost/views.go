@@ -34,6 +34,9 @@ type SessionView struct {
 	// Workspace is the last element of the working directory the client
 	// named, never the whole path.
 	Workspace *WorkspaceView `json:"workspace,omitempty"`
+	// Redacted tells prepareSession that the privacy policy replaces what
+	// it finds with placeholders, so the plugin's data holds them too.
+	Redacted bool `json:"redacted,omitempty"`
 }
 
 // WorkspaceView names the client's working directory by its last element.
