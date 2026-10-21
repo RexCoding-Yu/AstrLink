@@ -1,10 +1,18 @@
+import { useState } from "react";
+
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PluginView } from "@/components/PluginView";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
+import { Button } from "@/components/ui/button";
+import { runPluginAction } from "./bridge";
+import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
+import { notify } from "./notify";
 import type {
   MetadataEvent,
   MetadataValue,
+  PluginRecordAction,
   RequestMetadata,
   RequestPluginRecord,
 } from "./plugin-model";
@@ -26,6 +34,23 @@ const knownSkipReasons = new Set([
   "plugin_error",
   "privacy_blocked",
   "privacy_unavailable",
+  "paused_all",
+  "client_disabled",
+  "session_paused",
+  "over_budget",
+  "invalid_result",
+  "no_system_channel",
+  "no_opening_message",
+  "injection_failed",
+]);
+
+const knownTriggers = new Set([
+  "start",
+  "bound",
+  "config",
+  "compact",
+  "manual",
+  "auto",
 ]);
 
 const knownObserve = new Set([
@@ -52,6 +77,39 @@ function formatBytes(bytes: number): string {
 export function PluginRecordDetails({ record }: { record: RequestRecord }) {
   const t = useT();
   const records = record.plugin_records ?? [];
+  const [confirming, setConfirming] = useState<{
+    plugin: string;
+    action: PluginRecordAction;
+  } | null>(null);
+  const [running, setRunning] = useState(false);
+
+  async function run(plugin: string, action: PluginRecordAction) {
+    if (!record.session_id) return;
+    setRunning(true);
+    try {
+      const result = await runPluginAction(
+        plugin,
+        action.id,
+        record.session_id,
+      );
+      const why = result.message || result.reason;
+      if (result.status === "ok")
+        notify.success(result.message || t("pluginRecords.actionDone"));
+      else
+        notify.error(
+          why
+            ? t("pluginRecords.actionFailed", { reason: why })
+            : t("pluginRecords.actionFailedPlain"),
+        );
+    } catch (reason) {
+      notify.error(
+        controlErrorMessage(reason, t("pluginRecords.actionFailedPlain")),
+      );
+    } finally {
+      setRunning(false);
+    }
+  }
+
   if (records.length === 0) {
     return (
       <p className="text-xs leading-6 text-muted-foreground">
@@ -84,6 +142,18 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
               {t("pluginRecords.elapsed")}
             </dt>
             <dd className="tabular-nums">{entry.elapsed_ms} ms</dd>
+            {entry.trigger ? (
+              <>
+                <dt className="text-muted-foreground">
+                  {t("pluginRecords.trigger")}
+                </dt>
+                <dd>
+                  {knownTriggers.has(entry.trigger)
+                    ? t(`pluginRecords.triggers.${entry.trigger}`)
+                    : entry.trigger}
+                </dd>
+              </>
+            ) : null}
             {entry.skipped_reason ? (
               <>
                 <dt className="text-muted-foreground">
@@ -149,14 +219,54 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
               truncatedLabel={t("pluginRecords.truncated")}
             />
           ) : null}
+          {entry.actions && entry.actions.length > 0 && record.session_id ? (
+            <div className="flex flex-wrap gap-2">
+              {entry.actions.map((action) => (
+                <Button
+                  className="h-7 text-xs"
+                  data-testid="plugin-record-action"
+                  disabled={running}
+                  key={action.id}
+                  onClick={() => {
+                    if (action.confirm)
+                      setConfirming({ plugin: entry.plugin, action });
+                    else void run(entry.plugin, action);
+                  }}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {action.label}
+                </Button>
+              ))}
+            </div>
+          ) : null}
         </section>
       ))}
+      <ConfirmDialog
+        confirmLabel={confirming?.action.label ?? ""}
+        description={<p>{confirming?.action.confirm}</p>}
+        disabled={running}
+        onCancel={() => setConfirming(null)}
+        onConfirm={() => {
+          const target = confirming;
+          setConfirming(null);
+          if (target) void run(target.plugin, target.action);
+        }}
+        open={confirming !== null}
+        title={confirming?.action.label ?? ""}
+      />
     </div>
   );
 }
 
 function valueSource(value: MetadataValue, t: ReturnType<typeof useT>): string {
-  const source = t(`pluginRecords.metadataSources.${value.source}`);
+  const source =
+    value.source === "session" && value.set_by
+      ? t(`pluginRecords.setBy.${value.set_by}`, {
+          defaultValue: t("pluginRecords.metadataSources.session"),
+        })
+      : t(`pluginRecords.metadataSources.${value.source}`);
   return value.turn
     ? t("pluginRecords.metadataTurn", { source, turn: value.turn })
     : source;
@@ -175,7 +285,17 @@ function eventText(event: MetadataEvent, t: ReturnType<typeof useT>): string {
         : "",
     });
   }
-  return `${event.key}: ${t(`pluginRecords.metadataEvents.${event.event}`)}${value}`;
+  const notes = [
+    event.set_by
+      ? t(`pluginRecords.setBy.${event.set_by}`, { defaultValue: event.set_by })
+      : "",
+    event.new ? t("pluginRecords.metadataNew") : "",
+    event.normalized
+      ? t("pluginRecords.metadataNormalized", { value: event.normalized })
+      : "",
+  ].filter(Boolean);
+  const suffix = notes.length > 0 ? ` (${notes.join(" · ")})` : "";
+  return `${event.key}: ${t(`pluginRecords.metadataEvents.${event.event}`)}${value}${suffix}`;
 }
 
 /**

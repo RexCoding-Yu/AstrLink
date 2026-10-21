@@ -16,17 +16,28 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import {
+  clearPluginData,
   deletePluginCredential,
   getPlugin,
+  getPluginHostSettings,
   getPluginStatus,
   listPlugins,
   reloadPlugins,
   savePluginCredential,
   testPlugin,
   updatePlugin,
+  updatePluginHostSettings,
 } from "./bridge";
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
@@ -34,7 +45,11 @@ import { PageHeader } from "./PageHeader";
 import { PluginOverview } from "./PluginOverview";
 import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
 import {
+  MAX_INJECTION_BUDGET_BYTES,
+  MIN_INJECTION_BUDGET_BYTES,
   type PluginDetail,
+  type PluginHostSettings,
+  type PluginHostSettingsUpdate,
   type PluginList,
   type PluginLoadError,
   type PluginSettingsUpdate,
@@ -44,6 +59,13 @@ import {
 
 type Translate = ReturnType<typeof useT>;
 type DetailTab = "overview" | "settings" | "status";
+
+/** The injection budgets the plugin page offers, in KiB. */
+const INJECTION_BUDGETS_KIB = [4, 8, 16, 32, 64].filter(
+  (kib) =>
+    kib * 1024 >= MIN_INJECTION_BUDGET_BYTES &&
+    kib * 1024 <= MAX_INJECTION_BUDGET_BYTES,
+);
 
 /** i18n keys cannot hold the dots of a capability name. */
 function capabilityLabel(capability: string, t: Translate): string {
@@ -119,6 +141,8 @@ export function PluginManager({
   const [actionError, setActionError] = useState<string | null>(null);
   const [enabling, setEnabling] = useState<PluginDetail | null>(null);
   const [grants, setGrants] = useState<string[]>([]);
+  const [host, setHost] = useState<PluginHostSettings | null>(null);
+  const [hostError, setHostError] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
     try {
@@ -129,7 +153,40 @@ export function PluginManager({
     } catch (error) {
       setListError(controlErrorMessage(error, t("plugins.loadFailed")));
     }
+    try {
+      setHost(await getPluginHostSettings());
+    } catch {
+      // The header leaves out what it could not read.
+      setHost(null);
+    }
   }, [t]);
+
+  async function changeHost(update: PluginHostSettingsUpdate) {
+    setHostError(null);
+    try {
+      setHost(await updatePluginHostSettings(update));
+    } catch (error) {
+      setHostError(controlErrorMessage(error, t("plugins.host.saveFailed")));
+    }
+  }
+
+  /** Clears what the host keeps for the plugin, then shows the new counts. */
+  async function clearData(key: string, what: "workspaces" | "values") {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await clearPluginData(key, what);
+      await loadDetail(key);
+      return true;
+    } catch (error) {
+      setActionError(
+        controlErrorMessage(error, t("plugins.stored.clearFailed")),
+      );
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!isReady) return;
@@ -306,6 +363,13 @@ export function PluginManager({
       <PageHeader
         actions={
           <>
+            {host ? (
+              <PluginHostControls
+                disabled={!isReady}
+                host={host}
+                onChange={(update) => void changeHost(update)}
+              />
+            ) : null}
             {list ? (
               <HelpPopover label={t("plugins.directoryHelpLabel")}>
                 <p>{t("plugins.directoryHelp")}</p>
@@ -342,9 +406,14 @@ export function PluginManager({
         }
         variant="compact"
       />
-      {listError ? (
+      {listError || hostError ? (
         <FormMessage className="mb-3" tone="error">
-          {listError}
+          {listError ?? hostError}
+        </FormMessage>
+      ) : null}
+      {host?.paused ? (
+        <FormMessage className="mb-3" tone="notice">
+          {t("plugins.host.pausedNotice")}
         </FormMessage>
       ) : null}
       {!isReady && list !== null ? (
@@ -404,6 +473,7 @@ export function PluginManager({
                 busy={busy}
                 detail={detail}
                 onAdvancedOpen={setAdvancedOpen}
+                onClearData={(what) => clearData(detail.key, what)}
                 onCredentialClear={(name) =>
                   apply(() => deletePluginCredential(detail.key, name))
                 }
@@ -520,6 +590,72 @@ function PluginRow({
   );
 }
 
+/**
+ * The settings of every plugin at once, in the page's header: the pause of
+ * them all and what they may inject into one request together.
+ */
+function PluginHostControls({
+  host,
+  disabled,
+  onChange,
+}: {
+  host: PluginHostSettings;
+  disabled: boolean;
+  onChange: (update: PluginHostSettingsUpdate) => void;
+}) {
+  const t = useT();
+  const budgetKib = Math.round(host.injection_budget_bytes / 1024);
+  const budgets = INJECTION_BUDGETS_KIB.includes(budgetKib)
+    ? INJECTION_BUDGETS_KIB
+    : [...INJECTION_BUDGETS_KIB, budgetKib].sort((a, b) => a - b);
+  return (
+    <div className="flex items-center gap-3" data-testid="plugin-host-controls">
+      <div className="flex items-center gap-1.5">
+        <Switch
+          aria-label={t("plugins.host.pause")}
+          checked={host.paused}
+          disabled={disabled}
+          id="plugin-host-pause"
+          onCheckedChange={(paused) => onChange({ paused })}
+          size="sm"
+        />
+        <Label className="text-xs font-normal" htmlFor="plugin-host-pause">
+          {t("plugins.host.pause")}
+        </Label>
+        <HelpPopover label={t("plugins.host.pauseHelpLabel")}>
+          <p>{t("plugins.host.pauseHelp")}</p>
+        </HelpPopover>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <Label className="text-xs font-normal" htmlFor="plugin-host-budget">
+          {t("plugins.host.budget")}
+        </Label>
+        <Select
+          disabled={disabled}
+          onValueChange={(value) =>
+            onChange({ injection_budget_bytes: Number(value) * 1024 })
+          }
+          value={String(budgetKib)}
+        >
+          <SelectTrigger className="w-24" id="plugin-host-budget" size="sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {budgets.map((kib) => (
+              <SelectItem key={kib} value={String(kib)}>
+                {t("plugins.host.budgetValue", { value: kib })}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <HelpPopover label={t("plugins.host.budgetHelpLabel")}>
+          <p>{t("plugins.host.budgetHelp")}</p>
+        </HelpPopover>
+      </div>
+    </div>
+  );
+}
+
 function PluginDetailPane({
   detail,
   status,
@@ -538,6 +674,7 @@ function PluginDetailPane({
   onAdvancedOpen,
   onSaveSettings,
   onCredentialClear,
+  onClearData,
 }: {
   detail: PluginDetail;
   status: PluginStatus | null;
@@ -559,6 +696,7 @@ function PluginDetailPane({
     credentials: CredentialInput[],
   ) => Promise<boolean>;
   onCredentialClear: (name: string) => Promise<boolean>;
+  onClearData: (what: "workspaces" | "values") => Promise<boolean>;
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
@@ -674,7 +812,9 @@ function PluginDetailPane({
             value="overview"
           >
             <PluginOverview
+              busy={busy}
               detail={detail}
+              onClear={onClearData}
               status={status}
               statusError={statusError}
             />

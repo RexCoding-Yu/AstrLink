@@ -13,6 +13,9 @@ const bridgeMocks = vi.hoisted(() => ({
   testPlugin: vi.fn(),
   savePluginCredential: vi.fn(),
   deletePluginCredential: vi.fn(),
+  getPluginHostSettings: vi.fn(),
+  updatePluginHostSettings: vi.fn(),
+  clearPluginData: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -143,6 +146,24 @@ const memory: PluginDetail = {
       url: "https://github.com/oceanbase/powercontext",
       note: "本插件不是 PowerContext 官方插件。",
     },
+  ],
+  excluded_clients: [],
+  workspace_binding: true,
+  auto_refresh: false,
+  storage: [
+    {
+      label: "项目在服务器上的编号",
+      content: false,
+      retention: "一直保留，可在插件页清除",
+    },
+  ],
+  host_storage: [
+    { kind: "session_bindings" },
+    { kind: "workspace_bindings", count: 2 },
+    { kind: "plugin_sessions", count: 5 },
+    { kind: "request_records" },
+    { kind: "resident_block" },
+    { kind: "plugin_values", count: 3 },
   ],
 };
 
@@ -314,9 +335,19 @@ describe("PluginManager", () => {
             metadata: [],
             settings: [],
             credits: [],
+            excluded_clients: [],
+            workspace_binding: true,
+            auto_refresh: false,
+            storage: [],
+            host_storage: [],
           },
     );
     bridgeMocks.getPluginStatus.mockResolvedValue(status);
+    bridgeMocks.getPluginHostSettings.mockResolvedValue({
+      paused: false,
+      injection_budget_bytes: 16384,
+      language: "zh-CN",
+    });
     container = document.createElement("div");
     document.body.append(container);
     reactRoot = createRoot(container);
@@ -605,6 +636,124 @@ describe("PluginManager", () => {
         extra: true,
       },
       plaintext_consent: ["http://192.0.2.1:9090"],
+    });
+  });
+
+  it("pauses every plugin and sets their injection budget from the header", async () => {
+    bridgeMocks.updatePluginHostSettings.mockImplementation(
+      async (update: Record<string, unknown>) => ({
+        paused: false,
+        injection_budget_bytes: 16384,
+        language: "zh-CN",
+        ...update,
+      }),
+    );
+    await render();
+    const controls = document.querySelector(
+      '[data-testid="plugin-host-controls"]',
+    );
+    expect(controls?.textContent).toContain("16 KB");
+    expect(document.body.textContent).not.toContain("所有插件已暂停");
+    await click(
+      document.querySelector(
+        'button[aria-label="暂停所有插件"]',
+      ) as HTMLElement,
+    );
+    expect(bridgeMocks.updatePluginHostSettings).toHaveBeenCalledWith({
+      paused: true,
+    });
+    expect(document.body.textContent).toContain(
+      "所有插件已暂停，请求原样发出。",
+    );
+    await chooseOption("#plugin-host-budget", "32 KB");
+    await settleClosedLayer();
+    expect(bridgeMocks.updatePluginHostSettings).toHaveBeenLastCalledWith({
+      injection_budget_bytes: 32768,
+    });
+  });
+
+  it("lists what is kept for the plugin and clears it after asking", async () => {
+    bridgeMocks.clearPluginData.mockResolvedValue(2);
+    await render();
+    const stored = document.querySelector('[data-testid="plugin-stored"]');
+    expect(stored?.textContent).toContain("工作区和值的对应");
+    expect(stored?.textContent).toContain("2 条");
+    expect(stored?.textContent).toContain("当前装载块");
+    expect(stored?.textContent).toContain(
+      "插件声明：项目在服务器上的编号 · 不含对话内容 · 一直保留，可在插件页清除",
+    );
+    const items = [
+      ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
+    ];
+    const workspaces = items.find((item) =>
+      item.textContent?.includes("工作区和值的对应"),
+    ) as HTMLElement;
+    await click(button("清除", workspaces));
+    expect(bridgeMocks.clearPluginData).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("清除工作区记录？");
+    await click(
+      button(
+        "清除",
+        document.querySelector('[role="alertdialog"]') as HTMLElement,
+      ),
+    );
+    await finishExitAnimations();
+    expect(bridgeMocks.clearPluginData).toHaveBeenCalledWith(
+      "powercontext",
+      "workspaces",
+    );
+    // The counts come back from Core afresh.
+    expect(bridgeMocks.getPlugin).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks before automatic refresh and saves the host's switches", async () => {
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    expect(
+      control<HTMLButtonElement>("按工作区自动绑定").getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("true");
+    await click(control<HTMLButtonElement>("自动刷新"));
+    expect(document.body.textContent).toContain("打开自动刷新？");
+    await click(
+      button(
+        "打开",
+        document.querySelector('[role="alertdialog"]') as HTMLElement,
+      ),
+    );
+    await finishExitAnimations();
+    expect(
+      control<HTMLButtonElement>("自动刷新").getAttribute("aria-checked"),
+    ).toBe("true");
+    await click(control<HTMLButtonElement>("按工作区自动绑定"));
+    const clients = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="对哪些客户端生效"]',
+    );
+    expect(clients?.textContent).toContain("全部客户端");
+    await act(async () => {
+      clients?.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0 }),
+      );
+      clients?.click();
+    });
+    const cursor = document.querySelector<HTMLButtonElement>(
+      'button[role="checkbox"][aria-label="Cursor"]',
+    );
+    if (!cursor) throw new Error("Missing the Cursor option");
+    await click(cursor);
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+    await settleClosedLayer();
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      excluded_clients: ["cursor"],
+      workspace_binding: false,
+      auto_refresh: true,
     });
   });
 

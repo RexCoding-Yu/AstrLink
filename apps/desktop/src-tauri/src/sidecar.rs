@@ -2375,6 +2375,23 @@ impl CoreManager {
         serde_json::from_slice(&body).map_err(|_| "session metadata returned invalid JSON".into())
     }
 
+    /// The plugins' part in a session: read it, pause or resume a plugin
+    /// there, or make its next request load the plugin's block again.
+    pub async fn session_plugins(
+        &self,
+        session_id: &str,
+        key: Option<&str>,
+        input: Option<serde_json::Value>,
+        refresh: bool,
+    ) -> Result<serde_json::Value, String> {
+        validate_resource_id(session_id)?;
+        let (method, path, body) = session_plugins_request(session_id, key, input, refresh)?;
+        let (_, body) = self
+            .authenticated_control(method, &path, body, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "session plugins returned invalid JSON".into())
+    }
+
     /// `fresh` asks Core to drop its 30s quota snapshot and query the
     /// provider now. Only operator-initiated refreshes set it.
     pub async fn get_service_usage_with(
@@ -3449,11 +3466,20 @@ fn plugin_request(
     input: Option<serde_json::Value>,
 ) -> Result<(Method, String, Option<serde_json::Value>), String> {
     let base = "/control/v1/plugins";
-    if action == "list" {
-        return Ok((Method::GET, base.into(), None));
-    }
-    if action == "reload" {
-        return Ok((Method::POST, format!("{base}/reload"), None));
+    match action {
+        "list" => return Ok((Method::GET, base.into(), None)),
+        "reload" => return Ok((Method::POST, format!("{base}/reload"), None)),
+        // The settings of every plugin at once: the pause, the injection
+        // budget and the interface language.
+        "host" => return Ok((Method::GET, "/control/v1/plugin-host".into(), None)),
+        "update_host" => {
+            return Ok((
+                Method::PATCH,
+                "/control/v1/plugin-host".into(),
+                Some(input.ok_or("plugin host settings are required")?),
+            ))
+        }
+        _ => {}
     }
     let key = key
         .filter(|key| valid_plugin_name(key, '-'))
@@ -3468,6 +3494,13 @@ fn plugin_request(
         ),
         "test" => (Method::POST, format!("{plugin}/test"), None),
         "status" => (Method::GET, format!("{plugin}/status"), None),
+        "action" => (
+            Method::POST,
+            format!("{plugin}/actions"),
+            Some(input.ok_or("the action is required")?),
+        ),
+        "clear_workspaces" => (Method::DELETE, format!("{plugin}/workspaces"), None),
+        "clear_values" => (Method::DELETE, format!("{plugin}/values"), None),
         "save_credential" | "delete_credential" => {
             let name = name
                 .filter(|name| valid_plugin_name(name, '_'))
@@ -3515,6 +3548,7 @@ fn metadata_request(
             Some(input.ok_or("the attribute is required")?),
         ),
         "delete" => (Method::DELETE, format!("{base}/{key}"), None),
+        "values" => (Method::GET, format!("{base}/{key}/values"), None),
         _ => return Err("unsupported metadata operation".into()),
     })
 }
@@ -3540,6 +3574,31 @@ fn session_metadata_request(
         Method::PUT,
         format!("{base}/{key}"),
         Some(input.ok_or("the value is required")?),
+    ))
+}
+
+/// Translates an operation on the plugins' part in a session into the control
+/// request it makes: read them all, pause or resume one, or refresh one.
+fn session_plugins_request(
+    session_id: &str,
+    key: Option<&str>,
+    input: Option<serde_json::Value>,
+    refresh: bool,
+) -> Result<(Method, String, Option<serde_json::Value>), String> {
+    let base = format!("/control/v1/request-sessions/{session_id}/plugins");
+    let Some(key) = key else {
+        return Ok((Method::GET, base, None));
+    };
+    if !valid_plugin_name(key, '-') {
+        return Err("invalid plugin".into());
+    }
+    if refresh {
+        return Ok((Method::POST, format!("{base}/{key}/refresh"), None));
+    }
+    Ok((
+        Method::PUT,
+        format!("{base}/{key}"),
+        Some(input.ok_or("the pause is required")?),
     ))
 }
 
@@ -3615,7 +3674,10 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     // Core gives a plugin page hook 10 seconds, and a rescan compiles every
     // changed plugin.
     if path.starts_with("/control/v1/plugins/")
-        && ((method == Method::POST && (path.ends_with("/test") || path.ends_with("/reload")))
+        && ((method == Method::POST
+            && (path.ends_with("/test")
+                || path.ends_with("/reload")
+                || path.ends_with("/actions")))
             || (method == Method::GET && path.ends_with("/status")))
     {
         return Duration::from_secs(20);
@@ -6841,7 +6903,44 @@ mod tests {
                 None
             )
         );
+        assert_eq!(
+            plugin_request("host", None, None, None).unwrap(),
+            (Method::GET, "/control/v1/plugin-host".into(), None)
+        );
+        let language = serde_json::json!({ "language": "ja" });
+        assert_eq!(
+            plugin_request("update_host", None, None, Some(language.clone())).unwrap(),
+            (
+                Method::PATCH,
+                "/control/v1/plugin-host".into(),
+                Some(language)
+            )
+        );
+        let click = serde_json::json!({ "action": "refresh", "session": "session_1" });
+        assert_eq!(
+            plugin_request("action", Some("powercontext"), None, Some(click.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/powercontext/actions".into(),
+                Some(click)
+            )
+        );
+        for (action, path) in [
+            ("clear_workspaces", "workspaces"),
+            ("clear_values", "values"),
+        ] {
+            assert_eq!(
+                plugin_request(action, Some("powercontext"), None, None).unwrap(),
+                (
+                    Method::DELETE,
+                    format!("/control/v1/plugins/powercontext/{path}"),
+                    None
+                )
+            );
+        }
         for (action, key, name, input) in [
+            ("update_host", None, None, None),
+            ("action", Some("powercontext"), None, None),
             ("get", Some("../services"), None, None),
             ("get", Some("Team"), None, None),
             ("update", Some("team-rules"), None, None),
@@ -6882,6 +6981,14 @@ mod tests {
             (
                 Method::DELETE,
                 "/control/v1/metadata/attributes/env".into(),
+                None
+            )
+        );
+        assert_eq!(
+            metadata_request("values", Some("project"), None).unwrap(),
+            (
+                Method::GET,
+                "/control/v1/metadata/attributes/project/values".into(),
                 None
             )
         );
@@ -6936,6 +7043,36 @@ mod tests {
         );
         assert!(session_metadata_request("session_1", Some("project"), None, false).is_err());
         assert!(session_metadata_request("session_1", Some("../x"), None, true).is_err());
+    }
+
+    #[test]
+    fn session_plugin_actions_map_to_their_control_requests() {
+        let base = "/control/v1/request-sessions/session_1/plugins";
+        assert_eq!(
+            session_plugins_request("session_1", None, None, false).unwrap(),
+            (Method::GET, base.into(), None)
+        );
+        let pause = serde_json::json!({ "paused": true });
+        assert_eq!(
+            session_plugins_request(
+                "session_1",
+                Some("powercontext"),
+                Some(pause.clone()),
+                false
+            )
+            .unwrap(),
+            (Method::PUT, format!("{base}/powercontext"), Some(pause))
+        );
+        assert_eq!(
+            session_plugins_request("session_1", Some("powercontext"), None, true).unwrap(),
+            (Method::POST, format!("{base}/powercontext/refresh"), None)
+        );
+        assert!(session_plugins_request("session_1", Some("powercontext"), None, false).is_err());
+        assert!(session_plugins_request("session_1", Some("../x"), None, true).is_err());
+        assert_eq!(
+            control_request_timeout(&Method::POST, "/control/v1/plugins/powercontext/actions"),
+            Duration::from_secs(20)
+        );
     }
 
     #[test]

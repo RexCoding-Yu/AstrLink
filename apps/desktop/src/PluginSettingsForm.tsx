@@ -1,6 +1,8 @@
 import { useId, useMemo, useState } from "react";
 
 import { ChevronRight, Plus, Shredder as Trash2 } from "@/components/icons";
+import { clientTypeName } from "@/components/ClientTypeIcon";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FormMessage } from "@/components/FormMessage";
 import { HelpPopover } from "@/components/HelpPopover";
 import { IconButton } from "@/components/IconButton";
@@ -19,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MultiFilterSelect } from "@/components/MultiFilterSelect";
 import {
   Select,
   SelectContent,
@@ -45,6 +48,7 @@ import {
   type PluginSetting,
   type PluginSettingsUpdate,
 } from "./plugin-model";
+import { CLIENT_TYPES } from "./request-record-model";
 
 type Translate = ReturnType<typeof useT>;
 /** A field's value as the form holds it: numbers as the text typed. */
@@ -63,6 +67,10 @@ interface Draft {
   values: Record<string, Value>;
   wait: number;
   trusted: boolean;
+  /** The client types the plugin is off for. */
+  excluded: string[];
+  workspace: boolean;
+  refresh: boolean;
   /** The user's own origins, beside those of the servers. */
   origins: Array<{ origin: string; allow_plaintext: boolean }>;
   /**
@@ -90,7 +98,14 @@ interface Group {
   items: Item[];
 }
 
-const hostKeys: HostSettingKey[] = ["$wait", "$trusted", "$origins"];
+const hostKeys: HostSettingKey[] = [
+  "$wait",
+  "$trusted",
+  "$clients",
+  "$workspace",
+  "$refresh",
+  "$origins",
+];
 
 /** The origin of an address, "" for none, to tell two servers apart. */
 function originOf(raw: string): string {
@@ -142,6 +157,17 @@ function hostApplies(detail: PluginDetail, key: HostSettingKey): boolean {
       return detail.requested_capabilities.includes("request.read");
     case "$origins":
       return detail.needs_network;
+    case "$clients":
+      return ["prepareSession", "prepareTurn", "observeTurn"].some((hook) =>
+        detail.hooks.includes(hook),
+      );
+    case "$workspace":
+      return detail.metadata.length > 0;
+    case "$refresh":
+      return (
+        detail.hooks.includes("prepareSession") &&
+        detail.requested_capabilities.includes("context.inject")
+      );
   }
 }
 
@@ -194,6 +220,9 @@ function draftOf(detail: PluginDetail): Draft {
     values: valuesOf(detail, detail.config),
     wait: detail.turn_wait_ms,
     trusted: detail.privacy_trusted,
+    excluded: detail.excluded_clients,
+    workspace: detail.workspace_binding,
+    refresh: detail.auto_refresh,
     origins: ownOrigins(detail),
     consent,
     secrets: {},
@@ -396,10 +425,16 @@ export function PluginSettingsForm({
       (draft.consent[setting.key] ?? "") !== (initial[setting.key] ?? ""),
   );
   const configChanged = stableJSON(config) !== stableJSON(detail.config);
+  const clientsChanged =
+    stableJSON([...draft.excluded].sort()) !==
+    stableJSON([...detail.excluded_clients].sort());
   const dirty =
     configChanged ||
     draft.wait !== detail.turn_wait_ms ||
     draft.trusted !== detail.privacy_trusted ||
+    clientsChanged ||
+    draft.workspace !== detail.workspace_binding ||
+    draft.refresh !== detail.auto_refresh ||
     originsChanged ||
     consentChanged ||
     credentials.length > 0;
@@ -419,6 +454,11 @@ export function PluginSettingsForm({
     if (draft.wait !== detail.turn_wait_ms) update.turn_wait_ms = draft.wait;
     if (draft.trusted !== detail.privacy_trusted)
       update.privacy_trusted = draft.trusted;
+    if (clientsChanged) update.excluded_clients = draft.excluded;
+    if (draft.workspace !== detail.workspace_binding)
+      update.workspace_binding = draft.workspace;
+    if (draft.refresh !== detail.auto_refresh)
+      update.auto_refresh = draft.refresh;
     if (originsChanged) update.network_origins = draft.origins;
     const consent = servers
       .map((setting) => {
@@ -1029,7 +1069,125 @@ function HostRow({
           purpose={detail.network_purpose}
         />
       );
+    case "$clients":
+      return <ClientsRow draft={draft} onDraft={onDraft} />;
+    case "$workspace":
+      return (
+        <SettingRow
+          help={<p>{t("plugins.workspace.help")}</p>}
+          helpLabel={t("plugins.workspace.helpLabel")}
+          htmlFor={id}
+          label={t("plugins.workspace.label")}
+        >
+          <Switch
+            checked={draft.workspace}
+            id={id}
+            onCheckedChange={(checked) =>
+              onDraft((current) => ({ ...current, workspace: checked }))
+            }
+          />
+        </SettingRow>
+      );
+    case "$refresh":
+      return <RefreshRow draft={draft} onDraft={onDraft} />;
   }
+}
+
+/**
+ * The clients the plugin takes part for: every one by default. The list
+ * holds the ones it is on for; the plugin saves those it is off for, so a
+ * client AstrLink learns later starts on.
+ */
+function ClientsRow({
+  draft,
+  onDraft,
+}: {
+  draft: Draft;
+  onDraft: (change: (current: Draft) => Draft) => void;
+}) {
+  const t = useT();
+  const options = CLIENT_TYPES.map((client) => ({
+    value: client,
+    label:
+      client === "unknown"
+        ? t("plugins.clients.other")
+        : clientTypeName(client),
+  }));
+  const enabled = CLIENT_TYPES.filter(
+    (client) => !draft.excluded.includes(client),
+  );
+  return (
+    <SettingRow
+      help={<p>{t("plugins.clients.help")}</p>}
+      helpLabel={t("plugins.clients.helpLabel")}
+      label={t("plugins.clients.label")}
+    >
+      <MultiFilterSelect
+        allLabel={t("plugins.clients.all")}
+        ariaLabel={t("plugins.clients.label")}
+        className="w-56"
+        clearLabel={t("plugins.clients.clear")}
+        emptyMessage={t("plugins.clients.empty")}
+        everyLabel={t("plugins.clients.all")}
+        label=""
+        noneLabel={t("plugins.clients.none")}
+        onChange={(value) =>
+          onDraft((current) => ({
+            ...current,
+            excluded: CLIENT_TYPES.filter((client) => !value.includes(client)),
+          }))
+        }
+        options={options}
+        searchPlaceholder={t("plugins.clients.search")}
+        selectAllLabel={t("plugins.clients.selectAll")}
+        selectedCountLabel={(count) => t("plugins.clients.count", { count })}
+        value={enabled}
+      />
+    </SettingRow>
+  );
+}
+
+/** Automatic refresh rewrites a session's prompt cache whenever it swaps a
+ * block, so turning it on asks first. */
+function RefreshRow({
+  draft,
+  onDraft,
+}: {
+  draft: Draft;
+  onDraft: (change: (current: Draft) => Draft) => void;
+}) {
+  const t = useT();
+  const id = useId();
+  const [asking, setAsking] = useState(false);
+  return (
+    <SettingRow
+      help={<p>{t("plugins.refresh.help")}</p>}
+      helpLabel={t("plugins.refresh.helpLabel")}
+      htmlFor={id}
+      label={t("plugins.refresh.label")}
+    >
+      <Switch
+        checked={draft.refresh}
+        id={id}
+        onCheckedChange={(checked) => {
+          if (checked) setAsking(true);
+          else onDraft((current) => ({ ...current, refresh: false }));
+        }}
+      />
+      <ConfirmDialog
+        confirmLabel={t("plugins.refresh.confirm")}
+        description={<p>{t("plugins.refresh.confirmBody")}</p>}
+        onCancel={() => setAsking(false)}
+        onConfirm={() => {
+          setAsking(false);
+          onDraft((current) => ({ ...current, refresh: true }));
+        }}
+        open={asking}
+        title={t("plugins.refresh.confirmTitle")}
+        tone="warning"
+      />
+    </SettingRow>
+  );
 }
 
 function OriginsRow({

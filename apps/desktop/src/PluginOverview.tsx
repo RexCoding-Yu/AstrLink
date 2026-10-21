@@ -1,3 +1,6 @@
+import { useState } from "react";
+
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ExternalLink } from "@/components/ExternalLink";
 import { FormMessage } from "@/components/FormMessage";
 import { LoadingState } from "@/components/LoadingState";
@@ -6,6 +9,7 @@ import { PluginView } from "@/components/PluginView";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -22,6 +26,7 @@ import {
   type PluginBindings,
   type PluginCredit,
   type PluginDetail,
+  type PluginHostStorage,
   type PluginStatus,
   type PluginTestResult,
 } from "./plugin-model";
@@ -64,11 +69,15 @@ export function PluginOverview({
   detail,
   status,
   statusError,
+  busy = false,
+  onClear,
   now = new Date(),
 }: {
   detail: PluginDetail;
   status: PluginStatus | null;
   statusError: string | null;
+  busy?: boolean;
+  onClear?: (what: "workspaces" | "values") => Promise<boolean>;
   now?: Date;
 }) {
   const t = useT();
@@ -158,10 +167,116 @@ export function PluginOverview({
           {t("plugins.overviewNeedsViews")}
         </p>
       ) : null}
+      {detail.host_storage.length > 0 ? (
+        <StoredCard busy={busy} detail={detail} onClear={onClear} />
+      ) : null}
       {detail.credits.length > 0 ? (
         <CreditsCard credits={detail.credits} />
       ) : null}
     </div>
+  );
+}
+
+/** What the host keeps for a plugin, and what can be cleared of it. */
+const clearable: Partial<
+  Record<PluginHostStorage["kind"], "workspaces" | "values">
+> = {
+  workspace_bindings: "workspaces",
+  plugin_values: "values",
+};
+
+/**
+ * What is kept for the plugin, where, whether it holds conversation text and
+ * for how long: what the host keeps, then what the plugin says it keeps.
+ */
+function StoredCard({
+  detail,
+  busy,
+  onClear,
+}: {
+  detail: PluginDetail;
+  busy: boolean;
+  onClear?: (what: "workspaces" | "values") => Promise<boolean>;
+}) {
+  const t = useT();
+  const [clearing, setClearing] = useState<"workspaces" | "values" | null>(
+    null,
+  );
+  return (
+    <Panel data-testid="plugin-stored">
+      <PanelHeader size="sm">
+        <CardTitle>{t("plugins.stored.title")}</CardTitle>
+      </PanelHeader>
+      <ul className="divide-y text-xs">
+        {detail.host_storage.map((kept) => {
+          const what = clearable[kept.kind];
+          return (
+            <li
+              className="flex min-w-0 items-start gap-3 px-3 py-2"
+              data-testid="plugin-stored-item"
+              key={kept.kind}
+            >
+              <div className="grid min-w-0 flex-1 gap-0.5">
+                <span className="font-medium">
+                  {t(`plugins.stored.kinds.${kept.kind}.label`)}
+                </span>
+                <span className="text-muted-foreground">
+                  {t(`plugins.stored.kinds.${kept.kind}.detail`)}
+                </span>
+                {kept.kind === "plugin_values"
+                  ? detail.storage.map((item) => (
+                      <span className="text-muted-foreground" key={item.label}>
+                        {t("plugins.stored.declared", {
+                          label: item.label,
+                          content: item.content
+                            ? t("plugins.stored.withContent")
+                            : t("plugins.stored.withoutContent"),
+                          retention: item.retention,
+                        })}
+                      </span>
+                    ))
+                  : null}
+              </div>
+              {kept.count !== undefined ? (
+                <span className="shrink-0 text-muted-foreground tabular-nums">
+                  {t("plugins.stored.count", { count: kept.count })}
+                </span>
+              ) : null}
+              {what && onClear ? (
+                <Button
+                  className="h-6 shrink-0 px-2 text-xs"
+                  disabled={busy || kept.count === 0}
+                  onClick={() => setClearing(what)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {t("plugins.stored.clear")}
+                </Button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+      <ConfirmDialog
+        confirmLabel={t("plugins.stored.clear")}
+        description={
+          <p>
+            {clearing ? t(`plugins.stored.clearConfirm.${clearing}`) : null}
+          </p>
+        }
+        destructive
+        disabled={busy}
+        onCancel={() => setClearing(null)}
+        onConfirm={() => {
+          const what = clearing;
+          setClearing(null);
+          if (what && onClear) void onClear(what);
+        }}
+        open={clearing !== null}
+        title={clearing ? t(`plugins.stored.clearTitle.${clearing}`) : ""}
+      />
+    </Panel>
   );
 }
 

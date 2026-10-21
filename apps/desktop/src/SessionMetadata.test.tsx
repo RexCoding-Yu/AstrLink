@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const bridge = vi.hoisted(() => ({
   getSessionMetadata: vi.fn(),
   listMetadataAttributes: vi.fn(),
+  listMetadataValues: vi.fn(),
   setSessionMetadata: vi.fn(),
   unbindSessionMetadata: vi.fn(),
 }));
@@ -13,6 +14,7 @@ vi.mock("./bridge", () => bridge);
 vi.mock("./notify", () => ({ notify }));
 import { SessionMetadataChips } from "./SessionMetadata";
 import { applyLocale } from "./i18n";
+import { settleClosedLayer } from "./lib/test-layer-settle";
 
 const project = {
   key: "project",
@@ -46,6 +48,14 @@ beforeEach(async () => {
   vi.resetAllMocks();
   bridge.listMetadataAttributes.mockResolvedValue([project, env]);
   bridge.getSessionMetadata.mockResolvedValue(bound);
+  bridge.listMetadataValues.mockResolvedValue([
+    {
+      value: "astrlink",
+      sessions: 3,
+      last_used_at: "2026-10-18T01:00:00Z",
+    },
+    { value: "none", sessions: 1 },
+  ]);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -63,10 +73,41 @@ async function render() {
 
 function input(): HTMLInputElement {
   const field = document.querySelector<HTMLInputElement>(
+    'input[aria-label="新的项目"]',
+  );
+  if (!field) throw new Error("no new project field");
+  return field;
+}
+
+function picked(): string {
+  return document.querySelector("#session-metadata-project")?.textContent ?? "";
+}
+
+/** Picks the option of the project picker whose text starts with option. */
+async function pick(option: string) {
+  const trigger = document.querySelector<HTMLButtonElement>(
     "#session-metadata-project",
   );
-  if (!field) throw new Error("no project field");
-  return field;
+  if (!trigger) throw new Error("no project picker");
+  await act(async () => {
+    trigger.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        pointerType: "mouse",
+      }),
+    );
+    await Promise.resolve();
+  });
+  const item = [
+    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ].find((candidate) => candidate.textContent?.startsWith(option));
+  if (!item) throw new Error(`no option ${option}`);
+  await act(async () => {
+    item.click();
+    await Promise.resolve();
+  });
+  await settleClosedLayer();
 }
 
 function button(label: string): HTMLButtonElement {
@@ -131,7 +172,12 @@ it("binds by hand after checking the pattern, and unbinds to none", async () => 
     "[data-testid=session-metadata-chip]",
   );
   await act(async () => chip?.click());
-  expect(input().value).toBe("astrlink");
+  expect(picked()).toBe("astrlink");
+  // The picker offers the values sessions used, with their counts; none is
+  // what unbinding stores, not a project.
+  await pick("新项目…");
+  const options = [...document.querySelectorAll('[role="option"]')];
+  expect(options).toHaveLength(0);
 
   await type(input(), "Not Valid");
   await act(async () => button("保存").click());
@@ -144,6 +190,7 @@ it("binds by hand after checking the pattern, and unbinds to none", async () => 
     "session_1",
     "project",
     "paseo",
+    false,
   );
   expect(container.textContent).toContain("paseo");
 
@@ -155,4 +202,44 @@ it("binds by hand after checking the pattern, and unbinds to none", async () => 
   );
   expect(notify.success).toHaveBeenCalledWith("已解除「项目」");
   expect(container.textContent).toContain("不纳入");
+});
+
+it("asks whether the workspace follows a session moved to another project", async () => {
+  bridge.getSessionMetadata.mockResolvedValue({
+    ...bound,
+    workspace: { name: "astrlink", values: { project: "astrlink" } },
+    choices: { project: ["astrlink", "paseo"] },
+  });
+  bridge.setSessionMetadata.mockResolvedValue({
+    values: {
+      project: {
+        value: "paseo",
+        set_by: "manual",
+        turn: 3,
+        updated_at: "2026-10-18T02:00:00Z",
+      },
+    },
+  });
+  await render();
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>("[data-testid=session-metadata-chip]")
+      ?.click(),
+  );
+  // Nothing to ask while the session keeps the workspace's project.
+  expect(document.body.textContent).not.toContain("以后 astrlink 目录");
+  await pick("paseo");
+  const follow = [...document.querySelectorAll("label")].find((label) =>
+    label.textContent?.startsWith("以后 astrlink 目录里的新会话也用这个"),
+  );
+  expect(follow?.textContent).toContain("现在是 astrlink");
+  const box = document.getElementById(follow?.htmlFor ?? "");
+  await act(async () => box?.click());
+  await act(async () => button("保存").click());
+  expect(bridge.setSessionMetadata).toHaveBeenCalledWith(
+    "session_1",
+    "project",
+    "paseo",
+    true,
+  );
 });

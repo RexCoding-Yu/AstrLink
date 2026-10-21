@@ -1464,6 +1464,19 @@ async fn session_metadata(
 }
 
 #[tauri::command]
+async fn session_plugins(
+    session_id: String,
+    key: Option<String>,
+    input: Option<serde_json::Value>,
+    refresh: Option<bool>,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager
+        .session_plugins(&session_id, key.as_deref(), input, refresh.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
 async fn get_service_usage(
     service_id: String,
     fresh: Option<bool>,
@@ -2587,6 +2600,7 @@ pub fn run() {
             metadata_action,
             access_token_metadata,
             session_metadata,
+            session_plugins,
             get_routing_settings,
             update_routing_settings,
             get_classifier_settings,

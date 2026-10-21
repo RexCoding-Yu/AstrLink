@@ -2,12 +2,19 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const bridge = vi.hoisted(() => ({ runPluginAction: vi.fn() }));
+const notify = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock("./bridge", () => bridge);
+vi.mock("./notify", () => ({ notify }));
 
 import {
   PluginRecordDetails,
   RequestMetadataLine,
 } from "./PluginRecordDetails";
+import { installDialogAnimations } from "./lib/test-dialog-animations";
+import { settleClosedLayer } from "./lib/test-layer-settle";
 import {
   emptyTrajectoryFields,
   type RequestRecord,
@@ -177,6 +184,78 @@ describe("PluginRecordDetails", () => {
     expect(container.textContent).toBe("这个请求没有插件记录。");
   });
 
+  it("says why a block was loaded and runs the plugin's buttons after asking", async () => {
+    const removeAnimations = installDialogAnimations();
+    bridge.runPluginAction.mockResolvedValue({
+      status: "ok",
+      refresh: true,
+      message: "这个会话的下一个请求会重新装载记忆。",
+    });
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            session_id: "session_1",
+            plugin_records: [
+              {
+                plugin: "powercontext",
+                plugin_version: "2.0.0",
+                hook: "prepareSession",
+                title: "记忆装载",
+                status: "ok",
+                summary: "画像 · 主题 20 个 · 4.2 KB",
+                elapsed_ms: 310,
+                network: { requests: 2, denied: 0, errors: 0, wait_ms: 300 },
+                trigger: "compact",
+                actions: [
+                  { id: "refresh", label: "刷新记忆", confirm: "会重写缓存。" },
+                ],
+              },
+              {
+                plugin: "team-rules",
+                plugin_version: "1.0.0",
+                hook: "prepareSession",
+                title: "Team rules",
+                status: "skipped",
+                summary: "",
+                elapsed_ms: 0,
+                network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+                skipped_reason: "over_budget",
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    expect(container.textContent).toContain("compact 后刷新");
+    expect(container.textContent).toContain("超出注入总预算");
+    const action = container.querySelector<HTMLButtonElement>(
+      "[data-testid=plugin-record-action]",
+    );
+    expect(action?.textContent).toBe("刷新记忆");
+    await act(async () => action?.click());
+    // The plugin asked for a confirmation: nothing runs before it.
+    expect(bridge.runPluginAction).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("会重写缓存。");
+    const confirm = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        "[role=alertdialog] button",
+      ),
+    ].find((button) => button.textContent === "刷新记忆");
+    await act(async () => confirm?.click());
+    await settleClosedLayer();
+    expect(bridge.runPluginAction).toHaveBeenCalledWith(
+      "powercontext",
+      "refresh",
+      "session_1",
+    );
+    expect(notify.success).toHaveBeenCalledWith(
+      "这个会话的下一个请求会重新装载记忆。",
+    );
+    removeAnimations();
+  });
+
   it("puts a request's metadata on one line with where each value came from", async () => {
     await act(async () => {
       reactRoot.render(
@@ -199,14 +278,35 @@ describe("PluginRecordDetails", () => {
                 set_by: "header",
                 reason: "invalid_value",
               },
+              {
+                key: "project",
+                event: "bound",
+                value: "astrlink",
+                set_by: "model_marker",
+                normalized: "AstrLink",
+              },
+              {
+                key: "team",
+                event: "bound",
+                value: "infra",
+                set_by: "user_marker",
+                new: true,
+              },
             ],
           }}
         />,
       );
     });
     const line = document.querySelector('[data-testid="request-metadata"]');
+    // A session binding says how it was set.
     expect(line?.textContent).toContain(
-      "project=astrlink (会话绑定 · 第 2 轮)",
+      "project=astrlink (模型标记 · 第 2 轮)",
+    );
+    expect(line?.textContent).toContain(
+      "project: 绑定为 astrlink (模型标记 · 原写法 AstrLink)",
+    );
+    expect(line?.textContent).toContain(
+      "team: 绑定为 infra (用户标记 · 新建项目)",
     );
     expect(line?.textContent).toContain("env=prod (令牌默认值)");
     expect(line?.textContent).toContain("已忽略 env=Prod：值不符合校验规则");

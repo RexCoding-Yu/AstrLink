@@ -4830,6 +4830,88 @@
       "replace": "Replace",
       "keep": "Keep",
       "noOrigin": "Fill in the server address before saving the token"
+    },
+    "host": {
+      "pause": "Pause all plugins",
+      "pauseHelpLabel": "About pausing all plugins",
+      "pauseHelp": "While paused, no plugin runs: nothing is loaded, asked or written, and requests go out as they came. The first request of each turn records why. Resume to carry on.",
+      "pausedNotice": "All plugins are paused; requests go out as they came.",
+      "budget": "Injection budget",
+      "budgetHelpLabel": "About the injection budget",
+      "budgetHelp": "What all plugins together may add to one request. Past it, the blocks of the plugins later in order stay out, and the request record says it went over the budget.",
+      "budgetValue": "{{value}} KB",
+      "saveFailed": "Couldn't save the settings of the plugins."
+    },
+    "clients": {
+      "label": "Clients",
+      "helpLabel": "About the clients",
+      "help": "For a client left unticked the plugin stays out of its requests: nothing is loaded, asked or written, and the requests go out as they came. Clients AstrLink does not recognize count as Other. Useful to stay clear of a client's own memory.",
+      "all": "All clients",
+      "none": "No client",
+      "count_one": "{{count}} client",
+      "count_other": "{{count}} clients",
+      "search": "Search clients",
+      "empty": "No client matches",
+      "selectAll": "Select all",
+      "clear": "Select none",
+      "other": "Other"
+    },
+    "workspace": {
+      "label": "Bind by workspace",
+      "helpLabel": "About binding by workspace",
+      "help": "When a session first gets a project, AstrLink remembers this working directory → this project, and new sessions in the same directory start with it instead of being asked. Only a fingerprint of the directory's path and its last element are kept, on this computer."
+    },
+    "refresh": {
+      "label": "Automatic refresh",
+      "helpLabel": "About automatic refresh",
+      "help": "Each session checks the plugin's data at most every 10 minutes and swaps in a new block only when it changed. Each swap writes the session's prompt cache once more. Off by default.",
+      "confirmTitle": "Turn on automatic refresh?",
+      "confirmBody": "When the plugin's data changes, a session swaps in the new block. The system prompt changes, so the whole conversation after it goes into the prompt cache again; a long session may pay tens of thousands of tokens more. Each session checks at most every 10 minutes.",
+      "confirm": "Turn on"
+    },
+    "stored": {
+      "title": "What is kept",
+      "kinds": {
+        "session_bindings": {
+          "label": "Session bindings",
+          "detail": "value, how and in which turn it was set · AstrLink database · no conversation text · kept as long as the session's records"
+        },
+        "workspace_bindings": {
+          "label": "Workspaces and their values",
+          "detail": "a fingerprint of the directory's path and its last element, never the path · AstrLink database · no conversation text · until cleared"
+        },
+        "plugin_sessions": {
+          "label": "The plugin's first turn and pause in each session",
+          "detail": "AstrLink database · no conversation text · kept"
+        },
+        "request_records": {
+          "label": "Plugin records",
+          "detail": "counts, sizes, times and reasons · in request records · no conversation text · kept as long as the request records"
+        },
+        "resident_block": {
+          "label": "The block a session carries",
+          "detail": "in memory only · holds memory content · gone when the gateway restarts"
+        },
+        "plugin_values": {
+          "label": "Plugin storage",
+          "detail": "the plugin's own small data · AstrLink database · kept after the plugin is disabled; can be cleared"
+        }
+      },
+      "declared": "The plugin keeps: {{label}} · {{content}} · {{retention}}",
+      "withContent": "conversation text",
+      "withoutContent": "no conversation text",
+      "count_one": "{{count}} item",
+      "count_other": "{{count}} items",
+      "clear": "Clear",
+      "clearTitle": {
+        "workspaces": "Clear the workspace bindings?",
+        "values": "Clear the plugin storage?"
+      },
+      "clearConfirm": {
+        "workspaces": "New sessions no longer start with the project of their working directory and are asked again in their first turn. Sessions already bound keep their binding.",
+        "values": "Clears the plugin's own small data, such as the server ids of projects. The plugin gets it again when it needs it; the memory itself is untouched."
+      },
+      "clearFailed": "Couldn't clear it."
     }
   },
   "pluginRecords": {
@@ -4850,7 +4932,15 @@
       "plugin_error": "Plugin error",
       "privacy_blocked": "Blocked by the privacy policy",
       "privacy_unavailable": "The privacy check was unavailable",
-      "search_failed": "Some searches failed; nothing matched"
+      "search_failed": "Some searches failed; nothing matched",
+      "paused_all": "All plugins are paused",
+      "client_disabled": "The plugin is off for this client",
+      "session_paused": "Paused in this session",
+      "over_budget": "Over the injection budget",
+      "invalid_result": "The plugin returned an invalid result",
+      "no_system_channel": "The request has no system prompt to add to",
+      "no_opening_message": "The turn has no user message to add to",
+      "injection_failed": "Injection failed; the request went out as it came"
     },
     "injection": "Injected",
     "placement": {
@@ -4892,7 +4982,30 @@
       "bound": "bound to",
       "rebound": "changed to",
       "cleared": "cleared"
-    }
+    },
+    "trigger": "Reason",
+    "triggers": {
+      "start": "First load",
+      "bound": "Project just bound",
+      "config": "Settings or language changed",
+      "compact": "Refreshed after compact",
+      "manual": "Refreshed by hand",
+      "auto": "Automatic refresh"
+    },
+    "actionDone": "Done",
+    "actionFailed": "Couldn't do it: {{reason}}",
+    "setBy": {
+      "token_default": "token default",
+      "model_marker": "model marker",
+      "user_marker": "user marker",
+      "user_answer": "answer matched",
+      "workspace": "workspace",
+      "manual": "by hand",
+      "header": "request header"
+    },
+    "metadataNew": "new project",
+    "metadataNormalized": "written as {{value}}",
+    "actionFailedPlain": "Couldn't do it."
   },
   "metadata": {
     "title": "Metadata",
@@ -4954,8 +5067,8 @@
   "sessionMetadata": {
     "title": "Session metadata",
     "helpLabel": "About session metadata",
-    "help": "A value you enter is checked against the attribute's pattern; none leaves this session out.",
-    "unbindHelp": "Unbinding stores none: the session is no longer recalled, captured or asked about, and older marker lines in its history do not bind it again. Set a value here, or send a marker line on its own, to bind it again.",
+    "help": "Pick a value from the list, or New project… to type a new name; it must match the attribute's pattern.",
+    "unbindHelp": "Unbinding stores none: the session is no longer loaded for, written or asked about, and older marker lines in its history do not bind it again. Pick a value here, or send a marker line on its own, to bind it again.",
     "none": "left out",
     "notBound": "not bound",
     "unboundValue": "Not bound",
@@ -4967,8 +5080,19 @@
     "setBy": {
       "model_marker": "Model reply",
       "user_marker": "User message",
-      "manual": "Set by hand"
-    }
+      "manual": "Set by hand",
+      "user_answer": "Answer matched",
+      "workspace": "Workspace"
+    },
+    "workspaceHelp": "This session runs in the {{name}} directory. The first value picked for a directory serves the sessions that start there later.",
+    "usage_one": "{{count}} session · {{ago}}",
+    "usage_other": "{{count}} sessions · {{ago}}",
+    "neverUsed": "not used yet",
+    "offered": "offered in the first turn",
+    "newValue": "New project…",
+    "newValueLabel": "New {{label}}",
+    "newValuePlaceholder": "lowercase letters, digits, . _ -",
+    "workspaceFollow": "New sessions in {{name}} use this too (now {{previous}})"
   },
   "serviceTerminal": {
     "title": "Open “{{name}}” in a terminal",
@@ -4990,5 +5114,41 @@
     "failed": "Couldn't open the terminal: {{error}}",
     "disabled": "This API provider is turned off. Requests from the terminal fail until you turn it on.",
     "signedOut": "This account isn't signed in. Requests from the terminal fail until you sign in."
+  },
+  "sessionMemory": {
+    "tab": "Memory",
+    "loadFailed": "Couldn't read this session's memory.",
+    "actionFailed": "Couldn't do it.",
+    "changeProject": "Change",
+    "project": "Project",
+    "workspace": "Working directory",
+    "noPlugins": "No enabled plugin loads blocks.",
+    "refresh": "Refresh memory",
+    "pause": "Pause in this session",
+    "resume": "Resume",
+    "paused": "Paused",
+    "refreshPending": "Loads again on the next request",
+    "helpLabel": "About a session's memory",
+    "help": "The block goes at the end of the system prompt and stays the same within the session: it changes only after a compact, a refresh, or with automatic refresh on. It lives in memory only; after the gateway restarts, the session's next request computes it again.",
+    "firstTurn": "Takes part from turn {{turn}}",
+    "noBlock": "The session carries no block now. After the gateway restarts, the session's next request computes it again.",
+    "records": "Records",
+    "confirm": {
+      "refresh": {
+        "title": "Refresh {{name}}?",
+        "body": "The session's next request loads again. The system prompt changes, so the session's prompt cache is written once more.",
+        "action": "Refresh"
+      },
+      "pause": {
+        "title": "Pause {{name}} in this session?",
+        "body": "While paused nothing is loaded or written, and requests go out as they came; what is already in the context stays. The system prompt changes, so the prompt cache is written once more.",
+        "action": "Pause"
+      },
+      "resume": {
+        "title": "Resume {{name}}?",
+        "body": "Loading and writing resume. The system prompt changes, so the prompt cache is written once more.",
+        "action": "Resume"
+      }
+    }
   }
 }

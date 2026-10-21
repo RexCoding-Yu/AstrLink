@@ -179,19 +179,29 @@ import {
   parseAccessTokenMetadata,
   parseMetadataAttribute,
   parseMetadataAttributes,
+  parseMetadataValues,
+  parsePluginActionResult,
+  parsePluginClearResult,
   parsePluginDetail,
+  parsePluginHostSettings,
   parsePluginList,
   parsePluginStatus,
   parsePluginTestResult,
   parseSessionMetadata,
+  parseSessionPlugins,
   type MetadataAttribute,
   type MetadataAttributeInput,
+  type MetadataValueUsage,
+  type PluginActionResult,
   type PluginDetail,
+  type PluginHostSettings,
+  type PluginHostSettingsUpdate,
   type PluginList,
   type PluginSettingsUpdate,
   type PluginStatus,
   type PluginTestResult,
   type SessionMetadata,
+  type SessionPlugin,
 } from "./plugin-model";
 import {
   parseClientConfigApplyOutcome,
@@ -1461,6 +1471,99 @@ export async function deletePluginCredential(
   );
 }
 
+/** The settings of every plugin at once: the pause, the budget, the language. */
+export async function getPluginHostSettings(): Promise<PluginHostSettings> {
+  requireNativeBridge();
+  return parsePluginHostSettings(
+    await invoke<unknown>("plugin_action", { action: "host" }),
+  );
+}
+
+export async function updatePluginHostSettings(
+  update: PluginHostSettingsUpdate,
+): Promise<PluginHostSettings> {
+  requireNativeBridge();
+  return parsePluginHostSettings(
+    await invoke<unknown>("plugin_action", {
+      action: "update_host",
+      input: update,
+    }),
+  );
+}
+
+/** A click on a button of one of the plugin's records, for its session. */
+export async function runPluginAction(
+  key: string,
+  action: string,
+  session: string,
+): Promise<PluginActionResult> {
+  requireNativeBridge();
+  return parsePluginActionResult(
+    await invoke<unknown>("plugin_action", {
+      action: "action",
+      key,
+      input: { action, session },
+    }),
+  );
+}
+
+/**
+ * Clears what the host keeps for a plugin: the workspaces bound to its
+ * attributes' values, or its own stored values. Returns how many it removed.
+ */
+export async function clearPluginData(
+  key: string,
+  what: "workspaces" | "values",
+): Promise<number> {
+  requireNativeBridge();
+  return parsePluginClearResult(
+    await invoke<unknown>("plugin_action", {
+      action: what === "workspaces" ? "clear_workspaces" : "clear_values",
+      key,
+    }),
+  );
+}
+
+/** The plugins' part in a session: the block each keeps, and its pause. */
+export async function getSessionPlugins(
+  sessionId: string,
+): Promise<SessionPlugin[]> {
+  requireNativeBridge();
+  return parseSessionPlugins(
+    await invoke<unknown>("session_plugins", { sessionId }),
+  );
+}
+
+export async function pauseSessionPlugin(
+  sessionId: string,
+  key: string,
+  paused: boolean,
+): Promise<SessionPlugin[]> {
+  requireNativeBridge();
+  return parseSessionPlugins(
+    await invoke<unknown>("session_plugins", {
+      sessionId,
+      key,
+      input: { paused },
+    }),
+  );
+}
+
+/** Makes the session's next request load the plugin's block again. */
+export async function refreshSessionPlugin(
+  sessionId: string,
+  key: string,
+): Promise<SessionPlugin[]> {
+  requireNativeBridge();
+  return parseSessionPlugins(
+    await invoke<unknown>("session_plugins", {
+      sessionId,
+      key,
+      refresh: true,
+    }),
+  );
+}
+
 /** The request attributes, over the host's `metadata_action` command. */
 export async function listMetadataAttributes(): Promise<MetadataAttribute[]> {
   requireNativeBridge();
@@ -1491,6 +1594,16 @@ export async function updateMetadataAttribute(
 export async function deleteMetadataAttribute(key: string): Promise<void> {
   requireNativeBridge();
   await invoke<unknown>("metadata_action", { action: "delete", key });
+}
+
+/** The values of an attribute sessions are bound to, the most recent first. */
+export async function listMetadataValues(
+  key: string,
+): Promise<MetadataValueUsage[]> {
+  requireNativeBridge();
+  return parseMetadataValues(
+    await invoke<unknown>("metadata_action", { action: "values", key }),
+  );
 }
 
 /** An access token's default metadata by attribute key. */
@@ -1526,18 +1639,23 @@ export async function getSessionMetadata(
   );
 }
 
-/** Binds a session by hand; the value none leaves it out. */
+/**
+ * Binds a session by hand; the value none leaves it out. With workspace, the
+ * session's working directory takes the value too, for the sessions that
+ * start there later.
+ */
 export async function setSessionMetadata(
   sessionId: string,
   key: string,
   value: string,
+  workspace = false,
 ): Promise<SessionMetadata> {
   requireNativeBridge();
   return parseSessionMetadata(
     await invoke<unknown>("session_metadata", {
       sessionId,
       key,
-      input: { value },
+      input: workspace ? { value, workspace } : { value },
     }),
   );
 }

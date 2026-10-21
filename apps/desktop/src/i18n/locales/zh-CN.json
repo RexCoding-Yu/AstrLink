@@ -4830,6 +4830,88 @@
       "replace": "更换",
       "keep": "不更换",
       "noOrigin": "先填好服务器地址，再保存令牌"
+    },
+    "host": {
+      "pause": "暂停所有插件",
+      "pauseHelpLabel": "关于暂停所有插件",
+      "pauseHelp": "暂停期间所有插件都不运行：不装载、不询问、不写入，请求原样发出。每轮第一个请求的记录里会写明原因。恢复后照常工作。",
+      "pausedNotice": "所有插件已暂停，请求原样发出。",
+      "budget": "注入总预算",
+      "budgetHelpLabel": "关于注入总预算",
+      "budgetHelp": "所有插件往一次请求里注入的内容合计不超过这么多。超出时按插件顺序丢掉后面插件的块，请求记录里写明「超出注入总预算」。",
+      "budgetValue": "{{value}} KB",
+      "saveFailed": "无法保存插件的总设置。"
+    },
+    "clients": {
+      "label": "对哪些客户端生效",
+      "helpLabel": "关于对哪些客户端生效",
+      "help": "取消勾选的客户端，插件不参与它们的请求：不装载、不询问、不写入，请求原样发出。识别不出来的客户端归在「其他」。可以用来避开客户端自带的记忆。",
+      "all": "全部客户端",
+      "none": "不对任何客户端生效",
+      "search": "搜索客户端",
+      "empty": "没有匹配的客户端",
+      "selectAll": "全选",
+      "clear": "全不选",
+      "other": "其他",
+      "count_one": "{{count}} 个客户端",
+      "count_other": "{{count}} 个客户端"
+    },
+    "workspace": {
+      "label": "按工作区自动绑定",
+      "helpLabel": "关于按工作区自动绑定",
+      "help": "会话第一次选定项目时，记下「这个工作目录 → 这个项目」；同一目录里的新会话第一轮就自动接上，不再询问。只在本机保存目录路径的指纹和最后一级目录名，不存路径。"
+    },
+    "refresh": {
+      "label": "自动刷新",
+      "helpLabel": "关于自动刷新",
+      "help": "每个会话最多每 10 分钟检查一次插件的数据有没有更新，有更新才换上新的装载块。每换一次，这个会话的提示词缓存都要重写一次。默认关闭。",
+      "confirmTitle": "打开自动刷新？",
+      "confirmBody": "插件的数据有更新时，会话会换上新的装载块。系统提示词变了，这个会话之后的整段对话都要重新写入提示词缓存，长会话可能要多付几万 token。每个会话最多每 10 分钟检查一次。",
+      "confirm": "打开"
+    },
+    "stored": {
+      "title": "存了什么",
+      "kinds": {
+        "session_bindings": {
+          "label": "会话绑定的值",
+          "detail": "值、怎么绑定的、第几轮 · AstrLink 数据库 · 不含对话内容 · 跟会话记录一样"
+        },
+        "workspace_bindings": {
+          "label": "工作区和值的对应",
+          "detail": "目录路径的指纹和最后一级目录名，不存路径 · AstrLink 数据库 · 不含对话内容 · 直到清除"
+        },
+        "plugin_sessions": {
+          "label": "插件在每个会话里的第一轮和暂停状态",
+          "detail": "AstrLink 数据库 · 不含对话内容 · 一直保留"
+        },
+        "request_records": {
+          "label": "插件记录",
+          "detail": "次数、字节数、耗时、原因 · 请求记录里 · 不含对话内容 · 跟请求记录一样"
+        },
+        "resident_block": {
+          "label": "当前装载块",
+          "detail": "只在内存里 · 含记忆内容 · 网关重启就没了"
+        },
+        "plugin_values": {
+          "label": "插件存储",
+          "detail": "插件自己存的小数据 · AstrLink 数据库 · 停用插件后仍保留，可以清除"
+        }
+      },
+      "declared": "插件声明：{{label}} · {{content}} · {{retention}}",
+      "withContent": "含对话内容",
+      "withoutContent": "不含对话内容",
+      "clear": "清除",
+      "clearTitle": {
+        "workspaces": "清除工作区记录？",
+        "values": "清除插件存储？"
+      },
+      "clearConfirm": {
+        "workspaces": "清除后，新会话不再按工作目录自动接上项目，会在第一轮重新询问。已经绑定的会话不受影响。",
+        "values": "清除插件自己存的小数据，例如项目在服务器上的编号。插件会在下次用到时重新取，记忆本身不受影响。"
+      },
+      "clearFailed": "无法清除。",
+      "count_one": "{{count}} 条",
+      "count_other": "{{count}} 条"
     }
   },
   "pluginRecords": {
@@ -4850,7 +4932,15 @@
       "plugin_error": "插件出错",
       "privacy_blocked": "被隐私策略拦截",
       "privacy_unavailable": "隐私检查不可用",
-      "search_failed": "有检索失败，没有命中"
+      "search_failed": "有检索失败，没有命中",
+      "paused_all": "所有插件已暂停",
+      "client_disabled": "这个客户端没有启用插件",
+      "session_paused": "本会话已暂停",
+      "over_budget": "超出注入总预算",
+      "invalid_result": "插件返回的结果无效",
+      "no_system_channel": "请求没有系统提示词可放",
+      "no_opening_message": "这一轮没有可放的用户消息",
+      "injection_failed": "注入失败，请求原样发出"
     },
     "injection": "注入",
     "placement": {
@@ -4892,7 +4982,30 @@
       "bound": "绑定为",
       "rebound": "改绑为",
       "cleared": "已解除"
-    }
+    },
+    "trigger": "原因",
+    "triggers": {
+      "start": "首次装载",
+      "bound": "项目刚绑定",
+      "config": "设置或语言变了",
+      "compact": "compact 后刷新",
+      "manual": "手动刷新",
+      "auto": "自动刷新"
+    },
+    "actionDone": "已完成",
+    "actionFailed": "没能完成：{{reason}}",
+    "setBy": {
+      "token_default": "令牌默认值",
+      "model_marker": "模型标记",
+      "user_marker": "用户标记",
+      "user_answer": "回答直接匹配",
+      "workspace": "工作区",
+      "manual": "手动",
+      "header": "请求头"
+    },
+    "metadataNew": "新建项目",
+    "metadataNormalized": "原写法 {{value}}",
+    "actionFailedPlain": "没能完成。"
   },
   "metadata": {
     "title": "元信息",
@@ -4954,8 +5067,8 @@
   "sessionMetadata": {
     "title": "会话元信息",
     "helpLabel": "关于会话元信息",
-    "help": "填写的值按属性的校验规则检查；填 none 表示本会话不纳入。",
-    "unbindHelp": "解除即改存 none：本会话不召回、不捕获、不再询问，历史里的旧标记也不会把它认回来。需要时在这里填值，或在对话里单独发一行标记。",
+    "help": "从列表里选已有的值，或选「新项目…」输入新名字；值要符合属性的校验规则。",
+    "unbindHelp": "解除即改存 none：本会话不装载、不写入、不再询问，历史里的旧标记也不会把它认回来。需要时在这里重新选择，或在对话里单独发一行标记。",
     "none": "不纳入",
     "notBound": "未绑定",
     "unboundValue": "未绑定",
@@ -4967,8 +5080,19 @@
     "setBy": {
       "model_marker": "模型回复",
       "user_marker": "用户消息",
-      "manual": "手动设置"
-    }
+      "manual": "手动设置",
+      "user_answer": "回答直接匹配",
+      "workspace": "工作区"
+    },
+    "workspaceHelp": "这个会话在 {{name}} 目录里。目录第一次选定的值会给之后在这里开始的新会话用。",
+    "neverUsed": "还没用过",
+    "offered": "首轮列出",
+    "newValue": "新项目…",
+    "newValueLabel": "新的{{label}}",
+    "newValuePlaceholder": "小写字母、数字、点、下划线、短横线",
+    "workspaceFollow": "以后 {{name}} 目录里的新会话也用这个（现在是 {{previous}}）",
+    "usage_one": "{{count}} 个会话 · {{ago}}",
+    "usage_other": "{{count}} 个会话 · {{ago}}"
   },
   "serviceTerminal": {
     "title": "在终端打开「{{name}}」",
@@ -4990,5 +5114,41 @@
     "failed": "打不开终端：{{error}}",
     "disabled": "这个 API 提供商已关闭。打开它之前，终端里的请求都会失败。",
     "signedOut": "这个账号还没登录。登录之前，终端里的请求都会失败。"
+  },
+  "sessionMemory": {
+    "tab": "记忆",
+    "loadFailed": "无法读取这个会话的记忆。",
+    "actionFailed": "没能完成操作。",
+    "changeProject": "更改",
+    "project": "项目",
+    "workspace": "工作目录",
+    "noPlugins": "没有启用会装载内容的插件。",
+    "refresh": "刷新记忆",
+    "pause": "暂停本会话",
+    "resume": "恢复",
+    "paused": "已暂停",
+    "refreshPending": "下一个请求重新装载",
+    "helpLabel": "关于会话的记忆",
+    "help": "装载的内容放在系统提示词末尾，会话内不变：compact 之后、手动刷新或打开自动刷新时才换新的。它只在内存里，网关重启后要等下一个请求才会重新算出。",
+    "firstTurn": "从第 {{turn}} 轮开始参与这个会话",
+    "noBlock": "这个会话现在没有装载内容。网关重启后，要等下一个请求才会重新算出。",
+    "records": "记录",
+    "confirm": {
+      "refresh": {
+        "title": "刷新「{{name}}」？",
+        "body": "这个会话的下一个请求会重新装载。系统提示词变了，这个会话的提示词缓存要重写一次。",
+        "action": "刷新"
+      },
+      "pause": {
+        "title": "暂停「{{name}}」在这个会话里的工作？",
+        "body": "暂停后不装载、不写入，请求原样发出；已经在上下文里的内容不会撤回。系统提示词变了，提示词缓存要重写一次。",
+        "action": "暂停"
+      },
+      "resume": {
+        "title": "恢复「{{name}}」？",
+        "body": "恢复后照常装载和写入。系统提示词变了，提示词缓存要重写一次。",
+        "action": "恢复"
+      }
+    }
   }
 }

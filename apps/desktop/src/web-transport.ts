@@ -290,6 +290,14 @@ const commands: Record<string, Command> = {
     if (a.unbind === true) return route(path, "DELETE")(a);
     return route(path, "PUT", input)(a);
   },
+  session_plugins: (a) => {
+    if (a.key === undefined) return route((b) => `${session(b)}/plugins`)(a);
+    const path = (b: Args) =>
+      `${session(b)}/plugins/${segment(b.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
+    if (a.refresh === true)
+      return route((b) => `${path(b)}/refresh`, "POST")(a);
+    return route(path, "PUT", input)(a);
+  },
   get_request_record: route(request),
   list_request_record_children: route((a) => `${request(a)}/children`),
   delete_request_record: route(request, "DELETE"),
@@ -411,6 +419,9 @@ const commands: Record<string, Command> = {
   plugin_action: (a) => {
     if (a.action === "list") return route("/plugins")(a);
     if (a.action === "reload") return route("/plugins/reload", "POST")(a);
+    if (a.action === "host") return route("/plugin-host")(a);
+    if (a.action === "update_host")
+      return route("/plugin-host", "PATCH", input)(a);
     const plugin = `/plugins/${segment(a.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
     switch (a.action) {
       case "get":
@@ -421,6 +432,12 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/test`, "POST")(a);
       case "status":
         return route(`${plugin}/status`)(a);
+      case "action":
+        return route(`${plugin}/actions`, "POST", input)(a);
+      case "clear_workspaces":
+        return route(`${plugin}/workspaces`, "DELETE")(a);
+      case "clear_values":
+        return route(`${plugin}/values`, "DELETE")(a);
       case "save_credential":
         return route(
           `${plugin}/credentials/${segment(a.name, /^[a-z][a-z0-9_]{0,31}$/)}`,
@@ -453,6 +470,10 @@ const commands: Record<string, Command> = {
         return route(
           `${base}/${segment(a.key, /^[a-z][a-z0-9_]{0,31}$/)}`,
           "DELETE",
+        )(a);
+      case "values":
+        return route(
+          `${base}/${segment(a.key, /^[a-z][a-z0-9_]{0,31}$/)}/values`,
         )(a);
       default:
         throw new Error("Unsupported metadata operation");

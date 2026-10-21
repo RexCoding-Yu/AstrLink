@@ -17,6 +17,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getRequestSession: vi.fn(),
   getRoutingSettings: vi.fn(),
   getSessionMetadata: vi.fn(async () => ({ values: {} })),
+  getSessionPlugins: vi.fn(async () => []),
   listMetadataAttributes: vi.fn(async () => []),
   listPrivacyModelInstallations: vi.fn(),
   listRequestRecordChildren: vi.fn(),

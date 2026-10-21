@@ -25,7 +25,9 @@ export function MultiFilterSelect({
   clearLabel,
   disabled,
   emptyMessage,
+  everyLabel,
   label,
+  noneLabel,
   onChange,
   options,
   searchPlaceholder,
@@ -39,7 +41,14 @@ export function MultiFilterSelect({
   clearLabel: string;
   disabled?: boolean;
   emptyMessage: string;
+  /** The trigger's text with every option selected; the count without it. */
+  everyLabel?: string;
   label: string;
+  /**
+   * The trigger's text with nothing selected, where that means none rather
+   * than all; allLabel without it.
+   */
+  noneLabel?: string;
   onChange: (value: string[]) => void;
   options: readonly MultiFilterOption[];
   searchPlaceholder: string;
@@ -63,11 +72,13 @@ export function MultiFilterSelect({
     options.length > 0 && options.every((option) => selected.has(option.value));
   const triggerText =
     value.length === 0
-      ? allLabel
-      : value.length === 1
-        ? (options.find((option) => option.value === value[0])?.label ??
-          selectedCountLabel(1))
-        : selectedCountLabel(value.length);
+      ? (noneLabel ?? allLabel)
+      : allSelected && everyLabel !== undefined
+        ? everyLabel
+        : value.length === 1
+          ? (options.find((option) => option.value === value[0])?.label ??
+            selectedCountLabel(1))
+          : selectedCountLabel(value.length);
 
   function toggle(option: string): void {
     onChange(
@@ -101,7 +112,9 @@ export function MultiFilterSelect({
           type="button"
         >
           <span className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 text-muted-foreground">{label}</span>
+            {label ? (
+              <span className="shrink-0 text-muted-foreground">{label}</span>
+            ) : null}
             <span className="min-w-0 truncate" title={triggerText}>
               {triggerText}
             </span>

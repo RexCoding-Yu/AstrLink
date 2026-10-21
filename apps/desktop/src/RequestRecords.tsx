@@ -1,5 +1,6 @@
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { SessionChannelBindings } from "./SessionChannelBindings";
+import { SessionMemory } from "./SessionMemory";
 import { SessionMetadataChips } from "./SessionMetadata";
 import { RecoveryChain, RecoveryDetails } from "./components/RecoveryDetails";
 import {
@@ -83,6 +84,7 @@ import {
   getRawSealingStatus,
   getRequestAuditContent,
   getRequestSession,
+  getSessionPlugins,
   listenRawSealingChanged,
   listRequestRecordChildren,
   listRequestSessions,
@@ -218,6 +220,7 @@ type DetailTab =
   | "content"
   | "audit"
   | "binding"
+  | "memory"
   | "modelRouting";
 // Copies started from a menu lose their button when it closes, so their
 // outcome is announced beside the actions instead.
@@ -232,6 +235,7 @@ const DETAIL_TABS: readonly DetailTab[] = [
   "content",
   "audit",
   "binding",
+  "memory",
   "modelRouting",
 ];
 type PendingConfirm =
@@ -2820,6 +2824,26 @@ function RecordDetail({
     true,
     "desktop",
   );
+  // The memory tab shows once a plugin that loads blocks takes part in the
+  // session.
+  const [memoryAvailable, setMemoryAvailable] = useState(false);
+  useEffect(() => {
+    if (discovery) {
+      setMemoryAvailable(false);
+      return;
+    }
+    let current = true;
+    getSessionPlugins(session.id)
+      .then((plugins) => {
+        if (current) setMemoryAvailable(plugins.length > 0);
+      })
+      .catch(() => {
+        if (current) setMemoryAvailable(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [discovery, session.id]);
   const [childrenByRoot, setChildrenByRoot] = useState<
     Record<string, RequestRecord[]>
   >({});
@@ -3169,7 +3193,10 @@ function RecordDetail({
             setDetailTab(value as DetailTab);
           }
         }}
-        value={detailTab}
+        // A session no plugin loads for has no memory tab to stay on.
+        value={
+          detailTab === "memory" && !memoryAvailable ? "trajectory" : detailTab
+        }
       >
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b py-1.5">
           <TabsList aria-label={t("records.sections")} className="h-8">
@@ -3193,6 +3220,14 @@ function RecordDetail({
             >
               {t("records.tabContent")}
             </TabsTrigger>
+            {!discovery && memoryAvailable ? (
+              <TabsTrigger
+                value="memory"
+                onClick={() => setDetailTab("memory")}
+              >
+                {t("sessionMemory.tab")}
+              </TabsTrigger>
+            ) : null}
             {!discovery && (
               <TabsTrigger
                 value="binding"
@@ -3363,6 +3398,24 @@ function RecordDetail({
             }}
           />
         </TabsContent>
+
+        {!discovery && memoryAvailable ? (
+          <TabsContent
+            className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+            value="memory"
+          >
+            <SessionMemory
+              key={session.id}
+              onSelectRequest={(id) => {
+                onSelectTurn(id);
+                setDetailTab("trajectory");
+              }}
+              records={turns}
+              refreshKey={`${session.call_count}:${session.status}`}
+              sessionId={session.id}
+            />
+          </TabsContent>
+        ) : null}
 
         {!discovery && (
           <TabsContent

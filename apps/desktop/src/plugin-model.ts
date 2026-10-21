@@ -80,11 +80,106 @@ export interface PluginDetail extends PluginSummary {
   settings: PluginSetting[];
   /** Open-source projects the plugin credits. */
   credits: PluginCredit[];
+  /** The client types the plugin is off for. */
+  excluded_clients: string[];
+  /** A new session takes the value its working directory had. */
+  workspace_binding: boolean;
+  /** The host swaps a session's resident block when newer data changes it. */
+  auto_refresh: boolean;
+  /** What the plugin says it keeps in its own store. */
+  storage: PluginStorageItem[];
+  /** What the host keeps for the plugin, with counts where it can clear them. */
+  host_storage: PluginHostStorage[];
+}
+
+/** Something a plugin keeps, as its manifest declares it. */
+export interface PluginStorageItem {
+  label: string;
+  /** Whether it holds conversation text. */
+  content: boolean;
+  retention: string;
+}
+
+/** What the host keeps for a plugin. */
+export const PLUGIN_HOST_STORAGE = [
+  "session_bindings",
+  "workspace_bindings",
+  "plugin_sessions",
+  "request_records",
+  "resident_block",
+  "plugin_values",
+] as const;
+export type PluginHostStorageKind = (typeof PLUGIN_HOST_STORAGE)[number];
+
+export interface PluginHostStorage {
+  kind: PluginHostStorageKind;
+  count?: number;
 }
 
 /** The host's own settings a plugin may place in its form. */
-export const HOST_SETTINGS = ["$wait", "$trusted", "$origins"] as const;
+export const HOST_SETTINGS = [
+  "$wait",
+  "$trusted",
+  "$origins",
+  "$clients",
+  "$workspace",
+  "$refresh",
+] as const;
 export type HostSettingKey = (typeof HOST_SETTINGS)[number];
+
+/** The interface languages, which what plugins inject follows. */
+export type PluginLanguage = "en" | "zh-CN" | "ja";
+
+/** The settings of every plugin at once. */
+export interface PluginHostSettings {
+  /** Every plugin stays out of requests, which go out as they came. */
+  paused: boolean;
+  /** What all plugins together may inject into one request. */
+  injection_budget_bytes: number;
+  language: PluginLanguage;
+}
+
+export const DEFAULT_INJECTION_BUDGET_BYTES = 16 * 1024;
+export const MIN_INJECTION_BUDGET_BYTES = 4 * 1024;
+export const MAX_INJECTION_BUDGET_BYTES = 64 * 1024;
+
+export interface PluginHostSettingsUpdate {
+  paused?: boolean;
+  injection_budget_bytes?: number;
+  language?: PluginLanguage;
+}
+
+/** What came of a click on a button of a plugin's record. */
+export interface PluginActionResult {
+  status: "ok" | "failed";
+  message?: string;
+  refresh: boolean;
+  reason?: string;
+}
+
+/** A plugin's part in one session. */
+export interface SessionPlugin {
+  plugin: string;
+  name: string;
+  paused: boolean;
+  first_turn?: number;
+  /** The resident block the session carries; it lives in Core's memory only. */
+  block?: {
+    text: string;
+    bytes: number;
+    trigger: string;
+    language: string;
+    computed_at: string;
+  };
+  refresh_pending?: boolean;
+}
+
+/** A value sessions are bound to, with how many and when one was last used. */
+export interface MetadataValueUsage {
+  value: string;
+  sessions: number;
+  last_used_at?: string;
+}
 
 export type PluginSettingType =
   | "server"
@@ -140,6 +235,9 @@ export interface PluginSettingsUpdate {
   network_origins?: Array<{ origin: string; allow_plaintext: boolean }>;
   privacy_trusted?: boolean;
   turn_wait_ms?: number;
+  excluded_clients?: string[];
+  workspace_binding?: boolean;
+  auto_refresh?: boolean;
   config?: Record<string, unknown>;
   /** Plain http server origins the user agrees to reach in the clear. */
   plaintext_consent?: string[];
@@ -223,6 +321,17 @@ export interface RequestPluginRecord {
   injection?: PluginInjection;
   network: PluginNetworkCount;
   observe?: string;
+  /** Why a resident block was computed, on the request that first carried it. */
+  trigger?: string;
+  /** The plugin's buttons for the record's session. */
+  actions?: PluginRecordAction[];
+}
+
+/** A button on a plugin's record; confirm is asked before the click goes out. */
+export interface PluginRecordAction {
+  id: string;
+  label: string;
+  confirm?: string;
 }
 
 export interface MetadataAttribute {
@@ -264,12 +373,16 @@ export interface MetadataEvent {
   value?: string;
   set_by?: string;
   reason?: string;
+  /** A value no session had and nothing offered: a new project. */
+  new?: boolean;
+  /** The marker's own spelling, when a known value took its place. */
+  normalized?: string;
 }
 
 /** One binding of a session: its value, how it was set and in which turn. */
 export interface SessionMetadataValue {
   value: string;
-  /** model_marker, user_marker or manual. */
+  /** model_marker, user_marker, user_answer, workspace or manual. */
   set_by: string;
   turn?: number;
   updated_at: string;
@@ -278,6 +391,10 @@ export interface SessionMetadataValue {
 /** What a session is bound to, by attribute key. */
 export interface SessionMetadata {
   values: Record<string, SessionMetadataValue>;
+  /** The working directory the session's last request named, and what it is bound to. */
+  workspace?: { name: string; values: Record<string, string> };
+  /** The values plugins offered the session, by attribute key. */
+  choices?: Record<string, string[]>;
 }
 
 /** The metadata of one request, kept with its record. */
@@ -511,7 +628,106 @@ export function parsePluginDetail(value: unknown): PluginDetail {
         note: plugin.optionalString(credit.note, `${path}.note`),
       });
     }),
+    excluded_clients:
+      detail.excluded_clients === undefined
+        ? []
+        : plugin.strings(detail.excluded_clients, "$.excluded_clients"),
+    workspace_binding:
+      plugin.optionalBoolean(detail.workspace_binding, "$.workspace_binding") ??
+      true,
+    auto_refresh:
+      plugin.optionalBoolean(detail.auto_refresh, "$.auto_refresh") ?? false,
+    storage: (detail.storage === undefined
+      ? []
+      : plugin.array(detail.storage, "$.storage")
+    ).map((item, index) => {
+      const path = `$.storage[${index}]`;
+      const kept = plugin.object(item, path);
+      return {
+        label: plugin.string(kept.label, `${path}.label`),
+        content: plugin.boolean(kept.content, `${path}.content`),
+        retention: plugin.string(kept.retention, `${path}.retention`),
+      };
+    }),
+    host_storage: (detail.host_storage === undefined
+      ? []
+      : plugin.array(detail.host_storage, "$.host_storage")
+    ).flatMap((item, index) => {
+      const path = `$.host_storage[${index}]`;
+      const kept = plugin.object(item, path);
+      const kind = plugin.string(kept.kind, `${path}.kind`);
+      // A kind a newer Core keeps is not one this page can name.
+      if (!(PLUGIN_HOST_STORAGE as readonly string[]).includes(kind)) return [];
+      return [
+        defined({
+          kind: kind as PluginHostStorageKind,
+          count: plugin.optionalInteger(kept.count, `${path}.count`),
+        }),
+      ];
+    }),
   });
+}
+
+const languages = ["en", "zh-CN", "ja"] as const;
+
+export function parsePluginHostSettings(value: unknown): PluginHostSettings {
+  const settings = plugin.object(value, "$");
+  return {
+    paused: plugin.boolean(settings.paused, "$.paused"),
+    injection_budget_bytes: plugin.integer(
+      settings.injection_budget_bytes,
+      "$.injection_budget_bytes",
+    ),
+    language: plugin.oneOf(settings.language, languages, "$.language"),
+  };
+}
+
+export function parsePluginActionResult(value: unknown): PluginActionResult {
+  const result = plugin.object(value, "$");
+  return defined({
+    status: plugin.oneOf(result.status, ["ok", "failed"] as const, "$.status"),
+    message: plugin.optionalString(result.message, "$.message"),
+    refresh: plugin.boolean(result.refresh, "$.refresh"),
+    reason: plugin.optionalString(result.reason, "$.reason"),
+  });
+}
+
+/** Reads the plugins' part in a session. */
+export function parseSessionPlugins(value: unknown): SessionPlugin[] {
+  const list = plugin.object(value, "$");
+  return plugin.array(list.plugins, "$.plugins").map((item, index) => {
+    const path = `$.plugins[${index}]`;
+    const part = plugin.object(item, path);
+    let block: SessionPlugin["block"];
+    if (part.block !== undefined) {
+      const blockPath = `${path}.block`;
+      const raw = plugin.object(part.block, blockPath);
+      block = {
+        text: plugin.string(raw.text, `${blockPath}.text`),
+        bytes: plugin.integer(raw.bytes, `${blockPath}.bytes`),
+        trigger: plugin.string(raw.trigger, `${blockPath}.trigger`),
+        language: plugin.string(raw.language, `${blockPath}.language`),
+        computed_at: plugin.string(raw.computed_at, `${blockPath}.computed_at`),
+      };
+    }
+    return defined({
+      plugin: plugin.string(part.plugin, `${path}.plugin`),
+      name: plugin.string(part.name, `${path}.name`),
+      paused: plugin.boolean(part.paused, `${path}.paused`),
+      first_turn: plugin.optionalInteger(part.first_turn, `${path}.first_turn`),
+      block,
+      refresh_pending: plugin.optionalBoolean(
+        part.refresh_pending,
+        `${path}.refresh_pending`,
+      ),
+    });
+  });
+}
+
+/** Reads how many a clearing removed. */
+export function parsePluginClearResult(value: unknown): number {
+  const result = plugin.object(value, "$");
+  return plugin.integer(result.removed, "$.removed");
 }
 
 const settingTypes = ["server", "text", "number", "switch", "choice"] as const;
@@ -782,6 +998,24 @@ export function parseRequestPluginRecords(
       injection,
       network: parseNetworkCount(record.network, `${recordPath}.network`),
       observe: plugin.optionalString(record.observe, `${recordPath}.observe`),
+      trigger: plugin.optionalString(record.trigger, `${recordPath}.trigger`),
+      actions:
+        record.actions === undefined
+          ? undefined
+          : plugin
+              .array(record.actions, `${recordPath}.actions`)
+              .map((entry, at) => {
+                const actionPath = `${recordPath}.actions[${at}]`;
+                const action = plugin.object(entry, actionPath);
+                return defined({
+                  id: plugin.string(action.id, `${actionPath}.id`),
+                  label: plugin.string(action.label, `${actionPath}.label`),
+                  confirm: plugin.optionalString(
+                    action.confirm,
+                    `${actionPath}.confirm`,
+                  ),
+                });
+              }),
     });
   });
 }
@@ -833,7 +1067,33 @@ export function parseAccessTokenMetadata(
 export function parseSessionMetadata(value: unknown): SessionMetadata {
   const raw = metadata.object(value, "$");
   const values = metadata.object(raw.values, "$.values");
-  return {
+  let workspace: SessionMetadata["workspace"];
+  if (raw.workspace !== undefined) {
+    const place = metadata.object(raw.workspace, "$.workspace");
+    const bound = metadata.object(place.values, "$.workspace.values");
+    workspace = {
+      name: metadata.string(place.name, "$.workspace.name"),
+      values: Object.fromEntries(
+        Object.entries(bound).map(([key, entry]) => [
+          key,
+          metadata.string(entry, `$.workspace.values.${key}`),
+        ]),
+      ),
+    };
+  }
+  let choices: SessionMetadata["choices"];
+  if (raw.choices !== undefined) {
+    const offered = metadata.object(raw.choices, "$.choices");
+    choices = Object.fromEntries(
+      Object.entries(offered).map(([key, entry]) => [
+        key,
+        metadata.strings(entry, `$.choices.${key}`),
+      ]),
+    );
+  }
+  return defined({
+    workspace,
+    choices,
     values: Object.fromEntries(
       Object.entries(values).map(([key, entry]) => {
         const path = `$.values.${key}`;
@@ -849,7 +1109,24 @@ export function parseSessionMetadata(value: unknown): SessionMetadata {
         ];
       }),
     ),
-  };
+  });
+}
+
+/** Reads the values of an attribute sessions are bound to. */
+export function parseMetadataValues(value: unknown): MetadataValueUsage[] {
+  const list = metadata.object(value, "$");
+  return metadata.array(list.values, "$.values").map((item, index) => {
+    const path = `$.values[${index}]`;
+    const usage = metadata.object(item, path);
+    return defined({
+      value: metadata.string(usage.value, `${path}.value`),
+      sessions: metadata.integer(usage.sessions, `${path}.sessions`),
+      last_used_at: metadata.optionalString(
+        usage.last_used_at,
+        `${path}.last_used_at`,
+      ),
+    });
+  });
 }
 
 const sources = ["header", "session", "token"] as const;
@@ -902,6 +1179,11 @@ export function parseRequestMetadata(
               reason: metadata.optionalString(
                 event.reason,
                 `${eventPath}.reason`,
+              ),
+              new: metadata.optionalBoolean(event.new, `${eventPath}.new`),
+              normalized: metadata.optionalString(
+                event.normalized,
+                `${eventPath}.normalized`,
               ),
             });
           }),

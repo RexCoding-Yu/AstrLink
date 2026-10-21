@@ -2,6 +2,7 @@ import { isWebEdition } from "./edition";
 import { ConsoleLogout } from "./ConsoleEntry";
 import { WebSettings } from "./WebSettings";
 import { PluginManager } from "./PluginManager";
+import { usePluginLanguageSync } from "./use-plugin-language-sync";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -426,6 +427,7 @@ export default function App() {
       ? `${snapshot.pid ?? "none"}|${snapshot.ready.control_url}|${snapshot.ready.inference_url}`
       : null;
   const rawSealing = useRawSealingStatus(coreSessionKey, isReady);
+  usePluginLanguageSync(coreSessionKey);
   const rawSetupNeeded = useRawSetupNeeded(rawSealing.status);
   const onboarding = useOnboarding({
     isReady,

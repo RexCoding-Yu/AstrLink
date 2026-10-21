@@ -12,10 +12,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { formatAgo } from "@/lib/format-ago";
 import {
   getSessionMetadata,
   listMetadataAttributes,
+  listMetadataValues,
   setSessionMetadata,
   unbindSessionMetadata,
 } from "./bridge";
@@ -24,9 +36,13 @@ import { useT } from "./i18n";
 import { notify } from "./notify";
 import type {
   MetadataAttribute,
+  MetadataValueUsage,
   SessionMetadata,
   SessionMetadataValue,
 } from "./plugin-model";
+
+/** The picker's choice of a value nobody used yet, typed in beside it. */
+const NEW_VALUE = "\u0000new";
 import { metadataValueFits } from "./TokenMetadataDialog";
 
 /**
@@ -111,6 +127,14 @@ export function SessionMetadataChips({
   );
 }
 
+/** How a session binding was set, and in which turn. */
+export function sessionBindingSource(
+  value: SessionMetadataValue,
+  t: ReturnType<typeof useT>,
+): string {
+  return sourceText(value, t);
+}
+
 function sourceText(
   value: SessionMetadataValue,
   t: ReturnType<typeof useT>,
@@ -123,13 +147,32 @@ function sourceText(
     : source;
 }
 
-function SessionMetadataDialog({
+/** The values a session may take, the ones used most recently first. */
+function pickable(
+  usage: MetadataValueUsage[],
+  offered: string[],
+  current: string | undefined,
+): Array<{ value: string; usage?: MetadataValueUsage }> {
+  const options: Array<{ value: string; usage?: MetadataValueUsage }> = [];
+  const add = (value: string, entry?: MetadataValueUsage) => {
+    if (value === "none" || options.some((option) => option.value === value))
+      return;
+    options.push({ value, usage: entry });
+  };
+  for (const entry of usage) add(entry.value, entry);
+  for (const value of offered) add(value);
+  if (current !== undefined) add(current);
+  return options;
+}
+
+export function SessionMetadataDialog({
   attributes,
   bindings,
   onChanged,
   onClose,
   open,
   sessionId,
+  now = new Date(),
 }: {
   attributes: MetadataAttribute[];
   bindings: SessionMetadata;
@@ -137,45 +180,90 @@ function SessionMetadataDialog({
   onClose: () => void;
   open: boolean;
   sessionId: string;
+  now?: Date;
 }) {
   const t = useT();
   const [values, setValues] = useState<Record<string, string>>({});
+  const [typed, setTyped] = useState<Record<string, string>>({});
+  const [follow, setFollow] = useState<Record<string, boolean>>({});
+  const [usage, setUsage] = useState<Record<string, MetadataValueUsage[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
+    setTyped({});
+    setFollow({});
     setValues(
       Object.fromEntries(
-        attributes.map((attribute) => [
-          attribute.key,
-          bindings.values[attribute.key]?.value ?? "",
-        ]),
+        attributes.map((attribute) => {
+          const bound = bindings.values[attribute.key]?.value;
+          return [attribute.key, bound && bound !== "none" ? bound : ""];
+        }),
       ),
     );
+    let current = true;
+    Promise.all(
+      attributes.map(
+        async (attribute) =>
+          [
+            attribute.key,
+            await listMetadataValues(attribute.key).catch(() => []),
+          ] as const,
+      ),
+    )
+      .then((entries) => {
+        if (current) setUsage(Object.fromEntries(entries));
+      })
+      .catch(() => {
+        // The picker offers what it has without the usage counts.
+      });
+    return () => {
+      current = false;
+    };
     // The form starts from the bindings the dialog opened with.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  /** The value the form gives an attribute: picked, or typed as a new one. */
+  function chosen(key: string): string {
+    const picked = values[key] ?? "";
+    return picked === NEW_VALUE ? (typed[key] ?? "").trim() : picked;
+  }
+
+  /** The workspace's value the session's new one would differ from. */
+  function workspaceValue(key: string): string | undefined {
+    const bound = bindings.workspace?.values[key];
+    const value = chosen(key);
+    return bound !== undefined && value !== "" && value !== bound
+      ? bound
+      : undefined;
+  }
+
   async function save(event: FormEvent) {
     event.preventDefault();
-    const changes: Array<[string, string]> = [];
+    const changes: Array<[string, string, boolean]> = [];
     for (const attribute of attributes) {
-      const value = (values[attribute.key] ?? "").trim();
+      const value = chosen(attribute.key);
       if (value === "" || value === bindings.values[attribute.key]?.value)
         continue;
       if (!metadataValueFits(attribute, value)) {
         setError(t("sessionMetadata.invalidValue", { label: attribute.label }));
         return;
       }
-      changes.push([attribute.key, value]);
+      changes.push([
+        attribute.key,
+        value,
+        workspaceValue(attribute.key) !== undefined &&
+          follow[attribute.key] === true,
+      ]);
     }
     setSaving(true);
     try {
       let latest = bindings;
-      for (const [key, value] of changes) {
-        latest = await setSessionMetadata(sessionId, key, value);
+      for (const [key, value, workspace] of changes) {
+        latest = await setSessionMetadata(sessionId, key, value, workspace);
       }
       onChanged(latest);
       onClose();
@@ -191,7 +279,7 @@ function SessionMetadataDialog({
     try {
       const latest = await unbindSessionMetadata(sessionId, attribute.key);
       onChanged(latest);
-      setValues((current) => ({ ...current, [attribute.key]: "none" }));
+      setValues((current) => ({ ...current, [attribute.key]: "" }));
       setError(null);
       notify.success(
         t("sessionMetadata.unboundNotice", { label: attribute.label }),
@@ -219,6 +307,13 @@ function SessionMetadataDialog({
                 <div className="grid gap-2">
                   <p>{t("sessionMetadata.help")}</p>
                   <p>{t("sessionMetadata.unbindHelp")}</p>
+                  {bindings.workspace ? (
+                    <p>
+                      {t("sessionMetadata.workspaceHelp", {
+                        name: bindings.workspace.name,
+                      })}
+                    </p>
+                  ) : null}
                 </div>
               </HelpPopover>
             </DialogTitle>
@@ -229,9 +324,16 @@ function SessionMetadataDialog({
             <div className="grid gap-3">
               {attributes.map((attribute) => {
                 const bound = bindings.values[attribute.key];
+                const options = pickable(
+                  usage[attribute.key] ?? [],
+                  bindings.choices?.[attribute.key] ?? [],
+                  bound?.value,
+                );
+                const previous = workspaceValue(attribute.key);
+                const fieldId = `session-metadata-${attribute.key}`;
                 return (
                   <Field
-                    htmlFor={`session-metadata-${attribute.key}`}
+                    htmlFor={fieldId}
                     key={attribute.key}
                     label={
                       bound
@@ -239,28 +341,105 @@ function SessionMetadataDialog({
                         : attribute.label
                     }
                   >
-                    <div className="flex items-center gap-2">
-                      <Input
-                        autoComplete="off"
-                        className="font-mono"
-                        id={`session-metadata-${attribute.key}`}
-                        onChange={(event) =>
-                          setValues((current) => ({
-                            ...current,
-                            [attribute.key]: event.target.value,
-                          }))
-                        }
-                        placeholder={t("sessionMetadata.unboundValue")}
-                        value={values[attribute.key] ?? ""}
-                      />
-                      <Button
-                        disabled={saving || !bound || bound.value === "none"}
-                        onClick={() => void unbind(attribute)}
-                        type="button"
-                        variant="outline"
-                      >
-                        {t("sessionMetadata.unbind")}
-                      </Button>
+                    <div className="grid gap-2">
+                      <div className="flex items-center gap-2">
+                        <Select
+                          onValueChange={(value) =>
+                            setValues((current) => ({
+                              ...current,
+                              [attribute.key]: value,
+                            }))
+                          }
+                          value={values[attribute.key] || undefined}
+                        >
+                          <SelectTrigger
+                            className="min-w-0 flex-1 font-mono"
+                            id={fieldId}
+                          >
+                            <SelectValue
+                              placeholder={t("sessionMetadata.unboundValue")}
+                            />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {options.map((option) => (
+                              <SelectItem
+                                className="font-mono"
+                                description={
+                                  option.usage
+                                    ? t("sessionMetadata.usage", {
+                                        count: option.usage.sessions,
+                                        ago: option.usage.last_used_at
+                                          ? formatAgo(
+                                              new Date(
+                                                option.usage.last_used_at,
+                                              ),
+                                              now,
+                                            )
+                                          : t("sessionMetadata.neverUsed"),
+                                      })
+                                    : t("sessionMetadata.offered")
+                                }
+                                key={option.value}
+                                value={option.value}
+                              >
+                                {option.value}
+                              </SelectItem>
+                            ))}
+                            {options.length > 0 ? <SelectSeparator /> : null}
+                            <SelectItem value={NEW_VALUE}>
+                              {t("sessionMetadata.newValue")}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          disabled={saving || !bound || bound.value === "none"}
+                          onClick={() => void unbind(attribute)}
+                          type="button"
+                          variant="outline"
+                        >
+                          {t("sessionMetadata.unbind")}
+                        </Button>
+                      </div>
+                      {values[attribute.key] === NEW_VALUE ? (
+                        <Input
+                          aria-label={t("sessionMetadata.newValueLabel", {
+                            label: attribute.label,
+                          })}
+                          autoComplete="off"
+                          className="font-mono"
+                          onChange={(event) =>
+                            setTyped((current) => ({
+                              ...current,
+                              [attribute.key]: event.target.value,
+                            }))
+                          }
+                          placeholder={t("sessionMetadata.newValuePlaceholder")}
+                          value={typed[attribute.key] ?? ""}
+                        />
+                      ) : null}
+                      {previous !== undefined && bindings.workspace ? (
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            checked={follow[attribute.key] === true}
+                            id={`${fieldId}-workspace`}
+                            onCheckedChange={(checked) =>
+                              setFollow((current) => ({
+                                ...current,
+                                [attribute.key]: checked === true,
+                              }))
+                            }
+                          />
+                          <Label
+                            className="text-xs font-normal"
+                            htmlFor={`${fieldId}-workspace`}
+                          >
+                            {t("sessionMetadata.workspaceFollow", {
+                              name: bindings.workspace.name,
+                              previous,
+                            })}
+                          </Label>
+                        </div>
+                      ) : null}
                     </div>
                   </Field>
                 );
