@@ -24,7 +24,8 @@ type fakePowerContext struct {
 	// version is what server-info reports, 1.3.0 when empty.
 	version string
 	// scopes are the projects on the server by title; policies the scopes
-	// with a profile policy.
+	// with a profile policy. profile is the profile's Markdown, none when
+	// empty.
 	scopes   map[string]string
 	policies map[string]bool
 	profile  string
@@ -47,7 +48,7 @@ func newFakePowerContext() *fakePowerContext {
 	server := &fakePowerContext{
 		scopes:     map[string]string{"datav": "scp_datav", "paseo": "scp_paseo", "Has Space": "scp_bad"},
 		policies:   map[string]bool{"scp_paseo": true},
-		profile:    `{"title":"沟通约定","summary":"用中文沟通，注释写中文。\n测试用表驱动写法。"}`,
+		profile:    "## 沟通约定\n- 用中文沟通，注释写中文。\n- 测试用表驱动写法。\n",
 		processing: "on",
 	}
 	for index := range 30 {
@@ -142,8 +143,13 @@ func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTP
 			return reply(404, `{"error":{"code":"not_found","message":"Not found."}}`)
 		}
 		return reply(200, `{"scope_id":"`+scope+`","generation_enabled":false,"activation_mode":"automatic","pending_candidate_id":null,"version":3,"updated_at":"2026-10-21T00:00:00Z"}`)
-	case strings.HasSuffix(target.Path, "/artifacts/profile"):
-		return reply(200, `{"items":[`+server.profile+`],"next_cursor":null}`)
+	case strings.HasSuffix(target.Path, "/artifacts/profile/profile"):
+		// The profile artifact itself: its list item carries no text.
+		if server.profile == "" {
+			return reply(404, `{"error":{"code":"not_found","message":"Not found."}}`)
+		}
+		content, _ := json.Marshal(server.profile)
+		return reply(200, `{"scope_id":"scp","family":"profile","artifact_id":"profile","revision":2,"content":{"schema":"powercontext.profile.v1","media_type":"text/markdown","content":`+string(content)+`},"sources":[],"artifacts":[],"content_digest":"sha256:0"}`)
 	case strings.HasSuffix(target.Path, "/artifacts/topic-memory"):
 		topics := server.topics
 		next := "null"
@@ -277,7 +283,8 @@ func TestThePowerContextPluginLoadsTheProfileAndTheNewestTopics(t *testing.T) {
 	block := result.System.Open + "\n" + strings.Join(result.System.Items, "\n") + "\n" + result.System.Close
 	want := []string{
 		"<project-context>\n以下是本项目的历史记忆，与用户当前指示冲突时以当前指示为准。",
-		"项目画像\n- 沟通约定：用中文沟通，注释写中文。\n测试用表驱动写法。",
+		// The profile's Markdown as the server wrote it.
+		"项目画像\n## 沟通约定\n- 用中文沟通，注释写中文。\n- 测试用表驱动写法。\n主题目录",
 		// The five topics published last, newest first, their summaries cut
 		// at 100 characters.
 		"主题目录（最近更新的 5 个）\n- 主题 27：" + strings.Repeat("摘", 100) + "…\n- 主题 26：",
@@ -295,6 +302,10 @@ func TestThePowerContextPluginLoadsTheProfileAndTheNewestTopics(t *testing.T) {
 	if result.Record.Title != "记忆装载" || result.Record.Status != "ok" || !strings.HasPrefix(result.Record.Summary, "画像 · 主题 5/30 个 · ") ||
 		len(result.Record.Actions) != 1 || result.Record.Actions[0].ID != "refresh" || result.Record.Actions[0].Label != "刷新记忆" {
 		t.Fatalf("record = %+v", result.Record)
+	}
+	// The profile is read whole, from its artifact.
+	if reads := h.server.requests("GET", "/artifacts/profile/profile"); len(reads) != 1 {
+		t.Fatalf("profile reads = %d", len(reads))
 	}
 	// The project was found on the server by its title, and its profile
 	// policy turned on once.
@@ -328,7 +339,7 @@ func TestThePowerContextPluginLoadsTheProfileAndTheNewestTopics(t *testing.T) {
 func TestThePowerContextBlockFollowsTheSessionsLanguageAndPrivacy(t *testing.T) {
 	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test","topicCount":2}`, nil)
 	for language, want := range map[string][]string{
-		"en": {"Below is this project's memory", "Project profile\n- 沟通约定: ", "Topics (the 2 updated most recently)", "redaction placeholders", "More topics are not listed here."},
+		"en": {"Below is this project's memory", "Project profile\n## 沟通约定\n- 用中文沟通", "Topics (the 2 updated most recently)", "redaction placeholders", "More topics are not listed here."},
 		"ja": {"以下はこのプロジェクトの過去の記憶です", "プロジェクトのプロフィール", "トピック一覧（最近更新された 2 件）", "マスク用のプレースホルダー"},
 	} {
 		raw := h.call(HookPrepareSession, powerContextView("datav", language, map[string]any{"redacted": true}))
@@ -659,11 +670,12 @@ func TestThePowerContextSearchKeepsToWhatTheServerTakes(t *testing.T) {
 	if result.Text != "没有找到相关的记忆。" || *result.Hits != 0 || result.Record.Summary != "检索 · 没有命中" {
 		t.Fatalf("no hits = %+v", result)
 	}
-	// 1.3 takes at most 64 terms: a long query keeps its start and its end.
+	// 1.3's topic search takes at most 64 terms: a long query keeps its start
+	// and its end.
 	var sent struct {
 		Query string `json:"query"`
 	}
-	_ = json.Unmarshal(h.server.requests("POST", "/search")[0].JSON, &sent)
+	_ = json.Unmarshal(h.server.requests("POST", "/artifacts/topic-memory/search")[0].JSON, &sent)
 	if runes := []rune(sent.Query); len(runes) > 32 || !strings.HasPrefix(sent.Query, "分页游标") || !strings.HasSuffix(sent.Query, "分页游标") {
 		t.Fatalf("query sent = %q", sent.Query)
 	}
@@ -735,5 +747,52 @@ func TestThePowerContextProjectsLookupPages(t *testing.T) {
 	none := decodeResult[toolResult](t, h.call(HookCallTool, toolView("projects", "", "zh-CN", map[string]any{"query": "nothing", "cursor": "c2"})))
 	if none.Text != "没有符合的项目。" || *none.Hits != 0 {
 		t.Fatalf("no project = %+v", none)
+	}
+}
+
+func TestThePowerContextPluginSearchesAsTheServersVersionDoes(t *testing.T) {
+	long := strings.Repeat("分页游标", 30)
+	queries := func(h *powerContextHarness) map[string]map[string]any {
+		sent := map[string]map[string]any{}
+		for _, request := range h.server.requests("POST", "/search") {
+			var body map[string]any
+			_ = json.Unmarshal(request.JSON, &body)
+			family := strings.TrimSuffix(request.URL[strings.Index(request.URL, "/artifacts/")+len("/artifacts/"):], "/search")
+			if body["mode"] == nil || body["mode"] == "hybrid" {
+				sent[family] = body
+			}
+		}
+		return sent
+	}
+	// 1.3: atomic memory searches as the server sees fit; only the topic
+	// search, which counts terms, is cut, by characters and pairs.
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": long}))
+	sent := queries(h)
+	if _, set := sent["atomic-memory"]["mode"]; set || sent["atomic-memory"]["query"] != long {
+		t.Fatalf("1.3 atomic search = %+v", sent["atomic-memory"])
+	}
+	older := []rune(sent["topic-memory"]["query"].(string))
+	if len(older) > 32 {
+		t.Fatalf("1.3 topic query of %d characters", len(older))
+	}
+	// 1.4 searches atomic memory by words alone unless asked for both, and
+	// counts a Han character as a word at most: the topic query keeps more.
+	h = newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	h.server.version = "1.4.0"
+	h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": long}))
+	sent = queries(h)
+	if sent["atomic-memory"]["mode"] != "hybrid" || sent["atomic-memory"]["query"] != long {
+		t.Fatalf("1.4 atomic search = %+v", sent["atomic-memory"])
+	}
+	if newer := []rune(sent["topic-memory"]["query"].(string)); len(newer) < 60 || len(newer) > 61 {
+		t.Fatalf("1.4 topic query of %d characters", len(newer))
+	}
+	// Underscores join a word on both versions.
+	h = newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	words := strings.TrimSpace(strings.Repeat("snake_case_name ", 70))
+	h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": words}))
+	if got := queries(h)["topic-memory"]["query"].(string); len(strings.Fields(got)) > 60 {
+		t.Fatalf("a query of %d words went out", len(strings.Fields(got)))
 	}
 }

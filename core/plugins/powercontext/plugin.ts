@@ -2,9 +2,9 @@
 // system prompt when a session has a project, asks once, in the first turn,
 // which project a new session belongs to, lets the model look up the
 // project's memory itself, and records what the user typed. Turning records
-// into memory and generating profiles is left to the server's own schedules. It talks to PowerContext 1.3 or later through
-// astrlink.http.fetch, which reaches only the origins the user allows and adds
-// the token itself.
+// into memory and generating profiles is left to the server's own schedules.
+// It talks to PowerContext 1.3 or later through astrlink.http.fetch, which
+// reaches only the origins the user allows and adds the token itself.
 //
 // PowerContext (https://github.com/oceanbase/powercontext) is open source,
 // by OceanBase, under the Apache License 2.0. This is not an official
@@ -49,6 +49,11 @@ interface Scope {
 
 interface SearchItem {
   content?: Record<string, unknown>;
+}
+
+// The profile artifact: its content is the server's Markdown.
+interface ProfileArtifact {
+  content?: { content?: string };
 }
 
 interface Extraction {
@@ -833,7 +838,7 @@ const FETCH_TIMEOUT_MS = 5000;
 // little short of that so the closing lines always fit.
 const BLOCK_BYTES = 7600;
 const TOPIC_SUMMARY_CHARS = 100;
-const PROFILE_SUMMARY_CHARS = 2000;
+const PROFILE_CHARS = 2000;
 // A project with more topics than one page lists a second page; topics past
 // that are left to the search.
 const TOPIC_PAGES = 2;
@@ -933,9 +938,22 @@ function request(
   return sent;
 }
 
+// atLeast reports whether version is major.minor or later.
+function atLeast(version: string, major: number, minor: number): boolean {
+  const [have, haveMinor] = version
+    .split(".")
+    .map((part) => parseInt(part, 10));
+  return have > major || (have === major && haveMinor >= minor);
+}
+
 function supported(version: string): boolean {
-  const [major, minor] = version.split(".").map((part) => parseInt(part, 10));
-  return major > 1 || (major === 1 && minor >= 3);
+  return atLeast(version, 1, 3);
+}
+
+// 1.4 searches atomic memory by words alone unless asked otherwise, and cuts
+// Han text into words instead of characters and pairs.
+function modern(): boolean {
+  return atLeast(knownVersion() ?? "", 1, 4);
 }
 
 // The plugin was written against 1.3; later versions work as far as their
@@ -1099,19 +1117,29 @@ export function prepareSession(
   if (scope === null) return skipped(text, text.serverDown(text.fetch.network));
   const base = "/v1/scopes/" + scope + "/artifacts/";
   const policy = policyRequests(cfg, scope);
+  // The profile is one artifact, read whole: its list item carries no text.
+  // A project without one answers 404.
   const responses = astrlink.http.fetch([
-    request(cfg, "GET", base + "profile?limit=1"),
+    request(cfg, "GET", base + "profile/profile"),
     request(cfg, "GET", base + "topic-memory?limit=100"),
     ...policy,
   ]);
   const [profileResponse, topicResponse] = responses;
   if (policy.length > 0) settlePolicy(cfg, scope, responses[2]);
   if (profileResponse.status !== 200 && topicResponse.status !== 200)
-    return skipped(text, text.serverDown(failure(text, profileResponse)));
-  const profiles =
+    return skipped(
+      text,
+      text.serverDown(
+        failure(
+          text,
+          profileResponse.status === 404 ? topicResponse : profileResponse,
+        ),
+      ),
+    );
+  const profile =
     profileResponse.status === 200
-      ? ((profileResponse.json as Page<Listed>).items ?? [])
-      : [];
+      ? ((profileResponse.json as ProfileArtifact).content?.content ?? "")
+      : "";
   const topics: Listed[] = [];
   let page = topicResponse;
   for (let pages = 1; page.status === 200; pages++) {
@@ -1128,7 +1156,7 @@ export function prepareSession(
       ),
     );
   }
-  const block = render(text, cfg, view.redacted === true, profiles, topics);
+  const block = render(text, cfg, view.redacted === true, profile, topics);
   if (block === null) return skipped(text, text.empty);
   const record: AstrLinkPlugin.PluginRecord = {
     title: text.loadTitle,
@@ -1181,7 +1209,7 @@ function render(
   text: Texts,
   cfg: Config,
   redacted: boolean,
-  profiles: Listed[],
+  profile: string,
   topics: Listed[],
 ): Rendered | null {
   const open =
@@ -1204,15 +1232,11 @@ function render(
     clip(entry.title ?? "", 100) +
     (entry.title && entry.summary ? text.colon : "") +
     clip(entry.summary ?? "", max, flat);
-  const profileLines = profiles
-    .filter((profile) => profile.title || profile.summary)
-    .map((profile) => line(profile, PROFILE_SUMMARY_CHARS, false));
-  for (const entry of profileLines) {
-    const lines = items.length === 0 ? [text.profile, entry] : [entry];
-    if (!fits(lines)) break;
-    lines.forEach(add);
-  }
-  const profile = items.length > 0;
+  // The profile is the server's Markdown, its lines kept.
+  const profileText = clip(profile, PROFILE_CHARS, false);
+  if (profileText !== "" && fits([text.profile, profileText]))
+    [text.profile, profileText].forEach(add);
+  const hasProfile = items.length > 0;
   const sorted = topics
     .filter((topic) => topic.title || topic.summary)
     .sort((a, b) => {
@@ -1241,7 +1265,7 @@ function render(
   const closing = (more ? text.moreTopics + "\n" : "") + close;
   return {
     block: { open, items, close: closing },
-    profile,
+    profile: hasProfile,
     topics: topicLines.length,
     all: sorted.length,
     bytes:
@@ -1517,33 +1541,42 @@ export function onAction(
 }
 
 // cost is what one character adds to the terms of text, scanned in either
-// direction; run is the kind of the run it continues.
+// direction; run is the kind of the run it continues. Both versions count a
+// word of letters, digits and underscores once. 1.3 counts a run of n Han
+// characters as n characters and n - 1 pairs (pairs set); 1.4 cuts it into
+// words, at most one a character. Any other character counted like Han
+// never finds fewer, which keeps the query in.
 const SEPARATOR =
-  /[\s\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e\u2000-\u206f\u3000-\u3004\u3008-\u303f\uff00-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]/;
-const ASCII_WORD = /[0-9A-Za-z]/;
+  /[\s\x21-\x2f\x3a-\x40\x5b-\x5e\x60\x7b-\x7e\u2000-\u206f\u3000-\u3004\u3008-\u3020\u302a-\u3030\u3036\u3037\u303d-\u303f\uff00-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]/;
+const WORD = /[0-9A-Za-z_]/;
 
-function cost(char: string, run: string): { terms: number; run: string } {
+function cost(
+  char: string,
+  run: string,
+  pairs: boolean,
+): { terms: number; run: string } {
   if (SEPARATOR.test(char)) return { terms: 0, run: "" };
-  if (ASCII_WORD.test(char))
-    return { terms: run === "word" ? 0 : 1, run: "word" };
-  return { terms: run === "han" ? 2 : 1, run: "han" };
+  if (WORD.test(char)) return { terms: run === "word" ? 0 : 1, run: "word" };
+  return { terms: run === "han" && pairs ? 2 : 1, run: "han" };
 }
 
-// bound keeps text within limit terms: its start, and its end, where a long
-// sentence often says what it asks.
+// bound keeps a topic search within limit terms, the only kind of memory
+// that counts them: the text's start, and its end, where a long sentence
+// often says what it asks.
 function bound(text: string, limit: number): string {
+  const pairs = !modern();
   let head = 0;
   let used = 0;
   let run = "";
   for (; head < text.length; head++) {
-    const next = cost(text[head], run);
+    const next = cost(text[head], run, pairs);
     if (used + next.terms > Math.ceil(limit / 2)) break;
     used += next.terms;
     run = next.run;
   }
   let total = used;
   for (let index = head; index < text.length; index++) {
-    const next = cost(text[index], run);
+    const next = cost(text[index], run, pairs);
     total += next.terms;
     run = next.run;
   }
@@ -1551,7 +1584,7 @@ function bound(text: string, limit: number): string {
   let tail = text.length;
   run = "";
   for (let index = text.length - 1; index >= head; index--) {
-    const next = cost(text[index], run);
+    const next = cost(text[index], run, pairs);
     if (used + next.terms > limit) break;
     used += next.terms;
     run = next.run;
@@ -1629,22 +1662,18 @@ function searchMemory(
   );
   if (families.length === 0)
     return looked(text, text.searchOff, 0, "skipped", text.searchOff);
-  const terms = bound(query, MAX_QUERY_TERMS);
+  // 1.4 searches atomic memory by words alone unless asked for both.
+  const hybrid = modern();
   const batch: AstrLinkPlugin.HttpRequest[] = [];
   const searches = families.map((family) => {
     const path = "/v1/scopes/" + scope + "/artifacts/" + family + "/search";
-    const size =
-      family === "topic-memory" ? Math.min(limit, SEARCH_TOPICS) : limit;
+    const topics = family === "topic-memory";
+    const terms = topics ? bound(query, MAX_QUERY_TERMS) : query.trim();
+    const size = topics ? Math.min(limit, SEARCH_TOPICS) : limit;
+    const full: Record<string, unknown> = { query: terms, limit: size };
+    if (family === "atomic-memory" && hybrid) full.mode = "hybrid";
     const at =
-      batch.push(
-        request(
-          cfg,
-          "POST",
-          path,
-          { query: terms, limit: size },
-          SEARCH_TIMEOUT_MS,
-        ),
-      ) - 1;
+      batch.push(request(cfg, "POST", path, full, SEARCH_TIMEOUT_MS)) - 1;
     const wordsAt = TEXT_FALLBACK.includes(family)
       ? batch.push(
           request(

@@ -664,8 +664,8 @@ func (server *memoryServer) Fetch(_ context.Context, _ *plugin.Plugin, request p
 		return reply(200, `{"results":[{"family":"topic-memory","artifact_id":"t1","revision":1,"lineage":{},"content":{"title":"分页","summary":"改成游标","detail":"游标是 id。"}}]}`)
 	case strings.HasSuffix(path, "/search"):
 		return reply(200, `{"results":[]}`)
-	case strings.Contains(path, "/artifacts/profile"):
-		return reply(200, `{"items":[{"title":"约定","summary":"用中文沟通"}]}`)
+	case strings.HasSuffix(path, "/artifacts/profile/profile"):
+		return reply(200, `{"content":{"schema":"powercontext.profile.v1","media_type":"text/markdown","content":"- 约定：用中文沟通\n"}}`)
 	case strings.Contains(path, "/artifacts/topic-memory"):
 		return reply(200, `{"items":[{"title":"分页","summary":"改成游标","published_at":"2026-10-20T00:00:00Z"}]}`)
 	case path == "/v1/sources/content":
