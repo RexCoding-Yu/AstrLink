@@ -44,6 +44,20 @@ const triggers = new Set([
 
 type Pending = { kind: "refresh" | "pause" | "resume"; part: SessionPlugin };
 
+/**
+ * A turn the plugin had nothing for, as a session with its project has: the
+ * request's own record keeps it, the session's list leaves it out.
+ */
+function idle(entry: RequestPluginRecord): boolean {
+  return (
+    entry.hook === "prepareTurn" &&
+    entry.status === "ok" &&
+    !entry.summary &&
+    !entry.skipped_reason &&
+    !entry.injection
+  );
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   return `${(bytes / 1024).toFixed(1)} KiB`;
@@ -136,7 +150,7 @@ export function SessionMemory({
   const history = records
     .flatMap((record) =>
       (record.plugin_records ?? [])
-        .filter((entry) => keys.has(entry.plugin))
+        .filter((entry) => keys.has(entry.plugin) && !idle(entry))
         .map((entry) => ({ record, entry })),
     )
     .reverse();

@@ -85,6 +85,17 @@ const record = {
       trigger: "bound",
     },
     {
+      plugin: "powercontext",
+      plugin_version: "2.0.0",
+      hook: "prepareTurn",
+      title: "PowerContext 记忆",
+      status: "ok",
+      summary: "",
+      elapsed_ms: 1,
+      network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+      observe: "queued",
+    },
+    {
       plugin: "other",
       plugin_version: "1.0.0",
       hook: "observeTurn",
@@ -177,6 +188,8 @@ it("shows the project, how it was bound, and the block the session carries", asy
     "记忆装载 · 画像 · 主题 20 个 · 4.2 KB",
   );
   expect(memory?.textContent).not.toContain("别的插件");
+  // A turn the plugin had nothing for stays in the request's own record.
+  expect(memory?.textContent).not.toContain("PowerContext 记忆完成");
   const row = [...container.querySelectorAll("button")].find((item) =>
     item.textContent?.includes("记忆装载 · 画像"),
   );
