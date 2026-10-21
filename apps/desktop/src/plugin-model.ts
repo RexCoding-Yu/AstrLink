@@ -167,6 +167,63 @@ export interface PluginHostSettingsUpdate {
   language?: PluginLanguage;
 }
 
+/** The median and the slowest 5% of some durations, in milliseconds. */
+export interface PluginPercentiles {
+  p50: number;
+  p95: number;
+}
+
+/** What the prompt cache read of the input of some requests. */
+export interface PluginCacheShare {
+  requests: number;
+  input_tokens: number;
+  cache_read_tokens: number;
+}
+
+/** A plugin's account of one day, or of all of them. */
+export interface PluginDayStats {
+  /** YYYY-MM-DD in the gateway's time zone; the total has none. */
+  date?: string;
+  load: {
+    count: number;
+    by_trigger: Record<string, number>;
+    injected_bytes: number;
+    requests: number;
+    wait_ms?: PluginPercentiles;
+  };
+  lookup: {
+    ran: number;
+    refused: number;
+    counted: number;
+    with_hits: number;
+    ms?: PluginPercentiles;
+    sessions: number;
+    looking_up: number;
+  };
+  binding: {
+    workspace: number;
+    picked: number;
+    created: number;
+    declined: number;
+    unanswered: number;
+    changed: number;
+  };
+  write: { ok: number; failed: number };
+  problems: {
+    failed: number;
+    timeouts: number;
+    privacy: number;
+    over_budget: number;
+  };
+  cache: { with: PluginCacheShare; without: PluginCacheShare };
+}
+
+/** A plugin's account over its last days, from this computer's request records. */
+export interface PluginStats {
+  days: PluginDayStats[];
+  total: PluginDayStats;
+}
+
 /** What came of a click on a button of a plugin's record. */
 export interface PluginActionResult {
   status: "ok" | "failed";
@@ -771,6 +828,107 @@ export function parseSessionPlugins(value: unknown): SessionPlugin[] {
       lookup: plugin.optionalString(part.lookup, `${path}.lookup`),
     });
   });
+}
+
+function parsePercentiles(
+  value: unknown,
+  path: string,
+): PluginPercentiles | undefined {
+  if (value === undefined) return undefined;
+  const raw = plugin.object(value, path);
+  return {
+    p50: plugin.integer(raw.p50, `${path}.p50`),
+    p95: plugin.integer(raw.p95, `${path}.p95`),
+  };
+}
+
+function parseCacheShare(value: unknown, path: string): PluginCacheShare {
+  const raw = plugin.object(value, path);
+  return {
+    requests: plugin.integer(raw.requests, `${path}.requests`),
+    input_tokens: plugin.integer(raw.input_tokens, `${path}.input_tokens`),
+    cache_read_tokens: plugin.integer(
+      raw.cache_read_tokens,
+      `${path}.cache_read_tokens`,
+    ),
+  };
+}
+
+function parseDayStats(value: unknown, path: string): PluginDayStats {
+  const day = plugin.object(value, path);
+  const counts = <K extends string>(
+    raw: unknown,
+    at: string,
+    keys: readonly K[],
+  ): Record<K, number> => {
+    const object = plugin.object(raw, at);
+    return Object.fromEntries(
+      keys.map((key) => [key, plugin.integer(object[key], `${at}.${key}`)]),
+    ) as Record<K, number>;
+  };
+  const load = plugin.object(day.load, `${path}.load`);
+  const byTrigger = plugin.object(load.by_trigger, `${path}.load.by_trigger`);
+  const lookup = plugin.object(day.lookup, `${path}.lookup`);
+  const cache = plugin.object(day.cache, `${path}.cache`);
+  return defined({
+    date: plugin.optionalString(day.date, `${path}.date`),
+    load: defined({
+      count: plugin.integer(load.count, `${path}.load.count`),
+      by_trigger: Object.fromEntries(
+        Object.entries(byTrigger).map(([trigger, count]) => [
+          trigger,
+          plugin.integer(count, `${path}.load.by_trigger.${trigger}`),
+        ]),
+      ),
+      injected_bytes: plugin.integer(
+        load.injected_bytes,
+        `${path}.load.injected_bytes`,
+      ),
+      requests: plugin.integer(load.requests, `${path}.load.requests`),
+      wait_ms: parsePercentiles(load.wait_ms, `${path}.load.wait_ms`),
+    }),
+    lookup: defined({
+      ...counts(lookup, `${path}.lookup`, [
+        "ran",
+        "refused",
+        "counted",
+        "with_hits",
+        "sessions",
+        "looking_up",
+      ] as const),
+      ms: parsePercentiles(lookup.ms, `${path}.lookup.ms`),
+    }),
+    binding: counts(day.binding, `${path}.binding`, [
+      "workspace",
+      "picked",
+      "created",
+      "declined",
+      "unanswered",
+      "changed",
+    ] as const),
+    write: counts(day.write, `${path}.write`, ["ok", "failed"] as const),
+    problems: counts(day.problems, `${path}.problems`, [
+      "failed",
+      "timeouts",
+      "privacy",
+      "over_budget",
+    ] as const),
+    cache: {
+      with: parseCacheShare(cache.with, `${path}.cache.with`),
+      without: parseCacheShare(cache.without, `${path}.cache.without`),
+    },
+  });
+}
+
+/** Reads a plugin's account over its last days. */
+export function parsePluginStats(value: unknown): PluginStats {
+  const stats = plugin.object(value, "$");
+  return {
+    days: plugin
+      .array(stats.days, "$.days")
+      .map((day, index) => parseDayStats(day, `$.days[${index}]`)),
+    total: parseDayStats(stats.total, "$.total"),
+  };
 }
 
 /** Reads how many a clearing removed. */

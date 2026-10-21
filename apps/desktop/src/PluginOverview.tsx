@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/table";
 import { formatAgo } from "@/lib/format-ago";
 import { useT } from "./i18n";
+import { EffectCard } from "./PluginEffects";
 import {
   plaintextOrigin,
   settingValue,
@@ -28,6 +29,7 @@ import {
   type PluginCredit,
   type PluginDetail,
   type PluginHostStorage,
+  type PluginStats,
   type PluginStatus,
   type PluginTestResult,
 } from "./plugin-model";
@@ -72,9 +74,11 @@ export function PluginOverview({
   statusError,
   busy = false,
   onClear,
+  stats = null,
   now = new Date(),
 }: {
   detail: PluginDetail;
+  stats?: PluginStats | null;
   status: PluginStatus | null;
   statusError: string | null;
   busy?: boolean;
@@ -140,6 +144,7 @@ export function PluginOverview({
       {status?.bindings?.map((bindings) => (
         <BindingsCard bindings={bindings} key={bindings.key} now={now} />
       ))}
+      {stats ? <EffectCard detail={detail} stats={stats} /> : null}
       {describes && status === null && !statusError ? (
         <LoadingState label={t("plugins.loading")} />
       ) : null}

@@ -185,6 +185,7 @@ import {
   parsePluginDetail,
   parsePluginHostSettings,
   parsePluginList,
+  parsePluginStats,
   parsePluginStatus,
   parsePluginTestResult,
   parseSessionMetadata,
@@ -199,6 +200,7 @@ import {
   type PluginHostSettingsUpdate,
   type PluginList,
   type PluginSettingsUpdate,
+  type PluginStats,
   type PluginStatus,
   type PluginTestResult,
   type SessionMetadata,
@@ -1438,6 +1440,21 @@ export async function getPluginStatus(key: string): Promise<PluginStatus> {
   requireNativeBridge();
   return parsePluginStatus(
     await invoke<unknown>("plugin_action", { action: "status", key }),
+  );
+}
+
+/** A plugin's account over its last days, from this computer's request records. */
+export async function getPluginStats(
+  key: string,
+  days = 7,
+): Promise<PluginStats> {
+  requireNativeBridge();
+  return parsePluginStats(
+    await invoke<unknown>("plugin_action", {
+      action: "stats",
+      key,
+      input: { days },
+    }),
   );
 }
 

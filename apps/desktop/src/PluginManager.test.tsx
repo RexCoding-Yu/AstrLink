@@ -9,6 +9,7 @@ const bridgeMocks = vi.hoisted(() => ({
   reloadPlugins: vi.fn(),
   getPlugin: vi.fn(),
   getPluginStatus: vi.fn(),
+  getPluginStats: vi.fn(),
   updatePlugin: vi.fn(),
   testPlugin: vi.fn(),
   savePluginCredential: vi.fn(),
@@ -21,7 +22,12 @@ const bridgeMocks = vi.hoisted(() => ({
 vi.mock("./bridge", () => bridgeMocks);
 
 import { PluginManager } from "./PluginManager";
-import type { PluginDetail, PluginList } from "./plugin-model";
+import type {
+  PluginDayStats,
+  PluginDetail,
+  PluginList,
+  PluginStats,
+} from "./plugin-model";
 import {
   finishExitAnimations,
   installDialogAnimations,
@@ -210,6 +216,68 @@ const status = {
   ],
 };
 
+function day(date: string, change: Partial<PluginDayStats> = {}) {
+  const empty: PluginDayStats = {
+    date,
+    load: { count: 0, by_trigger: {}, injected_bytes: 0, requests: 0 },
+    lookup: {
+      ran: 0,
+      refused: 0,
+      counted: 0,
+      with_hits: 0,
+      sessions: 0,
+      looking_up: 0,
+    },
+    binding: {
+      workspace: 0,
+      picked: 0,
+      created: 0,
+      declined: 0,
+      unanswered: 0,
+      changed: 0,
+    },
+    write: { ok: 0, failed: 0 },
+    problems: { failed: 0, timeouts: 0, privacy: 0, over_budget: 0 },
+    cache: {
+      with: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
+      without: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
+    },
+  };
+  return { ...empty, ...change };
+}
+
+const busyDay = day("2026-10-21", {
+  load: {
+    count: 4,
+    by_trigger: { start: 2, bound: 1, compact: 1 },
+    injected_bytes: 61440,
+    requests: 12,
+    wait_ms: { p50: 310, p95: 1200 },
+  },
+  binding: {
+    workspace: 2,
+    picked: 1,
+    created: 1,
+    declined: 0,
+    unanswered: 1,
+    changed: 1,
+  },
+  write: { ok: 9, failed: 1 },
+  problems: { failed: 1, timeouts: 2, privacy: 0, over_budget: 0 },
+  cache: {
+    with: { requests: 10, input_tokens: 100000, cache_read_tokens: 82000 },
+    without: { requests: 5, input_tokens: 50000, cache_read_tokens: 30000 },
+  },
+});
+
+const stats: PluginStats = {
+  days: [
+    ...[15, 16, 17, 18, 19, 20].map((date) => day(`2026-10-${date}`)),
+    busyDay,
+  ],
+  total: { ...busyDay, date: undefined },
+};
+
 const list: PluginList = {
   directory: "/data/plugins",
   plugins: [
@@ -347,6 +415,7 @@ describe("PluginManager", () => {
           },
     );
     bridgeMocks.getPluginStatus.mockResolvedValue(status);
+    bridgeMocks.getPluginStats.mockResolvedValue(stats);
     bridgeMocks.getPluginHostSettings.mockResolvedValue({
       paused: false,
       injection_budget_bytes: 16384,
@@ -433,6 +502,23 @@ describe("PluginManager", () => {
     expect(
       document.querySelector('[data-testid="plugin-own-status"]')?.textContent,
     ).toContain("已整理成记忆");
+    // The last 7 days in numbers, with what the plugin has: no lookups
+    // here, so no line for them.
+    const effects = document.querySelector('[data-testid="plugin-effects"]');
+    expect(effects?.textContent).toContain(
+      "装载4 次 · 多带 60.0 KB（约 20,480 token） · 其中刷新 1 次 · 等待中位 310 ms，最慢 5% 1200 ms",
+    );
+    expect(effects?.textContent).toContain(
+      "工作区自动 2 · 选已有 1 · 新建 1 · 不纳入 0 · 没回答 1 · 自动绑定后改掉 1",
+    );
+    expect(effects?.textContent).toContain("写入9 条 · 失败 1");
+    expect(effects?.textContent).toContain(
+      "问题失败 1 · 超时 2 · 隐私拦截 0 · 超出预算 0",
+    );
+    expect(effects?.textContent).toContain(
+      "缓存命中开了记忆 82% · 其他会话 60%",
+    );
+    expect(effects?.textContent).not.toContain("查询");
     const credits = document.querySelector('[data-testid="plugin-credits"]');
     expect(credits?.textContent).toContain("OceanBase · Apache License 2.0");
     expect(credits?.textContent).toContain(
@@ -455,6 +541,59 @@ describe("PluginManager", () => {
       "启用后，新会话的前几轮会请模型询问项目。",
     );
     expect(about?.textContent).toContain("界面视图");
+  });
+
+  it("says when the last 7 days have no records, and shows lookups where there are", async () => {
+    bridgeMocks.getPluginStats.mockResolvedValueOnce({
+      days: [day("2026-10-21")],
+      total: day(""),
+    });
+    await render();
+    expect(
+      document.querySelector('[data-testid="plugin-effects"]')?.textContent,
+    ).toContain("最近 7 天还没有记录。");
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      tools: [{ name: "search", description: "检索本项目的记忆。" }],
+    });
+    bridgeMocks.getPluginStats.mockResolvedValueOnce({
+      ...stats,
+      total: {
+        ...stats.total,
+        lookup: {
+          ran: 8,
+          refused: 1,
+          counted: 8,
+          with_hits: 6,
+          ms: { p50: 640, p95: 2100 },
+          sessions: 5,
+          looking_up: 2,
+        },
+      },
+    });
+    bridgeMocks.reloadPlugins.mockResolvedValue(list);
+    await click(button("重新扫描"));
+    expect(
+      document.querySelector('[data-testid="plugin-effects"]')?.textContent,
+    ).toContain(
+      "查询8 次 · 有结果 75% · 5 个会话里 2 个查过 · 耗时中位 640 ms · 拒绝 1 次",
+    );
+  });
+
+  it("lists the account day by day on the status page, today first", async () => {
+    await render();
+    await openTab("运行状态");
+    const daily = document.querySelector(
+      '[data-testid="plugin-daily-effects"]',
+    );
+    const rows = daily?.querySelectorAll("tbody tr") ?? [];
+    expect(rows).toHaveLength(7);
+    expect(rows[0]?.textContent).toContain("2026-10-21");
+    expect(rows[0]?.textContent).toContain("60.0 KB");
+    expect(rows[0]?.textContent).toContain("9（失败 1）");
+    expect(rows[0]?.textContent).toContain("82% / 60%");
+    expect(rows[6]?.textContent).toContain("2026-10-15");
+    expect(daily?.querySelector("thead")?.textContent).not.toContain("查询");
   });
 
   it("grants only the capabilities left ticked when enabling", async () => {

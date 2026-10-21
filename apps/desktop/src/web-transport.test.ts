@@ -256,6 +256,13 @@ describe("web command transport", () => {
     ],
     [
       "plugin_action",
+      { action: "stats", key: "powercontext", input: { days: 7 } },
+      "GET",
+      "/control/v1/plugins/powercontext/stats?days=7",
+      undefined,
+    ],
+    [
+      "plugin_action",
       { action: "revoke_lookups", key: "powercontext" },
       "DELETE",
       "/control/v1/plugins/powercontext/lookup-credentials",

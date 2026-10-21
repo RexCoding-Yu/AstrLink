@@ -12,6 +12,7 @@ import {
   parsePluginStatus,
   parsePluginTestResult,
   parsePluginView,
+  parsePluginStats,
   parseRequestPluginRecords,
   parseSessionMetadata,
   parseSessionPlugins,
@@ -267,6 +268,54 @@ describe("plugin model", () => {
     });
     expect(metadata.choices).toEqual({ project: ["astrlink", "paseo"] });
     expect(parseSessionMetadata({ values: {} })).toEqual({ values: {} });
+  });
+
+  it("reads a plugin's account day by day", () => {
+    const day = {
+      date: "2026-10-21",
+      load: {
+        count: 2,
+        by_trigger: { start: 1, compact: 1 },
+        injected_bytes: 8192,
+        requests: 5,
+        wait_ms: { p50: 300, p95: 900 },
+      },
+      lookup: {
+        ran: 3,
+        refused: 1,
+        counted: 3,
+        with_hits: 2,
+        sessions: 2,
+        looking_up: 1,
+      },
+      binding: {
+        workspace: 1,
+        picked: 0,
+        created: 1,
+        declined: 0,
+        unanswered: 0,
+        changed: 0,
+      },
+      write: { ok: 4, failed: 0 },
+      problems: { failed: 0, timeouts: 1, privacy: 0, over_budget: 0 },
+      cache: {
+        with: { requests: 4, input_tokens: 4000, cache_read_tokens: 3000 },
+        without: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
+      },
+    };
+    const stats = parsePluginStats({
+      days: [day],
+      total: { ...day, date: undefined },
+    });
+    expect(stats.days[0]).toEqual(day);
+    expect(stats.total.date).toBeUndefined();
+    expect(stats.total.lookup.ms).toBeUndefined();
+    expect(() =>
+      parsePluginStats({
+        days: [],
+        total: { ...day, write: { ok: -1, failed: 0 } },
+      }),
+    ).toThrow("$.total.write.ok");
   });
 
   it("reads a lookup by its size and the lookups a block offered", () => {

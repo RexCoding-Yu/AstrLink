@@ -3494,6 +3494,16 @@ fn plugin_request(
         ),
         "test" => (Method::POST, format!("{plugin}/test"), None),
         "status" => (Method::GET, format!("{plugin}/status"), None),
+        // The plugin's account over its last 1 to 30 days.
+        "stats" => {
+            let days = input
+                .as_ref()
+                .and_then(|input| input.get("days"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|days| (1..=30).contains(days))
+                .ok_or("the days of the statistics are 1 to 30")?;
+            (Method::GET, format!("{plugin}/stats?days={days}"), None)
+        }
         "action" => (
             Method::POST,
             format!("{plugin}/actions"),
@@ -6905,6 +6915,26 @@ mod tests {
                 None
             )
         );
+        assert_eq!(
+            plugin_request(
+                "stats",
+                Some("powercontext"),
+                None,
+                Some(serde_json::json!({ "days": 7 }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/powercontext/stats?days=7".into(),
+                None
+            )
+        );
+        for days in [
+            serde_json::json!({ "days": 0 }),
+            serde_json::json!({ "days": 31 }),
+        ] {
+            assert!(plugin_request("stats", Some("powercontext"), None, Some(days)).is_err());
+        }
         assert_eq!(
             plugin_request("host", None, None, None).unwrap(),
             (Method::GET, "/control/v1/plugin-host".into(), None)

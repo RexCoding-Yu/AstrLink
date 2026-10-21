@@ -31,6 +31,7 @@ import {
   deletePluginCredential,
   getPlugin,
   getPluginHostSettings,
+  getPluginStats,
   getPluginStatus,
   listPlugins,
   reloadPlugins,
@@ -54,9 +55,11 @@ import {
   type PluginList,
   type PluginLoadError,
   type PluginSettingsUpdate,
+  type PluginStats,
   type PluginStatus,
   type PluginSummary,
 } from "./plugin-model";
+import { DailyEffects } from "./PluginEffects";
 
 type Translate = ReturnType<typeof useT>;
 type DetailTab = "overview" | "settings" | "status";
@@ -133,6 +136,7 @@ export function PluginManager({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [status, setStatus] = useState<PluginStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [stats, setStats] = useState<PluginStats | null>(null);
   const [tab, setTab] = useState<DetailTab>("overview");
   const [testing, setTesting] = useState(false);
   // Every detail Core sends starts the settings form afresh.
@@ -213,6 +217,11 @@ export function PluginManager({
 
   const loadStatus = useCallback(
     async (key: string) => {
+      // The account is numbers from the request records: without it the
+      // overview and the status page just leave it out.
+      void getPluginStats(key)
+        .then(setStats)
+        .catch(() => setStats(null));
       try {
         setStatus(await getPluginStatus(key));
         setStatusError(null);
@@ -226,6 +235,7 @@ export function PluginManager({
   useEffect(() => {
     setDetail(null);
     setStatus(null);
+    setStats(null);
     setActionError(null);
     setTab("overview");
     if (!selectedKey) return;
@@ -492,6 +502,7 @@ export function PluginManager({
                 onTab={setTab}
                 onTest={() => void runTest(detail.key)}
                 revision={revision}
+                stats={stats}
                 status={status}
                 statusError={statusError}
                 tab={tab}
@@ -659,6 +670,7 @@ function PluginHostControls({
 
 function PluginDetailPane({
   detail,
+  stats,
   status,
   statusError,
   testing,
@@ -678,6 +690,7 @@ function PluginDetailPane({
   onClearData,
 }: {
   detail: PluginDetail;
+  stats: PluginStats | null;
   status: PluginStatus | null;
   statusError: string | null;
   testing: boolean;
@@ -816,6 +829,7 @@ function PluginDetailPane({
               busy={busy}
               detail={detail}
               onClear={onClearData}
+              stats={stats}
               status={status}
               statusError={statusError}
             />
@@ -839,7 +853,12 @@ function PluginDetailPane({
             data-tab-scroller
             value="status"
           >
-            <StatusTab status={status} statusError={statusError} />
+            <StatusTab
+              detail={detail}
+              stats={stats}
+              status={status}
+              statusError={statusError}
+            />
           </TabsContent>
         </Tabs>
       )}
@@ -896,9 +915,13 @@ function AboutPlugin({ detail }: { detail: PluginDetail }) {
 }
 
 function StatusTab({
+  detail,
+  stats,
   status,
   statusError,
 }: {
+  detail: PluginDetail;
+  stats: PluginStats | null;
   status: PluginStatus | null;
   statusError: string | null;
 }) {
@@ -946,6 +969,7 @@ function StatusTab({
           </ul>
         </section>
       ) : null}
+      {stats ? <DailyEffects detail={detail} stats={stats} /> : null}
     </div>
   );
 }
