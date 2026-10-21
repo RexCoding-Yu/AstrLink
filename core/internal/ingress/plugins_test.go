@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/metadata"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
+	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
 	"github.com/tidwall/gjson"
@@ -254,7 +256,7 @@ export function callTool(view) {
 }
 `
 
-func newLookupGateway(t *testing.T) *pluginGateway {
+func newLookupGateway(t *testing.T, filters ...privacy.Filter) *pluginGateway {
 	t.Helper()
 	ctx := context.Background()
 	bindings, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "astrlink.db"))
@@ -279,7 +281,7 @@ func newLookupGateway(t *testing.T) *pluginGateway {
 	host := pluginhost.New(pluginhost.Options{Plugins: manager, Metadata: registry, Bindings: bindings, Logf: t.Logf})
 	t.Cleanup(host.Close)
 	gateway := &pluginGateway{t: t, store: &memoryRequestRecordStore{}, path: "/v1/messages", header: http.Header{}}
-	gateway.handler = NewWithDependencies(Dependencies{
+	dependencies := Dependencies{
 		Resolver: candidateResolver{candidates: []endpoint.Resolved{{
 			Endpoint: validEndpoint(contract.ProtocolAnthropicMessages, false), UpstreamModel: "upstream-model",
 		}}},
@@ -297,7 +299,11 @@ func newLookupGateway(t *testing.T) *pluginGateway {
 			_, err := writer.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
 			return err
 		}),
-	})
+	}
+	if len(filters) > 0 {
+		dependencies.PrivacyFilter = filters[0]
+	}
+	gateway.handler = NewWithDependencies(dependencies)
 	return gateway
 }
 
@@ -372,5 +378,42 @@ func TestTheLookupOutletAnswersAShellOnThisMachineOnly(t *testing.T) {
 		if answer := lookup(test.method, test.target, test.payload, test.edit); answer.Code != test.code {
 			t.Fatalf("%s = %d %q, want %d", name, answer.Code, answer.Body.String(), test.code)
 		}
+	}
+}
+
+func TestALookupAsksWithThePlaceholderTheUpstreamGot(t *testing.T) {
+	filter := testPrivacyEngine(t, privacy.Policy{Enabled: true, Mode: privacy.ModeRegex, Action: privacy.ActionRedact}, nil)
+	gateway := newLookupGateway(t, filter)
+	body := `{"model":"claude","max_tokens":16,"tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
+		`"metadata":{"user_id":"user_` + strings.Repeat("a", 64) + `_account_00000000-0000-0000-0000-000000000001_session_11111111-2222-3333-4444-555555555555"},` +
+		`"messages":[{"role":"user","content":"给 alice@example.com 发分页的说明"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:4000"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(contract.MetadataHeader("project"), "astrlink")
+	recorder := httptest.NewRecorder()
+	gateway.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	gateway.mutex.Lock()
+	sent := gateway.sent[len(gateway.sent)-1]
+	gateway.mutex.Unlock()
+	placeholder := emailPlaceholderFromBody(t, sent)
+	system := gjson.GetBytes(sent, "system").String()
+	at := strings.Index(system, "mk-")
+	if at < 0 {
+		t.Fatalf("no credential in %s", system)
+	}
+	lookup := httptest.NewRequest(http.MethodGet, "/tools/finder/search?query="+url.QueryEscape("alice@example.com 的分页"), nil)
+	lookup.RemoteAddr = "127.0.0.1:5000"
+	lookup.Header.Set("Authorization", "Bearer "+system[at:at+35])
+	answer := httptest.NewRecorder()
+	gateway.handler.ServeHTTP(answer, lookup)
+	// The plugin is asked what the upstream was sent, so the memory it wrote
+	// with that placeholder is found.
+	if answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), "found "+placeholder+" 的分页 in astrlink") ||
+		strings.Contains(answer.Body.String(), "alice@example.com") {
+		t.Fatalf("lookup = %d %q, want the placeholder %s", answer.Code, answer.Body.String(), placeholder)
 	}
 }
