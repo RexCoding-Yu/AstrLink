@@ -146,30 +146,60 @@ function ClassifierAnswers({ result }: { result: ClassifierDryRunResult }) {
       <h3 className="text-xs font-medium text-text-secondary">
         {t("dryRunTab.classifierTitle")}
       </h3>
-      <RoutingAnswerList
-        taskType={result.category}
-        confidence={result.confidence}
-        lowConfidence={lowConfidence}
-        dimensions={result.dimensions}
-      />
-      {result.fallback_reason === null ? null : (
-        <p
-          className="text-xs text-warning-foreground"
-          data-classifier-dry-run-fallback
-        >
-          {t("dryRunTab.fallbackLine", {
-            reason: modelRoutingCodeLabel(result.fallback_reason),
-          })}
-          <span className="ml-1.5 font-mono text-micro text-muted-foreground">
-            {result.fallback_reason}
-          </span>
-        </p>
+      {!result.configured ? (
+        // Without a classifier set up nothing was asked; one line says so
+        // instead of a list of answers that are all unknown.
+        <FormMessage tone="notice" data-classifier-dry-run-not-called>
+          {t("dryRunTab.notConfigured")}
+        </FormMessage>
+      ) : (
+        <>
+          <RoutingAnswerList
+            taskType={result.category}
+            confidence={result.confidence}
+            lowConfidence={lowConfidence}
+            dimensions={result.dimensions}
+          />
+          {result.fallback_reason === "classifier_timeout" ? (
+            // A timeout names the limit the classifier settings set, so the
+            // preview reads as the error it is rather than a generic fallback.
+            <FormMessage tone="error" data-classifier-dry-run-timeout>
+              {t("dryRunTab.classifierTimeout", {
+                ms: result.timeout_ms ?? result.duration_ms,
+              })}
+            </FormMessage>
+          ) : result.fallback_reason === null ? null : (
+            <p
+              className="text-xs text-warning-foreground"
+              data-classifier-dry-run-fallback
+            >
+              {t("dryRunTab.fallbackLine", {
+                reason: modelRoutingCodeLabel(result.fallback_reason),
+              })}
+              <span className="ml-1.5 font-mono text-micro text-muted-foreground">
+                {result.fallback_reason}
+              </span>
+            </p>
+          )}
+        </>
       )}
       {withCandidates.length === 0 ? null : (
         <HelpDisclosure title={t("dryRunTab.candidates")}>
           {withCandidates.map((field) => (
             <CandidateTable key={field.field} field={field} />
           ))}
+        </HelpDisclosure>
+      )}
+      {result.instruction === null ? null : (
+        // What the classifier was told, placeholders rendered, so what the
+        // prompt says can be checked against what was sent.
+        <HelpDisclosure title={t("dryRunTab.instruction")}>
+          <pre
+            className="m-0 max-h-60 overflow-auto rounded-sm border border-border bg-muted p-2 text-xs break-words whitespace-pre-wrap text-foreground"
+            data-classifier-dry-run-instruction
+          >
+            {result.instruction}
+          </pre>
         </HelpDisclosure>
       )}
       {result.sanitized_preview === "" ? null : (
@@ -274,24 +304,23 @@ function outcomeText(
   const { result, group, groupId } = run;
   const decision = result.decision;
   if (decision === null) {
-    // The handler returns before judging any rule when the classifier is not
-    // set up or the privacy check stops the text; neither is "group missing".
+    // The handler returns before judging any rule when the privacy check stops
+    // the text, which is not "group missing". A missing classifier does not:
+    // the rules are judged without it.
     return {
       judged: false,
-      text: !result.configured
-        ? i18n.t("dryRunTab.notConfigured")
-        : result.fallback_reason?.startsWith("privacy_")
-          ? i18n.t("dryRunTab.privacyStopped", {
-              reason: modelRoutingCodeLabel(result.fallback_reason),
-            })
-          : i18n.t("dryRunTab.groupMissing", {
-              group: modelRoutingPublicModelID(groupId),
-            }),
+      text: result.fallback_reason?.startsWith("privacy_")
+        ? i18n.t("dryRunTab.privacyStopped", {
+            reason: modelRoutingCodeLabel(result.fallback_reason),
+          })
+        : i18n.t("dryRunTab.groupMissing", {
+            group: modelRoutingPublicModelID(groupId),
+          }),
     };
   }
   const provider =
     services.find((service) => service.id === decision.service_id)?.name ??
-    decision.service_id;
+    i18n.t("binding.removedService");
   const ruleIndex =
     decision.rule_id === null
       ? -1
@@ -306,10 +335,9 @@ function outcomeText(
             provider,
             index: ruleIndex + 1,
           })
-        : i18n.t("dryRunTab.outcomeRuleId", {
+        : i18n.t("dryRunTab.outcomeUnlistedRule", {
             model: decision.model,
             provider,
-            rule: decision.rule_id ?? "",
           }),
   };
 }
@@ -393,8 +421,10 @@ function TriState({
  * Classifier testing and routing testing live here together: the classifier's
  * answers are what the rules read, so one run shows both.
  *
- * It never issues a real upstream inference request. It does call the
- * classifier for real, once per run.
+ * The text never goes on to a routed model. It does call the classifier for
+ * real, once per run — the cloud service, or the existing model the classifier
+ * settings name; without one the rules are judged with every classifier field
+ * unknown.
  */
 export function ClassifierDryRunPanel({
   ready,
@@ -648,14 +678,15 @@ export function ClassifierDryRunPanel({
                     </Button>
                   </PopoverTrigger>
                   <PopoverContent className="grid w-80 gap-3 text-xs">
-                    <div className="grid gap-0.5">
-                      <p className="text-sm font-medium">
-                        {t("dryRunTab.factsTitle")}
-                      </p>
-                      <p className="text-micro text-muted-foreground">
-                        {t("dryRunTab.factsHint")}
-                      </p>
-                    </div>
+                    <p className="flex items-center gap-1 text-sm font-medium">
+                      {t("dryRunTab.factsTitle")}
+                      <HelpPopover label={t("dryRunTab.factsTitle")}>
+                        <span className="grid gap-1.5">
+                          <span>{t("dryRunTab.factsHint")}</span>
+                          <span>{t("dryRunTab.factsUnavailable")}</span>
+                        </span>
+                      </HelpPopover>
+                    </p>
                     <Field label={t("dryRunTab.protocol")}>
                       <Select
                         value={protocol === "" ? unknownFact : protocol}
@@ -700,11 +731,16 @@ export function ClassifierDryRunPanel({
                           <SelectItem value={unknownFact}>
                             {t("classifier.dryRun.mediaKindUnknown")}
                           </SelectItem>
-                          {modelRoutingMediaKinds.map((value) => (
-                            <SelectItem key={value} value={value}>
-                              {modelRoutingFieldValueLabel("media_kind", value)}
-                            </SelectItem>
-                          ))}
+                          {modelRoutingMediaKinds
+                            .filter((value) => value !== "unknown")
+                            .map((value) => (
+                              <SelectItem key={value} value={value}>
+                                {modelRoutingFieldValueLabel(
+                                  "media_kind",
+                                  value,
+                                )}
+                              </SelectItem>
+                            ))}
                         </SelectContent>
                       </Select>
                     </Field>
@@ -745,9 +781,6 @@ export function ClassifierDryRunPanel({
                         )}
                       </span>
                     </Field>
-                    <p className="text-micro text-muted-foreground">
-                      {t("dryRunTab.factsUnavailable")}
-                    </p>
                   </PopoverContent>
                 </Popover>
                 <Select
@@ -856,18 +889,23 @@ export function ClassifierDryRunPanel({
           <PanelHeader
             className="shrink-0 items-center px-3 py-2"
             actions={
-              <>
-                {state.status === "done" ? (
-                  <span className="text-xs text-muted-foreground tabular-nums">
-                    {t("dryRunTab.durationMs", {
-                      ms: state.run.result.duration_ms,
-                    })}
-                  </span>
-                ) : null}
-                <Badge variant="secondary">
-                  {t("dryRunTab.callsClassifier")}
-                </Badge>
-              </>
+              // A run that called no classifier has no duration to show, and
+              // the badge would claim a call that did not happen.
+              state.status === "done" &&
+              state.run.result.timeout_ms === null ? null : (
+                <>
+                  {state.status === "done" ? (
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {t("dryRunTab.durationMs", {
+                        ms: state.run.result.duration_ms,
+                      })}
+                    </span>
+                  ) : null}
+                  <Badge variant="secondary">
+                    {t("dryRunTab.callsClassifier")}
+                  </Badge>
+                </>
+              )
             }
           >
             <h2 className="text-sm font-semibold">

@@ -9,7 +9,6 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 // fakeSync is the sync engine as the API surface sees it, recording what a
@@ -66,7 +65,7 @@ func (f *fakeSync) Sync(context.Context) (contract.SyncStatus, error) {
 
 func newSyncHandler(t *testing.T, manager SyncManager) *Handler {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}
@@ -154,6 +153,33 @@ func TestSyncConfigWriteRefusesUnknownFields(t *testing.T) {
 	}
 	if manager.configured != 0 {
 		t.Fatal("a refused body reached the engine")
+	}
+}
+
+// The one-shot force push is part of the configuration the settings surface
+// saves and reads back, so it has to survive the round trip through the API.
+func TestSyncConfigCarriesTheOneShotForcePush(t *testing.T) {
+	manager := &fakeSync{}
+	handler := newSyncHandler(t, manager)
+	response := controlRequest(t, handler, http.MethodPut, SyncPath+"/config", "application/json",
+		`{"enabled":true,"force_push":true,"trigger":{"mode":"manual"},`+
+			`"scope":{"services":true,"credentials":true,"policies":true,"pricing":true},`+
+			`"remote":{"kind":"webdav","endpoint":"https://dav.example"}}`, "")
+	if response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	if !manager.config.ForcePush {
+		t.Fatal("the armed force push did not reach the engine")
+	}
+	if !strings.Contains(response.Body.String(), `"force_push":true`) {
+		t.Fatal(response.Body.String())
+	}
+
+	// A device that never armed one leaves the field out entirely.
+	manager.config.ForcePush = false
+	read := controlRequest(t, handler, http.MethodGet, SyncPath+"/config", "", "", "")
+	if strings.Contains(read.Body.String(), "force_push") {
+		t.Fatal(read.Body.String())
 	}
 }
 

@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 // Legacy installation migration and ordinary startup filesystem work can still
 // take longer on slow disks even though model weights are verified lazily.
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(180);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const STOP_POLL_DELAY: Duration = Duration::from_millis(25);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,6 +34,11 @@ const SERVICE_MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 // Policy changes may synchronously stop a worker for up to five seconds, and
 // model deletion also waits for download cancellation and filesystem cleanup.
 const PRIVACY_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
+// Core ends a classifier dry-run at the classifier timeout plus five seconds
+// and answers dry_run_timeout. The timeout is at most five seconds for the
+// cloud classifier and sixty for an existing model, so this deadline only
+// catches a Core that never answers.
+const CLASSIFIER_DRY_RUN_TIMEOUT: Duration = Duration::from_secs(70);
 // Probe and install may pin a large tokenizer/configuration set over a slow
 // connection. The installation call returns before model-weight downloading.
 const PRIVACY_MODEL_METADATA_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -60,6 +65,7 @@ const PRIVACY_MODEL_PROBE_PATH: &str = "/control/v1/privacy-models/probe";
 const LOCAL_PRIVACY_MODEL_PROBE_PATH: &str = "/control/v1/privacy-models/local/probe";
 const PRIVACY_REGEX_BUILTIN_RULES_PATH: &str = "/control/v1/privacy/regex-builtin-rules";
 const POLICY_DRY_RUN_PATH: &str = "/control/v1/policies/policy_privacy_default/dry-run";
+const CLASSIFIER_DRY_RUN_PATH: &str = "/control/v1/routing/classifier/dry-run";
 const SERVICES_PATH: &str = "/control/v1/services";
 const SERVICE_MODEL_PROBES_PATH: &str = "/control/v1/service-model-probes";
 const SERVICE_PROXY_PROBES_PATH: &str = "/control/v1/service-proxy-probes";
@@ -2194,6 +2200,29 @@ impl CoreManager {
         let base = "/control/v1/pricing";
         let (method, path, body) = match operation {
             "status" | "catalog" => (Method::GET, format!("{base}/{operation}"), None),
+            // The official model behind a gateway model; null when unknown.
+            "model" => {
+                let model = input
+                    .as_ref()
+                    .and_then(|value| value.get("model"))
+                    .and_then(|value| value.as_str())
+                    .ok_or("model is required")?;
+                let path = format!(
+                    "/control/v1/model-metadata?model={}",
+                    percent_encode_query(model)
+                );
+                let (status, body) = self
+                    .authenticated_control_status(Method::GET, &path, None, None)
+                    .await?;
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    return Ok(serde_json::Value::Null);
+                }
+                if !status.is_success() {
+                    return Err(control_status_error(&Method::GET, &path, status, &body));
+                }
+                return serde_json::from_slice(&body)
+                    .map_err(|_| "model metadata returned invalid JSON".into());
+            }
             "sync" => (Method::POST, format!("{base}/sync"), None),
             "report" | "configure" | "backfill" => {
                 let id = service_id.ok_or("service ID is required")?;
@@ -2235,6 +2264,32 @@ impl CoreManager {
             .authenticated_control(method, &path, body, None)
             .await?;
         serde_json::from_slice(&body).map_err(|_| "pricing returned invalid JSON".into())
+    }
+
+    /// The reasoning levels of the official model a gateway model reaches,
+    /// or `None` when LLM Metadata does not list it as reasoning.
+    pub async fn official_reasoning(&self, model: &str) -> Result<Option<Vec<String>>, String> {
+        #[derive(Deserialize)]
+        struct ModelMetadata {
+            reasoning: bool,
+            reasoning_levels: Vec<String>,
+        }
+        let path = format!(
+            "/control/v1/model-metadata?model={}",
+            percent_encode_query(model)
+        );
+        let (status, body) = self
+            .authenticated_control_status(Method::GET, &path, None, None)
+            .await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(control_status_error(&Method::GET, &path, status, &body));
+        }
+        serde_json::from_slice::<ModelMetadata>(&body)
+            .map(|model| model.reasoning.then_some(model.reasoning_levels))
+            .map_err(|_| "model metadata returned invalid JSON".into())
     }
 
     /// Configuration sync. `configure` stores the settings, `passphrase` sets
@@ -2766,19 +2821,19 @@ impl CoreManager {
     /// sibling resource instead — the same one `get_classifier_settings`
     /// already exposes, through the same authenticated control channel.
     ///
-    /// This lookup is deliberately best-effort, and that is the point. An
-    /// empty list means "no custom dimensions", which is exactly the
-    /// built-in-only table the validator applied before dimensions existed. A
-    /// classifier-settings read that fails, is malformed, or races Core's
-    /// readiness therefore degrades to the previous behaviour rather than
-    /// inventing a new way to reject a routing document. Being unable to
+    /// This lookup is deliberately best-effort, and that is the point. A
+    /// classifier-settings read that fails or races Core's readiness answers
+    /// `None`, and the validator then leaves every name outside the built-in
+    /// table to Core instead of refusing it: Core stored the document against
+    /// the dimensions it holds, and an empty list here would reject every rule
+    /// naming one and keep the routing page from loading. Being unable to
     /// resolve dimensions must never be able to reject a document Core would
     /// accept, so this function never returns an error.
-    async fn known_classifier_dimensions(&self) -> Vec<String> {
-        match self.get_classifier_settings().await {
-            Ok(settings) => classifier_dimension_names(&settings),
-            Err(_) => Vec::new(),
-        }
+    async fn known_classifier_dimensions(&self) -> Option<Vec<String>> {
+        self.get_classifier_settings()
+            .await
+            .ok()
+            .map(|settings| classifier_dimension_names(&settings))
     }
 
     pub async fn get_routing_settings(&self) -> Result<serde_json::Value, String> {
@@ -2787,7 +2842,11 @@ impl CoreManager {
             .await?;
         let value = serde_json::from_slice(&body)
             .map_err(|error| format!("invalid routing settings: {error}"))?;
-        validate_routing_settings(&value, false, &self.known_classifier_dimensions().await)?;
+        validate_routing_settings(
+            &value,
+            false,
+            self.known_classifier_dimensions().await.as_deref(),
+        )?;
         Ok(value)
     }
 
@@ -2797,9 +2856,15 @@ impl CoreManager {
     ) -> Result<serde_json::Value, String> {
         // Fetched once and reused: dimensions belong to the classifier
         // settings, so this PATCH cannot change them between the precheck and
-        // the response validation below.
-        let known_dimensions = self.known_classifier_dimensions().await;
-        validate_routing_settings(&patch, true, &known_dimensions)?;
+        // the response validation below. Only a patch carrying groups needs
+        // them; any other leaves the stored groups, which Core validated, to
+        // Core.
+        let known_dimensions = if patch.get("model_routing_groups").is_some() {
+            self.known_classifier_dimensions().await
+        } else {
+            None
+        };
+        validate_routing_settings(&patch, true, known_dimensions.as_deref())?;
         let (_, body) = self
             .authenticated_control(
                 Method::PATCH,
@@ -2810,7 +2875,7 @@ impl CoreManager {
             .await?;
         let value = serde_json::from_slice(&body)
             .map_err(|error| format!("invalid routing settings: {error}"))?;
-        validate_routing_settings(&value, false, &known_dimensions)?;
+        validate_routing_settings(&value, false, known_dimensions.as_deref())?;
         Ok(value)
     }
 
@@ -2914,12 +2979,7 @@ impl CoreManager {
             }
         }
         let (_, body) = self
-            .authenticated_control(
-                Method::POST,
-                "/control/v1/routing/classifier/dry-run",
-                Some(input),
-                None,
-            )
+            .authenticated_control(Method::POST, CLASSIFIER_DRY_RUN_PATH, Some(input), None)
             .await?;
         serde_json::from_slice(&body)
             .map_err(|error| format!("invalid classifier dry-run response: {error}"))
@@ -3057,6 +3117,7 @@ impl CoreManager {
                 Err(error) => {
                     if attempt == 0
                         && !is_builtin_tool_test(&method, path)
+                        && !is_classifier_dry_run(&method, path)
                         && !crate::raw_access::is_proof_request(&method, path)
                         && is_control_transport_error(&error)
                     {
@@ -3482,6 +3543,13 @@ fn session_metadata_request(
     ))
 }
 
+/// A classifier dry-run makes one real classifier call, and Core runs one at a
+/// time. Sending it again after a wait timed out only meets the first run still
+/// holding that slot, which Core answers with `dry_run_busy`.
+fn is_classifier_dry_run(method: &Method, path: &str) -> bool {
+    *method == Method::POST && control_path(path) == CLASSIFIER_DRY_RUN_PATH
+}
+
 /// Translates a sync operation into the control request it makes. Kept apart
 /// from the request itself so the mapping is testable without a running Core.
 fn sync_request(
@@ -3570,6 +3638,9 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     }
     if method == Method::POST && path == POLICY_DRY_RUN_PATH {
         return PRIVACY_MUTATION_TIMEOUT;
+    }
+    if is_classifier_dry_run(method, path) {
+        return CLASSIFIER_DRY_RUN_TIMEOUT;
     }
     if (method == Method::PATCH && path == "/control/v1/policies/policy_privacy_default")
         || (method == Method::DELETE && path.starts_with("/control/v1/privacy-models/"))
@@ -4601,7 +4672,7 @@ fn validate_privacy_model_variants(value: &serde_json::Value) -> Result<(), Stri
         }
         let supported = variant["supported"].as_bool().expect("validated boolean");
         let reason = match variant["unsupported_reason"].as_str() {
-            Some("cpu_only") => Some("cpu_only"),
+            Some(reason @ ("cpu_only" | "requires_macos_26")) => Some(reason),
             None if variant["unsupported_reason"].is_null() => None,
             _ => return Err("privacy model variant unsupported_reason is invalid".to_string()),
         };
@@ -4639,6 +4710,7 @@ fn validate_privacy_model_installation(installation: &serde_json::Value) -> Resu
             "error",
             "label_mapping",
             "installed_at",
+            "preparation",
         ],
         "privacy model installation",
     )?;
@@ -4753,7 +4825,31 @@ fn validate_privacy_model_installation(installation: &serde_json::Value) -> Resu
             return Err("privacy model installation lifecycle fields are inconsistent".to_string())
         }
     }
+    if status != "ready" && !object["preparation"].is_null() {
+        return Err(
+            "privacy model installation preparation needs a ready installation".to_string(),
+        );
+    }
+    validate_privacy_model_preparation(&object["preparation"])?;
     validate_label_mapping(&object["label_mapping"])
+}
+
+/// Core prepares the policy's Core ML model ahead of requests; `fallback`
+/// names the previous detector that inspects requests until it is ready.
+fn validate_privacy_model_preparation(value: &serde_json::Value) -> Result<(), String> {
+    if value.is_null() {
+        return Ok(());
+    }
+    validate_exact_object_keys(value, &["state", "fallback"], "privacy model preparation")?;
+    let fallback = match value["fallback"].as_str() {
+        Some(kind @ ("local_model" | "regex")) => Some(kind),
+        None if value["fallback"].is_null() => None,
+        _ => return Err("privacy model preparation fallback is invalid".to_string()),
+    };
+    match (value["state"].as_str(), fallback) {
+        (Some("preparing" | "failed"), _) | (Some("ready"), None) => Ok(()),
+        _ => Err("privacy model preparation state is invalid".to_string()),
+    }
 }
 
 fn validate_label_mapping(value: &serde_json::Value) -> Result<(), String> {
@@ -5459,6 +5555,7 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
     let mut protocol: Option<&str> = None;
     let mut service_id: Option<&str> = None;
     let mut local_access_token_ids: Vec<&str> = Vec::new();
+    let mut models: Vec<&str> = Vec::new();
     let mut status: Option<&str> = None;
 
     for (key, value) in object {
@@ -5542,6 +5639,26 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
                     local_access_token_ids.push(text);
                 }
             }
+            "models" => {
+                let values = value.as_array().ok_or_else(|| {
+                    "request record query models must be an array of strings".to_string()
+                })?;
+                if values.len() > 100 {
+                    return Err("request record query models has too many entries".to_string());
+                }
+                for value in values {
+                    let text = value.as_str().ok_or_else(|| {
+                        "request record query models must be an array of strings".to_string()
+                    })?;
+                    if text.is_empty()
+                        || text.chars().count() > 256
+                        || text.chars().any(char::is_control)
+                    {
+                        return Err("request record query model is invalid".to_string());
+                    }
+                    models.push(text);
+                }
+            }
             "status" => {
                 let text = value
                     .as_str()
@@ -5583,6 +5700,9 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
             "local_access_token_id={}",
             percent_encode_query(value)
         ));
+    }
+    for value in models {
+        pairs.push(format!("model={}", percent_encode_query(value)));
     }
     if let Some(value) = status {
         pairs.push(format!("status={}", percent_encode_query(value)));
@@ -6474,10 +6594,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_tool_control_waits_past_two_seconds_and_does_not_repeat_transport_failures() {
+    fn tool_tests_and_classifier_dry_runs_wait_past_two_seconds_and_do_not_repeat_transport_failures(
+    ) {
         use std::io::{BufRead, Read, Write};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        for succeeds in [true, false] {
+        for (dry_run, succeeds) in [(false, true), (false, false), (true, true), (true, false)] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
@@ -6537,14 +6658,20 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap();
-            let result = runtime.block_on(manager.builtin_tool_action("web_search".into(), "test".into(), Some(serde_json::json!({"enabled":true,"backend":"upstream","service_id":"service_test","model":"main"}))));
+            let result = if dry_run {
+                runtime.block_on(
+                    manager.classifier_dry_run(serde_json::json!({"text": "write a unit test"})),
+                )
+            } else {
+                runtime.block_on(manager.builtin_tool_action("web_search".into(), "test".into(), Some(serde_json::json!({"enabled":true,"backend":"upstream","service_id":"service_test","model":"main"}))))
+            };
             stop.store(true, Ordering::SeqCst);
             server.join().unwrap();
             assert_eq!(result.is_ok(), succeeds, "{result:?}");
             assert_eq!(
                 calls.load(Ordering::SeqCst),
                 1,
-                "a tool test must never be automatically retried"
+                "a tool test or classifier dry-run must never be automatically retried"
             );
         }
     }
@@ -6573,6 +6700,30 @@ mod tests {
                 &Method::PUT,
                 "/control/v1/builtin-tools/web_search/credential"
             ),
+            REQUEST_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn classifier_dry_runs_have_their_own_deadline_and_never_retry() {
+        assert_eq!(
+            control_request_timeout(&Method::POST, CLASSIFIER_DRY_RUN_PATH),
+            CLASSIFIER_DRY_RUN_TIMEOUT
+        );
+        assert!(is_classifier_dry_run(
+            &Method::POST,
+            CLASSIFIER_DRY_RUN_PATH
+        ));
+        assert!(!is_classifier_dry_run(
+            &Method::GET,
+            CLASSIFIER_DRY_RUN_PATH
+        ));
+        assert!(!is_classifier_dry_run(
+            &Method::POST,
+            "/control/v1/routing/classifier/credential"
+        ));
+        assert_eq!(
+            control_request_timeout(&Method::GET, "/control/v1/routing/classifier"),
             REQUEST_TIMEOUT
         );
     }
@@ -6957,6 +7108,24 @@ mod tests {
             .unwrap(),
             "?service_id=service_01&local_access_token_id=token_01&local_access_token_id=token_02&status=succeeded&kind=inference"
         );
+        assert_eq!(
+            build_request_session_query(&serde_json::json!({
+                "kind": "inference",
+                "models": ["claude-opus-5-5", "gpt-6.1/sol 模型"]
+            }))
+            .unwrap(),
+            "?model=claude-opus-5-5&model=gpt-6.1%2Fsol%20%E6%A8%A1%E5%9E%8B&kind=inference"
+        );
+        for models in [
+            serde_json::json!("claude-opus-5-5"),
+            serde_json::json!([""]),
+            serde_json::json!([1]),
+            serde_json::json!(["model\nname"]),
+            serde_json::json!(["m".repeat(257)]),
+            serde_json::json!(vec!["model"; 101]),
+        ] {
+            assert!(build_request_session_query(&serde_json::json!({"models": models})).is_err());
+        }
         assert_eq!(
             build_request_session_query(&serde_json::json!({})).unwrap(),
             ""
@@ -7724,6 +7893,39 @@ mod tests {
         assert!(parse_privacy_dry_run_result(&serde_json::to_vec(&legacy).unwrap()).is_ok());
     }
 
+    #[test]
+    fn privacy_model_variants_accept_only_known_unsupported_reasons() {
+        let unsupported = |reason: serde_json::Value| {
+            let mut variant = privacy_variant_value();
+            variant["id"] = serde_json::json!("coreml_fp16_gpu");
+            variant["recommended"] = serde_json::json!(false);
+            variant["supported"] = serde_json::json!(false);
+            variant["unsupported_reason"] = reason;
+            variant
+        };
+        for reason in ["cpu_only", "requires_macos_26"] {
+            let variants = serde_json::json!([
+                privacy_variant_value(),
+                unsupported(serde_json::json!(reason))
+            ]);
+            assert!(
+                validate_privacy_model_variants(&variants).is_ok(),
+                "{reason}"
+            );
+        }
+        for variant in [
+            unsupported(serde_json::json!("requires_macos_15")),
+            unsupported(serde_json::Value::Null),
+            {
+                let mut supported = unsupported(serde_json::json!("requires_macos_26"));
+                supported["supported"] = serde_json::json!(true);
+                supported
+            },
+        ] {
+            assert!(validate_privacy_model_variants(&serde_json::json!([variant])).is_err());
+        }
+    }
+
     fn privacy_variant_value() -> serde_json::Value {
         serde_json::json!({
             "id": "cpu_int8",
@@ -7758,8 +7960,44 @@ mod tests {
             "estimated_ram_bytes": 420_000_000,
             "error": null,
             "label_mapping": {"EMAIL": "email", "MISC": null},
-            "installed_at": null
+            "installed_at": null,
+            "preparation": null
         })
+    }
+
+    #[test]
+    fn validates_policy_model_preparation_state() {
+        let mut installation = privacy_installation_value();
+        installation["status"] = serde_json::json!("ready");
+        installation["bytes_downloaded"] = serde_json::json!(180_000_000);
+        installation["installed_at"] = serde_json::json!("2026-10-17T10:30:00Z");
+        assert!(validate_privacy_model_installation(&installation).is_ok());
+        for preparation in [
+            serde_json::json!({"state": "preparing", "fallback": "local_model"}),
+            serde_json::json!({"state": "preparing", "fallback": null}),
+            serde_json::json!({"state": "failed", "fallback": "regex"}),
+            serde_json::json!({"state": "ready", "fallback": null}),
+        ] {
+            installation["preparation"] = preparation;
+            assert!(validate_privacy_model_installation(&installation).is_ok());
+        }
+        for preparation in [
+            serde_json::json!({"state": "compiling", "fallback": null}),
+            serde_json::json!({"state": "ready", "fallback": "regex"}),
+            serde_json::json!({"state": "preparing", "fallback": "cloud"}),
+            serde_json::json!({"state": "preparing"}),
+            serde_json::json!({"state": "preparing", "fallback": null, "progress": 1}),
+            serde_json::json!("preparing"),
+        ] {
+            installation["preparation"] = preparation;
+            assert!(validate_privacy_model_installation(&installation).is_err());
+        }
+        let mut downloading = privacy_installation_value();
+        downloading["preparation"] = serde_json::json!({"state": "preparing", "fallback": null});
+        assert!(validate_privacy_model_installation(&downloading).is_err());
+        let mut missing = privacy_installation_value();
+        missing.as_object_mut().unwrap().remove("preparation");
+        assert!(validate_privacy_model_installation(&missing).is_err());
     }
 
     #[test]

@@ -4,7 +4,6 @@ import (
 	"context"
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/pricing"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,7 +12,7 @@ import (
 )
 
 func TestPricingAPIAuthAndConfig(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "pricing.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "pricing.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

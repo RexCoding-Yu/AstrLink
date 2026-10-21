@@ -51,8 +51,8 @@ type responsesWSSession struct {
 }
 
 func (handler *Handler) serveResponsesWebSocket(writer http.ResponseWriter, request *http.Request) {
-	// The normal local boundary has already checked Origin, Host and credentials.
-	upgrader := websocket.Upgrader{HandshakeTimeout: 10 * time.Second}
+	// The normal boundary has already checked Host and the API token.
+	upgrader := websocket.Upgrader{HandshakeTimeout: 10 * time.Second, CheckOrigin: func(*http.Request) bool { return true }}
 	client, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		return
@@ -218,7 +218,7 @@ func websocketSkip(candidate endpoint.Resolved, routingModel string) contract.Ro
 	if upstreamModel == "" {
 		upstreamModel = routingModel
 	}
-	if native := service.Kind.ModelNativeProtocol(upstreamModel); native != "" && native != contract.ProtocolOpenAIResponses {
+	if format := service.ModelProtocol(upstreamModel); format != "" && format != contract.ProtocolOpenAIResponses {
 		return contract.RoutingSkipWebSocketUnsupported
 	}
 	for _, capability := range service.Capabilities {

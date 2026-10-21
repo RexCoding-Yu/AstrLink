@@ -429,7 +429,7 @@ func TestRawVaultRepairsAKeyTheKeychainLost(t *testing.T) {
 
 	// The keychain entry is gone: Core starts with a new local key, so the
 	// public key MAC no longer verifies.
-	lost, err := sqlite.Open(ctx, path, sqlite.WithLocalKey(make([]byte, storage.AuditKeyBytes)))
+	lost, err := openControlTestStore(t, ctx, path, sqlite.WithLocalKey(make([]byte, storage.AuditKeyBytes)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -958,7 +958,7 @@ func TestAnIndependentCoreCannotReadRawContent(t *testing.T) {
 
 	startCore := func(t *testing.T, key []byte) (*sqlite.Store, *Handler) {
 		t.Helper()
-		store, err := sqlite.Open(ctx, path, sqlite.WithLocalKey(key))
+		store, err := openControlTestStore(t, ctx, path, sqlite.WithLocalKey(key))
 		if err != nil {
 			t.Fatal(err)
 		}

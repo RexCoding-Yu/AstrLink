@@ -73,8 +73,8 @@ func TestCopilotModelsUseTheirPreferredNativeProtocol(t *testing.T) {
 		"grok-code-fast-1":  contract.ProtocolOpenAIChat,
 		"oswe-vscode-prime": contract.ProtocolOpenAIChat,
 	} {
-		if got := contract.ServiceKindCopilotSubscription.ModelNativeProtocol(model); got != want {
-			t.Errorf("ModelNativeProtocol(%q) = %q, want %q", model, got, want)
+		if got := contract.ServiceKindCopilotSubscription.BuiltinModelProtocol(model); got != want {
+			t.Errorf("BuiltinModelProtocol(%q) = %q, want %q", model, got, want)
 		}
 	}
 }

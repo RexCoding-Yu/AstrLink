@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
+	"github.com/gorilla/websocket"
 )
 
 func TestNetworkProductionRequiresTheSameDependenciesAndNoHostPin(t *testing.T) {
@@ -42,7 +43,7 @@ func TestNetworkProductionRequiresTheSameDependenciesAndNoHostPin(t *testing.T) 
 	}
 }
 
-func TestNetworkProductionAcceptsAnyHostButKeepsTokenAndOriginGate(t *testing.T) {
+func TestNetworkProductionAcceptsAnyHostAndOriginButRequiresToken(t *testing.T) {
 	const token = "astr_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
 	store := &memoryRequestRecordStore{}
 	resolveCalls := 0
@@ -78,7 +79,8 @@ func TestNetworkProductionAcceptsAnyHostButKeepsTokenAndOriginGate(t *testing.T)
 		{name: "LAN address", host: "192.168.1.20:8317", authorization: "Bearer " + token, status: http.StatusUnprocessableEntity, code: "missing_protocol_capability", resolves: true},
 		{name: "container name", host: "astrlink:8317", authorization: "Bearer " + token, status: http.StatusUnprocessableEntity, code: "missing_protocol_capability", resolves: true},
 		{name: "proxied hostname", host: "llm.example.com", authorization: "Bearer " + token, status: http.StatusUnprocessableEntity, code: "missing_protocol_capability", resolves: true},
-		{name: "browser Origin", host: "llm.example.com", origin: "https://llm.example.com", authorization: "Bearer " + token, status: http.StatusForbidden, code: "origin_forbidden"},
+		{name: "browser Origin", host: "llm.example.com", origin: "https://browser.example", authorization: "Bearer " + token, status: http.StatusUnprocessableEntity, code: "missing_protocol_capability", resolves: true},
+		{name: "browser missing token", host: "llm.example.com", origin: "https://browser.example", status: http.StatusUnauthorized, code: "invalid_access_token"},
 		{name: "missing token", host: "llm.example.com", status: http.StatusUnauthorized, code: "invalid_access_token"},
 		{name: "wrong token", host: "llm.example.com", authorization: "Bearer wrong_token_0123456789abcdef", status: http.StatusUnauthorized, code: "invalid_access_token"},
 		{name: "query token", host: "llm.example.com", query: "?key=" + token, status: http.StatusUnauthorized, code: "token_query_forbidden"},
@@ -103,9 +105,9 @@ func TestNetworkProductionAcceptsAnyHostButKeepsTokenAndOriginGate(t *testing.T)
 			}
 		})
 	}
-	// Only the three authenticated requests reach the records; nothing an
+	// Only the four authenticated requests reach the records; nothing an
 	// anonymous caller sends is persisted.
-	if len(store.records) != 3 {
+	if len(store.records) != 4 {
 		t.Fatalf("records = %d, want only the authenticated requests: %#v", len(store.records), store.records)
 	}
 	for _, record := range store.records {
@@ -115,11 +117,11 @@ func TestNetworkProductionAcceptsAnyHostButKeepsTokenAndOriginGate(t *testing.T)
 	}
 }
 
-func TestNetworkProductionResponsesWebSocketRejectsBrowserOriginUnrecorded(t *testing.T) {
+func TestNetworkProductionResponsesWebSocketAcceptsAuthenticatedOrigin(t *testing.T) {
 	store := &memoryRequestRecordStore{}
 	handler, err := NewNetworkProduction(Dependencies{
 		Resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
-			t.Fatal("a rejected upgrade must not resolve")
+			t.Error("an upgrade without a response.create must not resolve")
 			return endpoint.Resolved{}, endpoint.ErrNoEndpoint
 		}),
 		Authorizer: authorizerFunc(func(context.Context, contract.Endpoint) (http.Header, error) { return nil, nil }),
@@ -131,18 +133,15 @@ func TestNetworkProductionResponsesWebSocketRejectsBrowserOriginUnrecorded(t *te
 	if err != nil {
 		t.Fatalf("NewNetworkProduction: %v", err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
-	request.Host = "llm.example.com"
-	request.Header.Set("Connection", "Upgrade")
-	request.Header.Set("Upgrade", "websocket")
-	request.Header.Set("Sec-WebSocket-Version", "13")
-	request.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	request.Header.Set("Origin", "https://attacker.example")
-	request.Header.Set("Authorization", "Bearer astr_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	assertInferenceError(t, response, http.StatusForbidden, "origin_forbidden")
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	header := http.Header{"Origin": {"https://browser.example"}, "Authorization": {"Bearer astr_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"}}
+	client, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", header)
+	if err != nil {
+		t.Fatalf("authenticated browser upgrade: %v (response=%v)", err, response)
+	}
+	defer client.Close()
 	if len(store.records) != 0 {
-		t.Fatalf("rejected upgrade was recorded: %#v", store.records)
+		t.Fatalf("upgrade without a turn was recorded: %#v", store.records)
 	}
 }

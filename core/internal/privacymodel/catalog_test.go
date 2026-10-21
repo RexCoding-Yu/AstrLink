@@ -17,7 +17,7 @@ func TestBuiltinCatalogRecommendsGuardAndRetainsLegacyProvenance(t *testing.T) {
 	if guard.ID != CatalogAstrLinkGuard || !guard.Recommended ||
 		guard.Source != contract.PrivacyModelCatalogSourceOfficial ||
 		guard.Adapter != contract.PrivacyModelAdapterHFToken ||
-		guard.Version == nil || *guard.Version != "0.1.0" ||
+		guard.Version == nil || *guard.Version != "0.1.2" ||
 		!guard.Variants[0].Recommended || guard.Variants[1].Recommended {
 		t.Fatalf("guard catalog item = %#v", guard)
 	}
@@ -37,7 +37,7 @@ func TestBuiltinCatalogRecommendsGuardAndRetainsLegacyProvenance(t *testing.T) {
 		{
 			CatalogAstrLinkGuard,
 			"QuantumNous/astrlink-guard",
-			"49e8b7b83d34fd75a86cf07698bd80972d444ff3",
+			"33dfcc586f8a50529e98ce5fe2ba46836dbeab8f",
 			[]string{"cpu_int8", "cpu_fp32"},
 		},
 		{

@@ -11,6 +11,11 @@ import {
   type ModelRoutingGroupVersion,
 } from "./model-routing-version-model";
 import {
+  parseTerminalChoices,
+  type ServiceTerminalRequest,
+  type TerminalChoice,
+} from "./service-terminal-model";
+import {
   parseClientIdentities,
   parseRoutingSettings,
   type ClientIdentities,
@@ -34,7 +39,11 @@ import {
   parsePrivacySummary,
   type PrivacySummary,
 } from "./privacy-summary-model";
-import type { UsageSummary, UsageWindow } from "./usage-range";
+import {
+  hourlyUsageWindow,
+  type UsageSummary,
+  type UsageWindow,
+} from "./usage-range";
 
 import {
   browserSnapshot,
@@ -241,6 +250,25 @@ async function invoke<T>(
   }
 }
 
+const pendingHistoryReads = new Map<string, Promise<unknown>>();
+
+// Several panels can ask for the same history snapshot at once. Share only
+// in-flight reads; settled results and failures must never delay a refresh.
+function invokeHistoryRead(
+  command: "get_usage_summary" | "get_request_session",
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const key = JSON.stringify([command, args]);
+  const existing = pendingHistoryReads.get(key);
+  if (existing) return existing;
+  const pending = invoke<unknown>(command, args).finally(() => {
+    if (pendingHistoryReads.get(key) === pending)
+      pendingHistoryReads.delete(key);
+  });
+  pendingHistoryReads.set(key, pending);
+  return pending;
+}
+
 // These local reads should finish promptly. A stuck native event loop must not
 // leave settings loading forever or keep displaying an old ready snapshot.
 async function invokeDesktopRead(
@@ -275,16 +303,19 @@ export async function restartCore(): Promise<AppSnapshot> {
     throw new Error(i18n.t("bridge.restartDesktopOnly"));
   }
 
+  pendingHistoryReads.clear();
   return parseAppSnapshot(await invoke<unknown>("restart_core"));
 }
 
 export async function startCore(): Promise<AppSnapshot> {
   requireNativeBridge();
+  pendingHistoryReads.clear();
   return parseAppSnapshot(await invoke<unknown>("start_core"));
 }
 
 export async function stopCore(): Promise<AppSnapshot> {
   requireNativeBridge();
+  pendingHistoryReads.clear();
   return parseAppSnapshot(await invoke<unknown>("stop_core"));
 }
 
@@ -329,6 +360,21 @@ export async function trayPopoverResize(
 export async function trayPopoverHide(): Promise<void> {
   requireNativeBridge();
   await invoke<void>("tray_popover_hide");
+}
+
+/** The page the tray left for the main window, handed over once. */
+export async function takeTrayNavigation(): Promise<string | null> {
+  if (!hasNativeBridge()) return null;
+  return invoke<string | null>("take_tray_navigation");
+}
+
+/**
+ * Unsaved edits keep the hidden main window alive; otherwise the host
+ * releases it after a while in the tray and builds a fresh one on return.
+ */
+export async function setMainWindowUnsaved(unsaved: boolean): Promise<void> {
+  if (!hasNativeBridge()) return;
+  await invoke<void>("set_main_window_unsaved", { unsaved });
 }
 
 function requireNativeBridge(): void {
@@ -621,6 +667,9 @@ function compactQuery(
   ) {
     compact.local_access_token_ids = query.local_access_token_ids;
   }
+  if (query.models !== undefined && query.models.length > 0) {
+    compact.models = query.models;
+  }
   if (query.status !== undefined) compact.status = query.status;
   return compact;
 }
@@ -644,7 +693,7 @@ export async function getRequestSession(
 ): Promise<RequestSessionDetail> {
   requireNativeBridge();
   return parseRequestSessionDetail(
-    await invoke<unknown>("get_request_session", { sessionId }),
+    await invokeHistoryRead("get_request_session", { sessionId }),
   );
 }
 
@@ -867,11 +916,11 @@ export async function getUsageSummary(
 ): Promise<UsageSummary> {
   requireNativeBridge();
   return parseUsageSummary(
-    await invoke<unknown>("get_usage_summary", {
+    await invokeHistoryRead("get_usage_summary", {
       from: window.from,
       to: window.to,
       timeZone: window.time_zone || "UTC",
-      bucket: window.preset === "1d" ? "hour" : "day",
+      bucket: hourlyUsageWindow(window) ? "hour" : "day",
     }),
     window,
   );
@@ -887,7 +936,7 @@ export async function getPrivacySummary(
       from: window.from,
       to: window.to,
       timeZone: window.time_zone || "UTC",
-      bucket: window.preset === "1d" ? "hour" : "day",
+      bucket: hourlyUsageWindow(window) ? "hour" : "day",
     }),
     window,
   );
@@ -999,6 +1048,29 @@ export async function copyClientConfigSnippet(
   return parseClientConfigCopied(
     await invoke<unknown>("copy_client_config_snippet", { ...input }),
   );
+}
+
+/** Terminal apps installed here, the platform's own first. */
+export async function listTerminalApps(): Promise<TerminalChoice[]> {
+  if (!hasNativeBridge()) return [];
+  return parseTerminalChoices(await invoke<unknown>("list_terminal_apps"));
+}
+
+/** The folder the user picked, or null when they closed the picker. */
+export async function pickTerminalDirectory(
+  start: string | null,
+): Promise<string | null> {
+  requireNativeBridge();
+  const picked = await invoke<unknown>("pick_terminal_directory", { start });
+  return typeof picked === "string" ? picked : null;
+}
+
+/** Opens a terminal whose client reaches the gateway through one provider. */
+export async function openServiceTerminal(
+  request: ServiceTerminalRequest,
+): Promise<void> {
+  requireNativeBridge();
+  await invoke("open_service_terminal", { request });
 }
 
 /** Whether the OS has an app registered for CC Switch's import links. */
@@ -1243,17 +1315,18 @@ export async function saveTextFile(
 // the field check and the whole routing tab refuses to load, even though Core
 // accepted and stored it.
 //
-// Best-effort by design. A classifier read that fails leaves the list empty,
-// which is the strict reading (built-in fields only) and never admits an
-// unvalidated rule.
-async function knownRoutingDimensions(): Promise<ClassifierDimension[]> {
+// Best-effort by design. A classifier read that fails answers null, and a name
+// that is not a built-in field is then left to Core, which validated the
+// document against its own dimensions before storing it: an empty list would
+// refuse every rule naming a dimension and keep the tab from loading.
+async function knownRoutingDimensions(): Promise<ClassifierDimension[] | null> {
   try {
     const settings = parseClassifierSettings(
       await invoke<unknown>("get_classifier_settings"),
     );
     return settings.dimensions ?? [];
   } catch {
-    return [];
+    return null;
   }
 }
 

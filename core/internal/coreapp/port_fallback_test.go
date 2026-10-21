@@ -72,7 +72,7 @@ func TestOccupiedInferencePortFallsBackAndKeepsProductionHostGate(t *testing.T) 
 	}{
 		{name: "active host still requires a token", status: http.StatusUnauthorized},
 		{name: "saved host is rejected", host: config.InferenceListen, status: http.StatusMisdirectedRequest},
-		{name: "browser origin is rejected", origin: "https://example.com", status: http.StatusForbidden},
+		{name: "browser origin still requires a token", origin: "https://example.com", status: http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request, _ := http.NewRequest(http.MethodGet, ready.InferenceURL+"/v1/models", nil)

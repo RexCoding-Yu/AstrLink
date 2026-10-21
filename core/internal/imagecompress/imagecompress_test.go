@@ -86,7 +86,9 @@ func nrgba(img image.Image) *image.NRGBA {
 var lossless = Options{}
 
 func TestLosslessKeepsEveryPixelAndShrinksScreenshots(t *testing.T) {
-	source := screenshot(1280, 800)
+	// Keep the panel, text and transparent pixels without encoding a full screen
+	// repeatedly under the race detector.
+	source := screenshot(320, 200)
 	data := encodePNG(t, source)
 	encoded, ok := new(Compressor).WebP(context.Background(), data, lossless)
 	if !ok || len(encoded) >= len(data) {
@@ -133,7 +135,7 @@ func TestLosslessTakesSingleFrameGIFsOnly(t *testing.T) {
 
 func TestModesChooseWhichSourcesChange(t *testing.T) {
 	compressor := new(Compressor)
-	jpegData := encodeJPEG(t, photo(1024, 768), 95)
+	jpegData := encodeJPEG(t, photo(320, 240), 95)
 	if _, ok := compressor.WebP(context.Background(), jpegData, lossless); ok {
 		t.Fatal("lossless mode re-encoded a JPEG")
 	}
@@ -145,7 +147,10 @@ func TestModesChooseWhichSourcesChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A WebP no smaller than its source is not used.
-	small := encodeJPEG(t, photo(1024, 768), 20)
+	small := encodeJPEG(t, photo(320, 240), 20)
+	if len(small) < minImageBytes {
+		t.Fatal("small JPEG must reach the encoder, not the minimum-size guard")
+	}
 	if _, ok := compressor.WebP(context.Background(), small, Options{Lossy: true, Quality: 100}); ok {
 		t.Fatal("a larger WebP replaced a small JPEG")
 	}
@@ -187,7 +192,7 @@ func withOrientation(data []byte, orientation uint16) []byte {
 }
 
 func TestLossyKeepsRotatedPhotos(t *testing.T) {
-	data := encodeJPEG(t, photo(800, 600), 95)
+	data := encodeJPEG(t, photo(320, 240), 95)
 	options := Options{Lossy: true, Quality: 80}
 	if _, ok := new(Compressor).WebP(context.Background(), withOrientation(data, 6), options); ok {
 		t.Fatal("a photo rotated by EXIF lost its rotation")
@@ -198,7 +203,7 @@ func TestLossyKeepsRotatedPhotos(t *testing.T) {
 }
 
 func TestResultsAreStableAndCached(t *testing.T) {
-	data := encodePNG(t, screenshot(960, 600))
+	data := encodePNG(t, screenshot(320, 200))
 	first, ok := new(Compressor).WebP(context.Background(), data, lossless)
 	if !ok {
 		t.Fatal("not re-encoded")
@@ -213,11 +218,15 @@ func TestResultsAreStableAndCached(t *testing.T) {
 	if cached, ok := compressor.WebP(cancelled, data, lossless); !ok || !bytes.Equal(cached, first) {
 		t.Fatal("a cached image was not served")
 	}
-	if _, ok := compressor.WebP(cancelled, encodePNG(t, screenshot(900, 500)), lossless); ok {
+	uncached := encodePNG(t, screenshot(321, 200))
+	if len(uncached) < minImageBytes {
+		t.Fatal("uncached PNG must reach the cancellation check")
+	}
+	if _, ok := compressor.WebP(cancelled, uncached, lossless); ok {
 		t.Fatal("a done context still encoded")
 	}
 	// Results are kept per mode and quality.
-	noisy := encodePNG(t, photo(640, 480))
+	noisy := encodePNG(t, photo(256, 192))
 	exact, _ := compressor.WebP(context.Background(), noisy, lossless)
 	low, _ := compressor.WebP(context.Background(), noisy, Options{Lossy: true, Quality: 30})
 	high, _ := compressor.WebP(context.Background(), noisy, Options{Lossy: true, Quality: 95})

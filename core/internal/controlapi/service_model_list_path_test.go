@@ -9,7 +9,6 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/servicemodel"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 const customServiceWithModelListPath = `{"name":"Custom","kind":"custom","http":{"base_url":"https://gateway.example","auth":{"scheme":"none"},"model_list_path":"/api/models"},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`
@@ -86,7 +85,7 @@ func TestModelListPathRejectsInvalidFormat(t *testing.T) {
 }
 
 func TestDraftModelProbeUsesCustomModelListPath(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
 	}

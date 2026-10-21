@@ -19,6 +19,12 @@ const bridgeMocks = vi.hoisted(() => ({
 
 vi.mock("./bridge", () => bridgeMocks);
 
+const pricingMocks = vi.hoisted(() => ({
+  getOfficialModelLimits: vi.fn(),
+}));
+
+vi.mock("./pricing-bridge", () => pricingMocks);
+
 import type { ConversionEngineCapability } from "./core-model";
 import type { Service } from "./service-model";
 import { ClientSetupDialog } from "./ClientSetupDialog";
@@ -217,6 +223,7 @@ describe("ClientSetupDialog", () => {
     bridgeMocks.isCCSwitchInstalled.mockResolvedValue(false);
     bridgeMocks.listServices.mockResolvedValue({ items: [] });
     bridgeMocks.getRoutingSettings.mockResolvedValue({ model_redirects: [] });
+    pricingMocks.getOfficialModelLimits.mockResolvedValue(null);
     bridgeMocks.checkClientProxy.mockResolvedValue({
       client: { route: "direct" },
       numeric: null,
@@ -574,24 +581,110 @@ describe("ClientSetupDialog", () => {
     expect(bridgeMocks.getClientConfigStatus).toHaveBeenCalledWith(
       "http://127.0.0.1:8317",
     );
-    expect(card("Claude Code").getAttribute("aria-checked")).toBe("true");
-    expect(cardText("Claude Code")).toContain("已配置");
+    expect(dialog().querySelector("h2")?.textContent).toBe(
+      "为“VS Code”配置客户端",
+    );
+    // Another token's client is left alone until the user picks it.
+    expect(card("Pi").getAttribute("aria-checked")).toBe("true");
+    expect(cardText("Claude Code")).toContain("使用其他令牌");
+    expect(cardText("Claude Code")).not.toContain("已配置");
     expect(card("Codex").disabled).toBe(true);
     expect(cardText("Codex")).toContain("未安装");
     for (const label of ["Gemini CLI", "OpenCode", "OpenClaw"]) {
       expect(card(label).disabled).toBe(true);
       expect(cardText(label)).toContain("暂不支持");
     }
+    expect(dialog().textContent).toContain("安装 CC Switch 后可通过它导入");
+
+    await act(async () => card("Claude Code").click());
     const text = dialog().textContent;
-    expect(text).toContain("安装 CC Switch 后可通过它导入");
     expect(text).toContain("/Users/me/.claude/settings.json");
     expect(text).toContain(
-      "Claude Code 当前使用“Terminal”，更新后改用“VS Code”。",
+      "Claude Code 当前使用“Terminal”，改用后换成“VS Code”。",
     );
     expect(text).not.toContain(secret);
-    expect(button("更新配置").disabled).toBe(false);
-    expect(button("移除配置")).toBeTruthy();
+    expect(button("改用此令牌").disabled).toBe(false);
+    // Terminal's config is removed from Terminal's own dialog.
+    expect(text).not.toContain("移除配置");
+    expect(text).not.toContain("更新配置");
     expect(text).not.toContain("改用 CC Switch 导入");
+  });
+
+  it("opens on the client this token is configured in", async () => {
+    bridgeMocks.getClientConfigStatus.mockResolvedValue(
+      statuses(
+        configured("configured", "token_gone"),
+        { ...configured("configured"), models: { model: "gpt-5" } },
+        {
+          ...configured("modified", otherToken.id),
+          models: { model: "gpt-5" },
+        },
+      ),
+    );
+    bridgeMocks.applyClientConfig.mockResolvedValue({ status: "applied" });
+    await renderDialog();
+
+    expect(card("Codex").getAttribute("aria-checked")).toBe("true");
+    expect(cardText("Codex")).toContain("已配置");
+    expect(cardText("Claude Code")).toContain("使用其他令牌");
+    expect(cardText("Pi")).toContain("使用其他令牌");
+    expect(button("更新配置")).toBeTruthy();
+    expect(button("移除配置")).toBeTruthy();
+
+    // Switching rewrites the config, so the edit to Terminal's no longer matters.
+    await act(async () => card("Pi").click());
+    let text = dialog().textContent;
+    expect(text).toContain("Pi 当前使用“Terminal”，改用后换成“VS Code”。");
+    expect(text).not.toContain("重新写入即可恢复");
+    expect(text).not.toContain("移除配置");
+    await act(async () => button("改用此令牌").click());
+    expect(bridgeMocks.applyClientConfig).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ tokenId: token.id, client: "pi" }),
+    );
+
+    // A deleted token has no dialog of its own to remove its config from.
+    await act(async () => card("Claude Code").click());
+    text = dialog().textContent;
+    expect(text).toContain(
+      "Claude Code 当前使用其他令牌，改用后换成“VS Code”。",
+    );
+    expect(button("改用此令牌")).toBeTruthy();
+    expect(button("移除配置")).toBeTruthy();
+  });
+
+  it("starts in the place this token is configured", async () => {
+    const local = statuses(configured("configured", otherToken.id)).clients;
+    bridgeMocks.getClientConfigStatus.mockResolvedValue(
+      overview(
+        [
+          ...local,
+          ...local.map((status) => ({
+            ...status,
+            wsl: "Ubuntu",
+            paths: ["/wsl" + status.paths[0]],
+            ...(status.client === "claude"
+              ? configured("configured")
+              : { state: "not_configured" as const, token_id: null }),
+          })),
+        ],
+        { wsl_localhost: true },
+      ),
+    );
+    await renderDialog();
+
+    expect(card("Claude Code").getAttribute("aria-checked")).toBe("true");
+    expect(placeOption("WSL · Ubuntu").getAttribute("data-state")).toBe("on");
+    expect(
+      [
+        ...dialog().querySelectorAll('[data-slot="segmented-control-item"]'),
+      ].map((item) => item.textContent),
+    ).toEqual(["本机使用其他令牌", "WSL · Ubuntu已配置"]);
+    expect(cardText("Claude Code")).toContain("已配置");
+    expect(button("更新配置")).toBeTruthy();
+
+    await act(async () => placeOption("本机").click());
+    expect(cardText("Claude Code")).toContain("使用其他令牌");
+    expect(button("改用此令牌")).toBeTruthy();
   });
 
   it("shows ports awaiting an update, edited configs, and unreadable files", async () => {
@@ -773,10 +866,10 @@ describe("ClientSetupDialog", () => {
     expect(cardText("Codex")).toContain("连接其他实例");
     await act(async () => card("Codex").click());
     expect(dialog().textContent).toContain(
-      "Codex 现在连接的是这台电脑上的另一个 AstrLink。更新配置后改为连接这里。",
+      "Codex 现在连接的是这台电脑上的另一个 AstrLink。改用此令牌后连接这里。",
     );
     expect(dialog().textContent).not.toContain("当前使用其他令牌");
-    await act(async () => button("更新配置").click());
+    await act(async () => button("改用此令牌").click());
     expect(bridgeMocks.applyClientConfig).toHaveBeenLastCalledWith(
       expect.objectContaining({ client: "codex", replace: false }),
     );
@@ -1101,6 +1194,45 @@ describe("ClientSetupDialog", () => {
     await renderDialog();
     expect(card("Pi").disabled).toBe(true);
     expect(cardText("Pi")).toContain("未安装");
+  });
+
+  it("fills Pi's limits from the official model and writes what the user keeps", async () => {
+    bridgeMocks.applyClientConfig.mockResolvedValue({ status: "applied" });
+    pricingMocks.getOfficialModelLimits.mockImplementation(async (model) =>
+      model === "gpt-5.6"
+        ? { contextTokens: 1050000, outputTokens: 128000 }
+        : null,
+    );
+    await renderDialog();
+    await act(async () => card("Pi").click());
+    const field = (key: string) =>
+      document.querySelector<HTMLInputElement>(`#client-setup-${key}`)!;
+    expect(field("contextWindow").placeholder).toContain("128000");
+
+    await setInput("#client-setup-model", "gpt-5.6");
+    expect(field("contextWindow").value).toBe("1050000");
+    expect(field("maxTokens").value).toBe("128000");
+
+    // The subscription allows less; the user's numbers are written.
+    await setInput("#client-setup-contextWindow", "400000");
+    await setInput("#client-setup-maxTokens", "");
+    await act(async () => button("写入配置").click());
+    expect(bridgeMocks.applyClientConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        models: { model: "gpt-5.6", contextWindow: 400000 },
+      }),
+    );
+
+    // A number Pi cannot take blocks the write.
+    await setInput("#client-setup-maxTokens", "12k");
+    expect(dialog().textContent).toContain("1 到 100000000");
+    expect(button("写入配置").disabled).toBe(true);
+
+    // Another model starts from its own limits; an unknown one from Pi's.
+    await setInput("#client-setup-model", "house-model");
+    expect(field("contextWindow").value).toBe("");
+    expect(field("maxTokens").value).toBe("");
+    expect(button("写入配置").disabled).toBe(false);
   });
 
   it("suggests only compatible enabled models for each client", async () => {

@@ -282,6 +282,11 @@ describe("routing decision metadata", () => {
       parseRequestRecord({ ...fullRecord, routing_decision: decision })
         .routing_decision,
     ).toStrictEqual(decision);
+    const pinned = { selected: "client_pin", skipped: [] };
+    expect(
+      parseRequestRecord({ ...fullRecord, routing_decision: pinned })
+        .routing_decision,
+    ).toStrictEqual(pinned);
     // No provider could serve the call: every exclusion, no selection.
     const unserved = { skipped: decision.skipped };
     expect(

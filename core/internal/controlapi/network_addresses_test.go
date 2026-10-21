@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 func TestNetworkAddressesKeepReachableUnicastAddressesIPv4First(t *testing.T) {
@@ -51,7 +50,7 @@ func TestNetworkAddressesKeepReachableUnicastAddressesIPv4First(t *testing.T) {
 }
 
 func TestNetworkAddressesRouteNeedsTheOperatorToken(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}

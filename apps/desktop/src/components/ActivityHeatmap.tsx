@@ -30,9 +30,23 @@ const LEVELS = [
 ] as const;
 const AXIS_WIDTH = 28;
 const GAP = 3;
-const MIN_CELL = 14;
+// Gaps tighten before cells drop below this, so a year still fits the panel.
+const ROOMY_CELL = 10;
+const TIGHT_GAP = 2;
+// Below this a cell is too small to point at; the calendar scrolls instead.
+const MIN_CELL = 8;
 const MAX_ROW_HEIGHT = 22;
 const SHORT_RANGE_CELL_SIZE = 14;
+
+/** The cell width and gap that fit `columns` weeks into `width`. */
+export function heatmapCellLayout(
+  width: number,
+  columns: number,
+): { cell: number; gap: number } {
+  const fit = (gap: number) => (width - AXIS_WIDTH - columns * gap) / columns;
+  const gap = fit(GAP) >= ROOMY_CELL ? GAP : TIGHT_GAP;
+  return { cell: Math.max(MIN_CELL, fit(gap)), gap };
+}
 
 /** Consecutive days, Monday-first. Narrow calendars scroll to recent weeks. */
 export const ActivityHeatmap = memo(function ActivityHeatmap({
@@ -103,15 +117,14 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
   const dateOf = (date: string) => new Date(`${date}T12:00:00`);
   const offset = cells.length ? (dateOf(cells[0].date).getDay() + 6) % 7 : 0;
   const columns = Math.max(1, Math.ceil((cells.length + offset) / 7));
-  const availableCellSize = (width - AXIS_WIDTH - columns * GAP) / columns;
-  // A long range fills the panel width and scrolls below readable cells. Rows
-  // stop growing so wide windows widen the cells instead of the panel height.
-  const cellWidth =
-    cells.length > 90
-      ? Math.max(MIN_CELL, availableCellSize)
-      : SHORT_RANGE_CELL_SIZE;
+  // A long range fills the panel width and scrolls only below pointable
+  // cells. Rows stop growing so wide windows widen the cells instead of the
+  // panel height.
+  const fitted = heatmapCellLayout(width, columns);
+  const gap = cells.length > 90 ? fitted.gap : GAP;
+  const cellWidth = cells.length > 90 ? fitted.cell : SHORT_RANGE_CELL_SIZE;
   const cellHeight = Math.min(cellWidth, MAX_ROW_HEIGHT);
-  const calendarWidth = columns * cellWidth + (columns - 1) * GAP;
+  const calendarWidth = columns * cellWidth + (columns - 1) * gap;
   const monthFormat = useMemo(
     () => new Intl.DateTimeFormat(locale, { month: "short" }),
     [locale],
@@ -173,7 +186,7 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
           // Short ranges keep compact cells; split their spare width evenly.
           gridTemplateColumns: `${AXIS_WIDTH}px minmax(0, ${calendarWidth}px)`,
           justifyContent: "center",
-          gap: GAP,
+          gap,
         }}
         role="group"
         aria-label={label}
@@ -182,7 +195,7 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
           aria-hidden="true"
           className="grid"
           style={{
-            gap: GAP,
+            gap,
             gridTemplateRows: `20px repeat(7, ${cellHeight}px)`,
           }}
         >
@@ -211,7 +224,7 @@ export const ActivityHeatmap = memo(function ActivityHeatmap({
             data-slot="activity-calendar"
             className="grid w-max pb-3"
             style={{
-              gap: GAP,
+              gap,
               gridTemplateColumns: `repeat(${columns}, ${cellWidth}px)`,
               gridTemplateRows: `20px repeat(7, ${cellHeight}px)`,
             }}

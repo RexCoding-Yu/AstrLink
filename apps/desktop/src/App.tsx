@@ -36,6 +36,8 @@ import {
   getUsageSummary,
   listServices,
   restartCore,
+  setMainWindowUnsaved,
+  takeTrayNavigation,
 } from "./bridge";
 import {
   AccessTokenManager,
@@ -87,25 +89,20 @@ import {
   TRAY_NAVIGATE_EVENT,
   TRAY_PRIVACY_OVERVIEW_PAGE,
 } from "./tray-popover-window";
+import type { RecordsTarget } from "./request-live-model";
 import {
   DEFAULT_USAGE_RANGE_PRESET,
-  localDayWindow,
+  localDayKey,
   resolveUsageWindow,
-  type UsageRangePreset,
+  type UsageRange,
   type UsageState,
-  type UsageWindow,
 } from "./usage-range";
 
 type WorkspacePage =
   | { kind: "overview" }
   | { kind: "tokens" }
   | { kind: "safety"; view?: "models" | "overview" }
-  | {
-      kind: "records";
-      tokenId?: string;
-      /** Conversations with a call that failed in this window. */
-      failedWithin?: Pick<UsageWindow, "from" | "to">;
-    }
+  | { kind: "records"; target?: RecordsTarget }
   | { kind: "routing" }
   | {
       kind: "intelligentRouting";
@@ -176,14 +173,57 @@ function messageOf(error: unknown, fallback: string): string {
 }
 
 /** The pages the tray popover may open; anything else is ignored. */
+/**
+ * Opens the pages the tray leaves for this window. The host keeps a page until
+ * the window takes it, so one asked for while the window was being built again
+ * is taken once the window listens.
+ */
+export function followTrayNavigation(
+  open: (target: WorkspacePage) => void,
+): () => void {
+  let cancelled = false;
+  let stop: UnlistenFn | null = null;
+  const follow = () => {
+    takeTrayNavigation()
+      .then((kind) => {
+        const target = trayNavigationTarget(kind);
+        if (!cancelled && target) open(target);
+      })
+      .catch((error) =>
+        console.error("Unable to read AstrLink tray navigation", error),
+      );
+  };
+  listen(TRAY_NAVIGATE_EVENT, follow)
+    .then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+      stop = unlisten;
+      follow();
+    })
+    .catch((error) =>
+      console.error("Unable to observe AstrLink tray navigation", error),
+    );
+  return () => {
+    cancelled = true;
+    stop?.();
+  };
+}
+
 export function trayNavigationTarget(
   kind: unknown,
   now = new Date(),
 ): WorkspacePage | null {
   switch (kind) {
-    case TRAY_FAILED_TODAY_PAGE:
+    case TRAY_FAILED_TODAY_PAGE: {
       // The same local day the tray counted its failures over.
-      return { kind: "records", failedWithin: localDayWindow(now) };
+      const today = localDayKey(now);
+      return {
+        kind: "records",
+        target: { status: "failed", range: { from: today, to: today } },
+      };
+    }
     case TRAY_PRIVACY_OVERVIEW_PAGE:
       return { kind: "safety", view: "overview" };
     case "overview":
@@ -294,7 +334,7 @@ export default function App() {
   const [tokenCatalog, setTokenCatalog] =
     useState<AccessTokenCatalog>(emptyTokenCatalog);
   const [usage, setUsage] = useState<UsageState>(blockedUsage);
-  const [usagePreset, setUsagePreset] = useState<UsageRangePreset>(
+  const [usageRange, setUsageRange] = useState<UsageRange>(
     DEFAULT_USAGE_RANGE_PRESET,
   );
   const [page, setPage] = useState<WorkspacePage>({ kind: "overview" });
@@ -311,7 +351,18 @@ export default function App() {
   requestGateRef.current ??= new RequestGate();
   const requestGate = requestGateRef.current;
   const handleEditorDirtyChange = useCallback((dirty: boolean) => {
+    if (editorDirtyRef.current !== dirty) {
+      setMainWindowUnsaved(dirty).catch((error) =>
+        console.error("Unable to keep unsaved AstrLink edits", error),
+      );
+    }
     editorDirtyRef.current = dirty;
+  }, []);
+  // A reload drops the edits an earlier page asked the host to keep.
+  useEffect(() => {
+    setMainWindowUnsaved(false).catch((error) =>
+      console.error("Unable to keep unsaved AstrLink edits", error),
+    );
   }, []);
 
   const refreshCore = useCallback(async () => {
@@ -563,7 +614,7 @@ export default function App() {
         }));
       }
       try {
-        const usageWindow = resolveUsageWindow(usagePreset, new Date());
+        const usageWindow = resolveUsageWindow(usageRange, new Date());
         const summary = await getUsageSummary(usageWindow);
         if (usageGeneration.current !== generation) return;
         setUsage((current) =>
@@ -585,7 +636,7 @@ export default function App() {
         }
       }
     },
-    [isReady, usagePreset],
+    [isReady, usageRange],
   );
 
   useEffect(() => {
@@ -685,23 +736,7 @@ export default function App() {
   navigateRef.current = navigate;
   useEffect(() => {
     if (!isTauri()) return;
-    let cancelled = false;
-    let stop: UnlistenFn | null = null;
-    listen<unknown>(TRAY_NAVIGATE_EVENT, ({ payload }) => {
-      const target = trayNavigationTarget(payload);
-      if (target) navigateRef.current(target);
-    })
-      .then((unlisten) => {
-        if (cancelled) unlisten();
-        else stop = unlisten;
-      })
-      .catch((error) =>
-        console.error("Unable to observe AstrLink tray navigation", error),
-      );
-    return () => {
-      cancelled = true;
-      stop?.();
-    };
+    return followTrayNavigation((target) => navigateRef.current(target));
   }, []);
 
   const updateNoticeKind = updateNotice(updates.snapshot);
@@ -820,11 +855,18 @@ export default function App() {
   // The routing rule editor offers the protocols core says it serves. Only the
   // alpha phase is included: a post-alpha ID is a reserved identifier the
   // gateway cannot execute today, and offering it would let the user write a
-  // rule that can never match.
+  // rule that can never match. For the same reason Google formats are left
+  // out, since their path carries the model and cannot name astrlink/<group>,
+  // and so is model discovery, which no routing group serves.
   const protocolIDs = useMemo(
     () =>
       protocols
-        .filter((entry) => entry.phase === "alpha")
+        .filter(
+          (entry) =>
+            entry.phase === "alpha" &&
+            !entry.id.startsWith("google.") &&
+            !entry.id.endsWith(".models"),
+        )
         .map((entry) => entry.id),
     [protocols],
   );
@@ -1093,11 +1135,16 @@ export default function App() {
                 onOpenOnboarding={isWebEdition ? undefined : onboarding.open}
                 showOnboardingHint={!isWebEdition && onboarding.showResumeHint}
                 onDismissOnboardingHint={onboarding.dismissResumeHint}
+                onOpenRecords={(target) =>
+                  // The list covers the days the overview counted, unless
+                  // the target names a day of its own.
+                  navigate({
+                    kind: "records",
+                    target: { range: usageRange, ...target },
+                  })
+                }
                 onOpenService={(serviceId) =>
                   navigate({ kind: "edit", serviceId })
-                }
-                onOpenTokenRecords={(tokenId) =>
-                  navigate({ kind: "records", tokenId })
                 }
                 onRefreshServices={() => void refreshServices()}
                 onRefresh={() => {
@@ -1106,11 +1153,11 @@ export default function App() {
                   void refreshAccessTokens({ silent: true });
                 }}
                 onRestart={() => void handleRestart()}
-                onUsagePresetChange={setUsagePreset}
+                onUsageRangeChange={setUsageRange}
                 snapshot={snapshot}
                 tokenCatalog={tokenCatalog}
                 usage={usage}
-                usagePreset={usagePreset}
+                usageRange={usageRange}
               />
             ) : page.kind === "tokens" ? (
               <AccessTokenManager
@@ -1143,8 +1190,6 @@ export default function App() {
                 accessTokens={tokenCatalog.items}
                 accessTokensReady={tokenCatalog.status === "ready"}
                 coreSessionKey={coreSessionKey}
-                initialFailedWithin={page.failedWithin}
-                initialLocalAccessTokenId={page.tokenId}
                 services={catalog.items}
                 isReady={isReady}
                 conversionEngine={snapshot?.capabilities?.conversion_engine}
@@ -1159,6 +1204,7 @@ export default function App() {
                   navigate({ kind: "edit", serviceId, tab: "protocols" })
                 }
                 onServicesChanged={() => void refreshServices({ silent: true })}
+                target={page.target}
               />
             ) : page.kind === "routing" ? (
               <RouteManager
@@ -1216,6 +1262,7 @@ export default function App() {
                 catalogError={catalog.error}
                 catalogStatus={catalog.status}
                 conversionEngine={snapshot?.capabilities?.conversion_engine}
+                inferenceURL={snapshot?.ready?.client_inference_url ?? ""}
                 isReady={isReady}
                 onDirtyChange={handleEditorDirtyChange}
                 onRefresh={() => void refreshServices()}

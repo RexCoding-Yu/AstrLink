@@ -84,17 +84,18 @@ describe("web command transport", () => {
       }),
     );
   });
-  it("keeps repeated token query parameters and encodes cursors", async () => {
+  it("keeps repeated token and model query parameters and encodes cursors", async () => {
     respond({ items: [] });
     await webInvoke("list_request_sessions", {
       query: {
         local_access_token_ids: ["token_a", "token_b"],
+        models: ["claude-opus-5-5", "gpt-6.1/sol"],
         cursor: "x+y",
         kind: "agent",
       },
     });
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "/control/v1/request-sessions?local_access_token_id=token_a&local_access_token_id=token_b&cursor=x%2By&kind=agent",
+      "/control/v1/request-sessions?local_access_token_id=token_a&local_access_token_id=token_b&model=claude-opus-5-5&model=gpt-6.1%2Fsol&cursor=x%2By&kind=agent",
     );
   });
   it.each(["POST", "PUT", "PATCH", "DELETE"] as const)(

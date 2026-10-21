@@ -9,8 +9,16 @@ import { parseUsageSummary } from "./usage-summary-model";
 const window = resolveUsageWindow("1d", new Date(2026, 8, 19, 23));
 const date = "2026-09-19";
 const totals = { ...emptyUsageTotals(), requests: 5001, total_tokens: 10002 };
+const statusCounts = {
+  succeeded: 5001,
+  failed: 0,
+  blocked: 2,
+  cancelled: 1,
+  pending: 0,
+};
 const response = {
   totals,
+  status_counts: statusCounts,
   by_day: [{ date, ...totals }],
   by_hour: [{ date, hour: 9, ...totals }],
   by_service: [{ id: null, ...totals }],
@@ -71,6 +79,7 @@ describe("usage summary contract", () => {
   it("pads sparse buckets without truncating complete totals", () => {
     const summary = parseUsageSummary(response, window);
     expect(summary.totals.total_tokens).toBe(10002);
+    expect(summary.status_counts).toEqual(statusCounts);
     expect(summary.scanned_records).toBe(5001);
     expect(summary.by_token).toEqual(response.by_token);
     expect(summary.capped).toBe(false);
@@ -87,6 +96,11 @@ describe("usage summary contract", () => {
       totals: { ...totals, total_tokens: Number.MAX_SAFE_INTEGER + 1 },
     },
     { ...response, scanned_records: 10 },
+    { ...response, status_counts: { ...statusCounts, succeeded: 5000 } },
+    { ...response, status_counts: { ...statusCounts, failed: 1 } },
+    { ...response, status_counts: { ...statusCounts, blocked: -1 } },
+    { ...response, status_counts: { ...statusCounts, interrupted: 0 } },
+    { ...response, status_counts: undefined },
     { ...response, by_day: [{ date: "2026-09-18", ...totals }] },
     { ...response, by_hour: [{ date, hour: 24, ...totals }] },
     { ...response, by_model: [...response.by_model, ...response.by_model] },

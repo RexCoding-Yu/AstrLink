@@ -204,7 +204,10 @@ type Service struct {
 	// ModelRedirects belong to this provider alone: a requested model is
 	// served as the rule's target when the provider lists it. Routing keeps
 	// the requested model, so other providers that list it can still serve it.
-	ModelRedirects []ModelRedirect         `json:"model_redirects,omitempty"`
+	ModelRedirects []ModelRedirect `json:"model_redirects,omitempty"`
+	// ModelProtocols pin the protocol this provider is called in for a model
+	// it serves, replacing the kind's built-in choice for that model.
+	ModelProtocols []ModelProtocol         `json:"model_protocols,omitempty"`
 	FailurePolicy  *FailurePolicy          `json:"failure_policy,omitempty"`
 	ID             ServiceID               `json:"id"`
 	Name           string                  `json:"name"`
@@ -277,6 +280,18 @@ func (service Service) UpstreamModelFor(model string) (string, bool) {
 	return "", false
 }
 
+// ModelProtocol returns the protocol this provider is called in for model,
+// the model it serves after redirects: its own entry, else the kind's
+// built-in choice. An empty result leaves each capability row to decide.
+func (service Service) ModelProtocol(model string) ProtocolID {
+	for _, entry := range service.ModelProtocols {
+		if entry.Model == model {
+			return entry.Protocol
+		}
+	}
+	return service.Kind.BuiltinModelProtocol(model)
+}
+
 // ResponsesWebSocket reports the effective per-channel transport setting.
 // The Copilot API and Factory's gateway serve Responses over HTTP only.
 func (service Service) ResponsesWebSocket() bool {
@@ -337,6 +352,9 @@ func (service Service) Validate() error {
 	}
 	if err := ValidateModelRedirects(service.ModelRedirects); err != nil {
 		return fmt.Errorf("model_redirects: %w", err)
+	}
+	if err := ValidateModelProtocols(service.Kind, service.ModelProtocols); err != nil {
+		return err
 	}
 	if service.Kind.IsSubscription() {
 		if err := service.Kind.SubscriptionProvider().ValidateCapabilities(service.Capabilities); err != nil {

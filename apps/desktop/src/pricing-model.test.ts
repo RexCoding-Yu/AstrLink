@@ -51,6 +51,7 @@ describe("official pricing boundary", () => {
       to: "2026-09-20T00:00:00Z",
       by_model: [],
       by_token: [],
+      by_service: [],
     };
     expect(parseBillingSummary(value).amount_usd).toBe("0.000000001");
     expect(parseBillingSummary(value).by_token).toEqual([]);
@@ -72,6 +73,7 @@ describe("official pricing boundary", () => {
         from: "2026-09-19T00:00:00Z",
         to: "2026-09-20T00:00:00Z",
         by_model: [],
+        by_service: [],
       }),
     ).toThrow("Invalid pricing list");
   });
@@ -87,6 +89,7 @@ describe("official pricing boundary", () => {
       to: "2026-09-20T00:00:00Z",
       by_model: [],
       by_token: [],
+      by_service: [],
     };
     const period = {
       id: "month",
@@ -116,6 +119,11 @@ describe("official pricing boundary", () => {
         }),
       ).toThrow("Invalid pricing list");
     }
+    for (const by_service of [undefined, null, {}]) {
+      expect(() => parseBillingSummary({ ...summary, by_service })).toThrow(
+        "Invalid pricing list",
+      );
+    }
   });
   it("parses token billing groups with the stable token_id field", () => {
     const value = {
@@ -139,8 +147,26 @@ describe("official pricing boundary", () => {
           requests: 1,
         },
       ],
+      by_service: [
+        {
+          service_id: "service_a",
+          amount_usd: "1.25",
+          priced: 1,
+          unpriced: 0,
+          pending: 0,
+          revalued: 0,
+          requests: 1,
+        },
+      ],
     };
     expect(parseBillingSummary(value).by_token).toEqual(value.by_token);
+    expect(parseBillingSummary(value).by_service).toEqual(value.by_service);
+    expect(() =>
+      parseBillingSummary({
+        ...value,
+        by_service: [{ ...value.by_service[0], service_id: 1 }],
+      }),
+    ).toThrow();
   });
   it("keeps missing prices distinct from free calls and prefers the official cycle", () => {
     const amounts = {

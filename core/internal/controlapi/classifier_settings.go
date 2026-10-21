@@ -12,9 +12,11 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/autoclassifier"
 	"github.com/QuantumNous/astrlink/core/internal/autoclassifier/cloud"
+	"github.com/QuantumNous/astrlink/core/internal/classifieroutput"
 	"github.com/QuantumNous/astrlink/core/internal/modelrouting"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 // ClassifierSettingsPath is the singleton external-classifier resource. It
@@ -30,6 +32,12 @@ const dryRunPreviewRunes = 400
 
 // dryRunSlots allows one dry-run at a time: each one is a real cloud call.
 var dryRunSlots = make(chan struct{}, 1)
+
+// dryRunSlack is how much longer than the classifier timeout one dry-run may
+// take in all, for the privacy check and the reads around the classifier call.
+// A run that needs more ends in dry_run_timeout instead of keeping the caller
+// waiting. It is a variable so tests need not wait seconds.
+var dryRunSlack = 5 * time.Second
 
 func (handler *Handler) classifierResource(writer http.ResponseWriter, request *http.Request) {
 	if handler.classifierSettings == nil {
@@ -63,6 +71,10 @@ func (handler *Handler) classifierResource(writer http.ResponseWriter, request *
 				writeError(writer, http.StatusConflict, "classifier_dimension_in_use", inUse.Error())
 				return
 			}
+			if errors.Is(err, storage.ErrClassifierTarget) {
+				writeError(writer, http.StatusUnprocessableEntity, "classifier_model_unavailable", err.Error())
+				return
+			}
 			handler.writeStoreError(writer, err)
 			return
 		}
@@ -74,15 +86,10 @@ func (handler *Handler) classifierResource(writer http.ResponseWriter, request *
 }
 
 func (handler *Handler) writeClassifierSettings(writer http.ResponseWriter, request *http.Request, settings contract.ClassifierSettings) {
-	configured := false
-	if secrets, ok := handler.serviceStore.(secretstore.SecretStore); ok {
-		value, err := secrets.Get(request.Context(), classifierCredentialRef)
-		clear(value)
-		if err != nil && !errors.Is(err, secretstore.ErrNotFound) {
-			writeError(writer, http.StatusInternalServerError, "credential_unavailable", "could not read classifier credential status")
-			return
-		}
-		configured = err == nil
+	configured, err := handler.classifierCredentialConfigured(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "credential_unavailable", "could not read classifier credential status")
+		return
 	}
 	writeJSON(writer, http.StatusOK, classifierSettingsResponse{
 		ClassifierSettings:   settings,
@@ -93,6 +100,22 @@ func (handler *Handler) writeClassifierSettings(writer http.ResponseWriter, requ
 type classifierSettingsResponse struct {
 	contract.ClassifierSettings
 	CredentialConfigured bool `json:"credential_configured"`
+}
+
+// classifierCredentialStatus reports whether the sealed classifier key exists
+// without unsealing it. A key the keyring can no longer open, as after a move
+// to another machine, still reads as configured, so the settings page loads
+// and the key can be entered again.
+type classifierCredentialStatus interface {
+	ClassifierCredentialConfigured(context.Context) (bool, error)
+}
+
+func (handler *Handler) classifierCredentialConfigured(ctx context.Context) (bool, error) {
+	status, ok := handler.serviceStore.(classifierCredentialStatus)
+	if !ok {
+		return false, nil
+	}
+	return status.ClassifierCredentialConfigured(ctx)
 }
 
 func (handler *Handler) classifierSubResource(writer http.ResponseWriter, request *http.Request) {
@@ -115,13 +138,12 @@ func (handler *Handler) classifierCredentialResource(writer http.ResponseWriter,
 	}
 	switch request.Method {
 	case http.MethodGet:
-		value, err := secrets.Get(request.Context(), classifierCredentialRef)
-		defer clear(value)
-		if err != nil && !errors.Is(err, secretstore.ErrNotFound) {
+		configured, err := handler.classifierCredentialConfigured(request.Context())
+		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "credential_unavailable", "could not read classifier credential status")
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]bool{"configured": err == nil})
+		writeJSON(writer, http.StatusOK, map[string]bool{"configured": configured})
 	case http.MethodPut:
 		var input struct {
 			Secret string `json:"secret"`
@@ -165,7 +187,8 @@ type classifierDryRunRequest struct {
 	Text    string `json:"text"`
 	GroupID string `json:"group_id,omitempty"`
 	// Protocol must name a protocol AstrLink actually serves when set.
-	Protocol     string `json:"protocol,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+	// MediaKind is one a live request can carry; "unknown" leaves it unset.
 	MediaKind    string `json:"media_kind,omitempty"`
 	Streaming    *bool  `json:"streaming,omitempty"`
 	Continuation *bool  `json:"continuation,omitempty"`
@@ -183,16 +206,25 @@ type classifierDryRunDecision struct {
 }
 
 type classifierDryRunResponse struct {
-	Configured       bool                                    `json:"configured"`
-	Category         string                                  `json:"category,omitempty"`
-	Confidence       float64                                 `json:"confidence,omitempty"`
-	Dimensions       map[string]dryRunDimensionScore         `json:"dimensions,omitempty"`
-	FallbackReason   string                                  `json:"fallback_reason,omitempty"`
-	Privacy          string                                  `json:"privacy,omitempty"`
-	DurationMS       int                                     `json:"duration_ms"`
-	SanitizedPreview string                                  `json:"sanitized_preview,omitempty"`
-	Decision         *classifierDryRunDecision               `json:"decision,omitempty"`
-	Fields           []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
+	// Configured reports whether a classifier the run can call is set up: the
+	// cloud service, or an existing gateway model.
+	Configured     bool                            `json:"configured"`
+	Category       string                          `json:"category,omitempty"`
+	Confidence     float64                         `json:"confidence,omitempty"`
+	Dimensions     map[string]dryRunDimensionScore `json:"dimensions,omitempty"`
+	FallbackReason string                          `json:"fallback_reason,omitempty"`
+	Privacy        string                          `json:"privacy,omitempty"`
+	DurationMS     int                             `json:"duration_ms"`
+	// TimeoutMS is the classifier timeout this run used, the one the
+	// classifier settings give.
+	TimeoutMS        int    `json:"timeout_ms,omitempty"`
+	SanitizedPreview string `json:"sanitized_preview,omitempty"`
+	// Instruction is what the classifier was told, placeholders rendered: an
+	// existing model's whole system instruction, or the instructions of a
+	// cloud service's task_type question. Empty when nothing was called.
+	Instruction string                                  `json:"instruction,omitempty"`
+	Decision    *classifierDryRunDecision               `json:"decision,omitempty"`
+	Fields      []contract.ModelRoutingFieldObservation `json:"fields,omitempty"`
 	// Rules is every rule in the group with its own verdict, in evaluation
 	// order, in the same shape a request record keeps. The selection above
 	// reports only the winner, which cannot answer "why did the rule I wrote
@@ -215,8 +247,15 @@ type dryRunDimensionScore struct {
 }
 
 // classifierDryRun previews one classification locally: the text passes the
-// same privacy filter as production, then the configured provider is asked
-// once. No inference upstream is contacted and nothing is persisted.
+// same privacy filter as production, then the configured classifier is asked
+// once — the cloud service, or an existing gateway model through the path a
+// live request takes. The text never goes on to a routed model and nothing is
+// persisted.
+//
+// Without a configured classifier nothing is asked and the rules are still
+// judged: every classifier field stays unknown, as it does for a live request
+// whose classifier is unavailable, so the group's other rules and its default
+// decide.
 func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", http.MethodPost)
@@ -234,6 +273,7 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusTooManyRequests, "dry_run_busy", "another dry-run is in progress")
 		return
 	}
+	begun := time.Now()
 	var input classifierDryRunRequest
 	if !decodeControlJSON(writer, request, &input) {
 		return
@@ -253,6 +293,16 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 			return
 		}
 	}
+	switch input.MediaKind {
+	case "", "none", "image", "audio", "video", "mixed":
+	case "unknown":
+		// A live request is never of unknown media; an unknown fact is an
+		// unset one, which matches no rule.
+		input.MediaKind = ""
+	default:
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_dry_run", "media_kind must be none, image, audio, video or mixed")
+		return
+	}
 	systemTime, timeErr := dryRunSystemTime(input.SystemTime)
 	if timeErr != nil {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_dry_run", "system_time must be HH:MM")
@@ -263,76 +313,100 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 		handler.writeStoreError(writer, err)
 		return
 	}
-	response := classifierDryRunResponse{Configured: settings.CloudConfigured()}
-	if !response.Configured {
-		response.FallbackReason = autoclassifier.FallbackUnavailable
-		writeJSON(writer, http.StatusOK, response)
+	response := classifierDryRunResponse{Configured: settings.CloudConfigured() || settings.ExistingModelConfigured()}
+	// The classifier call keeps the timeout its settings give it; the whole
+	// run gets that timeout plus dryRunSlack and then answers dry_run_timeout.
+	timeoutMS := settings.EffectiveTimeoutMS()
+	ctx, cancel := context.WithDeadline(request.Context(), begun.Add(time.Duration(timeoutMS)*time.Millisecond+dryRunSlack))
+	defer cancel()
+	sanitized, privacyState := handler.dryRunPrivacy(ctx, input.Text)
+	if dryRunExpired(ctx) {
+		writeDryRunTimeout(writer)
 		return
 	}
-	sanitized, privacyState := handler.dryRunPrivacy(request.Context(), input.Text)
 	response.Privacy = privacyState
 	response.SanitizedPreview = boundedDryRunPreview(sanitized)
-	if privacyState == "blocked" || privacyState == "inspection_failed" {
+	switch privacyState {
+	case "blocked", "inspection_failed":
 		response.FallbackReason = "privacy_" + privacyState
+	case "unavailable":
+		// Without the policy the text cannot be checked, so it may not leave
+		// either; a live request stops with the same code.
+		response.FallbackReason = "privacy_policy_unavailable"
+	}
+	if response.FallbackReason != "" {
 		writeJSON(writer, http.StatusOK, response)
 		return
 	}
-	group := handler.dryRunGroup(request.Context(), input.GroupID)
+	group := handler.dryRunGroup(ctx, input.GroupID)
 	plan := settings.ResolveCallPlan(group)
-	secrets, _ := handler.serviceStore.(secretstore.SecretStore)
-	if secrets == nil {
-		response.FallbackReason = autoclassifier.FallbackUnavailable
-		writeJSON(writer, http.StatusOK, response)
-		return
-	}
-	secret, secretErr := secrets.Get(request.Context(), classifierCredentialRef)
-	if secretErr != nil {
-		response.FallbackReason = autoclassifier.FallbackUnavailable
-		writeJSON(writer, http.StatusOK, response)
-		return
-	}
-	started := time.Now()
-	outcome := cloud.Classify(request.Context(), nil, cloud.Input{
-		Protocol:   cloud.Protocol(plan.Protocol),
-		Endpoint:   plan.Endpoint,
-		APIKey:     secret,
-		Model:      plan.Model,
-		Prompt:     plan.Prompt,
-		Labels:     plan.Labels,
-		Text:       sanitized,
-		TimeoutMS:  plan.TimeoutMS,
-		Dimensions: plan.Dimensions,
-	})
-	response.DurationMS = int(time.Since(started).Milliseconds())
-	response.Confidence = outcome.Confidence
 	// The dry-run fills the same routing-side carrier as the inference
 	// path's cloud classifier (modelRoutingTaskTypeCloud): success requires a
 	// label the group accepts and enough confidence, low confidence stays a
 	// code and never a fallback, and failures go through the shared mapping.
 	// Facts and observations then derive from that carrier through the one
-	// conversion in modelrouting, never from a synthesized single value.
+	// conversion in modelrouting, never from a synthesized single value. A
+	// classifier that cannot be called leaves classifier_unavailable, the code
+	// a live request records in its place.
 	taskType := modelrouting.TaskTypeOutcome{
-		ClassifierID:           string(outcome.ClassifierID),
-		Candidates:             outcome.Candidates,
+		Code:                   autoclassifier.FallbackUnavailable,
 		LowConfidenceThreshold: plan.LowConfidenceThreshold,
-		Dimensions:             dryRunDimensionScores(outcome.Dimensions),
 	}
-	if outcome.OK() {
-		if group != nil && !group.ValidTaskTypeLabel(outcome.Category) {
-			taskType.Code = "classifier_invalid_output"
-		} else if outcome.Confidence < plan.LowConfidenceThreshold {
-			taskType.Code = modelrouting.CodeClassifierLowConfidence
-		} else {
-			taskType.Value = outcome.Category
-			taskType.Confidence = outcome.Confidence
+	if secret, ok := handler.dryRunClassifierKey(ctx, settings); ok {
+		response.TimeoutMS = timeoutMS
+		response.Instruction = plan.Prompt
+		started := time.Now()
+		outcome := cloud.Classify(ctx, nil, cloud.Input{
+			Protocol:   cloud.Protocol(plan.Protocol),
+			Endpoint:   plan.Endpoint,
+			APIKey:     secret,
+			Model:      plan.Model,
+			Prompt:     plan.Prompt,
+			Labels:     plan.Labels,
+			Text:       sanitized,
+			TimeoutMS:  plan.TimeoutMS,
+			Dimensions: plan.Dimensions,
+		})
+		response.DurationMS = int(time.Since(started).Milliseconds())
+		response.Confidence = outcome.Confidence
+		taskType = modelrouting.TaskTypeOutcome{
+			ClassifierID:           string(outcome.ClassifierID),
+			Candidates:             outcome.Candidates,
+			LowConfidenceThreshold: plan.LowConfidenceThreshold,
+			Dimensions:             dryRunDimensionScores(outcome.Dimensions),
 		}
-	} else {
-		// The dry-run preview reports failures through the same shared
-		// mapping as production routing: a stable record code instead of the
-		// raw provider reason, and no substituted label — the preview shows
-		// the default member a live request would fall through to.
-		failure := autoclassifier.FailureTaskType(outcome, response.DurationMS)
-		taskType.Code = failure.Code
+		if outcome.OK() {
+			if group != nil && !group.ValidTaskTypeLabel(outcome.Category) {
+				taskType.Code = "classifier_invalid_output"
+			} else if outcome.Confidence < plan.LowConfidenceThreshold {
+				taskType.Code = modelrouting.CodeClassifierLowConfidence
+			} else {
+				taskType.Value = outcome.Category
+				taskType.Confidence = outcome.Confidence
+			}
+		} else {
+			// The dry-run preview reports failures through the same shared
+			// mapping as production routing: a stable record code instead of
+			// the raw provider reason, and no substituted label — the preview
+			// shows the default member a live request would fall through to.
+			failure := autoclassifier.FailureTaskType(outcome, response.DurationMS)
+			taskType.Code = failure.Code
+		}
+	} else if settings.ExistingModelConfigured() && handler.modelClassifier != nil {
+		// An existing gateway model classifies through the code a live request
+		// runs, so instruction, parsing and failure codes cannot drift apart.
+		response.TimeoutMS = timeoutMS
+		// Built by the function the live call uses, from the same plan.
+		response.Instruction, _ = classifieroutput.ExistingModelInstruction(plan)
+		started := time.Now()
+		taskType, response.Confidence = handler.modelClassifier.ExistingModelTaskType(ctx, sanitized, group, settings)
+		response.DurationMS = int(time.Since(started).Milliseconds())
+	}
+	// The classifier's own timeout is a result (classifier_timeout); running
+	// out of the whole run's time is not, because nothing ran to completion.
+	if dryRunExpired(ctx) {
+		writeDryRunTimeout(writer)
+		return
 	}
 	response.Category = taskType.Value
 	response.FallbackReason = taskType.Code
@@ -382,11 +456,40 @@ func (handler *Handler) classifierDryRun(writer http.ResponseWriter, request *ht
 
 func boolPtrDryRun(value bool) *bool { return &value }
 
+// dryRunClassifierKey returns the cloud classifier's key when a dry-run can
+// call it: the cloud source is configured and its key is stored. Otherwise the
+// run calls nothing.
+func (handler *Handler) dryRunClassifierKey(ctx context.Context, settings contract.ClassifierSettings) ([]byte, bool) {
+	if !settings.CloudConfigured() {
+		return nil, false
+	}
+	secrets, _ := handler.serviceStore.(secretstore.SecretStore)
+	if secrets == nil {
+		return nil, false
+	}
+	secret, err := secrets.Get(ctx, classifierCredentialRef)
+	if err != nil {
+		return nil, false
+	}
+	return secret, true
+}
+
+// dryRunExpired reports whether a dry-run outlived its own deadline, as
+// opposed to the caller hanging up.
+func dryRunExpired(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+func writeDryRunTimeout(writer http.ResponseWriter) {
+	writeError(writer, http.StatusGatewayTimeout, "dry_run_timeout", "dry-run did not finish within the classifier timeout plus "+dryRunSlack.String())
+}
+
 // dryRunSystemTime resolves the preview's clock. An empty value means "now",
 // sampled once here so every rule in one preview reads the same instant — the
-// production fact builder makes the same guarantee. A supplied "HH:MM" keeps
-// today's date: `system_time` is a time-of-day window, and the evaluator only
-// ever reads the clock portion.
+// production fact builder makes the same guarantee. A supplied "HH:MM" is
+// pinned in UTC: `system_time` is a time-of-day window and the evaluator reads
+// only the clock, which in a local zone would skip or repeat an hour on the
+// day daylight saving time changes.
 func dryRunSystemTime(value string) (time.Time, error) {
 	if value == "" {
 		return time.Now(), nil
@@ -396,7 +499,7 @@ func dryRunSystemTime(value string) (time.Time, error) {
 		return time.Time{}, errInvalidDryRunClock
 	}
 	now := time.Now()
-	return time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()), nil
+	return time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC), nil
 }
 
 var errInvalidDryRunClock = errors.New("system_time must be HH:MM")

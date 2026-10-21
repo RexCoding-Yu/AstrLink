@@ -22,12 +22,13 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	storagecontract "github.com/QuantumNous/astrlink/core/internal/storage"
+	"github.com/QuantumNous/astrlink/core/internal/testutil/sqliteschema"
 )
 
 func TestOpenMigratesDatabaseAndUsesRestrictiveFileModes(t *testing.T) {
 	dataDirectory := filepath.Join(t.TempDir(), "data")
 	databasePath := filepath.Join(dataDirectory, "astrlink.db")
-	store := openTestStore(t, databasePath)
+	store := openUnseededTestStore(t, databasePath)
 	defer store.Close()
 
 	info, err := os.Stat(dataDirectory)
@@ -782,6 +783,12 @@ func mustServiceDocument(t *testing.T, store *Store, id contract.ServiceID) stri
 }
 
 func openTestStore(t *testing.T, path string) *Store {
+	t.Helper()
+	sqliteschema.Seed(t, path)
+	return openUnseededTestStore(t, path)
+}
+
+func openUnseededTestStore(t *testing.T, path string) *Store {
 	t.Helper()
 	store, err := Open(context.Background(), path)
 	if err != nil {

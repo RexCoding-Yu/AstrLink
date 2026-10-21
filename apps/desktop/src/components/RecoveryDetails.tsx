@@ -64,17 +64,19 @@ export function RecoveryDetails({
           <dd>
             {value.reason.startsWith("http_")
               ? t("failure.httpCode", { code: value.reason.slice(5) })
-              : value.reason === "upstream_timeout"
-                ? t("failure.responseTimeout")
-                : value.reason === "upstream_unavailable"
-                  ? t("failure.networkError")
-                  : value.reason === "thinking_signature_repair"
-                    ? t("failure.thinkingSignatureRepair")
-                    : value.reason === "openai_reasoning_repair"
-                      ? t("failure.openaiReasoningRepair")
-                      : value.reason === "openai_function_output_repair"
-                        ? t("failure.openaiFunctionOutputRepair")
-                        : value.reason}
+              : value.reason.startsWith("stream_")
+                ? t("failure.streamCode", { code: value.reason.slice(7) })
+                : value.reason === "upstream_timeout"
+                  ? t("failure.responseTimeout")
+                  : value.reason === "upstream_unavailable"
+                    ? t("failure.networkError")
+                    : value.reason === "thinking_signature_repair"
+                      ? t("failure.thinkingSignatureRepair")
+                      : value.reason === "openai_reasoning_repair"
+                        ? t("failure.openaiReasoningRepair")
+                        : value.reason === "openai_function_output_repair"
+                          ? t("failure.openaiFunctionOutputRepair")
+                          : value.reason}
           </dd>
         </div>
       ) : null}

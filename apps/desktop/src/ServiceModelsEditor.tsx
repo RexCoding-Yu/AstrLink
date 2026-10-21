@@ -1,5 +1,12 @@
 import { ModelSelect } from "./components/ModelSelect";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { ChevronDown, Plus, X } from "@/components/icons";
 import { useT } from "./i18n";
 
@@ -11,7 +18,19 @@ import { Panel } from "@/components/Panel";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
@@ -22,6 +41,11 @@ import {
   type ModelCategory,
   type ModelGroup,
 } from "./model-groups";
+import {
+  modelFormatLabels,
+  type ModelFormat,
+  type ModelProtocol,
+} from "./service-model";
 
 /** Model IDs returned by the latest successful upstream fetch. */
 export type UpstreamModelSnapshot = {
@@ -35,11 +59,22 @@ export type ServiceModelsEditorProps = {
   modelEditor: string;
   probingModels: boolean;
   upstream?: UpstreamModelSnapshot | null;
+  /** Formats this provider can pin a model to. Fewer than two hide the choice. */
+  formats: readonly ModelFormat[];
+  /** Models pinned to a format. Every other model is automatic. */
+  modelProtocols: readonly ModelProtocol[];
+  /** The format an automatic model uses, for kinds that have a table. */
+  builtinProtocol: (model: string) => ModelFormat | undefined;
   onModelEditorChange: (value: string) => void;
   onAddModels: () => void;
   onDiscoverModels?: () => void;
   onRemoveModels: (models: string[]) => void;
   onClearModels: () => void;
+  /** Pins the models to protocol, or makes them automatic with null. */
+  onModelProtocolsChange: (
+    models: string[],
+    protocol: ModelFormat | null,
+  ) => void;
 };
 
 type ModelsConfirm =
@@ -48,7 +83,24 @@ type ModelsConfirm =
   | { kind: "remove_missing"; models: string[] }
   | { kind: "remove_category"; category: string; models: string[] }
   | { kind: "remove_group"; group: string; models: string[] }
+  | { kind: "remove_selected"; models: string[] }
   | null;
+
+/** What every model row shares: its format choice and selection state. */
+type ModelRowControls = {
+  builtinProtocol: (model: string) => ModelFormat | undefined;
+  /** The checked models in selection mode, or null outside it. */
+  checked: ReadonlySet<string> | null;
+  formats: readonly ModelFormat[];
+  missing: ReadonlySet<string>;
+  onCheckedChange: (model: string, checked: boolean) => void;
+  onProtocolChange: (model: string, protocol: ModelFormat | null) => void;
+  onRemove: (model: string) => void;
+  protocols: ReadonlyMap<string, ModelFormat>;
+};
+
+/** The menu value of a model without a format of its own, apart from every protocol ID. */
+const DEFAULT_FORMAT = "default";
 
 const COLLAPSE_THRESHOLD = 12;
 
@@ -190,38 +242,187 @@ function ModelListHeader({
   );
 }
 
-function ModelRow({
-  missing,
-  model,
-  onRemove,
+/**
+ * The format choices for one row, or for the checked models when value is
+ * absent. The default choice names what the model falls back to.
+ */
+function ModelFormatMenuItems({
+  defaultLabel,
+  formats,
+  onChange,
+  value,
 }: {
-  missing: boolean;
-  model: string;
-  onRemove: () => void;
+  defaultLabel: string;
+  formats: readonly ModelFormat[];
+  onChange: (protocol: ModelFormat | null) => void;
+  value?: ModelFormat | typeof DEFAULT_FORMAT;
 }) {
   const t = useT();
+  const choose = (next: string) =>
+    onChange(next === DEFAULT_FORMAT ? null : (next as ModelFormat));
+  const choices = [
+    { value: DEFAULT_FORMAT, label: defaultLabel },
+    ...formats.map((format) => ({
+      value: format,
+      label: modelFormatLabels[format],
+    })),
+  ];
+  return (
+    <>
+      <DropdownMenuLabel className="grid max-w-64 gap-0.5">
+        <span>{t("models.format")}</span>
+        <span className="text-xs font-normal text-muted-foreground">
+          {t("models.formatHint")}
+        </span>
+      </DropdownMenuLabel>
+      <DropdownMenuSeparator />
+      {value === undefined ? (
+        choices.map((choice) => (
+          <DropdownMenuItem
+            key={choice.value}
+            onSelect={() => choose(choice.value)}
+          >
+            {choice.label}
+          </DropdownMenuItem>
+        ))
+      ) : (
+        <DropdownMenuRadioGroup onValueChange={choose} value={value}>
+          {choices.map((choice) => (
+            <DropdownMenuRadioItem key={choice.value} value={choice.value}>
+              {choice.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      )}
+    </>
+  );
+}
+
+/** The row action that pins one model to a format, shown beside delete. */
+function ModelFormatMenu({
+  builtin,
+  formats,
+  label,
+  onChange,
+  value,
+}: {
+  builtin: ModelFormat | undefined;
+  formats: readonly ModelFormat[];
+  label: string;
+  onChange: (protocol: ModelFormat | null) => void;
+  value: ModelFormat | undefined;
+}) {
+  const t = useT();
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          aria-label={t("models.formatFor", { label })}
+          className="h-6 shrink-0 px-1.5 text-xs text-muted-foreground opacity-0 group-focus-within/row:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100"
+          size="xs"
+          type="button"
+          variant="ghost"
+        >
+          {t("models.setFormat")}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <ModelFormatMenuItems
+          defaultLabel={
+            builtin
+              ? t("models.formatDefaultBuiltin", {
+                  format: modelFormatLabels[builtin],
+                })
+              : t("models.formatFollowEntry")
+          }
+          formats={formats}
+          onChange={onChange}
+          value={value ?? DEFAULT_FORMAT}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ModelRow({
+  controls,
+  model,
+}: {
+  controls: ModelRowControls;
+  model: string;
+}) {
+  const t = useT();
+  const checkboxID = useId();
   const label = encodeModelEditorValue(model);
+  const format = controls.protocols.get(model);
+  const name = (
+    <span className="flex min-w-0 flex-1 items-center gap-2">
+      <code
+        className="min-w-0 overflow-hidden text-sm text-ellipsis whitespace-nowrap"
+        title={label}
+      >
+        {label}
+      </code>
+      {format ? (
+        <Badge
+          className="shrink-0 px-1.5 py-0 text-micro font-normal"
+          data-testid="service-model-format"
+          title={t("models.formatTagTitle", {
+            format: modelFormatLabels[format],
+          })}
+          variant="secondary"
+        >
+          {t("models.formatTag", { format: modelFormatLabels[format] })}
+        </Badge>
+      ) : null}
+    </span>
+  );
   return (
     <DataRow
       className={cn("group/row py-2", LIST_GAP, LIST_INSET)}
       data-testid="service-model-row"
     >
+      {/* In selection mode the brand mark's cell holds the checkbox, so nothing moves. */}
       <ModelListLead>
-        <ModelBrandIcon model={model} size={16} />
+        {controls.checked ? (
+          <Checkbox
+            aria-label={t("models.selectModel", { label })}
+            checked={controls.checked.has(model)}
+            id={checkboxID}
+            onCheckedChange={(checked) =>
+              controls.onCheckedChange(model, checked === true)
+            }
+          />
+        ) : (
+          <ModelBrandIcon model={model} size={16} />
+        )}
       </ModelListLead>
-      <code
-        className="min-w-0 flex-1 overflow-hidden text-sm text-ellipsis whitespace-nowrap"
-        title={label}
-      >
-        {label}
-      </code>
-      {missing ? (
+      {controls.checked ? (
+        <Label
+          className="min-w-0 flex-1 cursor-pointer font-normal"
+          htmlFor={checkboxID}
+        >
+          {name}
+        </Label>
+      ) : (
+        name
+      )}
+      {controls.missing.has(model) ? (
         <StatusBadge tone="pending">{t("models.missingUpstream")}</StatusBadge>
+      ) : null}
+      {controls.formats.length > 1 ? (
+        <ModelFormatMenu
+          builtin={controls.builtinProtocol(model)}
+          formats={controls.formats}
+          label={label}
+          onChange={(protocol) => controls.onProtocolChange(model, protocol)}
+          value={format}
+        />
       ) : null}
       <Button
         aria-label={t("models.deleteNamed", { label })}
         className="size-6 shrink-0 rounded text-sm text-danger-foreground opacity-0 hover:bg-danger-wash group-hover/row:opacity-100 group-focus-within/row:opacity-100"
-        onClick={onRemove}
+        onClick={() => controls.onRemove(model)}
         type="button"
         size="icon-xs"
         variant="ghost"
@@ -234,19 +435,17 @@ function ModelRow({
 
 function ModelGroupSection({
   collapsed,
+  controls,
   group,
-  missing,
   nested = false,
   onRemove,
-  onRemoveModel,
   onToggle,
 }: {
   collapsed: boolean;
+  controls: ModelRowControls;
   group: ModelGroup;
-  missing: ReadonlySet<string>;
   nested?: boolean;
   onRemove: () => void;
-  onRemoveModel: (model: string) => void;
   onToggle: () => void;
 }) {
   const t = useT();
@@ -256,7 +455,7 @@ function ModelGroupSection({
         brandModel={nested ? undefined : group.models[0]}
         collapsed={collapsed}
         countLabel={`${group.models.length}`}
-        missingCount={countMissing(group.models, missing)}
+        missingCount={countMissing(group.models, controls.missing)}
         onRemove={onRemove}
         onToggle={onToggle}
         removeLabel={t("models.deleteGroup", { group: group.key })}
@@ -267,12 +466,7 @@ function ModelGroupSection({
       {collapsed
         ? null
         : group.models.map((model) => (
-            <ModelRow
-              key={model}
-              missing={missing.has(model)}
-              model={model}
-              onRemove={() => onRemoveModel(model)}
-            />
+            <ModelRow controls={controls} key={model} model={model} />
           ))}
     </>
   );
@@ -293,11 +487,15 @@ export function ServiceModelsEditor({
   modelEditor,
   probingModels,
   upstream,
+  formats,
+  modelProtocols,
+  builtinProtocol,
   onModelEditorChange,
   onAddModels,
   onDiscoverModels,
   onRemoveModels,
   onClearModels,
+  onModelProtocolsChange,
 }: ServiceModelsEditorProps) {
   const t = useT();
   const [query, setQuery] = useState("");
@@ -305,8 +503,18 @@ export function ServiceModelsEditor({
   const [confirm, setConfirm] = useState<ModelsConfirm>(null);
   const [adding, setAdding] = useState(false);
   const [bulkPaste, setBulkPaste] = useState(false);
+  // Selection mode, started from the select button, makes each row's mark a checkbox.
+  const [selecting, setSelecting] = useState(false);
+  const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
   const addInputRef = useRef<HTMLInputElement | null>(null);
   const seededCollapse = useRef(false);
+  const selectButtonRef = useRef<HTMLButtonElement | null>(null);
+  const moreButtonRef = useRef<HTMLButtonElement | null>(null);
+  const selectAllRef = useRef<HTMLButtonElement | null>(null);
+  const cancelSelectionRef = useRef<HTMLButtonElement | null>(null);
+  // Set when the user enters or leaves selection mode, whose controls
+  // replace the focused one.
+  const moveFocusRef = useRef(false);
 
   const catalog = useMemo(() => [...models].sort(), [models]);
   const missing = useMemo(
@@ -315,6 +523,16 @@ export function ServiceModelsEditor({
     [catalog, upstream],
   );
   const missingSet = useMemo(() => new Set(missing), [missing]);
+  const protocolByModel = useMemo(
+    () => new Map(modelProtocols.map((entry) => [entry.model, entry.protocol])),
+    [modelProtocols],
+  );
+
+  // An emptied list has no row to hold the selection controls.
+  if (selecting && catalog.length === 0) {
+    setSelecting(false);
+    setChecked(new Set());
+  }
 
   useEffect(() => {
     if (seededCollapse.current) return;
@@ -328,10 +546,29 @@ export function ServiceModelsEditor({
     addInputRef.current?.focus();
   }, [adding, bulkPaste]);
 
+  useEffect(() => {
+    if (!moveFocusRef.current) return;
+    moveFocusRef.current = false;
+    const target = (
+      selecting
+        ? [selectAllRef.current, cancelSelectionRef.current]
+        : [selectButtonRef.current, moreButtonRef.current]
+    ).find((element) => element?.isConnected && !element.disabled);
+    target?.focus({ preventScroll: true });
+  }, [selecting]);
+
   const filtered = useMemo(
     () => filterModels(catalog, query),
     [catalog, query],
   );
+  // A bulk action takes the checked models the search shows, so it acts on
+  // what the user sees. Models in collapsed groups count too.
+  const checkedModels = useMemo(
+    () => (selecting ? filtered.filter((model) => checked.has(model)) : []),
+    [checked, filtered, selecting],
+  );
+  const allChecked =
+    filtered.length > 0 && checkedModels.length === filtered.length;
   const categories = useMemo(() => groupModelsByCategory(filtered), [filtered]);
   const groupCount = useMemo(
     () =>
@@ -371,6 +608,49 @@ export function ServiceModelsEditor({
     setQuery("");
   };
 
+  const startSelection = () => {
+    setChecked(new Set());
+    setSelecting(true);
+    moveFocusRef.current = true;
+  };
+
+  const exitSelection = () => {
+    setSelecting(false);
+    setChecked(new Set());
+    moveFocusRef.current = true;
+  };
+
+  const toggleChecked = (model: string, next: boolean) => {
+    setChecked((current) => {
+      const updated = new Set(current);
+      if (next) updated.add(model);
+      else updated.delete(model);
+      return updated;
+    });
+  };
+
+  const toggleAllChecked = () => {
+    setChecked(allChecked ? new Set() : new Set(filtered));
+  };
+
+  const applyFormat = (protocol: ModelFormat | null) => {
+    if (checkedModels.length === 0) return;
+    onModelProtocolsChange(checkedModels, protocol);
+    exitSelection();
+  };
+
+  const rowControls: ModelRowControls = {
+    builtinProtocol,
+    checked: selecting ? checked : null,
+    formats,
+    missing: missingSet,
+    onCheckedChange: toggleChecked,
+    onProtocolChange: (model, protocol) =>
+      onModelProtocolsChange([model], protocol),
+    onRemove: (model) => onRemoveModels([model]),
+    protocols: protocolByModel,
+  };
+
   const applyConfirm = () => {
     if (!confirm) return;
     if (confirm.kind === "clear") {
@@ -381,6 +661,7 @@ export function ServiceModelsEditor({
     } else {
       onRemoveModels(confirm.models);
       if (confirm.kind === "remove_filtered") resetBrowsing();
+      if (confirm.kind === "remove_selected") exitSelection();
     }
     setConfirm(null);
   };
@@ -533,8 +814,14 @@ export function ServiceModelsEditor({
               </Button>
             </FormMessage>
           ) : null}
-          <div className="my-1.5 mt-2 flex min-h-4 items-center justify-between gap-2.5">
-            <span className="text-xs font-semibold text-muted-foreground tabular-nums">
+          {/* Selection covers this row without changing its size, so the list below stays put. */}
+          <div className="relative my-1.5 mt-2 flex min-h-4 items-center justify-between gap-2.5">
+            <span
+              className={cn(
+                "text-xs font-semibold text-muted-foreground tabular-nums",
+                selecting && "invisible",
+              )}
+            >
               {hasQuery
                 ? t("models.matchCount", {
                     shown: filtered.length,
@@ -551,7 +838,13 @@ export function ServiceModelsEditor({
                       count: catalog.length,
                     })}
             </span>
-            <div className="flex flex-wrap items-center justify-end gap-2.5">
+            <div
+              className={cn(
+                "flex flex-wrap items-center justify-end gap-2.5",
+                selecting && "invisible",
+              )}
+              data-testid="service-models-actions"
+            >
               {hasQuery ? (
                 <Button
                   className="h-auto px-0 text-xs text-danger-foreground"
@@ -579,15 +872,118 @@ export function ServiceModelsEditor({
                     : t("models.collapseAll")}
                 </Button>
               )}
-              <Button
-                className="h-auto px-0 text-xs text-danger-foreground"
-                onClick={() => setConfirm({ kind: "clear" })}
-                type="button"
-                variant="link"
-              >
-                {t("models.clear")}
-              </Button>
+              <span className="inline-flex items-center gap-0.5">
+                <Button
+                  ref={selectButtonRef}
+                  className="h-auto px-0 text-xs"
+                  disabled={filtered.length === 0}
+                  onClick={startSelection}
+                  type="button"
+                  variant="link"
+                >
+                  {t("models.select")}
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      ref={moreButtonRef}
+                      aria-label={t("models.moreActions")}
+                      className="h-auto px-0 text-muted-foreground hover:text-foreground has-[>svg]:px-0"
+                      type="button"
+                      variant="link"
+                    >
+                      <ChevronDown aria-hidden="true" className="size-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onSelect={() => setConfirm({ kind: "clear" })}
+                      variant="destructive"
+                    >
+                      {t("models.clear")}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </span>
             </div>
+            {selecting ? (
+              <div
+                className="absolute inset-0 flex items-center justify-between gap-2.5 whitespace-nowrap"
+                data-testid="service-models-selection"
+              >
+                <span
+                  className="min-w-0 truncate text-xs font-semibold text-muted-foreground tabular-nums"
+                  role="status"
+                >
+                  {t("models.selectedCount", { count: checkedModels.length })}
+                </span>
+                <div className="flex shrink-0 items-center gap-2.5">
+                  <Label className="inline-flex cursor-pointer gap-1.5 font-normal text-text-secondary">
+                    <Checkbox
+                      ref={selectAllRef}
+                      checked={allChecked}
+                      disabled={filtered.length === 0}
+                      onCheckedChange={toggleAllChecked}
+                    />
+                    {t("services.selectAll")}
+                  </Label>
+                  <Button
+                    ref={cancelSelectionRef}
+                    className="h-auto px-0 text-xs"
+                    onClick={exitSelection}
+                    type="button"
+                    variant="link"
+                  >
+                    {t("common.cancel")}
+                  </Button>
+                  {formats.length > 1 ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          className="h-auto gap-0.5 px-0 text-xs has-[>svg]:px-0"
+                          disabled={checkedModels.length === 0}
+                          type="button"
+                          variant="link"
+                        >
+                          {t("models.setFormat")}
+                          <ChevronDown
+                            aria-hidden="true"
+                            className="size-3.5"
+                          />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <ModelFormatMenuItems
+                          defaultLabel={
+                            checkedModels.some((model) =>
+                              builtinProtocol(model),
+                            )
+                              ? t("models.formatResetBuiltin")
+                              : t("models.formatFollowEntry")
+                          }
+                          formats={formats}
+                          onChange={applyFormat}
+                        />
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : null}
+                  <Button
+                    className="h-auto px-0 text-xs text-danger-foreground"
+                    disabled={checkedModels.length === 0}
+                    onClick={() =>
+                      setConfirm({
+                        kind: "remove_selected",
+                        models: checkedModels,
+                      })
+                    }
+                    type="button"
+                    variant="link"
+                  >
+                    {t("common.delete")}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {filtered.length === 0 ? (
@@ -606,8 +1002,8 @@ export function ServiceModelsEditor({
                     <ModelGroupSection
                       key={group.key}
                       collapsed={isGroupCollapsed(groupCollapseKey(group.key))}
+                      controls={rowControls}
                       group={group}
-                      missing={missingSet}
                       onRemove={() =>
                         setConfirm({
                           kind: "remove_group",
@@ -615,7 +1011,6 @@ export function ServiceModelsEditor({
                           models: group.models,
                         })
                       }
-                      onRemoveModel={(model) => onRemoveModels([model])}
                       onToggle={() => toggleGroup(groupCollapseKey(group.key))}
                     />
                   );
@@ -658,8 +1053,8 @@ export function ServiceModelsEditor({
                               collapsed={isGroupCollapsed(
                                 groupCollapseKey(group.key),
                               )}
+                              controls={rowControls}
                               group={group}
-                              missing={missingSet}
                               nested
                               onRemove={() =>
                                 setConfirm({
@@ -668,7 +1063,6 @@ export function ServiceModelsEditor({
                                   models: group.models,
                                 })
                               }
-                              onRemoveModel={(model) => onRemoveModels([model])}
                               onToggle={() =>
                                 toggleGroup(groupCollapseKey(group.key))
                               }
@@ -709,7 +1103,9 @@ export function ServiceModelsEditor({
                 ? t("models.deleteGroupTitle", { group: confirm.group })
                 : confirm?.kind === "remove_missing"
                   ? t("models.deleteMissingTitle")
-                  : t("models.deleteMatchesTitle")
+                  : confirm?.kind === "remove_selected"
+                    ? t("models.deleteSelectedTitle")
+                    : t("models.deleteMatchesTitle")
         }
       />
     </fieldset>

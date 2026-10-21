@@ -37,6 +37,9 @@ type usageScanner struct {
 	anthropicCacheWrite1h *int
 	anthropicSeen         bool
 	outputID              string
+	// failure is the data of the first error event of a stream that did not
+	// finish with a response after it.
+	failure []byte
 	// observer collects session cursors from the same decoded events the
 	// usage parser sees, so the response is parsed exactly once. nil for
 	// protocols without conversation history.
@@ -171,15 +174,21 @@ func (scanner *usageScanner) observeStreaming(chunk []byte) {
 		scanner.carry = nil
 		return
 	}
+	consumed := 0
 	for {
-		newline := bytes.IndexByte(scanner.carry, '\n')
+		newline := bytes.IndexByte(scanner.carry[consumed:], '\n')
 		if newline < 0 {
+			// Compact an unfinished line once per chunk, rather than copying the
+			// remaining batch after every SSE line.
+			scanner.carry = scanner.carry[:copy(scanner.carry, scanner.carry[consumed:])]
 			return
 		}
-		line := scanner.carry[:newline]
-		scanner.carry = append([]byte(nil), scanner.carry[newline+1:]...)
+		newline += consumed
+		line := scanner.carry[consumed:newline]
+		consumed = newline + 1
 		scanner.observeSSELine(line)
 		if scanner.disabled {
+			scanner.carry = nil
 			return
 		}
 	}
@@ -223,6 +232,18 @@ func (scanner *usageScanner) parseEventJSON(payload []byte) {
 			if kind == streamOutputAnswer {
 				scanner.firstAnswerAt = now
 			}
+		}
+	}
+	if scanner.streaming {
+		var eventType string
+		_ = json.Unmarshal(document["type"], &eventType)
+		switch streamEventOutcome(scanner.protocol, eventType) {
+		case streamOutcomeError, streamOutcomeFailed:
+			if scanner.failure == nil && len(payload) <= contract.MaxUpstreamErrorBodyBytes {
+				scanner.failure = bytes.Clone(payload)
+			}
+		case streamOutcomeFinished:
+			scanner.failure = nil
 		}
 	}
 	if scanner.observer != nil && (scanner.streaming || !scanner.observerFed) {
@@ -284,7 +305,10 @@ func (scanner *usageScanner) parseOpenAIResponses(document map[string]json.RawMe
 		if raw, ok := document["type"]; ok {
 			_ = json.Unmarshal(raw, &eventType)
 		}
-		if eventType != "" && eventType != "response.completed" {
+		// Every terminal response carries the usage the provider bills, an
+		// incomplete one (max_output_tokens, content filter) and a failed one
+		// included.
+		if eventType != "" && eventType != "response.completed" && eventType != "response.incomplete" && eventType != "response.failed" {
 			return
 		}
 		if rawResponse, ok := document["response"]; ok {
@@ -292,7 +316,7 @@ func (scanner *usageScanner) parseOpenAIResponses(document map[string]json.RawMe
 			if json.Unmarshal(rawResponse, &response) == nil {
 				scanner.noteOutputID(response["id"])
 				if usage := decodeOpenAIResponsesUsage(response["usage"]); usage != nil {
-					scanner.complete = true
+					scanner.complete = eventType != "response.failed"
 					scanner.usage = usage
 				}
 				return

@@ -168,6 +168,14 @@ describe("client-config IPC parsing", () => {
     ["an empty model", statuses({ models: { model: "" } })],
     ["a multi-line model", statuses({ models: { model: "a\nb" } })],
     ["an overlong model", statuses({ models: { model: "x".repeat(257) } })],
+    [
+      "a limit outside Pi",
+      statuses({}, { models: { model: "gpt-5", maxTokens: "1" } }),
+    ],
+    [
+      "a limit Pi cannot take",
+      statuses({}, {}, { models: { model: "pi", contextWindow: "0" } }),
+    ],
   ])("rejects %s", (_, value) => {
     expect(() => parseStatuses(value)).toThrow(
       "Invalid client-config IPC response",
@@ -182,9 +190,18 @@ describe("client-config IPC parsing", () => {
         models: { model: "main", haikuModel: "haiku", fableModel: "fable" },
       },
       { state: "configured", token_id: "token_01", models: { model: "gpt-5" } },
-      { state: "modified", token_id: "token_01", models: { model: "pi" } },
+      {
+        state: "modified",
+        token_id: "token_01",
+        models: { model: "pi", contextWindow: "400000", maxTokens: "64000" },
+      },
     );
-    expect(parseStatuses(value)).toEqual(value);
+    const parsed = parseStatuses(value);
+    expect(parsed[2].models).toEqual({
+      model: "pi",
+      contextWindow: 400000,
+      maxTokens: 64000,
+    });
   });
 
   it("accepts applied writes, key-only conflicts and another gateway", () => {

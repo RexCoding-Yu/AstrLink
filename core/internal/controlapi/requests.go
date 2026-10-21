@@ -23,6 +23,8 @@ const (
 	RequestSessionsPath = "/control/v1/request-sessions"
 
 	maxLocalAccessTokenFilters = 100
+	maxModelFilters            = 100
+	maxModelFilterRunes        = 256
 	maxRequestSearchRunes      = 200
 )
 
@@ -151,6 +153,7 @@ func parseRequestSessionListOptions(request *http.Request) (storage.RequestSessi
 		Protocol:            recordOptions.Protocol,
 		ServiceID:           recordOptions.ServiceID,
 		LocalAccessTokenIDs: recordOptions.LocalAccessTokenIDs,
+		Models:              recordOptions.Models,
 		Status:              recordOptions.Status,
 	}, nil
 }
@@ -733,6 +736,10 @@ func parseRequestRecordQuery(query url.Values) (storage.RequestRecordListOptions
 			if len(values) > maxLocalAccessTokenFilters {
 				return storage.RequestRecordListOptions{}, fmt.Errorf("too many local_access_token_id filters")
 			}
+		case "model":
+			if len(values) > maxModelFilters {
+				return storage.RequestRecordListOptions{}, fmt.Errorf("too many model filters")
+			}
 		default:
 			return storage.RequestRecordListOptions{}, fmt.Errorf("unknown query parameter")
 		}
@@ -797,6 +804,20 @@ func parseRequestRecordQuery(query url.Values) (storage.RequestRecordListOptions
 			}
 			seen[tokenID] = struct{}{}
 			options.LocalAccessTokenIDs = append(options.LocalAccessTokenIDs, tokenID)
+		}
+	}
+	if values, ok := query["model"]; ok {
+		options.Models = make([]string, 0, len(values))
+		seen := make(map[string]struct{}, len(values))
+		for _, value := range values {
+			if value == "" || utf8.RuneCountInString(value) > maxModelFilterRunes || strings.ContainsFunc(value, unicode.IsControl) {
+				return options, fmt.Errorf("invalid model filter")
+			}
+			if _, exists := seen[value]; exists {
+				return options, fmt.Errorf("duplicate model filter")
+			}
+			seen[value] = struct{}{}
+			options.Models = append(options.Models, value)
 		}
 	}
 	if value := query.Get("status"); value != "" {

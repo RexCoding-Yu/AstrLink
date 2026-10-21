@@ -36,16 +36,24 @@ func TestValuationDecimalCacheAndTiers(t *testing.T) {
 			t.Fatalf("unsafe expression accepted: %s", expr)
 		}
 	}
-	if _, err := Evaluate(`tier("x",p + cc + cc1h)`, &contract.Usage{InputTokens: 10, CacheWriteTokens: ptr(3)}, at); err == nil {
-		t.Fatal("missing TTL treated as zero")
+	// Without the 5-minute/1-hour split every cache write bills at the 5-minute rate.
+	got, err := Evaluate(`tier("standard", p * 3 + cc * 3.75 + cc1h * 6)`, &contract.Usage{InputTokens: 1000, CacheWriteTokens: ptr(400)}, at)
+	if err != nil || got.AmountUSD != "0.003300000" {
+		t.Fatalf("unsplit cache write=%+v %v", got, err)
 	}
 	if _, err := Evaluate(`tier("x",p)`, nil, at); err == nil {
 		t.Fatal("missing usage treated as free")
 	}
+	const thinking = `param("enable_thinking") == true ? tier("thinking",c * 4) : tier("normal",c)`
 	enabled := true
-	got, err := Evaluate(`param("enable_thinking") == true ? tier("thinking",c * 4) : tier("normal",c)`, &contract.Usage{OutputTokens: 100, ThinkingEnabled: &enabled}, at)
+	got, err = Evaluate(thinking, &contract.Usage{OutputTokens: 100, ThinkingEnabled: &enabled}, at)
 	if err != nil || got.AmountUSD != "0.000400000" {
 		t.Fatalf("thinking=%+v %v", got, err)
+	}
+	// A request that did not say whether thinking was on takes the standard tier.
+	got, err = Evaluate(thinking, &contract.Usage{OutputTokens: 100}, at)
+	if err != nil || got.AmountUSD != "0.000100000" || got.Tier != "normal" {
+		t.Fatalf("unknown thinking=%+v %v", got, err)
 	}
 }
 func TestOfficialProviderAndMonth(t *testing.T) {
@@ -91,31 +99,29 @@ func TestCodexAutoReviewPriceBinding(t *testing.T) {
 	}
 }
 
-func TestAudioBreakdownRequiredOnlyWhenItChangesCost(t *testing.T) {
+func TestIncompleteUsageIsValued(t *testing.T) {
 	const geminiFlash = `tier("standard", p * 0.75 + cr * 0.075 + ai * 0.75 + c * 3.75)`
 	tests := []struct {
 		name, expression string
 		usage            *contract.Usage
 		amount, reason   string
 	}{
-		{"gemini historical totals", geminiFlash, &contract.Usage{InputTokens: 1000000, OutputTokens: 100000, CacheReadTokens: ptr(400000)}, "0.855000000", ""},
+		{"gemini totals", geminiFlash, &contract.Usage{InputTokens: 1000000, OutputTokens: 100000, CacheReadTokens: ptr(400000)}, "0.855000000", ""},
 		{"gemini known audio overlaps cache", geminiFlash, &contract.Usage{InputTokens: 1000000, OutputTokens: 100000, CacheReadTokens: ptr(400000), InputAudioTokens: ptr(800000)}, "0.855000000", ""},
-		{"different audio rate stays unknown", `tier("standard", p * 1 + ai * 10)`, &contract.Usage{InputTokens: 100}, "", "missing_audio_usage"},
+		{"unreported audio bills as text", `tier("standard", p * 1 + ai * 10)`, &contract.Usage{InputTokens: 100}, "0.000100000", ""},
 		{"known text only with different rates", `tier("standard", p * 1 + ai * 10)`, &contract.Usage{InputTokens: 100, InputAudioTokens: ptr(0)}, "0.000100000", ""},
 		{"known audio with different rates", `tier("standard", p * 1 + ai * 10)`, &contract.Usage{InputTokens: 100, InputAudioTokens: ptr(20)}, "0.000280000", ""},
-		{"unknown cache audio intersection", `tier("standard", p * 1 + cr * 0.1 + ai * 10)`, &contract.Usage{InputTokens: 100, CacheReadTokens: ptr(10), InputAudioTokens: ptr(20)}, "", "missing_audio_cache_partition"},
-		{"equal output audio rates", `tier("standard", c * 2 + ao * 2)`, &contract.Usage{OutputTokens: 100}, "0.000200000", ""},
-		{"different output audio rates", `tier("standard", c * 2 + ao * 20)`, &contract.Usage{OutputTokens: 100}, "", "missing_audio_usage"},
-		{"zero tokens prove zero audio", `tier("standard", p + ai * 10 + c + ao * 20)`, &contract.Usage{}, "0.000000000", ""},
+		{"cache hits count as text", `tier("standard", p * 1 + cr * 0.1 + ai * 10)`, &contract.Usage{InputTokens: 100, CacheReadTokens: ptr(10), InputAudioTokens: ptr(20)}, "0.000271000", ""},
+		{"audio is cut to the uncached input", `tier("standard", p * 1 + cr * 0.1 + ai * 10)`, &contract.Usage{InputTokens: 100, CacheReadTokens: ptr(90), InputAudioTokens: ptr(20)}, "0.000109000", ""},
+		{"unreported output audio bills as text", `tier("standard", c * 2 + ao * 20)`, &contract.Usage{OutputTokens: 100}, "0.000200000", ""},
+		{"zero tokens", `tier("standard", p + ai * 10 + c + ao * 20)`, &contract.Usage{}, "0.000000000", ""},
 		{"context tiers", `len <= 200000 ? tier("small", p * 0.75 + ai * 0.75) : tier("large", p * 1.5 + ai * 1.5)`, &contract.Usage{InputTokens: 300000}, "0.450000000", ""},
 		{"decimal coefficients are exact", `tier("standard", 0.1 * p + 0.2 * p + ai * 0.3)`, &contract.Usage{InputTokens: 1000000}, "0.300000000", ""},
 		{"division", `tier("standard", (p + ai) / 4)`, &contract.Usage{InputTokens: 1000000}, "0.250000000", ""},
-		{"audio-dependent tier", `ai > 0 ? tier("audio", p + ai) : tier("text", p + ai)`, &contract.Usage{InputTokens: 100}, "", "missing_audio_usage"},
-		{"audio-dependent tier label", `tier(ai > 0 ? "audio" : "text", p + ai)`, &contract.Usage{InputTokens: 100}, "", "missing_audio_usage"},
-		{"text-dependent tier", `p > 50 ? tier("large", p + ai) : tier("small", p + ai)`, &contract.Usage{InputTokens: 100}, "", "missing_audio_usage"},
-		{"nonlinear surcharge", `tier("standard", p + ai + p * ai)`, &contract.Usage{InputTokens: 100}, "", "missing_audio_usage"},
-		{"invalid audio count", geminiFlash, &contract.Usage{InputTokens: 100, InputAudioTokens: ptr(101)}, "", "invalid_token_partition"},
-		{"incomplete stream", geminiFlash, &contract.Usage{InputTokens: 100, BillingIncomplete: true}, "", "incomplete_usage"},
+		{"audio-dependent tier", `ai > 0 ? tier("audio", p * 2) : tier("text", p)`, &contract.Usage{InputTokens: 100}, "0.000100000", ""},
+		{"audio larger than input is cut", geminiFlash, &contract.Usage{InputTokens: 100, InputAudioTokens: ptr(101)}, "0.000075000", ""},
+		{"cache larger than input is cut", `tier("standard", p * 1 + cr * 0.1 + cc * 2)`, &contract.Usage{InputTokens: 100, CacheReadTokens: ptr(80), CacheWriteTokens: ptr(50)}, "0.000048000", ""},
+		{"interrupted stream bills partial usage", geminiFlash, &contract.Usage{InputTokens: 100, BillingIncomplete: true}, "0.000075000", ""},
 		{"missing usage", geminiFlash, nil, "", "missing_usage"},
 	}
 	for _, tt := range tests {

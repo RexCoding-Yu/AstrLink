@@ -288,7 +288,7 @@ describe("TrayPopoverPanel", () => {
     await render(readyTrayState, tray);
     const text = container.textContent ?? "";
     expect(text).toContain("比昨天↑ 23%");
-    expect(text).toContain("缓存命中41%");
+    expect(text).toContain("缓存命中率41%");
     expect(text).toContain("活跃客户端Cursor · 71%");
     expect(text).toContain("上次请求刚刚 · gpt-5 · 2.1 s");
     expect(text).toContain("本月48M tokens");
@@ -631,7 +631,7 @@ describe("TrayPopoverPanel", () => {
     expect(document.querySelector('[data-slot="tray-raw-pending"]')).toBeNull();
     // Cost is shown without an unpriced caveat.
     expect(container.textContent).toContain("$0.83");
-    expect(container.textContent).not.toContain("待计价");
+    expect(container.textContent).not.toContain("未计价");
   });
 
   it("names approved raw reads and pending raw access requests", async () => {

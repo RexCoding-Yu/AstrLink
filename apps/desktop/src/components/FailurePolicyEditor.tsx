@@ -1,4 +1,5 @@
 import { useT } from "../i18n";
+import { cn } from "../lib/utils";
 import {
   defaultFailurePolicy,
   parseFailurePolicy,
@@ -37,6 +38,7 @@ export function FailurePolicyEditor({
   hint,
   headingLevel = 3,
   section = "all",
+  gatewayTimeoutSeconds = null,
 }: {
   value: FailurePolicy;
   onChange: (value: FailurePolicy) => void;
@@ -44,9 +46,15 @@ export function FailurePolicyEditor({
   hint?: string;
   headingLevel?: 2 | 3;
   section?: FailurePolicySection | "all";
+  /** Gateway response-start timeout from Settings; null while unknown. */
+  gatewayTimeoutSeconds?: number | null;
 }) {
   const t = useT();
   const Heading = headingLevel === 2 ? "h2" : "h3";
+  const inheritsTimeout = value.response_start_timeout_seconds === undefined;
+  const effectiveTimeout = inheritsTimeout
+    ? gatewayTimeoutSeconds
+    : value.response_start_timeout_seconds;
   const update = (patch: Partial<FailurePolicy>) =>
     onChange({ ...value, ...patch });
   const reset = () => {
@@ -81,6 +89,7 @@ export function FailurePolicyEditor({
           hint={hint}
           headingLevel={headingLevel}
           onReset={reset}
+          responseTimeoutSeconds={effectiveTimeout}
         />
         {invalid ? (
           <FormMessage tone="error">{t("failure.invalid")}</FormMessage>
@@ -190,18 +199,36 @@ export function FailurePolicyEditor({
                 />
               </Field>
             </div>
-            <Label className="flex items-center gap-2">
-              <Switch
-                checked={value.response_start_timeout_seconds === undefined}
-                onCheckedChange={(checked) => {
-                  const next = { ...value };
-                  if (checked) delete next.response_start_timeout_seconds;
-                  else next.response_start_timeout_seconds = 60;
-                  onChange(next);
-                }}
-              />
-              {t("failure.useGlobalTimeout")}
-            </Label>
+            <div className="grid gap-2">
+              <Label className="flex items-center gap-2">
+                <Switch
+                  checked={inheritsTimeout}
+                  onCheckedChange={(checked) => {
+                    const next = { ...value };
+                    if (checked) delete next.response_start_timeout_seconds;
+                    else next.response_start_timeout_seconds = 60;
+                    onChange(next);
+                  }}
+                />
+                {t("failure.useGlobalTimeout")}
+              </Label>
+              {inheritsTimeout && gatewayTimeoutSeconds !== null ? (
+                <p
+                  className={cn(
+                    "text-xs",
+                    gatewayTimeoutSeconds === 0
+                      ? "text-warning-foreground"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {gatewayTimeoutSeconds === 0
+                    ? t("failure.globalTimeoutUnlimited")
+                    : t("failure.globalTimeoutSeconds", {
+                        seconds: gatewayTimeoutSeconds,
+                      })}
+                </p>
+              ) : null}
+            </div>
             {value.response_start_timeout_seconds !== undefined ? (
               <Field
                 label={t("failure.timeout")}
@@ -231,6 +258,7 @@ export function FailurePolicyEditor({
             headingLevel={4}
             value={value}
             onChange={onChange}
+            responseTimeoutSeconds={effectiveTimeout}
           />
         )}
         {invalid ? (

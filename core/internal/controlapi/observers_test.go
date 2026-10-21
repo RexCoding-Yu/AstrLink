@@ -10,11 +10,10 @@ import (
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 func TestObserversAPI(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "observers.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "observers.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

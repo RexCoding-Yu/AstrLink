@@ -71,14 +71,14 @@ describe("routing process text", () => {
       when: { field: "literal_keyword", contains_any: ["翻译"] },
     };
     expect(routingFactLine(observed("literal_keyword", null, 0), single)).toBe(
-      "请求里没有出现「翻译」",
+      "用户消息里没有出现「翻译」",
     );
     expect(routingFactLine(observed("literal_keyword", null, 1), single)).toBe(
-      "请求里出现了「翻译」",
+      "用户消息里出现了「翻译」",
     );
     expect(
       routingFactLine(observed("literal_keyword", null, 1), keywordRule),
-    ).toBe("请求里出现了其中 1 个关键词");
+    ).toBe("用户消息里出现了其中 1 个关键词");
   });
 
   it("leaves unknown facts to the unknown-reason line", () => {

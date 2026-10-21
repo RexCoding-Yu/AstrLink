@@ -30,13 +30,14 @@ use crate::{
         PreferencesStore, QuotaDisplayMode, TrayMenubarText, TrayPreferences, TrayUsagePreferences,
     },
     sidecar::{CoreManager, CorePhase, CoreView, ObserverReadLevel},
+    window_reclaim::{self, Show},
 };
 
 pub const TRAY_ID: &str = "main";
 /// The popover webview. Must match `TRAY_POPOVER_LABEL` in the frontend.
 pub const POPOVER_LABEL: &str = "tray-popover";
-/// Emitted to the main window with the `WorkspacePage.kind` to open, or a
-/// named view of one such as `failedToday`.
+/// Tells the main window a page is waiting for it in `take_navigation`: a
+/// `WorkspacePage.kind`, or a named view of one such as `failedToday`.
 pub const NAVIGATE_EVENT: &str = "tray:navigate";
 /// Emitted to the popover with a fresh [`TrayStateSnapshot`].
 pub const STATE_EVENT: &str = "tray:state";
@@ -1082,6 +1083,8 @@ struct TrayRuntime {
     popover_return_to: Option<i32>,
     /// A dismissal is waiting for that app to take the foreground back.
     popover_handoff_pending: bool,
+    /// The page last asked of the main window, until that window takes it.
+    navigation: Option<String>,
 }
 
 /// Managed state for the tray. Separate from `CoreManager` so the tray can be
@@ -1460,11 +1463,20 @@ fn check_navigation(page: &str) -> Result<(), String> {
     }
 }
 
+/// The page waits here for the main window to take it: a window built again
+/// after release listens only once it has loaded.
 fn navigate(app: &AppHandle, kind: &str) {
+    if let Some(state) = app.try_state::<TrayState>() {
+        state.lock().navigation = Some(kind.to_string());
+    }
     crate::show_main_window(app);
-    if let Err(error) = app.emit_to("main", NAVIGATE_EVENT, kind) {
+    if let Err(error) = app.emit_to("main", NAVIGATE_EVENT, ()) {
         eprintln!("unable to route the AstrLink tray to {kind}: {error}");
     }
+}
+
+pub fn take_navigation(app: &AppHandle) -> Option<String> {
+    app.try_state::<TrayState>()?.lock().navigation.take()
 }
 
 fn copy_address(app: &AppHandle) -> Result<(), String> {
@@ -1585,12 +1597,20 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
         runtime.anchor = Some(anchor);
         runtime.popover_size
     };
-    if app.get_webview_window(POPOVER_LABEL).is_some() {
-        place_popover(app, anchor, size);
-        present_popover(app);
-        return;
+    open_popover(app, anchor, size);
+}
+
+fn open_popover(app: &AppHandle, anchor: PopoverAnchor, size: (f64, f64)) {
+    match window_reclaim::show(app, POPOVER_LABEL) {
+        Show::Existing => {
+            place_popover(app, anchor, size);
+            present_popover(app);
+            return;
+        }
+        Show::Build => {}
+        Show::Pending => return,
     }
-    // First open: the webview does not exist yet. Native window creation
+    // First open, or the hidden one was released. Native window creation
     // stays off the event loop (WebView2 deadlocks when a callback creates a
     // webview) and off the async workers, exactly like the inspector windows.
     let (x, y) = popover_placement(anchor.icon, anchor.work, size);
@@ -1603,6 +1623,7 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
         .await
         .map_err(|error| format!("popover build task failed: {error}"))
         .and_then(|result| result);
+        window_reclaim::built(&app, POPOVER_LABEL);
         match built {
             Ok(()) => present_popover(&app),
             Err(error) => {
@@ -1611,6 +1632,20 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
             }
         }
     });
+}
+
+/// Opens the popover a click asked for while the hidden one was released.
+pub fn reopen_popover(app: &AppHandle) {
+    let Some(state) = app.try_state::<TrayState>() else {
+        return;
+    };
+    let (anchor, size) = {
+        let runtime = state.lock();
+        (runtime.anchor, runtime.popover_size)
+    };
+    if let Some(anchor) = anchor {
+        open_popover(app, anchor, size);
+    }
 }
 
 /// Shows the existing popover, seeds it with the current state and asks for
@@ -1645,6 +1680,7 @@ pub fn hide_popover(app: &AppHandle) {
         return;
     }
     let _ = window.hide();
+    window_reclaim::hidden(app, POPOVER_LABEL);
     if let Some(state) = app.try_state::<TrayState>() {
         let mut runtime = state.lock();
         runtime.popover_hidden_at = Some(Instant::now());

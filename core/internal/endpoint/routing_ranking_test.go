@@ -150,25 +150,90 @@ func TestStoreResolverRanksEveryServiceWithItsSkipReason(t *testing.T) {
 }
 
 func TestPlanServiceReportsTheFurthestFailedCheck(t *testing.T) {
+	// kimi-k3 is called in Chat; a Messages client needs its own entry row.
 	service := contract.Service{
 		ID: "service_opencode", Kind: contract.ServiceKindOpenCodeGo, Enabled: true,
 		Models:       []string{"kimi-k3"},
-		Capabilities: []contract.Capability{{Protocol: contract.ProtocolAnthropicMessages, Mode: contract.CapabilityModeNative, Streaming: true}},
+		Capabilities: []contract.Capability{{Protocol: contract.ProtocolOpenAIChat, Mode: contract.CapabilityModeNative, Streaming: true}},
 	}
 	request := ResolveRequest{Protocol: contract.ProtocolAnthropicMessages, Model: "kimi-k3", Streaming: true}
 	runtime := contract.RuntimeProfile{RelayKitAvailable: true, Edges: []contract.ConversionEdge{{From: request.Protocol, To: contract.ProtocolOpenAIChat, Streaming: true}}}
 	if _, skip := planService(service, request, "", runtime); skip != contract.RoutingSkipProtocolUnsupported {
-		t.Fatalf("missing native protocol skip = %q", skip)
+		t.Fatalf("missing entry protocol skip = %q", skip)
 	}
-	service.Capabilities = append(service.Capabilities, contract.Capability{Protocol: contract.ProtocolOpenAIChat, Mode: contract.CapabilityModeNative})
+	service.Capabilities = append(service.Capabilities, contract.Capability{Protocol: contract.ProtocolAnthropicMessages, Mode: contract.CapabilityModeNative})
 	if _, skip := planService(service, request, "", runtime); skip != contract.RoutingSkipStreamingUnsupported {
-		t.Fatalf("non-streaming native protocol skip = %q", skip)
+		t.Fatalf("non-streaming entry protocol skip = %q", skip)
 	}
 	service.Capabilities[1].Streaming = true
 	if _, skip := planService(service, request, "", contract.RuntimeProfile{}); skip != contract.RoutingSkipConversionUnavailable {
 		t.Fatalf("no converter skip = %q", skip)
 	}
-	if resolved, skip := planService(service, request, "", runtime); skip != "" || resolved.PlanType != contract.PlanTypeRelayKit {
+	if resolved, skip := planService(service, request, "", runtime); skip != "" || resolved.PlanType != contract.PlanTypeRelayKit ||
+		resolved.UpstreamProtocol != contract.ProtocolOpenAIChat {
 		t.Fatalf("converted plan = %#v, %q", resolved, skip)
+	}
+}
+
+// A request that names a provider gets that provider alone, even behind
+// higher-priority ones, and learns why it cannot be used instead of moving on.
+func TestStoreResolverKeepsToTheNamedService(t *testing.T) {
+	http := func(id contract.ServiceID, models []string) contract.Service {
+		return contract.ServiceFromEndpoint(resolverEndpoint(id, contract.CapabilityModeNative, true, models))
+	}
+	disabled := http("svc_disabled", nil)
+	disabled.Enabled = false
+	resolver, err := NewStoreResolver(rankingStore{
+		services: []contract.Service{http("svc_first", nil), http("svc_second", nil), disabled, http("svc_unlisted", []string{"other"}), http("svc_limited", nil)},
+		order:    []contract.ServiceID{"svc_disabled", "svc_first", "svc_second", "svc_unlisted", "svc_limited"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.RecordRateLimit(Resolved{
+		Service: http("svc_limited", nil), Mode: contract.CapabilityModeNative,
+		UpstreamProtocol: contract.ProtocolOpenAIResponses, UpstreamModel: "gpt-5",
+	}, time.Minute)
+	resolve := func(service contract.ServiceID) ([]Resolved, []RankedService, error) {
+		return resolver.ResolveRankedCandidates(context.Background(), ResolveRequest{
+			Protocol: contract.ProtocolOpenAIResponses, Model: "gpt-5", Streaming: true, AllCandidates: true, Service: service,
+		})
+	}
+
+	candidates, ranking, err := resolve("svc_second")
+	if err != nil || len(candidates) != 1 || candidates[0].Service.ID != "svc_second" {
+		t.Fatalf("named candidates = %#v, %v", candidates, err)
+	}
+	// Providers ranked ahead were never considered, so the record lists none.
+	if !reflect.DeepEqual(ranking, []RankedService{{ServiceID: "svc_second"}}) {
+		t.Fatalf("named ranking = %#v", ranking)
+	}
+
+	for _, test := range []struct {
+		service contract.ServiceID
+		want    PinnedServiceError
+	}{
+		{"svc_disabled", PinnedServiceError{Service: "svc_disabled", Name: "svc_disabled", Reason: contract.RoutingSkipDisabled}},
+		{"svc_unlisted", PinnedServiceError{Service: "svc_unlisted", Name: "svc_unlisted", Reason: contract.RoutingSkipModelNotListed}},
+		{"svc_missing", PinnedServiceError{Service: "svc_missing"}},
+	} {
+		candidates, ranking, err := resolve(test.service)
+		var pinned *PinnedServiceError
+		if !errors.As(err, &pinned) || *pinned != test.want || len(candidates) != 0 {
+			t.Fatalf("%s: candidates = %#v, err = %#v", test.service, candidates, err)
+		}
+		if test.want.Name != "" && (len(ranking) != 1 || ranking[0].Skip != test.want.Reason) {
+			t.Fatalf("%s: ranking = %#v", test.service, ranking)
+		}
+	}
+
+	// A cooling-down provider is reported as such; nothing else stands in.
+	_, ranking, err = resolve("svc_limited")
+	var limited *RateLimitedCandidatesError
+	if !errors.As(err, &limited) || len(limited.Limits) != 1 || limited.Limits[0].Service != "svc_limited" {
+		t.Fatalf("named rate-limited err = %#v", err)
+	}
+	if !reflect.DeepEqual(ranking, []RankedService{{ServiceID: "svc_limited", Skip: contract.RoutingSkipRateLimited}}) {
+		t.Fatalf("named rate-limited ranking = %#v", ranking)
 	}
 }

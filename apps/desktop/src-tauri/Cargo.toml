@@ -46,9 +46,8 @@ tauri-plugin-opener = "=2.5.4"
 # deep-link: a second launch forwards its astrlink:// link to the running app.
 tauri-plugin-single-instance = { version = "=2.4.3", features = ["deep-link"] }
 tauri-plugin-shell = "=2.3.5"
-# 2.5.0 raises the MSRV to rustc 1.90; this crate is pinned at 1.77.2.
-tauri-plugin-store = "=2.4.5"
-tauri-plugin-updater = "=2.12.0"
+# Release updates use v2 installers; legacy v1 ZIP support pulls in vulnerable zip.
+tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tokio = { version = "=1.47.1", features = ["sync", "time", "macros"] }
 zeroize = { version = "=1.9.0", features = ["serde"] }
 

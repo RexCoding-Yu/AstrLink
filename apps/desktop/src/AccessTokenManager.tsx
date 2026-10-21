@@ -54,22 +54,24 @@ import {
   copyAccessToken,
   createAccessToken,
   deleteAccessToken,
-  getClientConfigStatus,
   listAccessTokenUsage,
   removeClientConfig,
 } from "./bridge";
 import type { AccessTokenSummary } from "./access-token-model";
-import type { ClientConfigStatus, DirectClient } from "./client-config-model";
+import type { DirectClient } from "./client-config-model";
+import { controlErrorCode } from "./control-error";
 import { currentLocale, i18n } from "./i18n";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
 import { startOfTodayIso, type ServicePerformance } from "./usage-range";
 import { TokenMetadataDialog } from "./TokenMetadataDialog";
+import { ClientSetupDialog } from "./ClientSetupDialog";
+import { TokenClientMarks, clientNames } from "@/components/TokenClientMarks";
 import {
-  ClientSetupDialog,
-  clientLabel,
-  clientSetupClients,
-} from "./ClientSetupDialog";
+  clientsUsing as clientsUsingToken,
+  configsUsing as configsUsingToken,
+  useClientConfigs,
+} from "./use-client-configs";
 
 export type AccessTokenCatalogStatus =
   | "blocked"
@@ -111,10 +113,22 @@ function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function clientList(clients: readonly DirectClient[]): string {
-  return new Intl.ListFormat(currentLocale(), { style: "narrow" }).format(
-    clients.map(clientLabel),
-  );
+/** Why the create dialog refused, and whether the name field is to blame. */
+type CreateError = { message: string; nameInvalid: boolean };
+
+function createErrorOf(error: unknown): CreateError {
+  switch (controlErrorCode(error)) {
+    // Core compares names ignoring case; nothing else collides on create.
+    case "conflict":
+      return { message: i18n.t("tokens.nameTaken"), nameInvalid: true };
+    case "access_token_limit":
+      return { message: i18n.t("tokens.limitReached"), nameInvalid: false };
+    default:
+      return {
+        message: messageOf(error, i18n.t("tokens.createFailed")),
+        nameInvalid: false,
+      };
+  }
 }
 
 function createdAtLabel(value: string): string {
@@ -161,9 +175,12 @@ export function AccessTokenManager({
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  // The dialog covers the page message, so it shows its own failures.
+  const [createError, setCreateError] = useState<CreateError | null>(null);
   // Closing clears the draft; keep the exit animation on what was entered.
   const shownName = useExitSnapshot(name, createOpen);
   const shownCreating = useExitSnapshot(creating, createOpen);
+  const shownCreateError = useExitSnapshot(createError, createOpen);
   const [deletingID, setDeletingID] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<AccessTokenSummary | null>(
     null,
@@ -174,7 +191,8 @@ export function AccessTokenManager({
   const [metadataToken, setMetadataToken] = useState<AccessTokenSummary | null>(
     null,
   );
-  const [clientConfigs, setClientConfigs] = useState<ClientConfigStatus[]>([]);
+  const { configs: clientConfigs, refresh: refreshClientConfigs } =
+    useClientConfigs(inferenceURL);
   const [removeConfigs, setRemoveConfigs] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [usageByToken, setUsageByToken] = useWorkspaceSnapshot<
@@ -193,6 +211,7 @@ export function AccessTokenManager({
     setQuery("");
     setName("");
     setCreating(false);
+    setCreateError(null);
     setDeletingID(null);
     setPendingDelete(null);
     setCopyingID(null);
@@ -206,40 +225,11 @@ export function AccessTokenManager({
     if (createOpen) nameInput.current?.focus();
   }, [createOpen]);
 
-  const clientGeneration = useRef(0);
-  const refreshClientConfigs = useCallback(() => {
-    const generation = ++clientGeneration.current;
-    // The client marks only annotate the list; a failed read hides them.
-    getClientConfigStatus(inferenceURL || null).then(
-      (overview) => {
-        if (clientGeneration.current === generation)
-          setClientConfigs(overview.clients);
-      },
-      () => {
-        if (clientGeneration.current === generation) setClientConfigs([]);
-      },
-    );
-  }, [inferenceURL]);
-
-  useEffect(() => {
-    refreshClientConfigs();
-    // Clients and CC Switch rewrite their configs outside AstrLink.
-    window.addEventListener("focus", refreshClientConfigs);
-    return () => {
-      clientGeneration.current += 1;
-      window.removeEventListener("focus", refreshClientConfigs);
-    };
-  }, [refreshClientConfigs]);
-
   // A client may hold the token on this computer and in WSL distributions.
   const configsUsing = (tokenId: string | undefined) =>
-    clientConfigs.filter(
-      (status) =>
-        status.token_id === tokenId && status.state !== "not_configured",
-    );
-  const clientsUsing = (tokenId: string | undefined): DirectClient[] => [
-    ...new Set(configsUsing(tokenId).map((status) => status.client)),
-  ];
+    configsUsingToken(clientConfigs, tokenId);
+  const clientsUsing = (tokenId: string | undefined): DirectClient[] =>
+    clientsUsingToken(clientConfigs, tokenId);
 
   const refreshTokenUsage = useCallback(async () => {
     const generation = usageGeneration.current + 1;
@@ -313,18 +303,30 @@ export function AccessTokenManager({
     };
   }, [refreshTokenUsage, coreSessionKey]);
 
+  const closeCreate = () => {
+    setCreateOpen(false);
+    setName("");
+    setCreateError(null);
+  };
+
   const submitCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // The closing frame still shows the draft that was just cleared.
     if (!createOpen) return;
     const trimmedName = name.trim();
     if (!trimmedName) {
-      setError(i18n.t("tokens.nameRequired"));
+      setCreateError({
+        message: i18n.t("tokens.nameRequired"),
+        nameInvalid: true,
+      });
       nameInput.current?.focus();
       return;
     }
     if ([...trimmedName].length > 64) {
-      setError(i18n.t("tokens.nameTooLong"));
+      setCreateError({
+        message: i18n.t("tokens.nameTooLong"),
+        nameInvalid: true,
+      });
       nameInput.current?.focus();
       return;
     }
@@ -332,18 +334,19 @@ export function AccessTokenManager({
 
     const generation = sessionGeneration.current;
     setCreating(true);
-    setError(null);
+    setCreateError(null);
     try {
       const result = await createAccessToken(trimmedName);
       if (sessionGeneration.current !== generation) return;
       onTokenCreated(result.token);
       setCopiedID(null);
-      setCreateOpen(false);
-      setName("");
+      closeCreate();
       notify.success(i18n.t("tokens.created", { name: result.token.name }));
     } catch (requestError) {
       if (sessionGeneration.current === generation) {
-        setError(messageOf(requestError, i18n.t("tokens.createFailed")));
+        const failure = createErrorOf(requestError);
+        setCreateError(failure);
+        if (failure.nameInvalid) nameInput.current?.focus();
       }
     } finally {
       if (sessionGeneration.current === generation) setCreating(false);
@@ -424,7 +427,7 @@ export function AccessTokenManager({
       if (failed.size > 0) {
         notify.error(
           i18n.t("tokens.removeConfigsFailed", {
-            clients: clientList([...failed]),
+            clients: clientNames([...failed]),
           }),
         );
       }
@@ -649,26 +652,7 @@ export function AccessTokenManager({
                           >
                             {token.name}
                           </strong>
-                          {usedBy.length > 0 ? (
-                            <span
-                              aria-label={t("clientSetup.configuredIn", {
-                                clients: clientList(usedBy),
-                              })}
-                              className="inline-flex shrink-0 items-center gap-1"
-                              role="img"
-                              title={t("clientSetup.configuredIn", {
-                                clients: clientList(usedBy),
-                              })}
-                            >
-                              {clientSetupClients
-                                .filter(({ id }) =>
-                                  usedBy.some((client) => client === id),
-                                )
-                                .map(({ id, Icon }) => (
-                                  <Icon key={id} aria-hidden="true" size={14} />
-                                ))}
-                            </span>
-                          ) : null}
+                          <TokenClientMarks clients={usedBy} />
                         </span>
                         <code
                           className="truncate font-mono text-xs text-muted-foreground"
@@ -859,10 +843,7 @@ export function AccessTokenManager({
       <Dialog
         open={createOpen}
         onOpenChange={(nextOpen) => {
-          if (!nextOpen && !creating) {
-            setCreateOpen(false);
-            setName("");
-          }
+          if (!nextOpen && !creating) closeCreate();
         }}
       >
         <DialogContent showCloseButton={!shownCreating}>
@@ -876,25 +857,38 @@ export function AccessTokenManager({
             <DialogDescription>{t("tokens.createHint")}</DialogDescription>
           </DialogHeader>
           <form onSubmit={(event) => void submitCreate(event)}>
-            <Field htmlFor="access-token-name" label={t("tokens.name")}>
-              <Input
-                autoComplete="off"
-                id="access-token-name"
-                maxLength={64}
-                onChange={(event) => setName(event.currentTarget.value)}
-                placeholder={t("tokens.namePlaceholder")}
-                ref={nameInput}
-                value={shownName}
-              />
-            </Field>
+            <div className="grid gap-1">
+              <Field htmlFor="access-token-name" label={t("tokens.name")}>
+                <Input
+                  aria-describedby={
+                    shownCreateError?.nameInvalid
+                      ? "access-token-name-error"
+                      : undefined
+                  }
+                  aria-invalid={shownCreateError?.nameInvalid || undefined}
+                  autoComplete="off"
+                  id="access-token-name"
+                  maxLength={64}
+                  onChange={(event) => {
+                    setName(event.currentTarget.value);
+                    setCreateError(null);
+                  }}
+                  placeholder={t("tokens.namePlaceholder")}
+                  ref={nameInput}
+                  value={shownName}
+                />
+              </Field>
+              {shownCreateError ? (
+                <FormMessage id="access-token-name-error" tone="error">
+                  {shownCreateError.message}
+                </FormMessage>
+              ) : null}
+            </div>
             <DialogFooter className="mt-5">
               <Button
                 variant="outline"
                 disabled={shownCreating}
-                onClick={() => {
-                  setCreateOpen(false);
-                  setName("");
-                }}
+                onClick={closeCreate}
                 type="button"
               >
                 {t("common.cancel")}
@@ -945,7 +939,7 @@ export function AccessTokenManager({
                 <p>
                   {t("tokens.usedBy", {
                     name: pendingDelete?.name ?? "",
-                    clients: clientList(deleteClients),
+                    clients: clientNames(deleteClients),
                   })}
                 </p>
                 <Label className="flex items-center gap-2 text-foreground">

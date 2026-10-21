@@ -24,11 +24,16 @@ export interface BillingGroup extends BillingAmounts {
 export interface TokenGroup extends BillingAmounts {
   token_id: string;
 }
+/** A failed-over call counts under every service that served an attempt. */
+export interface ServiceBillingGroup extends BillingAmounts {
+  service_id: string;
+}
 export interface BillingSummary extends BillingAmounts {
   from: string;
   to: string;
   by_model: BillingGroup[];
   by_token: TokenGroup[];
+  by_service: ServiceBillingGroup[];
 }
 export interface BillingPeriod {
   id: string;
@@ -159,6 +164,13 @@ export function parseBillingSummary(value: unknown): BillingSummary {
       return {
         ...parseBillingAmounts(row),
         token_id: str(row.token_id),
+      };
+    }),
+    by_service: array(o.by_service, (v) => {
+      const row = object(v);
+      return {
+        ...parseBillingAmounts(row),
+        service_id: str(row.service_id),
       };
     }),
   };

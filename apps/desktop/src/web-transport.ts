@@ -66,15 +66,18 @@ export async function consoleRequest(
   return { value, etag: response.headers.get("ETag") };
 }
 
+/** Core repeats one singular parameter per item of these lists. */
+const QUERY_LIST_NAMES: Record<string, string> = {
+  local_access_token_ids: "local_access_token_id",
+  models: "model",
+};
+
 function query(values: Args = {}): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
     if (value === undefined || value === null) continue;
     for (const item of Array.isArray(value) ? value : [value]) {
-      params.append(
-        key === "local_access_token_ids" ? "local_access_token_id" : key,
-        String(item),
-      );
+      params.append(QUERY_LIST_NAMES[key] ?? key, String(item));
     }
   }
   const result = params.toString();

@@ -57,9 +57,10 @@ func TestCodingPlanForwardingPathsHeadersAndStreams(t *testing.T) {
 		{contract.ServiceKindGLMCoding, "glm-5.3", "/api/coding/paas/v4", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "/api/v1/responses", ""},
 		{contract.ServiceKindMiniMaxCoding, "MiniMax-M3", "/anthropic", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer, "/v1/chat/completions", ""},
 		{contract.ServiceKindMiniMaxCoding, "MiniMax-M3", "/v1", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "/v1/responses", ""},
-		{contract.ServiceKindOpenCodeGo, "minimax-m3", "/zen/go/v1", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer, "", ""},
-		{contract.ServiceKindOpenCodeGo, "gpt-5.6-luna", "/zen/go/v1", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "", ""},
-		{contract.ServiceKindOpenCodeZen, "minimax-m3", "/zen/v1", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer, "", ""},
+		// OpenCode serves every format under /inference; saved /zen bases move there.
+		{contract.ServiceKindOpenCodeGo, "minimax-m3", "/zen/go/v1", "/v1/messages", contract.ProtocolAnthropicMessages, contract.AuthSchemeBearer, "/inference/go/v1/messages", ""},
+		{contract.ServiceKindOpenCodeGo, "gpt-5.6-luna", "/zen/go/v1", "/v1/responses", contract.ProtocolOpenAIResponses, contract.AuthSchemeBearer, "/inference/go/v1/responses", ""},
+		{contract.ServiceKindOpenCodeZen, "minimax-m3", "/zen/v1", "/v1/chat/completions", contract.ProtocolOpenAIChat, contract.AuthSchemeBearer, "/inference/v1/chat/completions", ""},
 	} {
 		t.Run(string(test.kind)+"/"+test.model, func(t *testing.T) {
 			for _, streaming := range []bool{false, true} {

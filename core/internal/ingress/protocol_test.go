@@ -280,19 +280,27 @@ func TestClassifyUsesConfiguredBodyLimit(t *testing.T) {
 // evaluator and classifier.
 func TestClassifiedWithSanitizedTextDropsPreRedactionViewsWhenExtractionIsEmpty(t *testing.T) {
 	classified := Request{
-		Protocol:     contract.ProtocolOpenAIResponses,
-		routingText:  `{"input":"write go code for alice@example.com"}`,
-		lastUserText: "write go code for alice@example.com",
-		InputPreview: "write go code for alice@example.com",
-		Conversation: convo.RequestSummary{LastUserText: "write go code for alice@example.com"},
+		Protocol:             contract.ProtocolOpenAIResponses,
+		routingUserText:      "write go code for alice@example.com",
+		routingUserTextRunes: 35,
+		routingUserTextKnown: true,
+		lastUserText:         "write go code for alice@example.com",
+		InputPreview:         "write go code for alice@example.com",
+		Conversation:         convo.RequestSummary{LastUserText: "write go code for alice@example.com"},
 	}
 	rebuilt := classifiedWithSanitizedText(classified, []byte(`{"input":""}`))
-	if rebuilt.lastUserText != "" || rebuilt.Conversation.LastUserText != "" || rebuilt.InputPreview != "" {
-		t.Fatalf("pre-redaction text survived the rebuild: lastUserText=%q conversation=%q preview=%q",
-			rebuilt.lastUserText, rebuilt.Conversation.LastUserText, rebuilt.InputPreview)
+	if rebuilt.lastUserText != "" || rebuilt.Conversation.LastUserText != "" || rebuilt.InputPreview != "" || rebuilt.routingUserText != "" {
+		t.Fatalf("pre-redaction text survived the rebuild: lastUserText=%q conversation=%q preview=%q routing=%q",
+			rebuilt.lastUserText, rebuilt.Conversation.LastUserText, rebuilt.InputPreview, rebuilt.routingUserText)
 	}
-	if strings.Contains(rebuilt.routingText, "alice@example.com") {
-		t.Fatalf("routing text kept pre-redaction copy: %q", rebuilt.routingText)
+	// The sanitized body was read, and its user text is empty: that is a
+	// known zero, unlike text the policy withheld.
+	if !rebuilt.routingUserTextKnown || rebuilt.routingUserTextRunes != 0 {
+		t.Fatalf("empty sanitized text: known=%v runes=%d", rebuilt.routingUserTextKnown, rebuilt.routingUserTextRunes)
+	}
+	withheld := classifiedWithSanitizedText(classified, nil)
+	if withheld.routingUserTextKnown || withheld.routingUserText != "" || withheld.lastUserText != "" {
+		t.Fatalf("withheld text must leave nothing to read: %+v", withheld)
 	}
 }
 

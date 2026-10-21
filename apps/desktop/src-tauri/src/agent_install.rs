@@ -212,12 +212,15 @@ pub struct InstallReceipt {
 pub struct InstallContext {
     pub home: PathBuf,
     pub cli_source: PathBuf,
-    /// Core's data directory, denied to hosts that support deny rules.
-    pub data_directory: Option<PathBuf>,
-    /// The desktop's raw key pin file, denied like the data directory. It
-    /// lives in the config directory, apart from the data on Linux, and is
-    /// `None` where the pins live in the keychain.
-    pub raw_key_pins: Option<PathBuf>,
+    /// Core's data directory of every AstrLink instance, denied to hosts that
+    /// support deny rules. The instances share the user's agent tools, so
+    /// either one writes and checks the same guards.
+    pub data_directories: Vec<PathBuf>,
+    /// The raw key pin file of every instance, denied like the data
+    /// directories. It lives in the config directory, apart from the data on
+    /// Linux, and is listed even for an instance that keeps its pins in the
+    /// keychain.
+    pub raw_key_pins: Vec<PathBuf>,
     /// Where the tools in `home` keep their configuration.
     pub dirs: ToolDirs,
     /// WSL distributions configured alongside `home`. Their tools run the CLI
@@ -1340,11 +1343,7 @@ fn guard_present(context: &InstallContext, home: Home, id: AgentToolId) -> bool 
         AgentToolId::Claude => claude_rules_present(
             &path,
             "deny",
-            &claude_deny_rules(
-                home,
-                context.data_directory.as_deref(),
-                context.raw_key_pins.as_deref(),
-            ),
+            &claude_deny_rules(home, &context.data_directories, &context.raw_key_pins),
         ),
         _ => codex_guard_range(&raw).is_some(),
     }
@@ -1376,18 +1375,18 @@ fn claude_rules_present(path: &Path, list: &str, rules: &[String]) -> bool {
 /// desktop's files sit under the drive mounts, the session file included.
 pub fn claude_deny_rules(
     home: Home,
-    data_directory: Option<&Path>,
-    raw_key_pins: Option<&Path>,
+    data_directories: &[PathBuf],
+    raw_key_pins: &[PathBuf],
 ) -> Vec<String> {
-    let pattern = |path: &Path| {
+    let pattern = |path: &PathBuf| {
         home.seen(path)
             .and_then(|path| claude_absolute_pattern(&path, home.windows()))
     };
     let mut rules = Vec::new();
-    if let Some(pattern) = data_directory.and_then(pattern) {
+    for pattern in data_directories.iter().filter_map(pattern) {
         rules.push(format!("Read({pattern}/**)"));
     }
-    if let Some(pattern) = raw_key_pins.and_then(pattern) {
+    for pattern in raw_key_pins.iter().filter_map(pattern) {
         rules.push(format!("Read({pattern})"));
     }
     let session = match home.wsl {
@@ -1536,16 +1535,29 @@ fn remove_one_rule(items: &mut Vec<Value>, rule: &str) {
 /// Codex loads `AGENTS.md` into every session, so this section only says what
 /// to avoid. Pointing at the skill here made agents load it for unrelated
 /// questions; the skill's own description decides when it applies.
-fn codex_guard_block(
-    home: Home,
-    data_directory: Option<&Path>,
-    raw_key_pins: Option<&Path>,
-) -> String {
-    let mut data = data_directory
-        .map(|path| format!("AstrLink's data directory (`{}`)", home.shown(path)))
-        .unwrap_or_else(|| "AstrLink's data directory".to_string());
-    if let Some(path) = raw_key_pins {
-        data.push_str(&format!(", its raw key pin file (`{}`)", home.shown(path)));
+fn codex_guard_block(home: Home, data_directories: &[PathBuf], raw_key_pins: &[PathBuf]) -> String {
+    let listed = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| format!("`{}`", home.shown(path)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut data = match data_directories {
+        [] => "AstrLink's data directory".to_string(),
+        [_] => format!("AstrLink's data directory ({})", listed(data_directories)),
+        _ => format!("AstrLink's data directories ({})", listed(data_directories)),
+    };
+    if !raw_key_pins.is_empty() {
+        let files = if raw_key_pins.len() == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        data.push_str(&format!(
+            ", its raw key pin {files} ({})",
+            listed(raw_key_pins)
+        ));
     }
     let session = match home.wsl {
         None => "~/.astrlink/control-session.json".to_string(),
@@ -1641,11 +1653,7 @@ fn install_host_guards(
     let mut files = Vec::new();
     if tool_ids.contains(&AgentToolId::Claude) {
         let path = claude_settings_path(home);
-        let deny = claude_deny_rules(
-            home,
-            context.data_directory.as_deref(),
-            context.raw_key_pins.as_deref(),
-        );
+        let deny = claude_deny_rules(home, &context.data_directories, &context.raw_key_pins);
         let existing = read_optional(&path)?;
         let (next, denied) = merge_claude_settings_rules(
             existing.as_deref(),
@@ -1675,11 +1683,7 @@ fn install_host_guards(
             || existing.is_none();
         record.codex = Some(CodexInstructionsRecord { created_file });
         write_host_guards(&home, &mut record)?;
-        let block = codex_guard_block(
-            home,
-            context.data_directory.as_deref(),
-            context.raw_key_pins.as_deref(),
-        );
+        let block = codex_guard_block(home, &context.data_directories, &context.raw_key_pins);
         write_text(
             &path,
             &merge_codex_agents_guard(existing.as_deref(), &block),
@@ -1746,16 +1750,16 @@ fn uninstall_host_guards(home: Home) -> Result<(), String> {
     remove_path(&host_guards_path(&home))
 }
 
-/// Keeps installed guards and CLI access current when the data directory, pin
-/// file, CLI path, or rule set changes, and adds CLI access to installs made
-/// before the CLI. A settings file, `AGENTS.md` section, or Codex rules file
-/// the user removed by hand is not re-created; reinstalling from Settings
-/// restores it. When the rules do change, every current rule missing from a
-/// kept settings file is added, including one the user deleted from it.
+/// Keeps installed guards and CLI access current when the data directories,
+/// pin files, CLI path, or rule set change, and adds CLI access to installs
+/// made before the CLI. A settings file, `AGENTS.md` section, or Codex rules
+/// file the user removed by hand is not re-created; reinstalling from
+/// Settings restores it. When the rules do change, every current rule missing
+/// from a kept settings file is added, including one the user deleted from it.
 pub fn sync_installed_host_guards(
     home: Home,
-    data_directory: Option<&Path>,
-    raw_key_pins: Option<&Path>,
+    data_directories: &[PathBuf],
+    raw_key_pins: &[PathBuf],
 ) -> Result<(), String> {
     let _lock = host_files::lock();
     if !receipt_path(&home).is_file() || !host_guards_path(&home).is_file() {
@@ -1763,7 +1767,7 @@ pub fn sync_installed_host_guards(
     }
     let mut record = read_host_guards(&home)?;
     if let Some(previous) = record.claude.clone() {
-        let rules = claude_deny_rules(home, data_directory, raw_key_pins);
+        let rules = claude_deny_rules(home, data_directories, raw_key_pins);
         let path = claude_settings_path(home);
         if previous.rules != rules {
             if let Some(existing) = read_optional(&path)? {
@@ -1794,7 +1798,7 @@ pub fn sync_installed_host_guards(
         let path = codex_agents_path(home);
         if let Some(existing) = read_optional(&path)? {
             if let Some((start, end)) = codex_guard_range(&existing) {
-                let block = codex_guard_block(home, data_directory, raw_key_pins);
+                let block = codex_guard_block(home, data_directories, raw_key_pins);
                 if existing[start..end] != block {
                     write_text(&path, &merge_codex_agents_guard(Some(&existing), &block))?;
                 }
@@ -1895,8 +1899,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -2098,8 +2102,8 @@ mod tests {
             let context = InstallContext {
                 home: home.clone(),
                 cli_source,
-                data_directory: None,
-                raw_key_pins: None,
+                data_directories: Vec::new(),
+                raw_key_pins: Vec::new(),
                 dirs: ToolDirs::default(),
                 wsl: Vec::new(),
             };
@@ -2182,8 +2186,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source: home.join("missing"),
-            data_directory: Some(home.join("data")),
-            raw_key_pins: None,
+            data_directories: vec![home.join("data")],
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -2238,8 +2242,7 @@ mod tests {
         // The upgraded receipt is not migrated again.
         fs::remove_file(codex_rules_path(Home::local(&home))).unwrap();
         sync_installed_cli(&context).unwrap();
-        sync_installed_host_guards(Home::local(&home), context.data_directory.as_deref(), None)
-            .unwrap();
+        sync_installed_host_guards(Home::local(&home), &context.data_directories, &[]).unwrap();
         assert!(!codex_rules_path(Home::local(&home)).exists());
         assert_eq!(
             fs::read_to_string(claude_settings_path(Home::local(&home))).unwrap(),
@@ -2475,8 +2478,8 @@ mod tests {
         let context = InstallContext {
             home,
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -2551,8 +2554,8 @@ mod tests {
             &InstallContext {
                 home: home.clone(),
                 cli_source,
-                data_directory: None,
-                raw_key_pins: None,
+                data_directories: Vec::new(),
+                raw_key_pins: Vec::new(),
                 dirs: ToolDirs::default(),
                 wsl: Vec::new(),
             },
@@ -2588,8 +2591,8 @@ mod tests {
             &InstallContext {
                 home: home.clone(),
                 cli_source,
-                data_directory: None,
-                raw_key_pins: None,
+                data_directories: Vec::new(),
+                raw_key_pins: Vec::new(),
                 dirs: ToolDirs::default(),
                 wsl: Vec::new(),
             },
@@ -2648,8 +2651,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source: next,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -2702,8 +2705,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -2757,8 +2760,8 @@ mod tests {
             let context = InstallContext {
                 home,
                 cli_source,
-                data_directory: None,
-                raw_key_pins: None,
+                data_directories: Vec::new(),
+                raw_key_pins: Vec::new(),
                 dirs: ToolDirs::default(),
                 wsl: Vec::new(),
             };
@@ -2784,7 +2787,7 @@ mod tests {
             );
             sync_installed_skills(Home::local(&context.home)).unwrap();
             sync_installed_cli(&context).unwrap();
-            sync_installed_host_guards(Home::local(&context.home), None, None).unwrap();
+            sync_installed_host_guards(Home::local(&context.home), &[], &[]).unwrap();
             let after = status(&context);
             let needs_cli = skills.contains(&AgentSkillId::AstrlinkDebug);
             let shared = selected.iter().any(|id| id.uses_shared_skills());
@@ -2916,8 +2919,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source: home.join("missing"),
-            data_directory: Some(home.join("data")),
-            raw_key_pins: None,
+            data_directories: vec![home.join("data")],
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -2975,8 +2978,7 @@ mod tests {
         };
         sync_installed_skills(Home::local(&home)).unwrap();
         sync_installed_cli(&context).unwrap();
-        sync_installed_host_guards(Home::local(&home), context.data_directory.as_deref(), None)
-            .unwrap();
+        sync_installed_host_guards(Home::local(&home), &context.data_directories, &[]).unwrap();
         untouched(&home);
 
         uninstall(&context).unwrap();
@@ -2999,8 +3001,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3157,8 +3159,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3234,7 +3236,8 @@ mod tests {
         assert_eq!(claude_absolute_pattern("relative/path", false), None);
         assert_eq!(claude_absolute_pattern("/", false), None);
 
-        let rules = claude_deny_rules(desktop(), Some(Path::new("/data/astrlink")), None);
+        let data = [PathBuf::from("/data/astrlink")];
+        let rules = claude_deny_rules(desktop(), &data, &[]);
         if cfg!(windows) {
             assert_eq!(rules.len(), 3);
         } else {
@@ -3243,12 +3246,12 @@ mod tests {
         assert!(rules.contains(&"Read(~/.astrlink/control-session.json)".to_string()));
         assert!(rules.contains(&"Bash(sqlite3 *)".to_string()));
         assert!(rules.contains(&"Bash(sqlite3*)".to_string()));
-        assert_eq!(claude_deny_rules(desktop(), None, None).len(), 3);
+        assert_eq!(claude_deny_rules(desktop(), &[], &[]).len(), 3);
 
         // The pin file sits apart from the data on Linux and gets the same
         // kind of rule as the data directory, and only that kind.
-        let pins = Path::new("/config/astrlink/raw-key-pins.json");
-        let with_pins = claude_deny_rules(desktop(), Some(Path::new("/data/astrlink")), Some(pins));
+        let pins = [PathBuf::from("/config/astrlink/raw-key-pins.json")];
+        let with_pins = claude_deny_rules(desktop(), &data, &pins);
         let pin_rules = with_pins
             .iter()
             .filter(|rule| rule.contains("raw-key-pins.json"))
@@ -3259,10 +3262,27 @@ mod tests {
             assert_eq!(pin_rules, ["Read(//config/astrlink/raw-key-pins.json)"]);
             assert_eq!(with_pins.len(), rules.len() + 1);
         }
-        assert_eq!(
-            claude_deny_rules(desktop(), None, Some(pins))[1..],
-            rules[1..]
-        );
+        assert_eq!(claude_deny_rules(desktop(), &[], &pins)[1..], rules[1..]);
+
+        // Every instance's directory and pin file get a rule, data first.
+        let both_data = [data[0].clone(), PathBuf::from("/data/other")];
+        let both_pins = [
+            pins[0].clone(),
+            PathBuf::from("/config/other/raw-key-pins.json"),
+        ];
+        let both = claude_deny_rules(desktop(), &both_data, &both_pins);
+        if !cfg!(windows) {
+            assert_eq!(
+                both[..4],
+                [
+                    "Read(//data/astrlink/**)",
+                    "Read(//data/other/**)",
+                    "Read(//config/astrlink/raw-key-pins.json)",
+                    "Read(//config/other/raw-key-pins.json)",
+                ]
+            );
+            assert_eq!(both[4..], rules[1..]);
+        }
     }
 
     #[test]
@@ -3348,25 +3368,37 @@ mod tests {
     #[test]
     fn codex_guard_block_round_trips_and_replaces_itself() {
         let user = "# My rules\n\nBe terse.\n";
-        let block = codex_guard_block(desktop(), Some(Path::new("/data/astrlink")), None);
+        let data = [PathBuf::from("/data/astrlink")];
+        let pins = [PathBuf::from("/config/astrlink/raw-key-pins.json")];
+        let block = codex_guard_block(desktop(), &data, &[]);
         assert!(block.contains("/data/astrlink"));
         assert!(block.contains("observer access"));
         assert!(!block.contains("skill"));
         assert!(!block.contains("raw key pin file"));
-        let pinned = codex_guard_block(
-            desktop(),
-            Some(Path::new("/data/astrlink")),
-            Some(Path::new("/config/astrlink/raw-key-pins.json")),
-        );
+        let pinned = codex_guard_block(desktop(), &data, &pins);
         assert!(pinned.contains(
             "Do not read, copy, search, or open AstrLink's data directory (`/data/astrlink`), \
              its raw key pin file (`/config/astrlink/raw-key-pins.json`), any `astrlink.db*` file"
+        ));
+        let every = codex_guard_block(
+            desktop(),
+            &[data[0].clone(), PathBuf::from("/data/other")],
+            &[
+                pins[0].clone(),
+                PathBuf::from("/config/other/raw-key-pins.json"),
+            ],
+        );
+        assert!(every.contains(
+            "Do not read, copy, search, or open AstrLink's data directories \
+             (`/data/astrlink`, `/data/other`), its raw key pin files \
+             (`/config/astrlink/raw-key-pins.json`, `/config/other/raw-key-pins.json`), \
+             any `astrlink.db*` file"
         ));
         let merged = merge_codex_agents_guard(Some(user), &block);
         assert!(merged.starts_with(user));
         assert_eq!(remove_codex_agents_guard(&merged), user);
 
-        let other = codex_guard_block(desktop(), Some(Path::new("/elsewhere")), None);
+        let other = codex_guard_block(desktop(), &[PathBuf::from("/elsewhere")], &[]);
         let replaced = merge_codex_agents_guard(Some(&merged), &other);
         assert_eq!(replaced.matches(CODEX_GUARD_BEGIN).count(), 1);
         assert!(replaced.contains("/elsewhere") && !replaced.contains("/data/astrlink"));
@@ -3382,11 +3414,11 @@ mod tests {
         // The user deleted the section by hand but kept its begin marker, then
         // installed again.
         let user = format!("# My rules\n\n{CODEX_GUARD_BEGIN}\nKeep this.\n");
-        let block = codex_guard_block(desktop(), Some(Path::new("/data/astrlink")), None);
+        let block = codex_guard_block(desktop(), &[PathBuf::from("/data/astrlink")], &[]);
         let merged = merge_codex_agents_guard(Some(&user), &block);
         assert_eq!(remove_codex_agents_guard(&merged), user);
 
-        let other = codex_guard_block(desktop(), Some(Path::new("/elsewhere")), None);
+        let other = codex_guard_block(desktop(), &[PathBuf::from("/elsewhere")], &[]);
         let replaced = merge_codex_agents_guard(Some(&merged), &other);
         assert!(replaced.starts_with(user.as_str()));
         assert!(replaced.contains("/elsewhere") && !replaced.contains("/data/astrlink"));
@@ -3411,8 +3443,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: Some(data.clone()),
-            raw_key_pins: Some(pins.clone()),
+            data_directories: vec![data.clone()],
+            raw_key_pins: vec![pins.clone()],
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3449,7 +3481,11 @@ mod tests {
         let merged: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
         let deny = merged["permissions"]["deny"].as_array().unwrap();
         assert_eq!(deny[0], "Read(~/.ssh/**)");
-        let rules = claude_deny_rules(desktop(), Some(&data), Some(&pins));
+        let rules = claude_deny_rules(
+            desktop(),
+            std::slice::from_ref(&data),
+            std::slice::from_ref(&pins),
+        );
         assert!(rules.iter().any(|rule| rule.contains("raw-key-pins.json")));
         for rule in rules {
             assert!(
@@ -3477,14 +3513,31 @@ mod tests {
 
         // Moving the data directory updates only the managed rule.
         let moved = home.join("moved-data");
-        sync_installed_host_guards(Home::local(&home), Some(&moved), Some(&pins)).unwrap();
+        sync_installed_host_guards(
+            Home::local(&home),
+            std::slice::from_ref(&moved),
+            std::slice::from_ref(&pins),
+        )
+        .unwrap();
         let synced = fs::read_to_string(&settings).unwrap();
         let synced: Value = serde_json::from_str(&synced).unwrap();
         let synced_deny = synced["permissions"]["deny"].as_array().unwrap();
         let has = |rule: &str| synced_deny.iter().any(|item| item.as_str() == Some(rule));
-        assert!(!has(&claude_deny_rules(desktop(), Some(&data), None)[0]));
-        assert!(has(&claude_deny_rules(desktop(), Some(&moved), None)[0]));
-        assert!(has(&claude_deny_rules(desktop(), None, Some(&pins))[0]));
+        assert!(!has(&claude_deny_rules(
+            desktop(),
+            std::slice::from_ref(&data),
+            &[]
+        )[0]));
+        assert!(has(&claude_deny_rules(
+            desktop(),
+            std::slice::from_ref(&moved),
+            &[]
+        )[0]));
+        assert!(has(&claude_deny_rules(
+            desktop(),
+            &[],
+            std::slice::from_ref(&pins)
+        )[0]));
         assert!(has("Read(~/.ssh/**)"));
         assert!(fs::read_to_string(&agents).unwrap().contains("moved-data"));
 
@@ -3509,8 +3562,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: Some(home.join("data")),
-            raw_key_pins: None,
+            data_directories: vec![home.join("data")],
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3528,7 +3581,7 @@ mod tests {
         // across restarts.
         fs::write(codex_agents_path(Home::local(&home)), "mine\n").unwrap();
         fs::remove_file(codex_rules_path(Home::local(&home))).unwrap();
-        sync_installed_host_guards(Home::local(&home), Some(&home.join("other")), None).unwrap();
+        sync_installed_host_guards(Home::local(&home), &[home.join("other")], &[]).unwrap();
         assert_eq!(
             fs::read_to_string(codex_agents_path(Home::local(&home))).unwrap(),
             "mine\n"
@@ -3556,8 +3609,8 @@ mod tests {
         let earlier = InstallContext {
             home: home.clone(),
             cli_source: cli_source.clone(),
-            data_directory: Some(data.clone()),
-            raw_key_pins: None,
+            data_directories: vec![data.clone()],
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3568,10 +3621,10 @@ mod tests {
         )
         .unwrap();
         let current = InstallContext {
-            raw_key_pins: Some(pins.clone()),
+            raw_key_pins: vec![pins.clone()],
             ..earlier
         };
-        let pin_rule = claude_deny_rules(desktop(), None, Some(&pins))[0].clone();
+        let pin_rule = claude_deny_rules(desktop(), &[], std::slice::from_ref(&pins))[0].clone();
         assert!(pin_rule.starts_with("Read(") && pin_rule.contains("raw-key-pins.json"));
         let claude_guarded = |context: &InstallContext| {
             status(context)
@@ -3584,7 +3637,12 @@ mod tests {
         // The earlier rules no longer count as the whole guard.
         assert!(!claude_guarded(&current));
 
-        sync_installed_host_guards(Home::local(&home), Some(&data), Some(&pins)).unwrap();
+        sync_installed_host_guards(
+            Home::local(&home),
+            std::slice::from_ref(&data),
+            std::slice::from_ref(&pins),
+        )
+        .unwrap();
         let synced: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
         let deny = synced["permissions"]["deny"]
             .as_array()
@@ -3617,6 +3675,75 @@ mod tests {
     }
 
     #[test]
+    fn either_instance_keeps_and_counts_the_guards_the_other_wrote() {
+        use crate::instance::{every_instance_directory, IDENTIFIER, ISOLATED_IDENTIFIER};
+
+        let home = unique_temp("agent-guards-instances");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let cli_source = home.join("src-astrlink-cli");
+        fs::write(&cli_source, b"cli").unwrap();
+        let support = home.join("Application Support");
+        let context_of = |identifier: &str| {
+            let every = every_instance_directory(&support.join(identifier));
+            InstallContext {
+                home: home.clone(),
+                cli_source: cli_source.clone(),
+                raw_key_pins: every
+                    .iter()
+                    .map(|directory| crate::raw_key_pin::pin_file(directory))
+                    .collect(),
+                data_directories: every,
+                dirs: ToolDirs::default(),
+                wsl: Vec::new(),
+            }
+        };
+        let installed = context_of(IDENTIFIER);
+        let isolated = context_of(ISOLATED_IDENTIFIER);
+        let tools = [AgentToolId::Claude, AgentToolId::Codex];
+        install_local(&installed, DEBUG_ONLY, &tools).unwrap();
+        let guarded = |context: &InstallContext| {
+            status(context)
+                .tools
+                .into_iter()
+                .filter(|tool| tool.guard_installed)
+                .map(|tool| tool.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(guarded(&isolated), tools);
+
+        let settings = claude_settings_path(Home::local(&home));
+        let agents = codex_agents_path(Home::local(&home));
+        let read = || {
+            (
+                fs::read_to_string(&settings).unwrap(),
+                fs::read_to_string(&agents).unwrap(),
+            )
+        };
+        let written = read();
+        for identifier in [IDENTIFIER, ISOLATED_IDENTIFIER] {
+            assert!(
+                written.0.contains(&format!("{identifier}/**)")),
+                "{identifier}"
+            );
+            assert!(written.1.contains(identifier), "{identifier}");
+        }
+        // Installing or syncing from the other instance changes nothing.
+        install_local(&isolated, DEBUG_ONLY, &tools).unwrap();
+        sync_installed_host_guards(
+            Home::local(&home),
+            &isolated.data_directories,
+            &isolated.raw_key_pins,
+        )
+        .unwrap();
+        assert_eq!(read(), written);
+
+        uninstall(&isolated).unwrap();
+        assert!(!settings.exists() && !agents.exists());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn sync_adds_cli_access_to_guards_installed_before_the_cli() {
         let home = unique_temp("agent-guards-cli");
         fs::create_dir_all(home.join(".claude")).unwrap();
@@ -3627,8 +3754,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: Some(data.clone()),
-            raw_key_pins: None,
+            data_directories: vec![data.clone()],
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3677,7 +3804,7 @@ mod tests {
         };
         assert!(access(&context).is_empty());
 
-        sync_installed_host_guards(Home::local(&home), Some(&data), None).unwrap();
+        sync_installed_host_guards(Home::local(&home), std::slice::from_ref(&data), &[]).unwrap();
         assert_eq!(access(&context), [AgentToolId::Claude, AgentToolId::Codex]);
         assert_eq!(
             serde_json::from_str::<Value>(&fs::read_to_string(&settings).unwrap()).unwrap(),
@@ -3706,8 +3833,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3723,7 +3850,7 @@ mod tests {
 
         // Uninstall and startup sync leave it alone too.
         uninstall(&context).unwrap();
-        sync_installed_host_guards(Home::local(&home), None, None).unwrap();
+        sync_installed_host_guards(Home::local(&home), &[], &[]).unwrap();
         assert_eq!(fs::read_to_string(&rules).unwrap(), foreign);
         let _ = fs::remove_dir_all(&home);
     }
@@ -3738,8 +3865,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: Vec::new(),
         };
@@ -3819,8 +3946,8 @@ mod tests {
         let context = InstallContext {
             home: host.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs::default(),
             wsl: vec![wsl_home(share.clone(), ToolDirs::default())],
         };
@@ -3944,8 +4071,10 @@ mod tests {
         assert_eq!(claude_allow_rules(target), [format!("Bash('{cli}' *)")]);
         assert!(codex_rules(target).contains(&serde_json::to_string(&cli).unwrap()));
 
-        let data = Path::new(r"C:\Users\Ada Lovelace\AppData\Roaming\AstrLink");
-        let rules = claude_deny_rules(target, Some(data), None);
+        let data = [PathBuf::from(
+            r"C:\Users\Ada Lovelace\AppData\Roaming\AstrLink",
+        )];
+        let rules = claude_deny_rules(target, &data, &[]);
         assert_eq!(
             rules[0],
             "Read(//mnt/c/Users/Ada Lovelace/AppData/Roaming/AstrLink/**)"
@@ -3954,7 +4083,7 @@ mod tests {
             rules[1],
             "Read(//mnt/c/Users/Ada Lovelace/.astrlink/control-session.json)"
         );
-        let block = codex_guard_block(target, Some(data), None);
+        let block = codex_guard_block(target, &data, &[]);
         assert!(block.contains("`/mnt/c/Users/Ada Lovelace/AppData/Roaming/AstrLink`"));
         assert!(block.contains("`/mnt/c/Users/Ada Lovelace/.astrlink/control-session.json`"));
         assert!(!block.contains("~/.astrlink"));
@@ -3976,8 +4105,8 @@ mod tests {
         let context = InstallContext {
             home: home.clone(),
             cli_source,
-            data_directory: None,
-            raw_key_pins: None,
+            data_directories: Vec::new(),
+            raw_key_pins: Vec::new(),
             dirs: ToolDirs {
                 claude: Some(claude.clone()),
                 codex: Some(codex.clone()),

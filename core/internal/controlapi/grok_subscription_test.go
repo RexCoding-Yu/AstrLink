@@ -17,7 +17,6 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
 	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 	"github.com/QuantumNous/astrlink/core/internal/servicemodel"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	"github.com/QuantumNous/astrlink/core/internal/subscription"
 )
 
@@ -83,7 +82,7 @@ func testGrokProxyLifecycle(t *testing.T, useProxy bool) {
 	})
 	upstream := httptest.NewServer(providerHandler)
 	t.Cleanup(upstream.Close)
-	store, err := sqlite.Open(ctx, t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, ctx, t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
 	}

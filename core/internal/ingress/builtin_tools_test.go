@@ -1,11 +1,16 @@
 package ingress
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +19,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/accountauth"
 	"github.com/QuantumNous/astrlink/core/internal/builtintools"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
@@ -227,6 +233,101 @@ func TestBuiltinToolCaptureFailure(t *testing.T) {
 	cancel()
 	if _, err := NewWithDependencies(Dependencies{}).builtinModel(ctx, httptest.NewRequest(http.MethodPost, "/v1/responses", nil), builtintools.Object{"model": "main", "input": "a"}, nil); err == nil {
 		t.Fatal("cancelled model call succeeded")
+	}
+}
+
+// codexBackendStream answers the way the Codex backend streams: items arrive
+// one by one and the completed response carries no output. The stream goes
+// out without the text/event-stream type, and compressed whenever the request
+// accepts gzip.
+func codexBackendStream(w http.ResponseWriter, r *http.Request, items ...builtintools.Object) {
+	w.Header()["Content-Type"] = nil
+	var out io.Writer = w
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		zipped := gzip.NewWriter(w)
+		defer zipped.Close()
+		out = zipped
+	}
+	write := func(event builtintools.Object) {
+		_, _ = fmt.Fprintf(out, "event: %s\ndata: %s\n\n", event["type"], builtintools.Text(event))
+	}
+	write(builtintools.Object{"type": "response.created", "response": builtintools.Object{"id": "resp_codex", "status": "in_progress", "output": []any{}}})
+	for index, item := range items {
+		write(builtintools.Object{"type": "response.output_item.done", "output_index": index, "item": item})
+	}
+	write(builtintools.Object{"type": "response.completed", "response": builtintools.Object{"id": "resp_codex", "status": "completed", "output": []any{}, "usage": builtintools.Object{"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}})
+}
+
+// noisyTestImage is a PNG whose stream event spans several reads.
+func noisyTestImage(t *testing.T) string {
+	t.Helper()
+	canvas := image.NewRGBA(image.Rect(0, 0, 192, 192))
+	random := rand.New(rand.NewPCG(1, 2))
+	for index := range canvas.Pix {
+		canvas.Pix[index] = byte(random.Uint32())
+	}
+	var buffer bytes.Buffer
+	if err := png.Encode(&buffer, canvas); err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(buffer.Bytes())
+}
+
+// The image tool mapped to a Codex subscription reads that backend's stream,
+// for an Images API request and for a Responses request with the hosted tool.
+func TestBuiltinImageToolReadsTheCodexBackendStream(t *testing.T) {
+	picture := noisyTestImage(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body builtintools.Object
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		tools := builtintools.Array(body["tools"])
+		if len(tools) != 1 {
+			t.Errorf("tools = %v", body["tools"])
+			return
+		}
+		tool := builtintools.Map(tools[0])
+		switch {
+		case tool["type"] == "image_generation":
+			codexBackendStream(w, r, builtintools.Object{"id": "ig_codex", "type": "image_generation_call", "status": "completed", "result": picture, "output_format": "png"})
+		case strings.Contains(builtintools.Text(body["input"]), "function_call_output"):
+			codexBackendStream(w, r, builtinMessage("Here is the fox."))
+		default:
+			codexBackendStream(w, r, builtintools.Object{"id": "fc_codex", "type": "function_call", "status": "completed", "name": tool["name"], "call_id": "call_codex", "arguments": `{"prompt":"a red fox"}`})
+		}
+	}))
+	defer server.Close()
+	store := newRedirectSettingsStore()
+	store.settings.BuiltinTools = &contract.BuiltinTools{ImageGeneration: contract.BuiltinTool{Enabled: true, Backend: "upstream", ServiceID: "service_codex", Model: "gpt-6-astra"}}
+	handler := NewWithDependencies(Dependencies{
+		Resolver:       codexToolResolver{candidateResolver{candidates: []endpoint.Resolved{codexVersionCandidate(server.URL + "/backend-api/codex")}}},
+		Authorizer:     endpoint.NewServiceAuthorizer(nil, codingPlanCredentials{}, accountauth.CodexIdentityPolicy{}),
+		RequestRecords: store,
+	})
+	for _, test := range []struct{ path, body string }{
+		{"/v1/images/generations", `{"model":"gpt-image-2","prompt":"a red fox"}`},
+		{"/v1/responses", `{"model":"gpt-6-astra","input":"Draw a red fox","stream":true,"tools":[{"type":"image_generation"}]}`},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			// Go clients such as New API ask for gzip on their own.
+			request.Header.Set("Accept-Encoding", "gzip")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			answer := response.Body.String()
+			if response.Code != http.StatusOK || !strings.Contains(answer, picture) || strings.Contains(answer, "response.failed") {
+				t.Fatalf("status = %d, image returned = %v, body starts %.300s", response.Code, strings.Contains(answer, picture), answer)
+			}
+		})
+	}
+	for _, record := range store.snapshot() {
+		if record.Status != contract.RequestStatusSucceeded {
+			t.Fatalf("%s record = %s", record.InputProtocol, record.Status)
+		}
 	}
 }
 

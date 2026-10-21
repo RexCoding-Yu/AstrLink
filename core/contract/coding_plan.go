@@ -2,9 +2,12 @@ package contract
 
 import "strings"
 
-// ModelNativeProtocol follows OpenCode's published endpoint tables. The
-// catalog is fetched live; these rules select its wire protocol, not access.
-func (kind ServiceKind) ModelNativeProtocol(model string) ProtocolID {
+// BuiltinModelProtocol is the protocol a kind calls model in until a service
+// stores its own entry for it (Service.ModelProtocol). OpenCode, Copilot and
+// Droid serve each model on one published endpoint; the catalog is fetched
+// live, so these rules select the wire protocol, not access. Keep it in step
+// with serviceBuiltinModelProtocol in apps/desktop/src/service-model.ts.
+func (kind ServiceKind) BuiltinModelProtocol(model string) ProtocolID {
 	if kind == ServiceKindCopilotSubscription {
 		return copilotModelProtocol(strings.ToLower(model))
 	}
@@ -15,6 +18,9 @@ func (kind ServiceKind) ModelNativeProtocol(model string) ProtocolID {
 		return ""
 	}
 	model = strings.ToLower(model)
+	if strings.HasPrefix(model, "gemini-") {
+		return ProtocolGoogleGenerateContent
+	}
 	if strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "grok-") || strings.HasPrefix(model, "muse-spark-") {
 		return ProtocolOpenAIResponses
 	}

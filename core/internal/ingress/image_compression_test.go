@@ -47,7 +47,7 @@ func testPNG(t *testing.T, img image.Image) []byte {
 
 func testJPEG(t *testing.T) []byte {
 	t.Helper()
-	img := image.NewNRGBA(image.Rect(0, 0, 480, 360))
+	img := image.NewNRGBA(image.Rect(0, 0, 160, 120))
 	random := rand.New(rand.NewSource(5))
 	for index := range img.Pix {
 		img.Pix[index] = uint8(100 + random.Intn(60))
@@ -66,7 +66,7 @@ func losslessCompression() imageCompression {
 }
 
 func TestImageCompressionRewritesOnlyInlineImagesOfEachProtocol(t *testing.T) {
-	source := testScreenshot(800, 500)
+	source := testScreenshot(320, 200)
 	pngData := testPNG(t, source)
 	webpData, ok := new(imagecompress.Compressor).WebP(context.Background(), pngData, imagecompress.Options{})
 	if !ok {
@@ -218,7 +218,7 @@ func TestImageCompressionSummary(t *testing.T) {
 }
 
 func TestImageCompressionEndToEnd(t *testing.T) {
-	pngURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNG(t, testScreenshot(640, 400)))
+	pngURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNG(t, testScreenshot(320, 200)))
 	jpegURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(testJPEG(t))
 	body := `{"model":"model-test","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + pngURL +
 		`"}},{"type":"image_url","image_url":{"url":"` + jpegURL + `"}}]}]}`
@@ -256,7 +256,7 @@ func TestImageCompressionEndToEnd(t *testing.T) {
 }
 
 func TestImageCompressionSendsTheSameBytesOnEveryAttempt(t *testing.T) {
-	pngURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNG(t, testScreenshot(640, 400)))
+	pngURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNG(t, testScreenshot(320, 200)))
 	body := `{"model":"model-test","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + pngURL + `"}}]}]}`
 	_, _, response := nativeProviderExchange(contract.ProtocolOpenAIChat, false)
 	first := newSequenceUpstream(t, "application/json", response, http.StatusInternalServerError, http.StatusInternalServerError)

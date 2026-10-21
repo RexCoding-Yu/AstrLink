@@ -24,10 +24,12 @@ mod raw_approval;
 mod raw_key_pin;
 mod recovery_path;
 mod service_proxy;
+mod service_terminal;
 mod sidecar;
 mod startup_window;
 mod tray;
 mod updates;
+mod window_reclaim;
 mod wsl;
 
 use std::sync::{
@@ -79,6 +81,8 @@ struct SettingsSnapshot {
 struct PreferencesInput {
     close_behavior: CloseBehavior,
     autostart: bool,
+    #[serde(default)]
+    autostart_hidden: bool,
     core_auto_start: bool,
     core_auto_recover: bool,
     use_system_proxy: bool,
@@ -102,6 +106,7 @@ impl From<PreferencesInput> for Preferences {
         Self {
             close_behavior: input.close_behavior,
             autostart: input.autostart,
+            autostart_hidden: input.autostart_hidden,
             core_auto_start: input.core_auto_start,
             core_auto_recover: input.core_auto_recover,
             use_system_proxy: input.use_system_proxy,
@@ -240,8 +245,7 @@ fn get_preferences(
 /// settings. Also returns the distributions left unchecked.
 fn agent_install_context(
     home: std::path::PathBuf,
-    data_directory: Option<std::path::PathBuf>,
-    raw_key_pins: Option<std::path::PathBuf>,
+    guarded: GuardedPaths,
     reach: wsl::Reach,
 ) -> Result<(agent_install::InstallContext, Vec<String>), String> {
     let homes = agent_home::Homes::find(home, reach)?;
@@ -249,22 +253,53 @@ fn agent_install_context(
         home: homes.host,
         // Install reports a missing sidecar itself; status and uninstall do not need it.
         cli_source: agent_install::resolve_sidecar_binary("astrlink-cli").unwrap_or_default(),
-        data_directory,
-        raw_key_pins,
+        data_directories: guarded.data_directories,
+        raw_key_pins: guarded.raw_key_pins,
         dirs: homes.dirs,
         wsl: homes.wsl,
     };
     Ok((context, homes.unchecked))
 }
 
+/// What agent guards keep agents out of: the data directory and raw key pin
+/// file of every AstrLink instance, so either one writes and checks the
+/// same rules in the agent tools they share.
+struct GuardedPaths {
+    data_directories: Vec<std::path::PathBuf>,
+    raw_key_pins: Vec<std::path::PathBuf>,
+}
+
+impl GuardedPaths {
+    fn of(
+        data_directory: Option<&std::path::Path>,
+        config_directory: Option<&std::path::Path>,
+    ) -> Self {
+        let every = |directory: Option<&std::path::Path>| {
+            directory
+                .map(instance::every_instance_directory)
+                .unwrap_or_default()
+        };
+        Self {
+            data_directories: every(data_directory),
+            raw_key_pins: every(config_directory)
+                .iter()
+                .map(|directory| raw_key_pin::pin_file(directory))
+                .collect(),
+        }
+    }
+}
+
 fn app_agent_install_context(
     app: &tauri::AppHandle,
     reach: wsl::Reach,
 ) -> Result<(agent_install::InstallContext, Vec<String>), String> {
+    let path = app.path();
     agent_install_context(
         control_session::user_home()?,
-        app.path().app_data_dir().ok(),
-        raw_key_pin_file(app),
+        GuardedPaths::of(
+            path.app_data_dir().ok().as_deref(),
+            path.app_config_dir().ok().as_deref(),
+        ),
         reach,
     )
 }
@@ -334,11 +369,7 @@ fn start_client_config_sync(manager: Arc<CoreManager>, preferences: Arc<Preferen
 /// Keeps installed agent skills, guards, and the CLI current. Recorded WSL
 /// distributions sync off the main thread, and only while running; starting
 /// AstrLink never starts a distribution.
-fn sync_agent_installs(
-    home: std::path::PathBuf,
-    data_directory: std::path::PathBuf,
-    raw_key_pins: Option<std::path::PathBuf>,
-) {
+fn sync_agent_installs(home: std::path::PathBuf, guarded: GuardedPaths) {
     let distributions = agent_install::recorded_wsl(&home);
     let sync_homes = |context: &agent_install::InstallContext, wsl_only: bool| {
         for target in context
@@ -354,20 +385,15 @@ fn sync_agent_installs(
             }
             if let Err(error) = agent_install::sync_installed_host_guards(
                 target,
-                context.data_directory.as_deref(),
-                context.raw_key_pins.as_deref(),
+                &context.data_directories,
+                &context.raw_key_pins,
             ) {
                 eprintln!("failed to sync AstrLink agent host guards{place}: {error}");
             }
         }
     };
     // The desktop user's home first; WSL distributions follow below.
-    match agent_install_context(
-        home,
-        Some(data_directory),
-        raw_key_pins,
-        wsl::Reach::Named(&[]),
-    ) {
+    match agent_install_context(home, guarded, wsl::Reach::Named(&[])) {
         Ok((context, _)) => {
             sync_homes(&context, false);
             // Runs without a sidecar too, so the MCP migration still happens.
@@ -380,8 +406,10 @@ fn sync_agent_installs(
             std::thread::spawn(move || {
                 match agent_install_context(
                     context.home,
-                    context.data_directory,
-                    context.raw_key_pins,
+                    GuardedPaths {
+                        data_directories: context.data_directories,
+                        raw_key_pins: context.raw_key_pins,
+                    },
                     wsl::Reach::RunningAmong(&distributions),
                 ) {
                     // The desktop user's home synced above.
@@ -394,13 +422,6 @@ fn sync_agent_installs(
         }
         Err(error) => eprintln!("failed to sync AstrLink agent installs: {error}"),
     }
-}
-
-/// The raw key pin file agent guards deny, where the pins live in one.
-fn raw_key_pin_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    app.try_state::<Arc<raw_key_pin::RawKeyPins>>()?
-        .file()
-        .map(std::path::Path::to_path_buf)
 }
 
 #[tauri::command]
@@ -554,14 +575,17 @@ fn apply_native_theme(app: &tauri::AppHandle, preference: ThemePreference) {
     app.set_theme(preference.native_theme());
     for window in app.webview_windows().values() {
         // The tray popover paints its own panel on a transparent window.
-        if window.label() == tray::POPOVER_LABEL {
-            continue;
+        if window.label() != tray::POPOVER_LABEL {
+            apply_window_background(window, preference);
         }
-        let theme = preference.native_theme().or_else(|| window.theme().ok());
-        if let Some(theme) = theme {
-            if let Err(error) = window.set_background_color(Some(theme_background(theme))) {
-                eprintln!("unable to update AstrLink window background: {error}");
-            }
+    }
+}
+
+fn apply_window_background(window: &tauri::WebviewWindow, preference: ThemePreference) {
+    let theme = preference.native_theme().or_else(|| window.theme().ok());
+    if let Some(theme) = theme {
+        if let Err(error) = window.set_background_color(Some(theme_background(theme))) {
+            eprintln!("unable to update AstrLink window background: {error}");
         }
     }
 }
@@ -603,6 +627,18 @@ fn tray_popover_hide(app: tauri::AppHandle) {
     tray::dismiss_popover(&app);
 }
 
+/// The page the tray last asked the main window to open, handed over once.
+#[tauri::command]
+fn take_tray_navigation(app: tauri::AppHandle) -> Option<String> {
+    tray::take_navigation(&app)
+}
+
+/// Unsaved edits keep the hidden main window from being released.
+#[tauri::command]
+fn set_main_window_unsaved(app: tauri::AppHandle, unsaved: bool) {
+    window_reclaim::hold(&app, "main", unsaved);
+}
+
 fn receive_deep_links(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
     // One confirmation at a time: only the last AstrLink link is kept.
     if let Some(url) = urls
@@ -615,26 +651,73 @@ fn receive_deep_links(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
 }
 
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        // Restore the foreground app before showing/focusing its window.
-        #[cfg(target_os = "macos")]
-        if let Err(error) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
-            eprintln!("unable to restore AstrLink in the Dock: {error}");
-        }
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    // Restore the foreground app before showing/focusing its window.
+    #[cfg(target_os = "macos")]
+    if let Err(error) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
+        eprintln!("unable to restore AstrLink in the Dock: {error}");
     }
+    match window_reclaim::show(app, "main") {
+        window_reclaim::Show::Existing => {
+            if let Some(window) = app.get_webview_window("main") {
+                bring_to_front(&window);
+            }
+        }
+        window_reclaim::Show::Build => rebuild_main_window(app),
+        window_reclaim::Show::Pending => {}
+    }
+}
+
+fn bring_to_front(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
+/// Builds the main window again after the hidden one was released. Native
+/// window creation stays off the event loop (WebView2 deadlocks when a
+/// callback creates a webview) and off the async workers.
+fn rebuild_main_window(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let built = build_main_window(&app);
+        window_reclaim::built(&app, "main");
+        match built {
+            Ok(window) => bring_to_front(&window),
+            Err(error) => eprintln!("unable to open the AstrLink window again: {error}"),
+        }
+    });
+}
+
+fn build_main_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "main")
+        .ok_or("main window configuration is missing")?;
+    // Hidden, as configured, until it is placed.
+    let window = WebviewWindowBuilder::from_config(app, config)
+        .and_then(|builder| builder.build())
+        .map_err(|error| error.to_string())?;
+    let preference = app.state::<Arc<PreferencesStore>>().snapshot().values.theme;
+    apply_window_background(&window, preference);
+    if let Err(error) = startup_window::restore(&window) {
+        eprintln!("failed to place AstrLink on the current display: {error}");
+    }
+    Ok(window)
 }
 
 fn hide_main_window_to_tray(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    startup_window::remember(&window);
     if let Err(error) = window.hide() {
         eprintln!("unable to hide AstrLink to the tray: {error}");
         return;
     }
+    window_reclaim::hidden(app, "main");
     // Hiding a window does not remove a regular macOS app from the Dock.
     // Accessory mode keeps the tray and pinned inspector windows available.
     // Use the activation policy directly: Tao's set_dock_visibility(false)
@@ -2364,6 +2447,20 @@ fn platform_initialization_script(platform: &str) -> String {
     format!("window.__ASTRLINK_DESKTOP_PLATFORM__ = {encoded};")
 }
 
+const AUTOSTART_ARG: &str = "--autostart";
+
+fn should_hide_on_autostart(
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+    preferences: &Preferences,
+) -> bool {
+    preferences.autostart
+        && preferences.autostart_hidden
+        && args
+            .into_iter()
+            .skip(1)
+            .any(|arg| arg.as_ref() == AUTOSTART_ARG)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before the development bundle is staged: `make dev` stages its own.
@@ -2381,21 +2478,25 @@ pub fn run() {
     let explicit_quit = Arc::new(AtomicBool::new(false));
 
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let hidden = app
+                .try_state::<Arc<PreferencesStore>>()
+                .is_some_and(|store| should_hide_on_autostart(args, &store.snapshot().values));
+            if !hidden {
+                show_main_window(app);
+            }
         }))
         // After single-instance, which forwards a second launch's link here.
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![AUTOSTART_ARG]),
         ))
         .append_invoke_initialization_script(platform_initialization_script(std::env::consts::OS))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_store::Builder::new().build());
+        .plugin(tauri_plugin_dialog::init());
     #[cfg(not(target_os = "macos"))]
     let builder = builder.plugin(tauri_plugin_notification::init());
 
@@ -2404,6 +2505,7 @@ pub fn run() {
         .manage(explicit_quit)
         .manage(Mutex::new(InspectorRegistry::default()))
         .manage(tray::TrayState::default())
+        .manage(window_reclaim::WindowReclaim::default())
         .manage(Arc::new(client_updates::ClientUpdateManager::default()))
         .manage(Arc::new(model_updates::PrivacyModelUpdates::default()))
         .manage(provider_import::ProviderImports::default())
@@ -2428,6 +2530,8 @@ pub fn run() {
             tray_action,
             tray_popover_resize,
             tray_popover_hide,
+            take_tray_navigation,
+            set_main_window_unsaved,
             start_core,
             stop_core,
             restart_core,
@@ -2452,6 +2556,9 @@ pub fn run() {
             open_authorization_url,
             open_external_url,
             save_text_file,
+            service_terminal::list_terminal_apps,
+            service_terminal::pick_terminal_directory,
+            service_terminal::open_service_terminal,
             get_service_authorization,
             cancel_service_authorization,
             logout_service,
@@ -2543,15 +2650,17 @@ pub fn run() {
                 .map_err(|error| format!("unable to resolve AstrLink data directory: {error}"))?;
             let preferences = Arc::new(PreferencesStore::load(&config_directory, &data_directory));
             let raw_key_pins = Arc::new(raw_key_pin::RawKeyPins::system(&config_directory));
-            let raw_key_pin_file = raw_key_pins.file().map(std::path::Path::to_path_buf);
             app.manage(raw_key_pins);
             let values = preferences.snapshot().values;
+            let start_hidden = should_hide_on_autostart(std::env::args_os(), &values);
             apply_native_theme(app.handle(), values.theme);
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = startup_window::fit_to_monitor(&window) {
                     eprintln!("failed to size AstrLink for the current display: {error}");
                 }
-                window.show()?;
+                if !start_hidden {
+                    window.show()?;
+                }
             }
             setup_manager.configure(&values);
             let autostart = app.autolaunch();
@@ -2559,13 +2668,14 @@ pub fn run() {
                 .is_enabled()
                 .map_err(|error| error.to_string())
                 .and_then(|actual| {
-                    if actual == values.autostart {
-                        return Ok(());
-                    }
                     if values.autostart {
+                        // Refresh existing login items too: older versions
+                        // registered them without the autostart argument.
                         autostart.enable().map_err(|error| error.to_string())
-                    } else {
+                    } else if actual {
                         autostart.disable().map_err(|error| error.to_string())
+                    } else {
+                        Ok(())
                     }
                 });
             if let Err(error) = reconciliation {
@@ -2583,6 +2693,16 @@ pub fn run() {
             updates.start(app.handle().clone());
 
             tray::build(app.handle())?;
+            if start_hidden {
+                window_reclaim::hidden(app.handle(), "main");
+                #[cfg(target_os = "macos")]
+                if let Err(error) = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory)
+                {
+                    eprintln!("unable to remove AstrLink from the Dock: {error}");
+                }
+            }
             tray::start(app.handle());
             model_updates::start(app.handle());
 
@@ -2605,11 +2725,14 @@ pub fn run() {
             dev_reload::start(app.handle());
 
             // The development instance shares the user's agent tools with the
-            // other AstrLink, whose guards name that one's data directory.
-            // Only installing from its settings points them at its own.
+            // other AstrLink. Only that one refreshes them at startup, so a
+            // development build's skills and CLI do not replace its copies.
             if !instance::is_isolated() {
                 if let Ok(home) = control_session::user_home() {
-                    sync_agent_installs(home, data_directory.clone(), raw_key_pin_file.clone());
+                    sync_agent_installs(
+                        home,
+                        GuardedPaths::of(Some(&data_directory), Some(&config_directory)),
+                    );
                 }
             }
 
@@ -2686,6 +2809,15 @@ pub fn run() {
                     Err(_) => eprintln!("inspector window registry is poisoned; {label} leaked"),
                 }
             }
+            // A show that raced a release builds the window now that its
+            // label is free.
+            if window_reclaim::destroyed(app_handle, label) {
+                if label == "main" {
+                    show_main_window(app_handle);
+                } else if label == tray::POPOVER_LABEL {
+                    tray::reopen_popover(app_handle);
+                }
+            }
         }
         if let RunEvent::WindowEvent {
             label,
@@ -2706,6 +2838,9 @@ pub fn run() {
                     app_handle
                         .state::<Arc<AtomicBool>>()
                         .store(true, Ordering::SeqCst);
+                    // Closing this window alone ends nothing while a hidden
+                    // tray popover or a pinned inspector is still open.
+                    app_handle.exit(0);
                 }
             }
         }
@@ -2713,6 +2848,17 @@ pub fn run() {
         if let RunEvent::Reopen { .. } = &event {
             if !app_handle.state::<Arc<AtomicBool>>().load(Ordering::SeqCst) {
                 show_main_window(app_handle);
+            }
+        }
+        // Releasing hidden windows can close the last one. AstrLink stays in
+        // the tray until it is told to quit.
+        if let RunEvent::ExitRequested {
+            code: None, api, ..
+        } = &event
+        {
+            if !app_handle.state::<Arc<AtomicBool>>().load(Ordering::SeqCst) {
+                api.prevent_exit();
+                return;
             }
         }
         if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
@@ -2730,6 +2876,49 @@ pub fn run() {
 mod tests {
     use super::*;
     use sidecar::CorePhase;
+
+    #[test]
+    fn only_autostart_launches_with_both_preferences_enabled_stay_hidden() {
+        for autostart in [false, true] {
+            for autostart_hidden in [false, true] {
+                let preferences = Preferences {
+                    autostart,
+                    autostart_hidden,
+                    ..Preferences::default()
+                };
+                assert_eq!(
+                    should_hide_on_autostart(["AstrLink", AUTOSTART_ARG], &preferences),
+                    autostart && autostart_hidden
+                );
+                // Each new launch uses its own arguments, so manually opening
+                // an already-running background instance reveals its window.
+                for args in [
+                    vec!["AstrLink"],
+                    vec!["AstrLink", "astrlink://import?data=test"],
+                    vec!["AstrLink", "--autostart=false"],
+                    vec![AUTOSTART_ARG],
+                ] {
+                    assert!(!should_hide_on_autostart(args, &preferences));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preferences_input_keeps_the_autostart_hidden_preference() {
+        let values = Preferences {
+            autostart: true,
+            autostart_hidden: true,
+            ..Preferences::default()
+        };
+        let mut json = serde_json::to_value(&values).unwrap();
+        let input: PreferencesInput = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(Preferences::from(input), values);
+
+        json.as_object_mut().unwrap().remove("autostart_hidden");
+        let input: PreferencesInput = serde_json::from_value(json).unwrap();
+        assert!(!Preferences::from(input).autostart_hidden);
+    }
 
     #[derive(Default)]
     struct MemoryPins(std::sync::Mutex<std::collections::BTreeMap<String, String>>);

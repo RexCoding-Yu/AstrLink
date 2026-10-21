@@ -68,7 +68,7 @@ func TestProbeHTTPDecodesCompressedPagesWithinCumulativeLimit(t *testing.T) {
 				if !errors.Is(err, ErrUpstream) || !errors.Is(err, transport.ErrResponseBodyTooLarge) {
 					t.Fatalf("oversized probe error = %v", err)
 				}
-			} else if err != nil || strings.Join(models, ",") != "first,second" {
+			} else if err != nil || strings.Join(models.Models, ",") != "first,second" {
 				t.Fatalf("models = %v, err = %v", models, err)
 			}
 			if calls != 2 {
@@ -103,7 +103,7 @@ func TestProbeHTTPReadsOpenAIModelsWithCanonicalURLAndAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeHTTP() error = %v", err)
 	}
-	if got, want := strings.Join(models, ","), "alpha,zeta"; got != want {
+	if got, want := strings.Join(models.Models, ","), "alpha,zeta"; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
 	}
 }
@@ -142,7 +142,7 @@ func TestProbeHTTPFollowsAnthropicCursorPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeHTTP() error = %v", err)
 	}
-	if calls != 2 || strings.Join(models, ",") != "claude-a,claude-z" {
+	if calls != 2 || strings.Join(models.Models, ",") != "claude-a,claude-z" {
 		t.Fatalf("calls=%d models=%v", calls, models)
 	}
 }
@@ -175,7 +175,7 @@ func TestProbeHTTPFollowsGeminiPaginationAndNormalizesNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeHTTP() error = %v", err)
 	}
-	if calls != 2 || strings.Join(models, ",") != "gemini-a,gemini-z" {
+	if calls != 2 || strings.Join(models.Models, ",") != "gemini-a,gemini-z" {
 		t.Fatalf("calls=%d models=%v", calls, models)
 	}
 }
@@ -295,17 +295,52 @@ func TestProbeServiceUsesConnectedCodexAccountAndRejectsMalformedResponse(t *tes
 	}
 	prober := New(store, manager, nil)
 	models, err := prober.ProbeService(context.Background(), service, contract.ProtocolOpenAIModels)
-	if err != nil || strings.Join(models, ",") != "codex-auto-review,gpt-6-astra,gpt-a,gpt-z" {
+	if err != nil || strings.Join(models.Models, ",") != "codex-auto-review,gpt-6-astra,gpt-a,gpt-z" {
 		t.Fatalf("models=%v err=%v", models, err)
 	}
 	responseBody = `{"models":[]}`
 	empty, err := prober.ProbeService(context.Background(), service, contract.ProtocolOpenAIModels)
-	if err != nil || strings.Join(empty, ",") != "codex-auto-review" {
+	if err != nil || strings.Join(empty.Models, ",") != "codex-auto-review" {
 		t.Fatalf("empty Codex catalog = %v err=%v", empty, err)
 	}
 	responseBody = `{}`
 	if _, err := prober.ProbeService(context.Background(), service, contract.ProtocolOpenAIModels); !errors.Is(err, ErrUpstream) {
 		t.Fatalf("malformed Codex response error = %v, want ErrUpstream", err)
+	}
+}
+
+// New API names each model's endpoint types; a model it serves in one chat
+// format is reported with that format. Chat alone, several formats, other
+// endpoint types and a malformed list report none.
+func TestProbeHTTPDerivesFormatsFromNewAPIEndpointTypes(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return probeResponse(`{"data":[
+			{"id":"gpt-5.3-codex","supported_endpoint_types":["openai-response","openai-response-compact","openai-alpha-search"]},
+			{"id":"gemini-x","supported_endpoint_types":["gemini"]},
+			{"id":"claude-x","supported_endpoint_types":["anthropic"]},
+			{"id":"image-x","supported_endpoint_types":["image-generation","openai-response"]},
+			{"id":"gemini-both","supported_endpoint_types":["gemini","openai"]},
+			{"id":"grok-x","supported_endpoint_types":["openai","openai-response"]},
+			{"id":"gpt-4o","supported_endpoint_types":["openai"]},
+			{"id":"embedding-x","supported_endpoint_types":["embeddings"]},
+			{"id":"odd-x","supported_endpoint_types":"gemini"},
+			{"id":"plain-x"}
+		]}`), nil
+	})}
+	discovery, err := New(nil, nil, client).ProbeHTTP(context.Background(), "service_api", contract.ServiceKindNewAPI,
+		contract.HTTPConnection{BaseURL: "https://newapi.example", Auth: contract.ServiceAuth{Scheme: contract.AuthSchemeBearer}},
+		[]byte("api-key"), contract.ProtocolOpenAIModels)
+	if err != nil || len(discovery.Models) != 10 {
+		t.Fatalf("discovery=%v err=%v", discovery, err)
+	}
+	want := []contract.ModelProtocol{
+		{Model: "claude-x", Protocol: contract.ProtocolAnthropicMessages},
+		{Model: "gemini-x", Protocol: contract.ProtocolGoogleGenerateContent},
+		{Model: "gpt-5.3-codex", Protocol: contract.ProtocolOpenAIResponses},
+		{Model: "image-x", Protocol: contract.ProtocolOpenAIResponses},
+	}
+	if fmt.Sprint(discovery.Protocols) != fmt.Sprint(want) {
+		t.Fatalf("protocols = %v, want %v", discovery.Protocols, want)
 	}
 }
 
@@ -319,7 +354,7 @@ func TestPayAsYouGoModelDiscovery(t *testing.T) {
 				return probeResponse(`{"data":[{"id":"model-test"}]}`), nil
 			})}
 			models, err := New(nil, nil, client).ProbeHTTP(context.Background(), "service_api", kind, contract.HTTPConnection{BaseURL: "https://api.example/v1", Auth: contract.ServiceAuth{Scheme: contract.AuthSchemeBearer}}, []byte("api-key"), contract.ProtocolOpenAIModels)
-			if err != nil || len(models) != 1 || models[0] != "model-test" {
+			if err != nil || len(models.Models) != 1 || models.Models[0] != "model-test" {
 				t.Fatalf("models=%v err=%v", models, err)
 			}
 		})
@@ -349,7 +384,7 @@ func TestMagpieDiscoversBothCatalogsWithOneBearerKey(t *testing.T) {
 			})}
 			models, err := New(nil, nil, client).ProbeHTTP(context.Background(), "service_api", contract.ServiceKindMagpie, contract.HTTPConnection{BaseURL: "http://127.0.0.1:3425", Auth: contract.ServiceAuth{Scheme: contract.AuthSchemeBearer}}, []byte("magpie"), tt.protocol)
 			// Magpie names models provider/model and routing groups group/<id>.
-			if err != nil || strings.Join(models, ",") != "deepseek/deepseek-v4-pro,group/opus-anywhere" {
+			if err != nil || strings.Join(models.Models, ",") != "deepseek/deepseek-v4-pro,group/opus-anywhere" {
 				t.Fatalf("models=%v err=%v", models, err)
 			}
 		})
@@ -370,7 +405,7 @@ func TestPayAsYouGoDiscoveryFromAnthropicSDKRoot(t *testing.T) {
 			models, err := New(nil, nil, client).ProbeHTTP(context.Background(), "service_api", kind, contract.HTTPConnection{
 				BaseURL: "https://proxy.example/tenant%2Fone/anthropic/v1/", Auth: contract.ServiceAuth{Scheme: contract.AuthSchemeBearer},
 			}, []byte("api-key"), contract.ProtocolOpenAIModels)
-			if !called || err != nil || len(models) != 1 || models[0] != "model-test" {
+			if !called || err != nil || len(models.Models) != 1 || models.Models[0] != "model-test" {
 				t.Fatalf("called=%t models=%v err=%v", called, models, err)
 			}
 		})

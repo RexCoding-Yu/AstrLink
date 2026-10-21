@@ -1,6 +1,24 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* dark: follows the theme the app applies, not the system setting. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* Open and closed parts, as Radix marks them with data-state. */
+@custom-variant data-open {
+  &:where([data-state="open"]),
+  &:where([data-open]:not([data-open="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-closed {
+  &:where([data-state="closed"]),
+  &:where([data-closed]:not([data-closed="false"])) {
+    @slot;
+  }
+}
+
 /* Native scrollbar pseudo-elements cannot reliably transition their own paint.
  * Animate this inherited value on the scrollport instead. */
 @property --native-scrollbar-opacity {
@@ -63,6 +81,185 @@
 @utility gutter-scroller {
   margin-inline-end: calc(var(--scrollbar-gutter-width) * -1);
   scrollbar-gutter: stable;
+}
+
+/* The running shimmer, from shadcn/ui: a band sweeps through the text of a
+ * step still in flight, fading it toward the background. Both themes fade:
+ * dark text has no room left to brighten. The band is mixed with color-mix
+ * rather than relative color syntax, which macOS 13 WebKit may lack; an
+ * invalid band would leave the text transparent. */
+@property --shimmer-angle {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 20deg;
+}
+
+@property --shimmer-image {
+  syntax: "*";
+  inherits: false;
+}
+
+@property --shimmer-text-fill {
+  syntax: "*";
+  inherits: false;
+}
+
+@keyframes tw-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+@utility shimmer {
+  --_spread: var(--shimmer-spread, calc(3ch + 40px));
+  --_base: currentColor;
+  --_highlight: var(
+    --shimmer-color,
+    color-mix(in oklch, currentColor 20%, transparent)
+  );
+
+  background-image: var(
+    --shimmer-image,
+    linear-gradient(
+      calc(90deg + var(--shimmer-angle)),
+      var(--_base) calc(50% - var(--_spread)),
+      color-mix(in oklch, var(--_highlight), var(--_base) 50%)
+        calc(50% - var(--_spread) * 0.5),
+      var(--_highlight) 50%,
+      color-mix(in oklch, var(--_highlight), var(--_base) 50%)
+        calc(50% + var(--_spread) * 0.5),
+      var(--_base) calc(50% + var(--_spread))
+    )
+  );
+  background-repeat: no-repeat;
+  background-size: calc(200% + var(--_spread) * 2) 100%;
+  background-position: 0 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: var(--shimmer-text-fill, transparent);
+  animation: tw-shimmer var(--shimmer-duration, 2s) linear infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+    background-image: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+@utility shimmer-none {
+  --shimmer-image: none;
+  --shimmer-text-fill: currentColor;
+}
+
+/* Scroll edge fades, from shadcn/ui: an edge fades once content hides past
+ * it, revealed by a scroll-driven animation. A scroller that does not overflow
+ * keeps its edges sharp. Engines without scroll timelines get no fade rather
+ * than a fixed one over the first characters. */
+@property --scroll-fade-t {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --scroll-fade-b {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --scroll-fade-s {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --scroll-fade-e {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes scroll-fade-reveal-t {
+  from {
+    --scroll-fade-t: 0px;
+  }
+  to {
+    --scroll-fade-t: var(--scroll-fade-size);
+  }
+}
+
+@keyframes scroll-fade-reveal-b {
+  from {
+    --scroll-fade-b: var(--scroll-fade-size);
+  }
+  to {
+    --scroll-fade-b: 0px;
+  }
+}
+
+@keyframes scroll-fade-reveal-s {
+  from {
+    --scroll-fade-s: 0px;
+  }
+  to {
+    --scroll-fade-s: var(--scroll-fade-size);
+  }
+}
+
+@keyframes scroll-fade-reveal-e {
+  from {
+    --scroll-fade-e: var(--scroll-fade-size);
+  }
+  to {
+    --scroll-fade-e: 0px;
+  }
+}
+
+@utility scroll-fade-y {
+  @supports (animation-timeline: scroll()) {
+    --scroll-fade-size: min(12%, calc(var(--spacing) * 10));
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 var(--scroll-fade-t),
+      #000 calc(100% - var(--scroll-fade-b)),
+      transparent 100%
+    );
+    mask-repeat: no-repeat;
+    animation:
+      scroll-fade-reveal-t 1ms ease-in-out,
+      scroll-fade-reveal-b 1ms ease-in-out;
+    animation-timeline: scroll(self y), scroll(self y);
+    animation-range:
+      0 calc(var(--spacing) * 24),
+      calc(100% - var(--spacing) * 24) 100%;
+    animation-fill-mode: both;
+  }
+}
+
+@utility scroll-fade-x {
+  @supports (animation-timeline: scroll()) {
+    --scroll-fade-size: min(12%, calc(var(--spacing) * 10));
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 var(--scroll-fade-s),
+      #000 calc(100% - var(--scroll-fade-e)),
+      transparent 100%
+    );
+    mask-repeat: no-repeat;
+    animation:
+      scroll-fade-reveal-s 1ms ease-in-out,
+      scroll-fade-reveal-e 1ms ease-in-out;
+    animation-timeline: scroll(self inline), scroll(self inline);
+    animation-range:
+      0 calc(var(--spacing) * 24),
+      calc(100% - var(--spacing) * 24) 100%;
+    animation-fill-mode: both;
+  }
 }
 
 /*

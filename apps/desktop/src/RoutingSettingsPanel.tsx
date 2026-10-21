@@ -42,6 +42,7 @@ import { PageHeader } from "./PageHeader";
 import type { RoutableService } from "./service-model";
 import { ThinkingPromptSettings } from "./ThinkingPromptSettings";
 import { UpstreamIdentitySettings } from "./UpstreamIdentitySettings";
+import { useGatewayResponseTimeout } from "./use-gateway-response-timeout";
 
 export const routingAutosaveDelay = 500;
 
@@ -111,7 +112,7 @@ const same = (left: unknown, right: unknown) =>
 function planAutosave(
   original: RoutingSettings,
   draft: RoutingSettings,
-  dimensions: ClassifierDimension[],
+  dimensions: ClassifierDimension[] | null,
 ) {
   type Unit = (document: RoutingSettings) => RoutingSettings;
   let units: { key: RoutingSettingKey; apply: Unit }[] = [];
@@ -183,12 +184,17 @@ export function RoutingSettingsPanel({
   onDirtyChange: (dirty: boolean) => void;
 }) {
   const t = useT();
+  const gatewayTimeout = useGatewayResponseTimeout();
   const [tab, setTab] = useState("rewrite");
   const [settings, setSettings] = useWorkspaceSnapshot<RoutingSettings | null>(
     "routing-settings",
     null,
   );
-  const [dimensions, setDimensions] = useState<ClassifierDimension[]>([]);
+  // null until known, or when the classifier settings cannot be read; rules
+  // naming a dimension are then left to Core.
+  const [dimensions, setDimensions] = useState<ClassifierDimension[] | null>(
+    null,
+  );
   const [draft, setDraft] = useState<RoutingSettings | null>(() =>
     settings ? withRedirects(settings) : null,
   );
@@ -243,11 +249,18 @@ export function RoutingSettingsPanel({
     if (!ready) return;
     let active = true;
     const version = mutationVersion.current;
-    void Promise.all([getRoutingSettings(), getClassifierSettings()])
+    void Promise.all([
+      getRoutingSettings(),
+      getClassifierSettings().catch(() => null),
+    ])
       .then(([settings, classifierSettings]) => {
         if (!active || mutationVersion.current !== version) return;
         setSettings(settings);
-        setDimensions(classifierSettings.dimensions ?? []);
+        setDimensions(
+          classifierSettings === null
+            ? null
+            : (classifierSettings.dimensions ?? []),
+        );
         // Reconnection and retry must never replace an unsaved draft.
         if (!dirtyRef.current) {
           setDraft(withRedirects(settings));
@@ -498,6 +511,7 @@ export function RoutingSettingsPanel({
                     }
                     headingLevel={2}
                     value={draft.default_failure_policy}
+                    gatewayTimeoutSeconds={gatewayTimeout}
                     onChange={(default_failure_policy) =>
                       changeDraft({ ...draft, default_failure_policy })
                     }
@@ -520,6 +534,7 @@ export function RoutingSettingsPanel({
                   hint={t("routing.rulesHint")}
                   headingLevel={2}
                   value={draft.default_failure_policy}
+                  gatewayTimeoutSeconds={gatewayTimeout}
                   onChange={(default_failure_policy) =>
                     changeDraft({ ...draft, default_failure_policy })
                   }

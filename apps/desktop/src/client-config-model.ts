@@ -29,7 +29,16 @@ export interface ClientConfigModels {
   opusModel?: string;
   /** Claude Code only; CC Switch drops it. */
   fableModel?: string;
+  /**
+   * Pi only: the context window and output limit Pi's entry for the model
+   * names, in tokens. Pi's own defaults apply where they are absent.
+   */
+  contextWindow?: number;
+  maxTokens?: number;
 }
+
+/** The largest limit a Pi entry takes, in tokens. */
+export const maxPiLimit = 100_000_000;
 
 /** Claude Code takes every field; the other clients take `model` only. */
 const modelFields = [
@@ -164,6 +173,8 @@ function arrayAt(value: unknown, path: string): unknown[] {
   return value;
 }
 
+const piLimits = ["contextWindow", "maxTokens"] as const;
+
 function parseModels(
   value: unknown,
   client: DirectClient,
@@ -173,6 +184,16 @@ function parseModels(
     client === "claude" ? modelFields : ["model"];
   return Object.fromEntries(
     Object.entries(objectAt(value, path)).map(([key, model]) => {
+      if (client === "pi" && (piLimits as readonly string[]).includes(key)) {
+        const tokens =
+          typeof model === "string" && /^[1-9][0-9]{0,8}$/.test(model)
+            ? Number(model)
+            : 0;
+        if (tokens < 1 || tokens > maxPiLimit) {
+          invalid(`${path}.${key}`, "expected a token count");
+        }
+        return [key, tokens];
+      }
       if (!fields.includes(key)) invalid(`${path}.${key}`, "unexpected field");
       return [key, lineAt(model, `${path}.${key}`, 256)];
     }),

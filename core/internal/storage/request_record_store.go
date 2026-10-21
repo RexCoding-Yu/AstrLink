@@ -15,7 +15,10 @@ type RequestRecordListOptions struct {
 	Protocol            *contract.ProtocolID
 	ServiceID           *contract.ServiceID
 	LocalAccessTokenIDs []contract.AccessTokenID
-	Status              *contract.RequestStatus
+	// Models keeps roots that name one of these models as the client's model,
+	// its redirect target, or the model a recovery served. Empty means any.
+	Models []string
+	Status *contract.RequestStatus
 	// Query matches root records whose input preview contains it as a
 	// literal, ASCII case-insensitive substring. Empty means no text filter.
 	Query string
@@ -61,7 +64,9 @@ type RequestSessionListOptions struct {
 	Protocol            *contract.ProtocolID
 	ServiceID           *contract.ServiceID
 	LocalAccessTokenIDs []contract.AccessTokenID
-	Status              *contract.RequestStatus
+	// Models matches roots as RequestRecordListOptions.Models does.
+	Models []string
+	Status *contract.RequestStatus
 }
 
 type RequestSessionPage struct {

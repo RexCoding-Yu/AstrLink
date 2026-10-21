@@ -96,6 +96,19 @@ func decodeServiceModelRedirects(raw json.RawMessage) ([]contract.ModelRedirect,
 	return redirects, nil
 }
 
+// decodeServiceModelProtocols reads a provider's own per-model formats,
+// sorted by model; an empty array clears them.
+func decodeServiceModelProtocols(kind contract.ServiceKind, raw json.RawMessage) ([]contract.ModelProtocol, error) {
+	if isJSONNull(raw) {
+		return nil, fmt.Errorf("model_protocols must be an array")
+	}
+	var entries []contract.ModelProtocol
+	if err := strictUnmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("decode model_protocols: %w", err)
+	}
+	return contract.NormalizeModelProtocols(kind, entries)
+}
+
 func decodeServiceAuth(raw json.RawMessage) (contract.ServiceAuth, error) {
 	if isJSONNull(raw) {
 		return contract.ServiceAuth{}, fmt.Errorf("auth must be an object")
@@ -220,6 +233,10 @@ func (handler *Handler) writeStoreError(writer http.ResponseWriter, err error) {
 			"precondition_failed",
 			"If-Match does not match the current resource",
 		)
+	case errors.Is(err, storage.ErrModelRoutingReference):
+		// The message names the group, member and model that depend on the
+		// service, so the operator knows what to change first.
+		writeError(writer, http.StatusConflict, "model_routing_reference", err.Error())
 	case errors.Is(err, storage.ErrInvalidCursor):
 		writeError(writer, http.StatusBadRequest, "invalid_cursor", "cursor is invalid")
 	case errors.Is(err, storage.ErrInvalidArgument):

@@ -18,9 +18,9 @@
     "test:watch": "vitest --maxWorkers=1",
     "tauri": "tauri",
     "sidecar:build": "bun scripts/build-sidecar.mjs",
-    "desktop:dev": "bun run branding:sync && bun run sidecar:build && tauri dev --config src-tauri/tauri.dev.conf.json",
-    "desktop:start": "bun run branding:sync && bun run sidecar:build && rsbuild build && tauri dev --no-watch --no-dev-server --config src-tauri/tauri.start.conf.json",
-    "desktop:build": "bun run branding:sync && bun run sidecar:build && tauri build",
+    "desktop:dev": "bun run branding:sync && bun run sidecar:build && tauri dev --config src-tauri/tauri.dev.conf.json --config src-tauri/binaries/tauri.onnxruntime.conf.json",
+    "desktop:start": "bun run branding:sync && bun run sidecar:build && rsbuild build && tauri dev --no-watch --no-dev-server --config src-tauri/tauri.start.conf.json --config src-tauri/binaries/tauri.onnxruntime.conf.json",
+    "desktop:build": "bun run branding:sync && bun run sidecar:build && tauri build --config src-tauri/binaries/tauri.onnxruntime.conf.json",
     "macos:notarize": "bun scripts/notarize-macos.mjs",
     "build:web": "PUBLIC_ASTRLINK_EDITION=web bun run build"
   },
@@ -30,7 +30,6 @@
     "@lobehub/icons": "5.16.0",
     "@tanstack/react-virtual": "^3.14.10",
     "@tauri-apps/api": "2.11.1",
-    "@tauri-apps/plugin-store": "2.4.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "i18next": "26.4.0",
@@ -42,6 +41,7 @@
     "react-markdown": "10.1.0",
     "recharts": "3.10.1",
     "remark-gfm": "4.0.1",
+    "shiki": "4.4.3",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.6.0"
   },

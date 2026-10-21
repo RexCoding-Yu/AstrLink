@@ -185,8 +185,9 @@ func replaceRequestRecordCursors(ctx context.Context, transaction *sql.Tx, recor
 	}
 	for _, cursor := range record.Cursors {
 		if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO request_record_cursors (
-    request_id, kind, direction, value
-) VALUES (?, ?, ?, ?)`, string(record.ID), string(cursor.Kind), string(cursor.Direction), cursor.Value); err != nil {
+    request_id, kind, direction, value, started_at, local_access_token_id
+) VALUES (?, ?, ?, ?, ?, ?)`, string(record.ID), string(cursor.Kind), string(cursor.Direction), cursor.Value,
+			record.StartedAt.UTC().Format(time.RFC3339Nano), record.LocalAccessTokenID); err != nil {
 			return fmt.Errorf("insert request record cursor: %w", err)
 		}
 	}
@@ -377,6 +378,24 @@ func appendAccessTokenFilter(query *strings.Builder, args *[]any, ids []contract
 	}
 }
 
+// appendModelFilter keeps roots that name one of models as the client's model,
+// its redirect target, or the model a recovery served. The usage summary
+// groups by the last name present, so every call it counts for a model lists.
+func appendModelFilter(query *strings.Builder, args *[]any, models []string) {
+	if len(models) == 0 {
+		return
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat(`?,`, len(models)), `,`)
+	query.WriteString(` AND (requested_model IN (` + placeholders + `)
+    OR json_extract(NULLIF(model_redirect_json, ''), '$.to') IN (` + placeholders + `)
+    OR json_extract(NULLIF(recovery_json, ''), '$.upstream_model') IN (` + placeholders + `))`)
+	for range 3 {
+		for _, model := range models {
+			*args = append(*args, model)
+		}
+	}
+}
+
 // escapeLikePattern makes every character of value match itself in a LIKE
 // pattern that declares ESCAPE '\'.
 func escapeLikePattern(value string) string {
@@ -416,6 +435,7 @@ FROM request_records WHERE parent_request_id IS NULL`)
 		args = append(args, options.To.UTC().Format(time.RFC3339Nano))
 	}
 	appendAccessTokenFilter(&query, &args, options.LocalAccessTokenIDs)
+	appendModelFilter(&query, &args, options.Models)
 	if options.Query != "" {
 		query.WriteString(` AND input_preview LIKE ? ESCAPE '\'`)
 		args = append(args, "%"+escapeLikePattern(options.Query)+"%")

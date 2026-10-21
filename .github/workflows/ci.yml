@@ -61,7 +61,7 @@ jobs:
         if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true' && runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path astrlink-core.exe, ../LICENSE, ../LICENSING.md, ../LICENSES -DestinationPath astrlink-core-${{ runner.arch }}.zip
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true'
         with:
           name: astrlink-core-${{ runner.os }}-${{ runner.arch }}
@@ -120,16 +120,36 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: core/go.mod
-          cache-dependency-path: |
-            core/go.mod
-            core/go.sum
-            convo/go.mod
-            contracts/go.mod
-            contracts/go.sum
+          # Other Go jobs can populate setup-go's shared key before -race runs.
+          # Its immutable cache then never gains the race compiler artifacts.
+          cache: false
+      - name: Locate Go caches
+        id: go-cache
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "modules=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: race-cache
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.modules }}
+          key: go-race-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('core/go.mod', 'core/go.sum', 'convo/go.mod', 'contracts/go.mod', 'contracts/go.sum', 'Makefile') }}-${{ hashFiles('core/**/*.go', 'convo/**/*.go', 'contracts/**/*.go', '**/testdata/**') }}
+          restore-keys: |
+            go-race-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('core/go.mod', 'core/go.sum', 'convo/go.mod', 'contracts/go.mod', 'contracts/go.sum', 'Makefile') }}-
+            go-race-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-
       - name: Test Core, convo and contracts with race detector
         run: make -j3 core-race convo-race contracts-race
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.race-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.modules }}
+          key: ${{ steps.race-cache.outputs.cache-primary-key }}
 
   govulncheck:
     name: Go vulnerability scan
@@ -170,7 +190,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-deny@0.20.2
       # Policy lives in the repository-root deny.toml.
@@ -271,6 +291,8 @@ jobs:
           librsvg2-dev
           patchelf
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        # Rust unit checks do not build Go sidecars.
+        if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true'
         with:
           go-version-file: core/go.mod
           cache-dependency-path: |
@@ -283,6 +305,7 @@ jobs:
         with:
           bun-version: 1.3.14
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true'
         with:
           path: ${{ runner.temp }}/bun-cache
           key: bun-packages-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/bun.lock') }}
@@ -291,6 +314,14 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
+      - name: Reduce test debug information
+        if: env.ASTRLINK_CI_BUILD_ARTIFACTS != 'true'
+        shell: bash
+        # Keep debug assertions and all tests; omit bulky debugger symbols.
+        # rust-cache includes CARGO_* in its key, isolating this test profile.
+        run: |
+          echo 'CARGO_PROFILE_DEV_DEBUG=0' >> "$GITHUB_ENV"
+          echo 'CARGO_PROFILE_TEST_DEBUG=0' >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: astrlink-native
@@ -305,6 +336,8 @@ jobs:
             apps/classifier-worker
           cache-directories: apps/privacy-worker/target/onnxruntime
       - name: Install frontend dependencies
+        # The runtime preparation script uses only built-in modules.
+        if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true'
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-cache
         run: bun install --frozen-lockfile
@@ -355,7 +388,7 @@ jobs:
           src-tauri/binaries
       - name: Build Tauri bundle
         if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true'
-        run: bun run tauri build --ci --bundles ${{ matrix.bundle }} --config '{"build":{"beforeBuildCommand":null}}'
+        run: bun run tauri build --ci --bundles ${{ matrix.bundle }} --config '{"build":{"beforeBuildCommand":null}}' --config src-tauri/binaries/tauri.onnxruntime.conf.json
       - name: Inspect packaged macOS application contents
         if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true' && runner.os == 'macOS'
         run: >-
@@ -475,7 +508,7 @@ jobs:
       - name: Archive macOS app with executable modes
         if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true' && runner.os == 'macOS'
         run: tar -czf astrlink-desktop-${{ runner.arch }}.tar.gz -C src-tauri/target/release/bundle/macos AstrLink.app
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: env.ASTRLINK_CI_BUILD_ARTIFACTS == 'true'
         with:
           name: astrlink-desktop-${{ runner.os }}-${{ runner.arch }}

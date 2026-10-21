@@ -78,7 +78,7 @@ func TestPrepareCodexSubscriptionRequestNormalizesStructureOnly(t *testing.T) {
 }
 
 func TestPrepareCodexSubscriptionRequestKeepsCompliantBytes(t *testing.T) {
-	const compliant = "{ \"model\": \"gpt-6-astra\",\n  \"instructions\": \"be brief\", \"input\": \"hello\",\n" +
+	const compliant = "{ \"model\": \"gpt-6-astra\",\n  \"instructions\": \"be brief\", \"input\": [{\"role\":\"user\",\"content\":\"hello\"}],\n" +
 		"  \"store\": false, \"stream\": true, \"reasoning\": {\"effort\": \"low\"},\n" +
 		"  \"include\": [\"reasoning.encrypted_content\"] }"
 	_, raw, forced := prepareCodexBody(t, contract.ProtocolOpenAIResponses, compliant)
@@ -150,13 +150,21 @@ type codexSSEUpstream struct {
 // newCodexSSEUpstream answers attempt N with streams[min(N, len-1)].
 func newCodexSSEUpstream(t *testing.T, streams ...string) *codexSSEUpstream {
 	t.Helper()
+	return newCodexSSEUpstreamWithType(t, "text/event-stream", streams...)
+}
+
+func newCodexSSEUpstreamWithType(t *testing.T, contentType string, streams ...string) *codexSSEUpstream {
+	t.Helper()
 	upstream := &codexSSEUpstream{bodies: make(chan []byte, 8), accept: make(chan string, 8)}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		hit := int(upstream.hits.Add(1)) - 1
 		body, _ := io.ReadAll(request.Body)
 		upstream.bodies <- body
 		upstream.accept <- request.Header.Get("Accept")
-		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.Header()["Content-Type"] = nil // Suppress net/http's MIME sniffing.
+		if contentType != "" {
+			writer.Header().Set("Content-Type", contentType)
+		}
 		_, _ = io.WriteString(writer, streams[min(hit, len(streams)-1)])
 	}))
 	t.Cleanup(server.Close)
@@ -244,16 +252,21 @@ func TestCodexSubscriptionAggregatesForcedStream(t *testing.T) {
 	}
 }
 
+// A refusal in the forced stream follows the failure rule for its HTTP status:
+// the candidate retries 429 and 5xx twice, and the last refusal reaches the
+// client as that status.
 func TestCodexSubscriptionForcedStreamFailureStatus(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name, event, code string
 		status            int
+		hits              int32
 	}{
-		{"rate limit", `{"type":"response.failed","response":{"id":"resp_failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}}`, "rate_limit_exceeded", http.StatusTooManyRequests},
-		{"context length", `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}`, "context_length_exceeded", http.StatusBadRequest},
-		{"flat error", `{"type":"error","code":"invalid_prompt","message":"bad prompt"}`, "invalid_prompt", http.StatusBadRequest},
-		{"server error", `{"type":"response.failed","response":{"id":"resp_failed","error":{"code":"server_error","message":"oops"}}}`, "server_error", http.StatusBadGateway},
+		{"rate limit", `{"type":"response.failed","response":{"id":"resp_failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}}`, "rate_limit_exceeded", http.StatusTooManyRequests, 3},
+		{"overloaded", `{"type":"response.failed","response":{"id":"resp_failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded."}}}`, "server_is_overloaded", http.StatusServiceUnavailable, 3},
+		{"context length", `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}`, "context_length_exceeded", http.StatusBadRequest, 1},
+		{"flat error", `{"type":"error","code":"invalid_prompt","message":"bad prompt"}`, "invalid_prompt", http.StatusBadRequest, 1},
+		{"server error", `{"type":"response.failed","response":{"id":"resp_failed","error":{"code":"server_error","message":"oops"}}}`, "server_error", http.StatusBadGateway, 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -267,8 +280,8 @@ func TestCodexSubscriptionForcedStreamFailureStatus(t *testing.T) {
 			if response.Code != test.status || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Error.Code != test.code {
 				t.Fatalf("response = %d %s, want %d %s", response.Code, response.Body.String(), test.status, test.code)
 			}
-			if hits := upstream.hits.Load(); hits != 1 {
-				t.Fatalf("failed stream was retried %d times", hits)
+			if hits := upstream.hits.Load(); hits != test.hits {
+				t.Fatalf("upstream hits = %d, want %d", hits, test.hits)
 			}
 		})
 	}
@@ -332,7 +345,7 @@ func TestCodexSubscriptionConvertedNonStreamingRequestAggregates(t *testing.T) {
 
 func TestCodexSubscriptionForwardsCompliantNativeBodyUnchanged(t *testing.T) {
 	t.Parallel()
-	const compliant = `{"model":"gpt-6-astra","instructions":"be brief","input":"hello","store":false,"stream":true}`
+	const compliant = `{"model":"gpt-6-astra","instructions":"be brief","input":[{"role":"user","content":"hello"}],"store":false,"stream":true}`
 	upstream := newCodexSSEUpstream(t, codexSSE(codexCompletedWithoutOutput))
 	handler := NewWithDependencies(Dependencies{
 		Resolver:   candidateResolver{candidates: []endpoint.Resolved{riskCodexCandidate("service_codex", upstream.url)}},

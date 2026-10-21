@@ -76,6 +76,11 @@ func TestUsageSummaryCompleteWindowAndOutcomeSemantics(t *testing.T) {
 	if summary.Totals != want || summary.ScannedRecords != 4008 {
 		t.Fatalf("totals=%+v scanned=%d", summary.Totals, summary.ScannedRecords)
 	}
+	// Outcomes that are not requests are counted beside them, never in them.
+	wantStatuses := storage.UsageStatusCounts{Succeeded: 4006, Failed: 2, Blocked: 1, Cancelled: 1, Pending: 1}
+	if summary.StatusCounts != wantStatuses {
+		t.Fatalf("status counts=%+v", summary.StatusCounts)
+	}
 	if len(summary.ByDay) != 1 || summary.ByDay[0].Date != "2026-09-19" || summary.ByDay[0].UsageTotals != want {
 		t.Fatalf("days=%+v", summary.ByDay)
 	}
@@ -96,13 +101,13 @@ func TestUsageSummaryCompleteWindowAndOutcomeSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	summary, err = store.GetUsageSummary(ctx, options)
-	if err != nil || summary.ScannedRecords != 0 || summary.ByDay == nil || summary.ByService == nil {
+	if err != nil || summary.ScannedRecords != 0 || summary.ByDay == nil || summary.ByService == nil || summary.StatusCounts != (storage.UsageStatusCounts{}) {
 		t.Fatalf("empty=%+v err=%v", summary, err)
 	}
 }
 
-// The tray opens its daily failure count as the session list filtered by call
-// status over the same window. Every counted failure must sit in a listed
+// The tray and the overview open a status count as the session list filtered
+// by call status over the same window. Every counted call must sit in a listed
 // conversation, including one that recovered and now reads as succeeded.
 func TestUsageSummaryFailuresListAsFailedSessions(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "failed-sessions.db"))
@@ -148,21 +153,33 @@ func TestUsageSummaryFailuresListAsFailedSessions(t *testing.T) {
 	if summary.Totals.FailedRequests != 3 || summary.Totals.Requests != 2 {
 		t.Fatalf("totals=%+v", summary.Totals)
 	}
-	failed := contract.RequestStatusFailed
-	page, err := store.ListRequestSessions(ctx, storage.RequestSessionListOptions{Kind: "inference", From: &from, To: &to, Status: &failed})
-	if err != nil {
-		t.Fatal(err)
+	if want := (storage.UsageStatusCounts{Succeeded: 2, Failed: 3, Blocked: 1}); summary.StatusCounts != want {
+		t.Fatalf("status counts=%+v", summary.StatusCounts)
 	}
-	listed := map[contract.SessionID]contract.SessionStatus{}
-	for _, session := range page.Items {
-		listed[session.ID] = session.Status
-	}
-	want := map[contract.SessionID]contract.SessionStatus{
-		"session_failing":   contract.SessionStatusFailed,
-		"session_recovered": contract.SessionStatusSucceeded,
-	}
-	if !reflect.DeepEqual(listed, want) {
-		t.Fatalf("listed=%v want=%v", listed, want)
+	for status, want := range map[contract.RequestStatus]map[contract.SessionID]contract.SessionStatus{
+		contract.RequestStatusFailed: {
+			"session_failing":   contract.SessionStatusFailed,
+			"session_recovered": contract.SessionStatusSucceeded,
+		},
+		contract.RequestStatusSucceeded: {
+			"session_recovered": contract.SessionStatusSucceeded,
+			"session_retried":   contract.SessionStatusSucceeded,
+		},
+		contract.RequestStatusBlocked: {
+			"session_blocked": contract.SessionStatusBlocked,
+		},
+	} {
+		page, err := store.ListRequestSessions(ctx, storage.RequestSessionListOptions{Kind: "inference", From: &from, To: &to, Status: &status})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listed := map[contract.SessionID]contract.SessionStatus{}
+		for _, session := range page.Items {
+			listed[session.ID] = session.Status
+		}
+		if !reflect.DeepEqual(listed, want) {
+			t.Fatalf("%s listed=%v want=%v", status, listed, want)
+		}
 	}
 }
 

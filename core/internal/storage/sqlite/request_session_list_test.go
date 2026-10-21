@@ -35,6 +35,7 @@ func TestListRequestSessionsPagesLikeAFullAggregation(t *testing.T) {
 	statuses := []contract.RequestStatus{
 		contract.RequestStatusSucceeded, contract.RequestStatusSucceeded, contract.RequestStatusFailed,
 	}
+	models := []string{"", "model-a", "model-b", "model-c"}
 	for index := range 240 {
 		// Whole seconds tie often. A half second sorts before them as text.
 		startedAt := start.Add(time.Duration(random.IntN(40)) * time.Second)
@@ -48,6 +49,16 @@ func TestListRequestSessionsPagesLikeAFullAggregation(t *testing.T) {
 			InputProtocol:      protocols[random.IntN(len(protocols))],
 			LocalAccessTokenID: tokens[random.IntN(len(tokens))],
 			Audit:              contract.NotCapturedAuditSummary(),
+		}
+		// A redirect or a recovery names a model the client did not ask for.
+		if model := models[random.IntN(len(models))]; model != "" {
+			record.RequestedModel = &model
+			switch random.IntN(4) {
+			case 0:
+				record.ModelRedirect = &contract.RequestModelRedirect{From: model, To: models[slices.Index(models, model)%3+1]}
+			case 1:
+				record.Recovery = &contract.RequestRecovery{UpstreamModel: models[random.IntN(3)+1]}
+			}
 		}
 		if random.IntN(4) > 0 {
 			session := contract.SessionID(fmt.Sprintf("session_page_%02d", random.IntN(50)))
@@ -72,18 +83,24 @@ func TestListRequestSessionsPagesLikeAFullAggregation(t *testing.T) {
 	type root struct {
 		session, startedAt, protocol, status string
 		token                                sql.NullString
+		models                               []string
 	}
 	var roots []root
-	rows, err := store.db.QueryContext(ctx, `SELECT COALESCE(session_id, id), started_at, input_protocol, status, local_access_token_id
+	rows, err := store.db.QueryContext(ctx, `SELECT COALESCE(session_id, id), started_at, input_protocol, status, local_access_token_id,
+    COALESCE(requested_model, ''), COALESCE(json_extract(model_redirect_json, '$.to'), ''),
+    COALESCE(json_extract(recovery_json, '$.upstream_model'), '')
 FROM request_records WHERE parent_request_id IS NULL`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for rows.Next() {
 		var item root
-		if err := rows.Scan(&item.session, &item.startedAt, &item.protocol, &item.status, &item.token); err != nil {
+		var requested, redirected, recovered string
+		if err := rows.Scan(&item.session, &item.startedAt, &item.protocol, &item.status, &item.token,
+			&requested, &redirected, &recovered); err != nil {
 			t.Fatal(err)
 		}
+		item.models = []string{requested, redirected, recovered}
 		roots = append(roots, item)
 	}
 	if err := rows.Close(); err != nil {
@@ -105,6 +122,10 @@ FROM request_records WHERE parent_request_id IS NULL`)
 				continue
 			case len(options.LocalAccessTokenIDs) > 0 && (!item.token.Valid ||
 				!slices.Contains(options.LocalAccessTokenIDs, contract.AccessTokenID(item.token.String))):
+				continue
+			case len(options.Models) > 0 && !slices.ContainsFunc(item.models, func(model string) bool {
+				return slices.Contains(options.Models, model)
+			}):
 				continue
 			}
 			newest[item.session] = max(newest[item.session], item.startedAt)
@@ -133,6 +154,8 @@ FROM request_records WHERE parent_request_id IS NULL`)
 		{Kind: "inference", LocalAccessTokenIDs: []contract.AccessTokenID{tokenA, tokenB}},
 		{Status: &failed},
 		{From: &from, To: &to},
+		{Models: []string{"model-a"}},
+		{Kind: "inference", Models: []string{"model-b", "model-c"}, LocalAccessTokenIDs: []contract.AccessTokenID{tokenA}},
 	} {
 		want := expected(options)
 		if len(want) < 5 {
@@ -205,6 +228,7 @@ func TestRequestSessionQueriesReadInIndexOrder(t *testing.T) {
 		{Kind: "inference", LocalAccessTokenIDs: []contract.AccessTokenID{"token_a"}},
 		{Kind: "inference", LocalAccessTokenIDs: []contract.AccessTokenID{"token_a", "token_b"}},
 		{From: &from, To: &to},
+		{Kind: "inference", Models: []string{"model-a", "model-b"}},
 	} {
 		query, args := requestSessionScan(options)
 		plan := explain(query, args...)

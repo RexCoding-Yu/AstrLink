@@ -16,7 +16,6 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 type fakeAccessTokenManager struct {
@@ -206,7 +205,7 @@ func TestAccessTokenControlAPISanitizesManagerErrors(t *testing.T) {
 
 func newAccessTokenHandler(t *testing.T, manager AccessTokenManager) *Handler {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}

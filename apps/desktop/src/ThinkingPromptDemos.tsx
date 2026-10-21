@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import astrlinkLogo from "./assets/astrlink-logo.svg";
+import { FlowDemoStage } from "./components/FlowDemoStage";
 import { LockKeyhole } from "./components/icons";
 import { SegmentedControl } from "./components/SegmentedControl";
 import { StrengthMeter } from "./components/StrengthMeter";
@@ -18,39 +18,7 @@ import {
 } from "./failure-policy-model";
 import { useT } from "./i18n";
 import { cn } from "./lib/utils";
-
-/**
- * Steps through a looping animation and returns the current step and loop:
- * each step starts at its time in milliseconds, and the last one holds
- * before the loop starts over. Reduced motion rests on the last step.
- */
-function useLoopStep(times: readonly number[], hold: number, playing: boolean) {
-  const reducedMotion = useReducedMotion();
-  const [clock, setClock] = useState({ step: 0, cycle: 0 });
-  useEffect(() => {
-    if (!playing || reducedMotion) return;
-    const timers = times
-      .slice(1)
-      .map((at, index) =>
-        window.setTimeout(
-          () => setClock((current) => ({ ...current, step: index + 1 })),
-          at,
-        ),
-      );
-    timers.push(
-      window.setTimeout(
-        () => setClock((current) => ({ step: 0, cycle: current.cycle + 1 })),
-        times[times.length - 1] + hold,
-      ),
-    );
-    return () => timers.forEach(window.clearTimeout);
-  }, [clock.cycle, hold, playing, reducedMotion, times]);
-  if (!playing) return { step: 0, cycle: clock.cycle };
-  return {
-    step: reducedMotion ? times.length - 1 : clock.step,
-    cycle: clock.cycle,
-  };
-}
+import { useLoopStep } from "./use-loop-step";
 
 const rank = (level: ReasoningLevel) => reasoningLevels.indexOf(level);
 
@@ -91,19 +59,15 @@ function FlowVisual({ fixed }: { fixed?: ReasoningLevel }) {
       ? t("routing.thinkingDemo.noThinking")
       : t(`routing.thinkingLevels.${level}`);
   return (
-    <div
-      aria-hidden="true"
-      className="relative h-28 overflow-hidden rounded-md border bg-card"
+    <FlowDemoStage
+      className="h-28"
       data-arrived={arrived}
       data-flow={fixed ? "fixed" : "passthrough"}
       data-visual="flow"
+      from={t("routing.thinkingDemo.client")}
+      gatewayTop={43}
+      to={t("routing.thinkingDemo.model")}
     >
-      <span className="absolute top-1.5 left-2.5 text-micro text-muted-foreground">
-        {t("routing.thinkingDemo.client")}
-      </span>
-      <span className="absolute top-1.5 right-2.5 text-micro text-muted-foreground">
-        {t("routing.thinkingDemo.model")}
-      </span>
       {/* What each client sent stays outlined where its card started. */}
       {clientPicks.map((pick, index) => (
         <span
@@ -144,27 +108,7 @@ function FlowVisual({ fixed }: { fixed?: ReasoningLevel }) {
           </motion.span>
         );
       })}
-      {/* AstrLink as the protocol mode help draws it, centered on the middle
-          lane and above the cards so they pass through it. */}
-      <span
-        className="absolute left-1/2 z-10 flex -translate-x-1/2 flex-col items-center gap-1"
-        data-gateway
-        style={{ top: 43 }}
-      >
-        <span className="flex size-11 items-center justify-center rounded-md border bg-card">
-          <img
-            alt=""
-            className="size-7"
-            height={28}
-            src={astrlinkLogo}
-            width={28}
-          />
-        </span>
-        <span className="rounded-sm bg-card px-1 text-micro font-medium text-muted-foreground">
-          AstrLink
-        </span>
-      </span>
-    </div>
+    </FlowDemoStage>
   );
 }
 

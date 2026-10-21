@@ -177,7 +177,8 @@ export type RoutingSelection =
   | "session_binding"
   | "response_affinity"
   | "websocket_connection"
-  | "failover";
+  | "failover"
+  | "client_pin";
 
 /** Why routing excluded a provider before any attempt. */
 export type RoutingSkipReason =
@@ -567,6 +568,8 @@ export interface RequestSessionListQuery {
   protocol?: string;
   service_id?: string;
   local_access_token_ids?: string[];
+  /** Roots asking for, redirected to, or served by any of these models. */
+  models?: string[];
   // Filters on record status, not on the aggregated session outcome, so it
   // cannot name a session-only status such as interrupted.
   status?: RequestStatus;
@@ -585,6 +588,8 @@ export interface RequestRecordListQuery {
   protocol?: string;
   service_id?: string;
   local_access_token_ids?: string[];
+  /** Roots asking for, redirected to, or served by any of these models. */
+  models?: string[];
   status?: RequestStatus;
 }
 
@@ -1122,6 +1127,7 @@ const routingSelections = new Set<RoutingSelection>([
   "response_affinity",
   "websocket_connection",
   "failover",
+  "client_pin",
 ]);
 
 const routingSkipReasons = new Set<RoutingSkipReason>([

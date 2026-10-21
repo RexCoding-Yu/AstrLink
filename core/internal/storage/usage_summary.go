@@ -54,6 +54,17 @@ type ServicePerformance struct {
 	SpeedSamples          int64    `json:"speed_samples"`
 }
 
+// UsageStatusCounts counts root inference requests by outcome over the same
+// window as Totals. Succeeded and Failed equal Totals.Requests and
+// Totals.FailedRequests; the other outcomes never count as requests.
+type UsageStatusCounts struct {
+	Succeeded int64 `json:"succeeded"`
+	Failed    int64 `json:"failed"`
+	Blocked   int64 `json:"blocked"`
+	Cancelled int64 `json:"cancelled"`
+	Pending   int64 `json:"pending"`
+}
+
 type UsageTimeBucket struct {
 	Date string `json:"date"`
 	Hour *int   `json:"hour,omitempty"`
@@ -63,6 +74,7 @@ type UsageTimeBucket struct {
 // UsageSummary contains sparse calendar buckets; clients can pad empty periods.
 type UsageSummary struct {
 	Totals         UsageTotals       `json:"totals"`
+	StatusCounts   UsageStatusCounts `json:"status_counts"`
 	ByDay          []UsageTimeBucket `json:"by_day"`
 	ByHour         []UsageTimeBucket `json:"by_hour"`
 	ByService      []UsageGroup      `json:"by_service"`

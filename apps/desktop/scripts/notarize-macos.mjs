@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-export const staplerRetryDelaysMs = [10_000, 30_000, 60_000];
+export const appleRetryDelaysMs = [10_000, 30_000, 60_000];
 
 const desktopDirectory = fileURLToPath(new URL("../", import.meta.url));
 const submissionPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -59,7 +59,7 @@ export function notarizeMacOS({
   submissionID,
   timeout = "30m",
   runCommand = run,
-  retryDelaysMs = staplerRetryDelaysMs,
+  retryDelaysMs = appleRetryDelaysMs,
 }) {
   if (!/^[A-Z0-9]{10}$/.test(teamID ?? "")) {
     throw new Error(
@@ -79,9 +79,20 @@ export function notarizeMacOS({
   const binaries = (config.bundle.externalBin ?? []).map((binary) =>
     path.join(app, "Contents/MacOS", path.basename(binary)),
   );
-  const frameworks = (config.bundle.macOS.frameworks ?? []).map((framework) =>
-    path.join(app, "Contents/Frameworks", path.basename(framework)),
-  );
+  // Apple silicon bundles add the Core ML runtime through a generated config
+  // (see build-sidecar.mjs), so check what the bundle holds as well as what
+  // tauri.conf.json lists.
+  const frameworksDirectory = path.join(app, "Contents/Frameworks");
+  const frameworks = [
+    ...new Set([
+      ...(config.bundle.macOS.frameworks ?? []).map((framework) =>
+        path.basename(framework),
+      ),
+      ...(existsSync(frameworksDirectory)
+        ? readdirSync(frameworksDirectory)
+        : []),
+    ]),
+  ].map((name) => path.join(frameworksDirectory, name));
   console.log(
     "Checking Developer ID signatures, Team ID, timestamps and Hardened Runtime.",
   );
@@ -95,13 +106,30 @@ export function notarizeMacOS({
   }
   runCommand("hdiutil", ["verify", dmg]);
 
+  // Connections from the CI runners to Apple's notary and ticket services
+  // sometimes drop or time out. Retry network errors only; any other xcrun
+  // failure stops the release at once.
+  const xcrun = (...args) => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return runCommand("xcrun", args);
+      } catch (error) {
+        const delay = retryDelaysMs[attempt];
+        if (delay === undefined || !/NSURLErrorDomain/.test(error.message))
+          throw error;
+        console.warn(
+          `${args[0]} ${args[1]} lost its connection to Apple; retrying in ${delay / 1000} s.`,
+        );
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      }
+    }
+  };
   const credentials = [
     "--keychain-profile",
     profile,
     ...(keychain ? ["--keychain", keychain] : []),
   ];
-  const notary = (...args) =>
-    runCommand("xcrun", ["notarytool", ...args, ...credentials]);
+  const notary = (...args) => xcrun("notarytool", ...args, ...credentials);
   const logs = path.join(bundleDirectory, "notarization");
   mkdirSync(logs, { recursive: true });
   const sha256 = createHash("sha256").update(readFileSync(dmg)).digest("hex");
@@ -164,30 +192,11 @@ export function notarizeMacOS({
   if (issues?.length)
     console.warn("Apple notarization issues:", JSON.stringify(issues, null, 2));
 
-  // Stapler fetches tickets from Apple's CloudKit service, whose connection
-  // sometimes drops after the submission was accepted. Retry network errors
-  // only; any other stapler failure stops the release at once.
-  const stapler = (action, file) => {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        return runCommand("xcrun", ["stapler", action, file]);
-      } catch (error) {
-        const delay = retryDelaysMs[attempt];
-        if (delay === undefined || !/NSURLErrorDomain/.test(error.message))
-          throw error;
-        console.warn(
-          `stapler ${action} lost its connection to Apple; retrying in ${delay / 1000} s.`,
-        );
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
-      }
-    }
-  };
-
   // A DMG submission also produces a ticket for the enclosed app. Staple the
   // standalone app before archiving it, and the DMG before calculating hashes.
   for (const file of [app, dmg]) {
-    stapler("staple", file);
-    stapler("validate", file);
+    xcrun("stapler", "staple", file);
+    xcrun("stapler", "validate", file);
     runCommand("codesign", ["--verify", "--deep", "--strict", file]);
   }
   runCommand("spctl", ["--assess", "--type", "execute", "--verbose=2", app]);

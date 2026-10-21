@@ -1,6 +1,7 @@
 package ingress
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -291,6 +292,13 @@ type recordSession struct {
 	persistBlobs   AuditBlobPersister
 	persistLogf    func(string, ...any)
 	persistedAudit map[storage.AuditDirection]bool
+	// Keep serialized metadata so pointer-backed fields cannot mutate the last
+	// successful snapshot. Unchanged capture/progress callbacks need no write.
+	persistedMetadata []byte
+	// inMemory marks a session nothing may persist: the standalone
+	// classification call a control-plane dry-run makes. Every write below
+	// checks it, whichever store a step offers.
+	inMemory bool
 }
 
 func newRecordSession(
@@ -346,6 +354,14 @@ func (session *recordSession) bindPersistence(
 	session.persistLogf = logf
 }
 
+// keepInMemory unbinds the session from storage for good: nothing it records
+// is written, whatever store a later step offers.
+func (session *recordSession) keepInMemory() {
+	session.inMemory = true
+	session.persistStore = nil
+	session.persistBlobs = nil
+}
+
 func (session *recordSession) persistPending(
 	ctx context.Context,
 	store RequestRecordStore,
@@ -354,7 +370,7 @@ func (session *recordSession) persistPending(
 	if session == nil {
 		return
 	}
-	if store != nil {
+	if store != nil && !session.inMemory {
 		session.persistStore = store
 	}
 	if logf != nil {
@@ -429,22 +445,40 @@ func (session *recordSession) persistAvailableAudit(ctx context.Context) {
 	session.syncCaptureTees()
 	persistCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	if session.persistStore != nil {
-		if err := session.persistStore.UpsertRequestRecord(persistCtx, session.recordSnapshot(nil, nil)); err != nil {
-			logRequestRecordFailure(session.persistLogf, "live_audit_upsert", err)
-			return
-		}
+	if err := session.persistMetadata(persistCtx); err != nil {
+		logRequestRecordFailure(session.persistLogf, "live_audit_upsert", err)
+		return
 	}
+	before := session.liveAuditSummary()
 	if session.persistBlobs != nil {
 		session.persistReadyAuditBlobs(persistCtx, session.persistBlobs, session.persistLogf)
 		session.settleRequestExposure(persistCtx, session.persistBlobs, session.persistLogf)
 	}
-	if session.persistStore == nil {
+	if session.liveAuditSummary() == before {
 		return
 	}
-	if err := session.persistStore.UpsertRequestRecord(persistCtx, session.recordSnapshot(nil, nil)); err != nil {
+	if err := session.persistMetadata(persistCtx); err != nil {
 		logRequestRecordFailure(session.persistLogf, "live_audit_upsert", err)
 	}
+}
+
+func (session *recordSession) persistMetadata(ctx context.Context) error {
+	if session.persistStore == nil {
+		return nil
+	}
+	record := session.recordSnapshot(nil, nil)
+	metadata, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(metadata, session.persistedMetadata) {
+		return nil
+	}
+	if err := session.persistStore.UpsertRequestRecord(ctx, record); err != nil {
+		return err
+	}
+	session.persistedMetadata = metadata
+	return nil
 }
 
 func (session *recordSession) persistReadyAuditBlobs(
@@ -895,7 +929,7 @@ func (session *recordSession) beginNetworkAttempt(
 	serviceName := string(candidate.Service.ID)
 	session.addEvent(contract.RequestEventRouted, contract.RequestStatusSucceeded, string(plan.Type)+" · "+serviceName)
 	session.addEvent(contract.RequestEventUpstream, contract.RequestStatusPending, string(plan.UpstreamProtocol))
-	if store != nil {
+	if store != nil && !session.inMemory {
 		session.persistStore = store
 	}
 	if logf != nil {
@@ -1123,7 +1157,7 @@ func (session *recordSession) persistLiveMetadata(ctx context.Context) {
 	}
 	persistCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	if err := session.persistStore.UpsertRequestRecord(persistCtx, session.recordSnapshot(nil, nil)); err != nil {
+	if err := session.persistMetadata(persistCtx); err != nil {
 		logRequestRecordFailure(session.persistLogf, "live_metadata_upsert", err)
 	}
 }
@@ -1177,6 +1211,22 @@ func (session *recordSession) failFromHTTPError() bool {
 		summary := session.upstreamHTTPErrorSummary(status)
 		session.errorSummary = &summary
 	}
+	session.updateModelRoutingExecution(contract.ModelRoutingExecutionFailed, session.errorSummary.Code)
+	return true
+}
+
+// failFromStreamError fails a delivered stream that the upstream ended with
+// an error event.
+func (session *recordSession) failFromStreamError() bool {
+	if session == nil || session.upstreamScanner == nil || session.upstreamScanner.failure == nil {
+		return false
+	}
+	session.status = contract.RequestStatusFailed
+	if session.errorSummary == nil {
+		summary := streamFailureSummary(session.upstreamScanner.protocol, session.upstreamScanner.failure)
+		session.errorSummary = &summary
+	}
+	session.updateModelRoutingExecution(contract.ModelRoutingExecutionFailed, session.errorSummary.Code)
 	return true
 }
 
@@ -1184,7 +1234,7 @@ func (session *recordSession) noteSucceeded() {
 	if session == nil {
 		return
 	}
-	if session.failFromHTTPError() {
+	if session.failFromStreamError() || session.failFromHTTPError() {
 		return
 	}
 	session.status = contract.RequestStatusSucceeded
@@ -1270,7 +1320,7 @@ func (session *recordSession) demoteCurrentAttemptToChild(
 	child.SessionLink = nil
 
 	pendingBlobs := make([]storage.AuditBlob, 0, 3)
-	if blobs != nil {
+	if blobs != nil && !session.inMemory {
 		key, keyErr := session.prepareUpstreamAuditKey(ctx, blobs, logf)
 		if keyErr == nil && key != nil {
 			if blob, ok := session.sealCapture(storage.AuditDirectionUpstreamRequest, &session.upstreamRequestCapture, key, completed, logf); ok {
@@ -1308,7 +1358,7 @@ func (session *recordSession) commitPendingAttempt(ctx context.Context, store Re
 	if err := child.Validate(); err != nil {
 		logRequestRecordFailure(logf, "child_validate", err)
 		persisted = false
-	} else if store != nil {
+	} else if store != nil && !session.inMemory {
 		if err := store.InsertRequestRecord(ctx, child); err != nil {
 			logRequestRecordFailure(logf, "child_insert", err)
 			persisted = false
@@ -1396,7 +1446,7 @@ func (session *recordSession) finish(
 		return
 	}
 	session.syncCaptureTees()
-	if store == nil {
+	if store == nil || session.inMemory {
 		logIngressAccess(logf, session)
 		return
 	}
@@ -2171,7 +2221,7 @@ func errorSummaryFromInference(code, message string, retryable bool) contract.Er
 	case "invalid_access_token", "token_query_forbidden":
 		category = "auth"
 	case "upstream_unavailable", "upstream_timeout", "credential_unavailable",
-		"upstream_stream_interrupted", "upstream_http_error":
+		"upstream_stream_interrupted", "upstream_stream_failed", "upstream_http_error":
 		category = "upstream"
 	case "missing_protocol_capability", "endpoint_resolver_unavailable":
 		category = "routing"

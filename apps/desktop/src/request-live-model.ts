@@ -3,8 +3,24 @@ import type {
   ClientType,
   RequestRecord,
   RequestSession,
+  RequestStatus,
   SessionStatus,
 } from "./request-record-model";
+import type { UsageRange } from "./usage-range";
+
+/** What another page opens the request records on. */
+export interface RecordsTarget {
+  tokenId?: string;
+  serviceId?: string;
+  models?: string[];
+  /** The days to list; all of history when absent. */
+  range?: UsageRange;
+  /**
+   * Only conversations with a call that ended this way within the range,
+   * whatever the conversation's own outcome.
+   */
+  status?: RequestStatus;
+}
 
 export interface RecordFilters {
   // The monitor list is a session stream, so the status filter spans the

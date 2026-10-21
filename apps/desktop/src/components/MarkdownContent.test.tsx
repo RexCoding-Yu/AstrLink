@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
+import { installHighlighterWorker } from "@/lib/test-highlighter-worker";
 import { MarkdownContent } from "./MarkdownContent";
 
 const mocks = vi.hoisted(() => ({
@@ -12,6 +13,8 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => mocks.native }));
 vi.mock("@/bridge", () => ({ openExternalURL: mocks.openExternalURL }));
+
+const worker = installHighlighterWorker();
 
 let container: HTMLDivElement;
 let root: Root;
@@ -46,9 +49,10 @@ it("renders model replies as Markdown with shared tables and readable code", asy
   expect(container.querySelector("h3")?.textContent).toBe("Reply");
   expect(container.querySelector("strong")?.textContent).toBe("OK");
   expect(container.querySelector("ul li")?.textContent).toBe("first");
-  expect(container.querySelector("pre code")?.textContent).toBe(
-    '{"ok":true}\n',
-  );
+  // A fence is a code block, one line per line, without the closing newline.
+  expect(
+    container.querySelector('[data-slot="code-block"] pre code')?.textContent,
+  ).toBe('{"ok":true}');
   expect(container.querySelector('[data-slot="table"] td')?.textContent).toBe(
     "test",
   );
@@ -79,6 +83,40 @@ it("accepts plain text and truncated Markdown without losing the response", asyn
   expect(container.querySelector("pre code")?.textContent).toContain(
     '{"unfinished":',
   );
+});
+
+it("highlights a fence by its language, keeps an unknown one plain and copies either", async () => {
+  const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  await render(
+    "```ts\nconst answer: number = 42;\n```\n\n```brainfuck\n+[>+<-]\n```\n\nInline `code` stays inline.",
+  );
+  const blocks = container.querySelectorAll('[data-slot="code-block"]');
+  expect(blocks).toHaveLength(2);
+  expect(worker.requests.map((request) => request.language)).toEqual(
+    expect.arrayContaining(["ts", "brainfuck"]),
+  );
+  await act(async () => {
+    await worker.answered();
+  });
+  await vi.waitFor(() =>
+    expect(
+      blocks[0]!.querySelectorAll("code span[style]").length,
+    ).toBeGreaterThan(0),
+  );
+  expect(blocks[0]!.querySelector("code")?.textContent).toBe(
+    "const answer: number = 42;",
+  );
+  expect(blocks[1]!.querySelectorAll("code span[style]")).toHaveLength(0);
+  expect(blocks[1]!.querySelector("code")?.textContent).toBe("+[>+<-]");
+  expect(container.querySelector("p code")?.textContent).toBe("code");
+
+  await act(async () =>
+    blocks[1]!
+      .querySelector<HTMLButtonElement>('[data-slot="code-block-copy-button"]')!
+      .click(),
+  );
+  expect(copy).toHaveBeenCalledWith("+[>+<-]");
+  copy.mockRestore();
 });
 
 it("renders GitHub alerts without the marker and keeps plain quotes", async () => {

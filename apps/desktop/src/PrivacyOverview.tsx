@@ -44,6 +44,7 @@ import {
 import {
   formatCompactNumber,
   formatExactNumber,
+  formatShare,
 } from "./format-compact-number";
 import { useT } from "./i18n";
 import {
@@ -556,12 +557,6 @@ function TooltipSeries({
   );
 }
 
-/** A share too small to round up still reads as present. */
-function shareLabel(percent: number): string {
-  if (percent > 0 && percent < 1) return "<1%";
-  return `${Math.round(percent)}%`;
-}
-
 /**
  * Matches the policy found but left in place, by the reason the user can act
  * on. Matches of a kind the user turned off are not mentioned: leaving those
@@ -622,7 +617,7 @@ function PrivacyKindsPanel({
           >
             {rows.map((row) => (
               <UsageMeterRow
-                caption={shareLabel(row.percent)}
+                caption={formatShare(row.percent)}
                 className="min-h-6"
                 key={row.kind}
                 label={row.label}
@@ -686,7 +681,7 @@ function PrivacyOutcomesPanel({ totals }: { totals: PrivacyTotals }) {
                 key={segment.key}
                 label={t(`privacyStats.outcome.${segment.key}`)}
                 outcome={segment.key}
-                share={shareLabel((segment.value * 100) / reached)}
+                share={formatShare((segment.value * 100) / reached)}
               />
             ))}
         </ul>

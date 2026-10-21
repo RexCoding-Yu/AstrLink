@@ -38,17 +38,23 @@ export function PopoverContent({
   align = "end",
   sideOffset = 8,
   collisionPadding = 12,
+  animated = false,
   onWheel,
   onTouchMove,
   onEscapeKeyDown,
   ...props
-}: ComponentProps<typeof PopoverPrimitive.Content>) {
+}: ComponentProps<typeof PopoverPrimitive.Content> & {
+  /** Grows from the trigger and fades like menus; reduced motion skips it. */
+  animated?: boolean;
+}) {
   return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Content
         align={align}
         className={cn(
           "z-50 max-h-(--radix-popover-content-available-height) w-72 max-w-[calc(100vw-24px)] overflow-y-auto overscroll-contain rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none",
+          animated &&
+            "origin-(--radix-popover-content-transform-origin) data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 motion-safe:data-[state=closed]:animate-out motion-safe:data-[state=open]:animate-in",
           className,
         )}
         collisionPadding={collisionPadding}

@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 func TestReadOnlyControlContract(t *testing.T) {
@@ -74,7 +73,7 @@ func TestControlContractRejectsMutationAndUnknownPaths(t *testing.T) {
 }
 
 func TestShutdownRequiresAuthenticationAndAcknowledgesBeforeCancellation(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +113,7 @@ func TestNewWithDependenciesRequiresServiceStoreAndStrongToken(t *testing.T) {
 	if _, err := NewWithDependencies(version, Dependencies{}); err == nil {
 		t.Fatal("missing service store was accepted")
 	}
-	store, err := sqlite.Open(
+	store, err := openControlTestStore(t,
 		context.Background(),
 		t.TempDir()+"/astrlink.db",
 	)

@@ -12,7 +12,6 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 const testObserverToken = "test-observer-token-0123456789"
@@ -48,7 +47,7 @@ var roleCallers = []roleCaller{
 
 func newRoleMatrixHandler(t *testing.T) *Handler {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}
@@ -111,6 +110,7 @@ func TestControlRoleMatrix(t *testing.T) {
 		{http.MethodGet, ServiceOrderPath, "", RoleObserver},
 		{http.MethodGet, LocalDataPath, "", RoleObserver},
 		{http.MethodGet, ClientIdentitiesPath, "", RoleObserver},
+		{http.MethodGet, ModelMetadataPath + "?model=gpt-5.6", "", RoleObserver},
 
 		{http.MethodGet, AccessTokensPath + "/tok_missing/secret", "", RoleOperator},
 		// The full view needs the operator role or an approved raw grant.
@@ -177,7 +177,7 @@ func TestControlRoleRejectsUnknownBearerAndBareHTTP(t *testing.T) {
 }
 
 func TestObserverTokenIsOptionalAndDistinct(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}

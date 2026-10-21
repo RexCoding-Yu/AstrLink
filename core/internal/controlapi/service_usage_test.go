@@ -268,7 +268,7 @@ func TestGetServiceUsageMapsUpstreamFailure(t *testing.T) {
 
 func newUsageHandler(t *testing.T, upstream *httptest.Server, id contract.ServiceID) (*sqlite.Store, accountauth.AccountCredentialStore, *Handler) {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatalf("sqlite.Open() = %v", err)
 	}

@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -177,6 +179,9 @@ func (handler *Handler) builtinModel(ctx context.Context, original *http.Request
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Del("Content-Length")
 	request.Header.Del("Content-Encoding")
+	// The capture parses raw bytes and cannot decode the compressed answer
+	// the client's Accept-Encoding would invite.
+	request.Header.Del("Accept-Encoding")
 	capture := &builtinCapture{header: make(http.Header), onEvent: mode.OnEvent}
 	handler.ServeHTTP(capture, request)
 	if ctx.Err() != nil {
@@ -188,7 +193,7 @@ func (handler *Handler) builtinModel(ctx context.Context, original *http.Request
 	if capture.status >= 400 {
 		return nil, fmt.Errorf("model request failed with HTTP %d", capture.status)
 	}
-	if strings.Contains(capture.header.Get("Content-Type"), "text/event-stream") {
+	if capture.events {
 		if capture.response == nil {
 			return nil, fmt.Errorf("model stream ended without a terminal response")
 		}
@@ -356,11 +361,15 @@ func (handler *Handler) builtinServiceSearch(ctx context.Context, config contrac
 
 // builtinCapture parses bounded individual SSE frames. Large image payloads
 // never pass through the ordinary eight-MiB text inspection buffer here.
+// The body, not its Content-Type, tells an event stream from a JSON answer:
+// some upstreams send a valid event stream under a missing or other MIME type.
 type builtinCapture struct {
 	onEvent  func(builtintools.Object) error
 	header   http.Header
 	status   int
 	buffer   []byte
+	events   bool
+	items    map[int]any
 	response builtintools.Object
 	err      error
 }
@@ -384,8 +393,13 @@ func (c *builtinCapture) Write(data []byte) (int, error) {
 		c.err = fmt.Errorf("model response exceeds tool buffer limit")
 		return 0, c.err
 	}
-	if !strings.Contains(c.header.Get("Content-Type"), "text/event-stream") {
-		return len(data), nil
+	if !c.events {
+		// A JSON answer is one object, read whole once it ends.
+		start := firstNonSpace(c.buffer)
+		if start < 0 || c.buffer[start] == '{' {
+			return len(data), nil
+		}
+		c.events = true
 	}
 	c.buffer = bytes.ReplaceAll(c.buffer, []byte("\r\n"), []byte("\n"))
 	for {
@@ -410,8 +424,24 @@ func (c *builtinCapture) Write(data []byte) (int, error) {
 			}
 		}
 		switch builtintools.String(event["type"]) {
+		case "response.output_item.done":
+			if index, ok := event["output_index"].(float64); ok && builtintools.Map(event["item"]) != nil {
+				if c.items == nil {
+					c.items = map[int]any{}
+				}
+				c.items[int(index)] = event["item"]
+			}
 		case "response.completed", "response.incomplete":
 			c.response = builtintools.Map(event["response"])
+			// The Codex backend completes with an empty output after sending
+			// its items one by one.
+			if c.response != nil && len(builtintools.Array(c.response["output"])) == 0 && len(c.items) > 0 {
+				output := make([]any, 0, len(c.items))
+				for _, index := range slices.Sorted(maps.Keys(c.items)) {
+					output = append(output, c.items[index])
+				}
+				c.response["output"] = output
+			}
 		case "response.failed", "error":
 			c.err = builtinStreamError(event)
 			return 0, c.err

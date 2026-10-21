@@ -33,8 +33,12 @@ const CODEX_PROVIDER: &str = "astrlink";
 const CODEX_PROVIDER_PREFIX: &str = "model_providers.astrlink.";
 const PI_PROVIDER: &str = "astrlink";
 const PI_PROVIDER_PREFIX: &str = "providers.astrlink.";
-/// Pi's model list for the provider, written as `[{"id": <model>}]`.
+/// Pi's model list for the provider, written as `[{"id": <model>}]` plus
+/// the model's reasoning levels when the official catalog lists them.
 const PI_MODELS_KEY: &str = "providers.astrlink.models";
+/// Pi's thinking levels, weakest first. Pi treats a custom model as one that
+/// cannot think unless its entry says it reasons.
+const PI_THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 /// The model Pi starts with, which its `/model` picker can save over.
 const PI_STARTUP_KEYS: [&str; 2] = ["defaultProvider", "defaultModel"];
 /// Codex shows its own image generation and web search tools only for a
@@ -211,9 +215,32 @@ pub struct Models {
     pub sonnet_model: Option<String>,
     pub opus_model: Option<String>,
     pub fable_model: Option<String>,
+    /// Pi only: the context window and output limit its entry names.
+    pub context_window: Option<u64>,
+    pub max_tokens: Option<u64>,
 }
 
+/// The largest limit a Pi entry takes, in tokens.
+const MAX_PI_LIMIT: u64 = 100_000_000;
+
 impl Models {
+    /// The context window and output limit for Pi's entry.
+    fn pi_limits(&self, client: Client) -> Result<(Option<u64>, Option<u64>), String> {
+        let limits = (self.context_window, self.max_tokens);
+        if client != Client::Pi {
+            return match limits {
+                (None, None) => Ok(limits),
+                _ => Err("context and output limits apply to Pi only".into()),
+            };
+        }
+        for (name, limit) in [("contextWindow", limits.0), ("maxTokens", limits.1)] {
+            if limit.is_some_and(|limit| limit == 0 || limit > MAX_PI_LIMIT) {
+                return Err(format!("invalid {name}"));
+            }
+        }
+        Ok(limits)
+    }
+
     /// The filled-in models, trimmed and named by their camelCase field.
     /// Claude Code takes every tier; other clients take one required model.
     pub fn fields(&self, client: Client) -> Result<Vec<(&'static str, String)>, String> {
@@ -293,6 +320,15 @@ pub async fn reveal_access_token(
         .filter(|token| !token.is_empty())
         .map(str::to_string)
         .ok_or_else(|| "access token is unavailable".to_string())
+}
+
+/// The token AstrLink last set `client` up with in `home`, whatever the
+/// config holds now.
+pub fn configured_token(home: Home, client: Client) -> Result<Option<String>, String> {
+    let _lock = host_files::lock();
+    Ok(read_records(&home)?
+        .get(client)
+        .map(|record| record.token_id.clone()))
 }
 
 /// A token's list entry: its display name and non-secret hint.
@@ -572,21 +608,218 @@ fn json_parent(object: &CstObject, parents: &[&str]) -> Option<CstObject> {
         .try_fold(object.clone(), |parent, name| parent.object_value(name))
 }
 
-/// The model a Pi model list names when it is exactly `[{"id": <model>}]`;
-/// any other list is not one AstrLink wrote.
-fn single_model(value: &CstNode) -> Option<String> {
-    let entries = value.as_array()?.elements();
-    let [entry] = entries.as_slice() else {
-        return None;
-    };
-    let properties = entry.as_object()?.properties();
-    let [id] = properties.as_slice() else {
-        return None;
-    };
-    if id.decoded_name()? != "id" {
-        return None;
+/// The one entry of a Pi model list AstrLink wrote: the model, and the
+/// reasoning flag and thinking level map AstrLink adds. A list with more
+/// entries or other fields is not one AstrLink wrote.
+#[derive(Debug, PartialEq, Eq)]
+struct PiModel {
+    id: String,
+    reasoning: Option<bool>,
+    /// Pi's thinking levels in `PI_THINKING_LEVELS` order, each with the
+    /// effort it sends or `None` where the model lacks the level.
+    thinking: Option<Vec<(&'static str, Option<String>)>>,
+    context_window: Option<u64>,
+    max_tokens: Option<u64>,
+}
+
+/// What AstrLink writes into Pi's entry for the model besides its id.
+#[derive(Default)]
+struct PiDetails {
+    /// The official reasoning levels; `None` when the catalog lists no
+    /// reasoning for the model. A model with no levels to choose keeps Pi's
+    /// default range.
+    reasoning: Option<Vec<String>>,
+    context_window: Option<u64>,
+    max_tokens: Option<u64>,
+}
+
+impl PiModel {
+    fn new(id: &str, details: &PiDetails) -> Self {
+        let mut model = Self::from_id(id);
+        model.context_window = details.context_window;
+        model.max_tokens = details.max_tokens;
+        let Some(levels) = &details.reasoning else {
+            return model;
+        };
+        model.reasoning = Some(true);
+        model.thinking = (!levels.is_empty()).then(|| {
+            PI_THINKING_LEVELS
+                .iter()
+                .map(|level| {
+                    let effort = if *level == "off" { "none" } else { level };
+                    (
+                        *level,
+                        levels
+                            .iter()
+                            .any(|known| known == effort)
+                            .then(|| effort.to_string()),
+                    )
+                })
+                .collect()
+        });
+        model
     }
-    id.value()?.as_string_lit()?.decoded_value().ok()
+
+    fn from_id(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            reasoning: None,
+            thinking: None,
+            context_window: None,
+            max_tokens: None,
+        }
+    }
+
+    /// An entry with only the fields AstrLink writes.
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let entry = value.as_object()?;
+        let mut model = Self::from_id(entry.get("id")?.as_str()?);
+        for (key, value) in entry {
+            match key.as_str() {
+                "id" => {}
+                "reasoning" => model.reasoning = Some(value.as_bool()?),
+                "thinkingLevelMap" => {
+                    let map = value.as_object()?;
+                    if map
+                        .keys()
+                        .any(|level| !PI_THINKING_LEVELS.contains(&level.as_str()))
+                    {
+                        return None;
+                    }
+                    let mut thinking = Vec::new();
+                    for level in PI_THINKING_LEVELS {
+                        let Some(effort) = map.get(level) else {
+                            continue;
+                        };
+                        let effort = match effort {
+                            serde_json::Value::Null => None,
+                            effort => Some(effort.as_str()?.to_string()),
+                        };
+                        thinking.push((level, effort));
+                    }
+                    model.thinking = Some(thinking);
+                }
+                "contextWindow" => model.context_window = Some(value.as_u64()?),
+                "maxTokens" => model.max_tokens = Some(value.as_u64()?),
+                _ => return None,
+            }
+        }
+        Some(model)
+    }
+
+    /// The entry a list holding exactly one names.
+    fn read(list: &CstNode) -> Option<Self> {
+        let entries = list.as_array()?.elements();
+        let [entry] = entries.as_slice() else {
+            return None;
+        };
+        Self::from_json(&cst_json(entry)?)
+    }
+
+    /// Reads `value`.
+    fn parse(value: &str) -> Self {
+        serde_json::from_str(value)
+            .ok()
+            .and_then(|value| Self::from_json(&value))
+            .unwrap_or_else(|| Self::from_id(value))
+    }
+
+    /// The key's value: the id alone for `[{"id": <model>}]`, the form
+    /// configs from released builds were recorded with, else the entry as
+    /// JSON with sorted keys, so reformatting the file changes nothing.
+    fn value(&self) -> String {
+        if self.reasoning.is_none()
+            && self.thinking.is_none()
+            && self.context_window.is_none()
+            && self.max_tokens.is_none()
+        {
+            return self.id.clone();
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), self.id.clone().into());
+        if let Some(reasoning) = self.reasoning {
+            entry.insert("reasoning".into(), reasoning.into());
+        }
+        if let Some(thinking) = &self.thinking {
+            let map = thinking
+                .iter()
+                .map(|(level, effort)| ((*level).to_string(), effort.clone().into()))
+                .collect();
+            entry.insert("thinkingLevelMap".into(), serde_json::Value::Object(map));
+        }
+        if let Some(tokens) = self.context_window {
+            entry.insert("contextWindow".into(), tokens.into());
+        }
+        if let Some(tokens) = self.max_tokens {
+            entry.insert("maxTokens".into(), tokens.into());
+        }
+        serde_json::Value::Object(entry).to_string()
+    }
+
+    /// The list as written, with the levels in Pi's order.
+    fn input(&self) -> CstInputValue {
+        let mut entry = vec![("id".to_string(), CstInputValue::String(self.id.clone()))];
+        if let Some(reasoning) = self.reasoning {
+            entry.push(("reasoning".into(), CstInputValue::Bool(reasoning)));
+        }
+        if let Some(thinking) = &self.thinking {
+            let map = thinking
+                .iter()
+                .map(|(level, effort)| {
+                    let effort = match effort {
+                        Some(effort) => CstInputValue::String(effort.clone()),
+                        None => CstInputValue::Null,
+                    };
+                    ((*level).to_string(), effort)
+                })
+                .collect();
+            entry.push(("thinkingLevelMap".into(), CstInputValue::Object(map)));
+        }
+        if let Some(tokens) = self.context_window {
+            entry.push((
+                "contextWindow".into(),
+                CstInputValue::Number(tokens.to_string()),
+            ));
+        }
+        if let Some(tokens) = self.max_tokens {
+            entry.push((
+                "maxTokens".into(),
+                CstInputValue::Number(tokens.to_string()),
+            ));
+        }
+        CstInputValue::Array(vec![CstInputValue::Object(entry)])
+    }
+}
+
+/// The value of a node from a file Pi reads.
+fn cst_json(node: &CstNode) -> Option<serde_json::Value> {
+    if let Some(object) = node.as_object() {
+        let mut map = serde_json::Map::new();
+        for property in object.properties() {
+            map.insert(property.decoded_name()?, cst_json(&property.value()?)?);
+        }
+        return Some(serde_json::Value::Object(map));
+    }
+    if let Some(array) = node.as_array() {
+        return array
+            .elements()
+            .iter()
+            .map(cst_json)
+            .collect::<Option<_>>()
+            .map(serde_json::Value::Array);
+    }
+    if let Some(text) = node.as_string_lit() {
+        return text.decoded_value().ok().map(serde_json::Value::String);
+    }
+    if let Some(boolean) = node.as_boolean_lit() {
+        return Some(serde_json::Value::Bool(boolean.value()));
+    }
+    if let Some(number) = node.as_number_lit() {
+        return serde_json::from_str::<serde_json::Number>(&number.to_string())
+            .ok()
+            .map(serde_json::Value::Number);
+    }
+    node.as_null_keyword().map(|_| serde_json::Value::Null)
 }
 
 /// Rejects what the client itself cannot read. Claude Code and Pi's
@@ -773,7 +1006,10 @@ impl Document {
                 let (parents, name) = json_key(path);
                 let value = json_parent(object, parents)?.get(name)?.value();
                 Some(if path == PI_MODELS_KEY {
-                    value.as_ref().and_then(single_model)
+                    value
+                        .as_ref()
+                        .and_then(PiModel::read)
+                        .map(|model| model.value())
                 } else {
                     value
                         .and_then(|value| value.as_string_lit())
@@ -896,10 +1132,7 @@ impl Document {
                         .ok_or_else(|| format!("has a {segment} value that is not an object"))?;
                 }
                 let value = if path == PI_MODELS_KEY {
-                    CstInputValue::Array(vec![CstInputValue::Object(vec![(
-                        "id".into(),
-                        CstInputValue::String(value.into()),
-                    )])])
+                    PiModel::parse(value).input()
                 } else {
                     CstInputValue::String(value.into())
                 };
@@ -1171,7 +1404,8 @@ pub struct Connection<'a> {
     pub models: &'a [(&'static str, String)],
 }
 
-fn desired_keys(client: Client, connection: &Connection) -> Vec<(String, String)> {
+/// `pi` is what Pi's entry for the model says besides its id.
+fn desired_keys(client: Client, connection: &Connection, pi: &PiDetails) -> Vec<(String, String)> {
     let base_url = client.base_url(connection.origin);
     let model = |field: &str| {
         connection
@@ -1210,7 +1444,8 @@ fn desired_keys(client: Client, connection: &Connection) -> Vec<(String, String)
                 keys.push((format!("{PI_PROVIDER_PREFIX}{key}"), value.into()));
             }
             if let Some(model) = model("model") {
-                keys.push((PI_MODELS_KEY.into(), model.clone()));
+                let entry = PiModel::new(&model, pi);
+                keys.push((PI_MODELS_KEY.into(), entry.value()));
                 keys.push(("defaultProvider".into(), PI_PROVIDER.into()));
                 keys.push(("defaultModel".into(), model));
             }
@@ -1255,8 +1490,25 @@ pub fn plan_write(
     connection: &Connection,
     previous: Option<&ClientRecord>,
 ) -> Result<WritePlan, FileError> {
+    plan_write_with(
+        client,
+        existing,
+        connection,
+        &PiDetails::default(),
+        previous,
+    )
+}
+
+/// `plan_write` with what Pi's entry for the model says besides its id.
+fn plan_write_with(
+    client: Client,
+    existing: &[Option<&str>],
+    connection: &Connection,
+    pi: &PiDetails,
+    previous: Option<&ClientRecord>,
+) -> Result<WritePlan, FileError> {
     let mut config = Config::parse(client, existing)?;
-    let desired = desired_keys(client, connection);
+    let desired = desired_keys(client, connection, pi);
     let mut conflicts = Vec::new();
     for (path, value) in config.group() {
         let wanted = desired.iter().find(|(key, _)| *key == path);
@@ -1366,6 +1618,13 @@ fn current_models(client: Client, existing: &[Option<&str>]) -> BTreeMap<&'stati
         config
             .get(path)
             .flatten()
+            .map(|value| {
+                if path == PI_MODELS_KEY {
+                    PiModel::parse(&value).id
+                } else {
+                    value
+                }
+            })
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty() && valid_model(value))
     };
@@ -1377,7 +1636,26 @@ fn current_models(client: Client, existing: &[Option<&str>]) -> BTreeMap<&'stati
             let starts_here =
                 config.get("defaultProvider").flatten().as_deref() == Some(PI_PROVIDER);
             let startup = starts_here.then(|| read("defaultModel")).flatten();
-            vec![("model", startup.or_else(|| read(PI_MODELS_KEY)))]
+            let entry = config
+                .get(PI_MODELS_KEY)
+                .flatten()
+                .map(|value| PiModel::parse(&value));
+            let limit = |tokens: Option<u64>| {
+                tokens
+                    .filter(|tokens| (1..=MAX_PI_LIMIT).contains(tokens))
+                    .map(|tokens| tokens.to_string())
+            };
+            vec![
+                ("model", startup.or_else(|| read(PI_MODELS_KEY))),
+                (
+                    "contextWindow",
+                    entry.as_ref().and_then(|entry| limit(entry.context_window)),
+                ),
+                (
+                    "maxTokens",
+                    entry.as_ref().and_then(|entry| limit(entry.max_tokens)),
+                ),
+            ]
         }
         _ => CLAUDE_MODEL_KEYS
             .iter()
@@ -1549,14 +1827,32 @@ pub async fn apply(
 ) -> Result<ApplyOutcome, String> {
     let client = client.writable()?;
     let origin = local_origin(&inference_url)?;
+    let (context_window, max_tokens) = models.pi_limits(client)?;
     let models = models.fields(client)?;
     if !client.detected(target.home()) {
         return Err("this client is not installed for the current user".into());
     }
     let token = reveal_access_token(manager, &token_id, &inference_url).await?;
     let tokens = Tokens::of(manager).await?;
+    // Pi offers thinking levels only for a model its entry says reasons.
+    // Without the levels the model is still written, without thinking.
+    let reasoning = match models.iter().find(|(field, _)| *field == "model") {
+        Some((_, model)) if client == Client::Pi => manager
+            .official_reasoning(model)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("reasoning levels for {model} are unavailable: {error}");
+                None
+            }),
+        _ => None,
+    };
+    let pi = PiDetails {
+        reasoning,
+        context_window,
+        max_tokens,
+    };
     tauri::async_runtime::spawn_blocking(move || {
-        write(
+        write_with(
             target.home(),
             client,
             &Connection {
@@ -1565,6 +1861,7 @@ pub async fn apply(
                 origin: &origin,
                 models: &models,
             },
+            &pi,
             &tokens,
             replace,
         )
@@ -1573,12 +1870,33 @@ pub async fn apply(
     .map_err(|error| error.to_string())?
 }
 
-/// `tokens` are the gateway's, so a config another AstrLink wrote moves here
-/// only once the user confirms.
-pub fn write(
+/// `write_with` for a model the official catalog lists no reasoning for.
+#[cfg(test)]
+fn write(
     home: Home,
     client: Client,
     connection: &Connection,
+    tokens: &Tokens,
+    replace: bool,
+) -> Result<ApplyOutcome, String> {
+    write_with(
+        home,
+        client,
+        connection,
+        &PiDetails::default(),
+        tokens,
+        replace,
+    )
+}
+
+/// `tokens` are the gateway's, so a config another AstrLink wrote moves here
+/// only once the user confirms. `pi` is what Pi's entry for the model says
+/// besides its id.
+fn write_with(
+    home: Home,
+    client: Client,
+    connection: &Connection,
+    pi: &PiDetails,
     tokens: &Tokens,
     replace: bool,
 ) -> Result<ApplyOutcome, String> {
@@ -1587,8 +1905,14 @@ pub fn write(
     let mut records = read_records(&home)?;
     let paths = client.config_paths(home);
     let existing = read_files(&paths)?;
-    let plan = plan_write(client, &texts(&existing), connection, records.get(client))
-        .map_err(|error| error.at(&paths))?;
+    let plan = plan_write_with(
+        client,
+        &texts(&existing),
+        connection,
+        pi,
+        records.get(client),
+    )
+    .map_err(|error| error.at(&paths))?;
     let gateway = records
         .get(client)
         .filter(|_| {
@@ -2475,6 +2799,230 @@ mod tests {
             json(settings_left),
             serde_json::json!({"defaultProvider": "anthropic"})
         );
+    }
+
+    fn levels(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn pi_entries_name_the_official_thinking_levels() {
+        let gpt = levels(&["none", "low", "medium", "high", "xhigh", "max"]);
+        let plan = plan_write_with(
+            Client::Pi,
+            &[None, None],
+            &connection(&pi_models()),
+            &PiDetails {
+                reasoning: Some(gpt.clone()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert_eq!(
+            json(&plan.contents[0])["providers"]["astrlink"]["models"],
+            serde_json::json!([{"id": "pi-route", "reasoning": true, "thinkingLevelMap": {
+                "off": "none", "minimal": null, "low": "low", "medium": "medium",
+                "high": "high", "xhigh": "xhigh", "max": "max",
+            }}])
+        );
+        // Written in Pi's order, recorded with sorted keys.
+        let text = &plan.contents[0];
+        let at = |needle: &str| text.find(needle).unwrap();
+        assert!(at("\"reasoning\"") < at("\"thinkingLevelMap\"") && at("\"off\"") < at("\"max\""));
+        assert_eq!(
+            plan.record.keys[PI_MODELS_KEY],
+            sha256_hex(
+                r#"{"id":"pi-route","reasoning":true,"thinkingLevelMap":{"high":"high","low":"low","max":"max","medium":"medium","minimal":null,"off":"none","xhigh":"xhigh"}}"#
+            )
+        );
+        let existing = [Some(plan.contents[0].as_str()), Some(&plan.contents[1])];
+        assert_eq!(
+            inspect(Client::Pi, &existing, Some(&plan.record), Some(ORIGIN)),
+            ClientState::Configured
+        );
+        assert_eq!(
+            current_models(Client::Pi, &[existing[0], None]),
+            BTreeMap::from([("model", "pi-route".to_string())])
+        );
+        assert_eq!(
+            plan_remove(Client::Pi, &existing, &plan.record).unwrap()[0],
+            Removal::Delete
+        );
+
+        // A model that cannot answer without reasoning has no off level.
+        let opus = levels(&["low", "medium", "high", "xhigh", "max"]);
+        let plan = plan_write_with(
+            Client::Pi,
+            &[None, None],
+            &connection(&pi_models()),
+            &PiDetails {
+                reasoning: Some(opus.clone()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            json(&plan.contents[0])["providers"]["astrlink"]["models"][0]["thinkingLevelMap"],
+            serde_json::json!({
+                "off": null, "minimal": null, "low": "low", "medium": "medium",
+                "high": "high", "xhigh": "xhigh", "max": "max",
+            })
+        );
+        // One that reasons with no strength to choose keeps Pi's range.
+        let plan = plan_write_with(
+            Client::Pi,
+            &[None, None],
+            &connection(&pi_models()),
+            &PiDetails {
+                reasoning: Some(Vec::new()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            json(&plan.contents[0])["providers"]["astrlink"]["models"],
+            serde_json::json!([{"id": "pi-route", "reasoning": true}])
+        );
+    }
+
+    #[test]
+    fn pi_thinking_levels_reach_released_configs_and_edits_stay_the_users() {
+        let released =
+            plan_write(Client::Pi, &[None, None], &connection(&pi_models()), None).unwrap();
+        let existing = [
+            Some(released.contents[0].as_str()),
+            Some(&released.contents[1]),
+        ];
+        let gpt = levels(&["none", "low", "medium", "high", "xhigh", "max"]);
+        let plan = plan_write_with(
+            Client::Pi,
+            &existing,
+            &connection(&pi_models()),
+            &PiDetails {
+                reasoning: Some(gpt.clone()),
+                ..Default::default()
+            },
+            Some(&released.record),
+        )
+        .unwrap();
+        assert!(plan.conflicts.is_empty());
+        assert!(plan.contents[0].contains("\"thinkingLevelMap\""));
+        // Reformatting the entry keeps it AstrLink's.
+        let compact = json(&plan.contents[0]).to_string();
+        assert_eq!(
+            plan_remove(
+                Client::Pi,
+                &[Some(&compact), Some(&plan.contents[1])],
+                &plan.record
+            )
+            .unwrap()[0],
+            Removal::Delete
+        );
+        // A level the user changed is theirs.
+        let edited = plan.contents[0].replace("\"max\": \"max\"", "\"max\": null");
+        assert_ne!(edited, plan.contents[0]);
+        let existing = [Some(edited.as_str()), Some(&plan.contents[1])];
+        let rewrite = plan_write_with(
+            Client::Pi,
+            &existing,
+            &connection(&pi_models()),
+            &PiDetails {
+                reasoning: Some(gpt.clone()),
+                ..Default::default()
+            },
+            Some(&plan.record),
+        )
+        .unwrap();
+        assert_eq!(rewrite.conflicts, ["providers.astrlink.models"]);
+        assert_eq!(
+            current_models(Client::Pi, &[existing[0], None]),
+            BTreeMap::from([("model", "pi-route".to_string())])
+        );
+        let removals = plan_remove(Client::Pi, &existing, &plan.record).unwrap();
+        let Removal::Write(left) = &removals[0] else {
+            panic!("expected the edited list to stay");
+        };
+        assert_eq!(
+            json(left)["providers"]["astrlink"]["models"][0]["thinkingLevelMap"]["max"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn pi_entries_carry_the_limits_the_user_set() {
+        let pi = PiDetails {
+            reasoning: Some(levels(&["none", "high"])),
+            context_window: Some(400_000),
+            max_tokens: Some(64_000),
+        };
+        let plan = plan_write_with(
+            Client::Pi,
+            &[None, None],
+            &connection(&pi_models()),
+            &pi,
+            None,
+        )
+        .unwrap();
+        let entry = &json(&plan.contents[0])["providers"]["astrlink"]["models"][0];
+        assert_eq!(entry["contextWindow"], 400_000);
+        assert_eq!(entry["maxTokens"], 64_000);
+        let existing = [Some(plan.contents[0].as_str()), Some(&plan.contents[1])];
+        assert_eq!(
+            current_models(Client::Pi, &existing),
+            BTreeMap::from([
+                ("contextWindow", "400000".to_string()),
+                ("maxTokens", "64000".to_string()),
+                ("model", "pi-route".to_string()),
+            ])
+        );
+        // Writing the same entry again changes nothing and asks nothing.
+        let again = plan_write_with(
+            Client::Pi,
+            &existing,
+            &connection(&pi_models()),
+            &pi,
+            Some(&plan.record),
+        )
+        .unwrap();
+        assert!(again.conflicts.is_empty());
+        assert_eq!(again.contents, plan.contents);
+        // Clearing the limits gives Pi its defaults back.
+        let cleared = plan_write_with(
+            Client::Pi,
+            &existing,
+            &connection(&pi_models()),
+            &PiDetails::default(),
+            Some(&plan.record),
+        )
+        .unwrap();
+        assert!(cleared.conflicts.is_empty());
+        assert_eq!(
+            json(&cleared.contents[0])["providers"]["astrlink"]["models"],
+            serde_json::json!([{"id": "pi-route"}])
+        );
+        assert_eq!(
+            plan_remove(Client::Pi, &existing, &plan.record).unwrap()[0],
+            Removal::Delete
+        );
+        let limits = |context_window, max_tokens| Models {
+            model: Some("m".into()),
+            context_window,
+            max_tokens,
+            ..Default::default()
+        };
+        assert_eq!(
+            limits(Some(1), Some(MAX_PI_LIMIT)).pi_limits(Client::Pi),
+            Ok((Some(1), Some(MAX_PI_LIMIT)))
+        );
+        assert!(limits(Some(0), None).pi_limits(Client::Pi).is_err());
+        assert!(limits(None, Some(MAX_PI_LIMIT + 1))
+            .pi_limits(Client::Pi)
+            .is_err());
+        assert!(limits(Some(1), None).pi_limits(Client::Codex).is_err());
     }
 
     #[test]

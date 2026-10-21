@@ -255,7 +255,7 @@ func TestServicesAreTheOnlyServiceControlSurface(t *testing.T) {
 
 func newServiceHandler(t *testing.T, ids ...contract.ServiceID) (*sqlite.Store, *Handler) {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatalf("sqlite.Open() = %v", err)
 	}
@@ -613,6 +613,58 @@ func TestServiceModelRedirectsPersist(t *testing.T) {
 	}
 }
 
+func TestServiceModelProtocolsPersist(t *testing.T) {
+	store, handler := newServiceHandler(t, "service_format_api", "service_format_bad_one", "service_format_bad_two",
+		"service_format_bad_three", "service_format_copilot")
+	api := createServiceForTest(t, handler, `{"name":"API","kind":"newapi","http":{"base_url":"https://newapi.example","auth":{"scheme":"bearer"},"credential":{"secret":"key"}},"capabilities":[{"protocol":"openai.responses","mode":"native","streaming":true}],"models":["gpt-x","gemini-x"],"model_protocols":[{"model":"gpt-x","protocol":"openai.chat"},{"model":"gemini-x","protocol":"google.generate_content"}]}`)
+	if len(api.ModelProtocols) != 2 || api.ModelProtocols[0].Model != "gemini-x" || api.ModelProtocols[1].Protocol != contract.ProtocolOpenAIChat {
+		t.Fatalf("created formats = %#v", api.ModelProtocols)
+	}
+	for _, formats := range []string{
+		`[{"model":"gpt-x","protocol":"openai.embeddings"}]`,
+		`[{"model":"gpt-x","protocol":"openai.chat"},{"model":"gpt-x","protocol":"openai.responses"}]`,
+		`[{"model":"gpt-x","protocol":"openai.chat","enabled":true}]`,
+	} {
+		if response := serviceRequestForTest(t, handler, http.MethodPost, ServicesPath, "application/json",
+			`{"name":"Bad","kind":"newapi","http":{"base_url":"https://newapi.example","auth":{"scheme":"none"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}],"model_protocols":`+formats+`}`, ""); response.Code != 422 {
+			t.Fatalf("accepted %s: %d %s", formats, response.Code, response.Body.String())
+		}
+	}
+	copilot := createServiceForTest(t, handler, `{"name":"Copilot","kind":"copilot_subscription"}`)
+	record, err := store.GetService(context.Background(), copilot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := ServicesPath + "/" + string(copilot.ID)
+	if response := serviceRequestForTest(t, handler, http.MethodPatch, path, "application/merge-patch+json",
+		`{"model_protocols":[{"model":"gemini-3.1-pro","protocol":"google.generate_content"}]}`, record.ETag); response.Code != 422 {
+		t.Fatalf("accepted a format Copilot is not called in: %d %s", response.Code, response.Body.String())
+	}
+	if response := serviceRequestForTest(t, handler, http.MethodPatch, path, "application/merge-patch+json",
+		`{"model_protocols":[{"model":"gpt-5.4","protocol":"openai.chat"}]}`, record.ETag); response.Code != 200 {
+		t.Fatalf("patch %d %s", response.Code, response.Body.String())
+	}
+	saved, err := store.GetService(context.Background(), copilot.ID)
+	if err != nil || len(saved.Service.ModelProtocols) != 1 {
+		t.Fatalf("persisted = %#v, %v", saved.Service, err)
+	}
+	account, err := saved.Service.SubscriptionAccountView()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutSubscriptionAccount(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := store.GetService(context.Background(), copilot.ID)
+	if err != nil || len(refreshed.Service.ModelProtocols) != 1 {
+		t.Fatalf("formats after account update = %#v, %v", refreshed.Service.ModelProtocols, err)
+	}
+	if response := serviceRequestForTest(t, handler, http.MethodPatch, path, "application/merge-patch+json", `{"model_protocols":[]}`, refreshed.ETag); response.Code != 200 ||
+		strings.Contains(response.Body.String(), "model_protocols") {
+		t.Fatalf("clear %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestSubscriptionServicesAcceptOnlyProviderEgressConversions(t *testing.T) {
 	// Rejected creates still draw an ID, so reserve one per create attempt.
 	store, handler := newServiceHandler(t,
@@ -675,5 +727,43 @@ func TestSubscriptionServicesAcceptOnlyProviderEgressConversions(t *testing.T) {
 	if err != nil || len(saved.Service.Capabilities) != 4 ||
 		saved.Service.Capabilities[3].Protocol != contract.ProtocolOpenAIChat {
 		t.Fatalf("persisted capabilities = %#v, %v", saved.Service.Capabilities, err)
+	}
+}
+
+// A service a model routing group depends on cannot lose what the group uses.
+// The change is refused as a conflict that names the group and the member, not
+// as a storage failure.
+func TestServiceChangeARoutingGroupDependsOnIsAConflict(t *testing.T) {
+	ctx := context.Background()
+	store, handler := newServiceHandler(t, "service_routed")
+	service := createServiceForTest(t, handler, `{"name":"API","kind":"openai","models":["fast-model","strong-model"],"http":{"base_url":"https://api.example/v1","auth":{"scheme":"none"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`)
+	settings := contract.DefaultRoutingSettings()
+	settings.ModelRoutingGroups = []contract.ModelRoutingGroup{{
+		ID: "superclaude", Enabled: true,
+		Members: []contract.ModelRoutingMember{
+			{ID: "fast", ServiceID: service.ID, Model: "fast-model"},
+			{ID: "strong", ServiceID: service.ID, Model: "strong-model"},
+		},
+		DefaultMemberID: "fast", Rules: []contract.ModelRoutingRule{},
+	}}
+	if err := store.UpdateRoutingSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetService(ctx, service.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"dropping a member's model": serviceRequestForTest(t, handler, http.MethodPatch, ServicesPath+"/"+string(service.ID), "application/merge-patch+json", `{"models":["fast-model"]}`, record.ETag),
+		"disabling the service":     serviceRequestForTest(t, handler, http.MethodPatch, ServicesPath+"/"+string(service.ID), "application/merge-patch+json", `{"enabled":false}`, record.ETag),
+		"deleting the service":      serviceRequestForTest(t, handler, http.MethodDelete, ServicesPath+"/"+string(service.ID), "", "", record.ETag),
+	} {
+		body := response.Body.String()
+		if response.Code != http.StatusConflict || !strings.Contains(body, `"code":"model_routing_reference"`) || !strings.Contains(body, "superclaude") {
+			t.Fatalf("%s = %d %s, want 409 model_routing_reference naming the group", name, response.Code, body)
+		}
+	}
+	if saved, err := store.GetService(ctx, service.ID); err != nil || saved.ETag != record.ETag {
+		t.Fatalf("refused changes altered the service: %v", err)
 	}
 }

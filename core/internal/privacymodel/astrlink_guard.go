@@ -12,8 +12,8 @@ import (
 
 const (
 	astrLinkGuardRepoID   = "QuantumNous/astrlink-guard"
-	astrLinkGuardRevision = "49e8b7b83d34fd75a86cf07698bd80972d444ff3"
-	astrLinkGuardVersion  = "0.1.0"
+	astrLinkGuardRevision = "33dfcc586f8a50529e98ce5fe2ba46836dbeab8f"
+	astrLinkGuardVersion  = "0.1.2"
 	astrLinkGuardLicense  = "LICENSE"
 
 	// The Hub counts a download only for requests to the repository's root
@@ -50,7 +50,7 @@ func astrLinkGuardCatalogEntry() contract.PrivacyModelCatalogItem {
 		Variants: []contract.PrivacyModelVariant{
 			{
 				ID: "cpu_int8", Name: "CPU INT8", Quantization: "int8",
-				BytesTotal: 38_886_573, EstimatedRAMBytes: 268_435_456,
+				BytesTotal: 38_971_636, EstimatedRAMBytes: 268_435_456,
 				Recommended: true, Supported: true,
 			},
 			{
@@ -103,13 +103,13 @@ func astrLinkGuardAssets(variant string) []Asset {
 	switch variant {
 	case "cpu_int8":
 		assets = []Asset{
-			{Path: "model_int8.onnx", Size: 324_054, SHA256: "6cacc676cf1eea9fccc9654c0587484c181102b5835600ffaf1362e53c2641a9"},
-			{Path: "model_int8.onnx_data", Size: 37_046_272, SHA256: "fe5918effd2a04684d071aa4e6bf880963318c4ed6edd6189a1ae439f225c83b"},
+			{Path: "model_int8.onnx", Size: 330_781, SHA256: "0a070d3113615e33ba3b84d6bd486f663a377c04c4b056e7381732179f51832a"},
+			{Path: "model_int8.onnx_data", Size: 37_124_608, SHA256: "0ba34216ceead01e0ae2dfd8e46d52b67e7aee80b04f722d9b758613a91c0067"},
 		}
 	case "cpu_fp32":
 		assets = []Asset{
-			{Path: "model.onnx", Size: 219_740, SHA256: "f94aa70c09f9a3f424701df9d1bca366d631504d24a97c6c52346d7ce60f980f"},
-			{Path: "model.onnx_data", Size: 147_443_712, SHA256: "da97f2b4a9fc59a373e1932ed6d6849dfe17e13260216463c7e60d917bf05806"},
+			{Path: "model.onnx", Size: 219_740, SHA256: "994d61395afadffd0b81aa94c95f9f7b6ba02e79771b6109a72eeb9b541c156d"},
+			{Path: "model.onnx_data", Size: 147_443_712, SHA256: "2298b89ea747a212820abb81260027b2bc6383fa6615277e24546e535031b734"},
 		}
 	default:
 		return nil

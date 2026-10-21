@@ -97,7 +97,7 @@ WHERE id = 'policy_privacy_default'`, fields); err != nil {
 
 func TestDefaultPrivacyPolicyMigrationAndETagUpdate(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "astrlink.db")
-	store := openTestStore(t, databasePath)
+	store := openUnseededTestStore(t, databasePath)
 	ctx := context.Background()
 
 	page, err := store.ListPolicies(ctx)

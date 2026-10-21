@@ -248,7 +248,7 @@ func TestPolicyAndPrivacyModelRoutesRequireAuthenticationAndNoStore(t *testing.T
 }
 
 func TestPolicyChangeHookRunsSynchronously(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func TestPolicyDryRunSeparatesAcceptedAndSuppressedModelFindings(t *testing.T) {
 
 func newPolicyHandler(t *testing.T) (*sqlite.Store, *Handler, *fakePrivacyModelRegistry) {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}

@@ -201,10 +201,11 @@ func (handler *Handler) executeCandidatesWithTest(
 		if upstreamModel == "" {
 			upstreamModel = classified.routingModel()
 		}
-		if native := candidate.Service.Kind.ModelNativeProtocol(upstreamModel); native != "" {
+		if format := candidate.Service.ModelProtocol(upstreamModel); format != "" && classified.Protocol.IsModelFormat() {
+			// The model's format replaces the entry row's own conversion.
 			convertTo = ""
-			if native != classified.Protocol {
-				convertTo = native
+			if format != classified.Protocol {
+				convertTo = format
 			}
 		}
 		if test != nil {
@@ -223,7 +224,7 @@ func (handler *Handler) executeCandidatesWithTest(
 			}
 			plan, planErr = planner.BuildRelayKit(planner.RelayKitInput{
 				Service: candidate.Service, InputProtocol: classified.Protocol,
-				UpstreamProtocol: upstreamProtocol, Streaming: classified.Streaming,
+				UpstreamProtocol: upstreamProtocol, UpstreamModel: upstreamModel, Streaming: classified.Streaming,
 				Edges: handler.conversionEngine.Edges(),
 			})
 		} else {
@@ -668,7 +669,35 @@ func (handler *Handler) executeCandidatesWithTest(
 				test.observer.Outbound()
 			}
 		}
+		// A replayable request can still move on if the stream refuses it
+		// before the client has seen a byte. Tests and WebSocket turns
+		// cannot. The hold reads the raw stream, below the record and risk
+		// observers, which see the held bytes when they are passed on.
+		// Antigravity wraps its stream in an envelope the transport removes
+		// only after them.
+		holdStart := test == nil && body.Replayable() && responsesWSTurnFromContext(request.Context()) == nil &&
+			candidate.Service.Kind != contract.ServiceKindAntigravitySubscription && holdsStreamStart(plan.UpstreamProtocol)
+		if holdStart && classified.Streaming {
+			// The hold reads events as they arrive, which a compressed stream hides.
+			attemptRequest.Header.Del("Accept-Encoding")
+		}
+		var startFailure *streamFailure
+		var startErr error
+		var responseRetryAfter time.Duration
+		coolOverload := func(event []byte, retryAfter time.Duration) time.Duration {
+			if limiter == nil || !streamFailureOverloaded(plan.UpstreamProtocol, event) {
+				return retryAfter
+			}
+			duration := max(streamOverloadCooldown, retryAfter, time.Duration(policy.InitialDelayMS)*time.Millisecond)
+			limiter.RecordRateLimit(candidate, duration)
+			return duration
+		}
 		forwardTarget.WrapResponseBody = func(status int, header http.Header, body io.ReadCloser) io.ReadCloser {
+			if holdStart && holdsStreamResponse(status, header) {
+				// The response has started; only the client waits for the hold.
+				startWriter.markStarted(status)
+				body, startFailure, startErr = holdStreamStart(body, plan.UpstreamProtocol, streamStartHoldLimit)
+			}
 			if test != nil && test.observer.WrapResponseBody != nil {
 				body = test.observer.WrapResponseBody(body)
 			}
@@ -685,12 +714,27 @@ func (handler *Handler) executeCandidatesWithTest(
 				test.observer.Response(response.StatusCode)
 			}
 			startWriter.markStarted(response.StatusCode)
-			if response.StatusCode < 400 {
+			responseRetryAfter = parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
+			if startErr != nil {
+				// Nothing reached the client, so the stream failed like a
+				// dropped connection.
+				_ = response.Body.Close()
+				return transport.NewResponseError(startErr)
+			}
+			// A refusal in the stream follows the rule for its HTTP status.
+			status := response.StatusCode
+			if startFailure != nil {
+				status = startFailure.status
+			}
+			if status < 400 {
 				handler.clearExpiredSubscriptionRisk(request.Context(), candidate, time.Now())
 			}
-			if response.StatusCode >= 400 {
-				action := policy.ActionForStatus(response.StatusCode)
-				reason := "http_" + fmt.Sprint(response.StatusCode)
+			if status >= 400 {
+				action := policy.ActionForStatus(status)
+				reason := "http_" + fmt.Sprint(status)
+				if startFailure != nil {
+					reason = "stream_" + fmt.Sprint(status)
+				}
 				inspectedDone, inspectedComplete := false, false
 				var inspected []byte
 				inspect := func() ([]byte, bool) {
@@ -701,10 +745,15 @@ func (handler *Handler) executeCandidatesWithTest(
 					return inspected, inspectedComplete
 				}
 				var risk subscriptionRiskSignal
-				if protection.risk && handler.subscriptionRisk != nil && subscriptionRiskKind(candidate.Service.Kind) &&
-					subscriptionRiskStatus(response.StatusCode) {
-					risk = inspectSubscriptionRisk(candidate.Service.Kind, response, inspect, time.Now())
-					handler.applySubscriptionRisk(request.Context(), candidate, risk, headers)
+				if protection.risk && handler.subscriptionRisk != nil && subscriptionRiskKind(candidate.Service.Kind) {
+					if startFailure != nil {
+						// The stream watcher reports the event for the account when
+						// the held bytes pass it.
+						risk = classifySubscriptionStreamError(candidate.Service.Kind, startFailure.event, time.Now())
+					} else if subscriptionRiskStatus(response.StatusCode) {
+						risk = inspectSubscriptionRisk(candidate.Service.Kind, response, inspect, time.Now())
+						handler.applySubscriptionRisk(request.Context(), candidate, risk, headers)
+					}
 				}
 				accountBlocked := risk.scope == subscriptionRiskAccount
 				if accountBlocked {
@@ -746,11 +795,14 @@ func (handler *Handler) executeCandidatesWithTest(
 						}
 					}
 				}
-				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
+				retryAfter := responseRetryAfter
+				if startFailure != nil {
+					retryAfter = coolOverload(startFailure.event, retryAfter)
+				}
 				if risk.scope == subscriptionRiskModel {
 					retryAfter = max(retryAfter, risk.cooldown)
 				}
-				if test == nil && response.StatusCode == http.StatusTooManyRequests {
+				if test == nil && status == http.StatusTooManyRequests {
 					if cooldown, ok := handler.resolver.(endpoint.RateLimitController); ok {
 						duration := max(retryAfter, time.Duration(policy.InitialDelayMS)*time.Millisecond)
 						if until := risk.observation.PausedUntil; accountBlocked && until != nil {
@@ -771,18 +823,32 @@ func (handler *Handler) executeCandidatesWithTest(
 				if recovering {
 					// Keep only a small complete error for the rare case where every
 					// remaining candidate fails local preparation or health admission.
+					limit := 64 * 1024
+					if startFailure != nil {
+						// The held events come first.
+						limit += startFailure.held
+					}
 					stopRead := time.AfterFunc(time.Second, func() { attemptContext.cancel(context.DeadlineExceeded) })
-					data, readErr := io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
+					data, readErr := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 					stopRead.Stop()
 					_ = response.Body.Close()
-					complete := readErr == nil && len(data) <= 64*1024
+					complete := readErr == nil && len(data) <= limit
 					failure := recordSession.upstreamHTTPErrorSummary(response.StatusCode)
+					if startFailure != nil {
+						// The held events already carry the error, so the stream
+						// can be shown as far as it was read.
+						complete = true
+						failure = startFailure.summary()
+					}
 					savedHeaders := downstream.Header().Clone()
 					replayLastHTTP = func() {
 						resetResponseHeaders(downstream.Header(), savedHeaders)
 						if complete {
 							response.Body = io.NopCloser(bytes.NewReader(data))
 							_ = transport.WriteResponse(outWriter, response)
+							if codexAggregate != nil {
+								_ = codexAggregate.Finish()
+							}
 							if relayWriter != nil {
 								_ = relayWriter.Finish()
 							}
@@ -798,7 +864,7 @@ func (handler *Handler) executeCandidatesWithTest(
 							recordSession.noteRecoveryStop("targets_exhausted")
 						}
 					}
-					return &retryHTTPError{status: response.StatusCode, reason: reason}
+					return &retryHTTPError{status: status, reason: reason, summary: failure}
 				}
 				if recordSession != nil {
 					recordSession.noteRecoveryStop(schedule.stopReason)
@@ -811,6 +877,13 @@ func (handler *Handler) executeCandidatesWithTest(
 			forwardErr = turn.forward(startWriter, attemptRequest, forwardTarget, candidate, upstreamModel)
 		} else {
 			forwardErr = handler.forwarder.Forward(startWriter, attemptRequest, forwardTarget)
+		}
+		if startFailure == nil && recordSession != nil && recordSession.upstreamScanner != nil {
+			// A late overload cannot be retried after commitment, but it must
+			// still keep new requests off this route. A completed response
+			// clears the scanner's error and establishes no cooldown.
+			_ = recordSession.upstreamScanner.Usage()
+			coolOverload(recordSession.upstreamScanner.failure, responseRetryAfter)
 		}
 		if test != nil {
 			var responseErr *transport.ResponseError
@@ -866,7 +939,7 @@ func (handler *Handler) executeCandidatesWithTest(
 			if recordSession != nil {
 				recordSession.noteRecoveryDecision(candidateIndex, schedule, retryHTTP.reason)
 			}
-			demoteFailedAttemptForRetry(request.Context(), recordSession, handler.requestRecords, handler.auditBlobs, recordSession.upstreamHTTPErrorSummary(retryHTTP.status), handler.recordLogger)
+			demoteFailedAttemptForRetry(request.Context(), recordSession, handler.requestRecords, handler.auditBlobs, retryHTTP.summary, handler.recordLogger)
 			if relayWriter != nil {
 				_ = relayWriter.streamClose()
 			}
@@ -896,6 +969,10 @@ func (handler *Handler) executeCandidatesWithTest(
 						handler.rememberResponseAffinity(rememberContext, session, candidate, plan)
 						handler.rememberChannelBinding(rememberContext, session, candidate)
 					}
+				} else if session.recovery == nil || session.recovery.StopReason == "" {
+					// The upstream ended the stream with an error after it
+					// reached the client.
+					session.noteRecoveryStop("response_committed")
 				}
 			}
 			return
@@ -1190,6 +1267,15 @@ func captureRequestBody(request *http.Request, forceBuffer bool) (*requestBodySo
 		return source, nil
 	}
 	if request.GetBody != nil {
+		if _, capturing := request.Body.(*captureTee); capturing {
+			// The body factory reuses bytes classification already buffered,
+			// but the inbound audit tee still needs to observe the original.
+			if _, err := io.Copy(io.Discard, request.Body); err != nil {
+				_ = request.Body.Close()
+				source.Close()
+				return nil, err
+			}
+		}
 		source.replayable = true
 		source.factory = request.GetBody
 		if err := request.Body.Close(); err != nil {

@@ -98,6 +98,31 @@ func TestCodingPlanSurfacesAcceptSavedAndDocumentedBases(t *testing.T) {
 			[]string{"https://api.kimi.ai/coding", "https://api.kimi.ai/coding/v1"}, "https://api.kimi.ai/coding/v1/responses"},
 		{contract.ServiceKindKimiCoding, contract.ProtocolOpenAIModels, "/v1/models",
 			[]string{"https://api.kimi.ai/coding", "https://api.kimi.ai/coding/v1"}, "https://api.kimi.ai/coding/v1/models"},
+		// OpenCode serves every format under /inference; saved /zen bases move there.
+		{contract.ServiceKindOpenCodeGo, contract.ProtocolAnthropicMessages, "/v1/messages",
+			[]string{"https://opencode.ai/zen/go/v1", "https://opencode.ai/inference/go/v1/"}, "https://opencode.ai/inference/go/v1/messages"},
+		{contract.ServiceKindOpenCodeGo, contract.ProtocolOpenAIResponses, "/v1/responses",
+			[]string{"https://opencode.ai/zen/go/v1", "https://opencode.ai/inference/go/v1"}, "https://opencode.ai/inference/go/v1/responses"},
+		{contract.ServiceKindOpenCodeGo, contract.ProtocolOpenAIChat, "/v1/chat/completions",
+			[]string{"https://opencode.ai/zen/go/v1", "https://opencode.ai/inference/go/v1"}, "https://opencode.ai/inference/go/v1/chat/completions"},
+		{contract.ServiceKindOpenCodeGo, contract.ProtocolOpenAIModels, "/v1/models",
+			[]string{"https://opencode.ai/zen/go/v1", "https://opencode.ai/inference/go/v1"}, "https://opencode.ai/inference/go/v1/models"},
+		{contract.ServiceKindOpenCodeGo, contract.ProtocolGoogleGenerateContent, "/v1beta/models/gemini-4-argon-contributor:streamGenerateContent?alt=sse",
+			[]string{"https://opencode.ai/zen/go/v1", "https://opencode.ai/inference/go/v1"},
+			"https://opencode.ai/inference/go/v1/models/gemini-4-argon-contributor:streamGenerateContent?alt=sse"},
+		{contract.ServiceKindOpenCodeZen, contract.ProtocolAnthropicMessages, "/v1/messages",
+			[]string{"https://opencode.ai/zen/v1", "https://opencode.ai/inference/v1"}, "https://opencode.ai/inference/v1/messages"},
+		{contract.ServiceKindOpenCodeZen, contract.ProtocolOpenAIResponses, "/v1/responses",
+			[]string{"https://opencode.ai/zen/v1/", "https://opencode.ai/inference/v1"}, "https://opencode.ai/inference/v1/responses"},
+		{contract.ServiceKindOpenCodeZen, contract.ProtocolOpenAIChat, "/v1/chat/completions",
+			[]string{"https://opencode.ai/zen/v1", "https://opencode.ai/inference/v1"}, "https://opencode.ai/inference/v1/chat/completions"},
+		{contract.ServiceKindOpenCodeZen, contract.ProtocolOpenAIModels, "/v1/models",
+			[]string{"https://opencode.ai/zen/v1", "https://opencode.ai/inference/v1"}, "https://opencode.ai/inference/v1/models"},
+		{contract.ServiceKindOpenCodeZen, contract.ProtocolGoogleGenerateContent, "/v1beta/models/gemini-3.1-pro:generateContent",
+			[]string{"https://opencode.ai/zen/v1", "https://opencode.ai/inference/v1"}, "https://opencode.ai/inference/v1/models/gemini-3.1-pro:generateContent"},
+		// A relay saved under the OpenCode kind keeps its own root.
+		{contract.ServiceKindOpenCodeGo, contract.ProtocolOpenAIChat, "/v1/chat/completions",
+			[]string{"https://relay.example/v1"}, "https://relay.example/v1/chat/completions"},
 	} {
 		for _, raw := range tt.bases {
 			t.Run(string(tt.kind)+"/"+string(tt.protocol)+"/"+raw, func(t *testing.T) {

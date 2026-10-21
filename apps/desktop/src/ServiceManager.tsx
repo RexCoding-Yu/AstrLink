@@ -6,6 +6,8 @@ import {
   validProxyDraft,
   type ProxyDraft,
 } from "./service-proxy-model";
+import { isWebEdition } from "./edition";
+import { ServiceTerminalDialog } from "./ServiceTerminalDialog";
 import { ServiceTestDialog } from "./ServiceTestDialog";
 import { PricingWorkspace, ServiceBillingMeter } from "./PricingWorkspace";
 import { useServiceOrder } from "./use-service-order";
@@ -20,7 +22,9 @@ import { ProtocolModeHelp } from "./ProtocolModeHelp";
 import { ServiceEditorTour } from "./ServiceEditorTour";
 import { OrderedList } from "./components/OrderedList";
 import { ClientTypeIcons } from "./components/ClientTypeIcon";
+import { useGatewayResponseTimeout } from "./use-gateway-response-timeout";
 import { useRoutingDefaults } from "./use-routing-defaults";
+import { controlErrorMessage } from "./control-error";
 import { FailurePolicyEditor } from "./components/FailurePolicyEditor";
 import {
   modelRedirectIssues,
@@ -36,7 +40,7 @@ import {
   ChevronRight,
   Flask,
   Connect as Cable,
-  Menu as Ellipsis,
+  Ellipsis,
   Key as KeyRound,
   SquarePen as Pencil,
   Plus,
@@ -171,10 +175,17 @@ import {
   responsesWebSocketEnabled,
   serviceBuiltinRedirects,
   withClaudeCodeRedirects,
+  pruneModelProtocols,
+  sameModelProtocols,
+  serviceBuiltinModelProtocol,
+  serviceModelFormats,
+  withDiscoveredModelProtocols,
+  withModelProtocols,
   supportsResponsesWebSocket,
   serviceKindLabel,
   hasPlanUsage,
   bestConversionTarget,
+  isModelFormat,
   isSubscriptionKind,
   serviceStatusLabel,
   subscriptionConversionTargets,
@@ -183,6 +194,7 @@ import {
   subscriptionNativeCapabilities,
   type HTTPServiceKind,
   type ModelDiscoveryProtocol,
+  type ModelProtocol,
   type Service,
   type ServiceAuthScheme,
   type ServiceCapability,
@@ -244,6 +256,8 @@ export interface ServiceManagerProps {
   onServiceSaved: (service: Service) => void;
   onServiceRemoved: (id: string) => void;
   onDirtyChange: (dirty: boolean) => void;
+  /** The gateway address a terminal opened for a provider connects to. */
+  inferenceURL?: string;
 }
 
 type Draft = {
@@ -262,6 +276,8 @@ type Draft = {
   models: string[];
   /** This provider's own redirect rules. */
   modelRedirects: ModelRedirect[];
+  /** Models pinned to an upstream format. Other models stay automatic. */
+  modelProtocols: ModelProtocol[];
   capabilities: ServiceCapability[];
   authorizationFlow: AuthorizationFlow | null;
   modelListPath: string;
@@ -545,6 +561,8 @@ type ModelPreview = {
   /** Current allowlist entries the upstream did not return. */
   missing: string[];
   warnings: string[];
+  /** Upstream formats the fetched lists named, for models that name one. */
+  protocols?: ModelProtocol[];
 };
 
 function modelDiscoveryProtocols(draft: Draft): ModelDiscoveryProtocol[] {
@@ -585,6 +603,7 @@ function draftForKind(
       proxy: proxyDraft(),
       models: [],
       modelRedirects: [],
+      modelProtocols: [],
       capabilities: subscriptionNativeCapabilities[kind].map((capability) => ({
         ...capability,
       })),
@@ -611,6 +630,7 @@ function draftForKind(
     proxy: proxyDraft(),
     models: [...(preset.models ?? [])],
     modelRedirects: [],
+    modelProtocols: [],
     capabilities: preset.capabilities.map((capability) => ({ ...capability })),
     authorizationFlow: null,
     modelListPath: "",
@@ -631,6 +651,9 @@ function draftFromRecord(record: ServiceRecord): Draft {
       models: [...service.models],
       modelRedirects: (service.model_redirects ?? []).map((redirect) => ({
         ...redirect,
+      })),
+      modelProtocols: (service.model_protocols ?? []).map((entry) => ({
+        ...entry,
       })),
       capabilities: service.capabilities.map((capability) => ({
         ...capability,
@@ -654,6 +677,9 @@ function draftFromRecord(record: ServiceRecord): Draft {
     models: [...service.models],
     modelRedirects: (service.model_redirects ?? []).map((redirect) => ({
       ...redirect,
+    })),
+    modelProtocols: (service.model_protocols ?? []).map((entry) => ({
+      ...entry,
     })),
     authorizationFlow: null,
     capabilities: service.capabilities.map((capability) =>
@@ -692,12 +718,32 @@ function redirectCreateFields(
     : {};
 }
 
+/** An edit sends the model formats when they changed. `[]` clears them. */
+function modelProtocolPatchFields(
+  draft: Draft,
+  saved: Service,
+): Pick<ServicePatchInput, "model_protocols"> {
+  const listed = pruneModelProtocols(draft.modelProtocols, draft.models);
+  return sameModelProtocols(listed, saved.model_protocols ?? [])
+    ? {}
+    : { model_protocols: listed };
+}
+
+/** A new service sends the formats of the models it lists, if any. */
+function modelProtocolCreateFields(
+  draft: Draft,
+): Pick<ServiceCreateInput, "model_protocols"> {
+  const listed = pruneModelProtocols(draft.modelProtocols, draft.models);
+  return listed.length > 0 ? { model_protocols: listed } : {};
+}
+
 function draftSignature(draft: Draft): string {
   return JSON.stringify(draft);
 }
 
+/** A Control API error code with a localized message is shown in it. */
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
+  return controlErrorMessage(error, fallback);
 }
 
 function authForDraft(draft: Draft) {
@@ -996,8 +1042,10 @@ export function ServiceManager({
   onServiceSaved,
   onServiceRemoved,
   onDirtyChange,
+  inferenceURL = "",
 }: ServiceManagerProps) {
   const routingDefaults = useRoutingDefaults(isReady);
+  const gatewayTimeout = useGatewayResponseTimeout();
   const serviceOrder = useServiceOrder(
     services,
     isReady && view.kind === "list" && catalogStatus === "ready",
@@ -1092,6 +1140,7 @@ export function ServiceManager({
   );
   const pendingUsageIDs = useRef(new Set<string>());
   const [testingService, setTestingService] = useState<Service | null>(null);
+  const [terminalService, setTerminalService] = useState<Service | null>(null);
   const [billingService, setBillingService] = useState<string | null>(null);
   const copyFeedback = useCopyFeedback();
   const loadGeneration = useRef(0);
@@ -1626,10 +1675,12 @@ export function ServiceManager({
         }),
       );
       const discovered: string[] = [];
+      const discoveredProtocols: ModelProtocol[] = [];
       const warnings: string[] = [];
       attempts.forEach((attempt, index) => {
         if (attempt.status === "fulfilled") {
           discovered.push(...attempt.value.model_ids);
+          discoveredProtocols.push(...(attempt.value.model_protocols ?? []));
         } else {
           warnings.push(
             `${protocolLabel(discoveryProtocols[index] ?? "models")}：${errorMessage(attempt.reason, t("services.fetchFailed"))}`,
@@ -1658,6 +1709,7 @@ export function ServiceManager({
         selected: initialModelPreviewSelection(draft.models, models),
         missing: draft.models.filter((model) => !upstream.has(model)).sort(),
         warnings,
+        protocols: discoveredProtocols,
       });
     } finally {
       setProbingModels(false);
@@ -1667,10 +1719,14 @@ export function ServiceManager({
   const removeDraftModels = (removals: string[]) => {
     if (removals.length === 0) return;
     const drop = new Set(removals);
-    setDraft((current) => ({
-      ...current,
-      models: current.models.filter((model) => !drop.has(model)),
-    }));
+    setDraft((current) => {
+      const models = current.models.filter((model) => !drop.has(model));
+      return {
+        ...current,
+        models,
+        modelProtocols: pruneModelProtocols(current.modelProtocols, models),
+      };
+    });
   };
 
   const presentAuthorization = (
@@ -1733,6 +1789,7 @@ export function ServiceManager({
           privacy_trusted: draft.privacyTrusted,
           models: draft.models,
           ...redirectPatchFields(draft, editing.service),
+          ...modelProtocolPatchFields(draft, editing.service),
           failure_policy: draft.failurePolicy ?? null,
         };
         if (!isSubscriptionKind(draft.kind)) {
@@ -1768,6 +1825,7 @@ export function ServiceManager({
             ...(draft.privacyTrusted ? { privacy_trusted: true } : {}),
             models: draft.models,
             ...redirectCreateFields(draft),
+            ...modelProtocolCreateFields(draft),
             ...(draft.failurePolicy
               ? { failure_policy: draft.failurePolicy }
               : {}),
@@ -1792,6 +1850,7 @@ export function ServiceManager({
             ...(draft.privacyTrusted ? { privacy_trusted: true } : {}),
             models: draft.models,
             ...redirectCreateFields(draft),
+            ...modelProtocolCreateFields(draft),
             ...(draft.failurePolicy
               ? { failure_policy: draft.failurePolicy }
               : {}),
@@ -2669,7 +2728,17 @@ export function ServiceManager({
                                     {t("services.signOut")}
                                   </DropdownMenuItem>
                                 ) : null}
-                                {subscription ? (
+                                {isWebEdition ? null : (
+                                  <DropdownMenuItem
+                                    disabled={
+                                      acting || !isReady || !inferenceURL
+                                    }
+                                    onSelect={() => setTerminalService(service)}
+                                  >
+                                    {t("services.openInTerminal")}
+                                  </DropdownMenuItem>
+                                )}
+                                {subscription || !isWebEdition ? (
                                   <DropdownMenuSeparator />
                                 ) : null}
                                 <DropdownMenuItem
@@ -2703,6 +2772,14 @@ export function ServiceManager({
             key={testingService.id}
             service={testingService}
             onClose={() => setTestingService(null)}
+          />
+        ) : null}
+        {terminalService ? (
+          <ServiceTerminalDialog
+            key={terminalService.id}
+            service={terminalService}
+            inferenceURL={inferenceURL}
+            onClose={() => setTerminalService(null)}
           />
         ) : null}
         {confirmAction?.kind === "reset-usage" ? (
@@ -3088,7 +3165,12 @@ export function ServiceManager({
   const modelsEditor = (
     <ServiceModelsEditor
       key={editingServiceID ?? "create"}
+      builtinProtocol={(model) =>
+        serviceBuiltinModelProtocol(draft.kind, model)
+      }
+      formats={serviceModelFormats(draft.kind)}
       modelEditor={modelEditor}
+      modelProtocols={draft.modelProtocols}
       models={draft.models}
       probingModels={probingModels}
       onAddModels={addModels}
@@ -3096,6 +3178,7 @@ export function ServiceManager({
         setDraft((current) => ({
           ...current,
           models: [],
+          modelProtocols: [],
         }))
       }
       onDiscoverModels={
@@ -3105,6 +3188,16 @@ export function ServiceManager({
           : undefined
       }
       onModelEditorChange={setModelEditor}
+      onModelProtocolsChange={(models, protocol) =>
+        setDraft((current) => ({
+          ...current,
+          modelProtocols: withModelProtocols(
+            current.modelProtocols,
+            models,
+            protocol,
+          ),
+        }))
+      }
       onRemoveModels={removeDraftModels}
       upstream={
         upstreamModels?.key === modelDiscoveryKey(draft)
@@ -3126,6 +3219,10 @@ export function ServiceManager({
   const egressTargets = subscriptionKind
     ? subscriptionConversionTargets[subscriptionKind]
     : null;
+  // Every OpenCode model has an upstream format. Its chat entry rows decide
+  // which clients get in, and the model's format decides what OpenCode gets.
+  const formatRoutedKind =
+    draft.kind === "opencode_go" || draft.kind === "opencode_zen";
   // Re-enabling a protocol the preset's upstream serves natively passes it through.
   const presetUpstreamProtocols = new Set(
     selectedPreset?.capabilities
@@ -3158,7 +3255,9 @@ export function ServiceManager({
                     })
                   : t("services.capabilityHintSubscriptionUnavailable")
                 : conversionEngine?.available
-                  ? t("services.capabilityHintConvert")
+                  ? formatRoutedKind
+                    ? t("services.capabilityHintPerModel")
+                    : t("services.capabilityHintConvert")
                   : t("services.capabilityHintPassthrough")}
             </p>
           </div>
@@ -3170,8 +3269,12 @@ export function ServiceManager({
               (item) => item.protocol === descriptor.id,
             );
             const native = nativeProtocols.has(descriptor.id);
+            const followsModelFormat =
+              formatRoutedKind && isModelFormat(descriptor.id);
             const convertible =
-              !native && supportsLocalConversion(descriptor.id);
+              !native &&
+              !followsModelFormat &&
+              supportsLocalConversion(descriptor.id);
             const targets = convertible
               ? localConversionTargets(descriptor.id, conversionEngine).filter(
                   (target) =>
@@ -3183,7 +3286,7 @@ export function ServiceManager({
             );
             const defaultTarget = egressTargets
               ? targets.find((target) => target.enabled)?.id
-              : presetUpstreamProtocols.has(descriptor.id)
+              : followsModelFormat || presetUpstreamProtocols.has(descriptor.id)
                 ? undefined
                 : bestConversionTarget(
                     descriptor.id,
@@ -3290,7 +3393,9 @@ export function ServiceManager({
                     {capability
                       ? native
                         ? t("services.subscriptionNative")
-                        : t("services.passthrough")
+                        : followsModelFormat
+                          ? t("services.perModelFormat")
+                          : t("services.passthrough")
                       : ""}
                   </span>
                 )}
@@ -3949,6 +4054,7 @@ export function ServiceManager({
                 {draft.failurePolicy ? (
                   <FailurePolicyEditor
                     value={draft.failurePolicy}
+                    gatewayTimeoutSeconds={gatewayTimeout}
                     onChange={(failurePolicy) =>
                       setDraft((current) => ({ ...current, failurePolicy }))
                     }
@@ -4018,6 +4124,14 @@ export function ServiceManager({
                 current.modelRedirects,
                 current.models,
                 models,
+              ),
+              // Newly listed models take the format the fetched list names.
+              modelProtocols: withDiscoveredModelProtocols(
+                current.kind,
+                pruneModelProtocols(current.modelProtocols, models),
+                current.models,
+                models,
+                modelPreview.protocols ?? [],
               ),
             }));
             setModelPreview(null);

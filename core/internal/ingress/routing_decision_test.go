@@ -241,6 +241,12 @@ func TestWebSocketSkipNamesWhyAProviderCannotServeTheTurn(t *testing.T) {
 		{"converted", func(candidate *endpoint.Resolved) { candidate.PlanType = contract.PlanTypeRelayKit }, contract.RoutingSkipWebSocketUnsupported},
 		{"other upstream protocol", func(candidate *endpoint.Resolved) { candidate.UpstreamProtocol = contract.ProtocolOpenAIChat }, contract.RoutingSkipWebSocketUnsupported},
 		{"no streaming responses", func(candidate *endpoint.Resolved) { candidate.Service.Capabilities[0].Streaming = false }, contract.RoutingSkipWebSocketUnsupported},
+		{"model called in another format", func(candidate *endpoint.Resolved) {
+			candidate.Service.ModelProtocols = []contract.ModelProtocol{{Model: "public", Protocol: contract.ProtocolOpenAIChat}}
+		}, contract.RoutingSkipWebSocketUnsupported},
+		{"model called in Responses", func(candidate *endpoint.Resolved) {
+			candidate.Service.ModelProtocols = []contract.ModelProtocol{{Model: "public", Protocol: contract.ProtocolOpenAIResponses}}
+		}, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			candidate := wsCandidate("https://upstream.example")

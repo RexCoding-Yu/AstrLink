@@ -11,12 +11,11 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 func TestPrivacyWarningsAPIServesKindsWithoutValues(t *testing.T) {
 	const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "warnings.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "warnings.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

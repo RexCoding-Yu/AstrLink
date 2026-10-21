@@ -50,6 +50,7 @@ export function HelpPopover({
         </Button>
       </PopoverTrigger>
       <PopoverContent
+        animated
         align="start"
         className={cn(
           "text-xs leading-relaxed",

@@ -16,8 +16,8 @@ import (
 var (
 	ErrNoEndpoint = errors.New("no endpoint provides the requested capability")
 	// ErrNoHealthyEndpoint means every candidate is still cooling down after
-	// its upstream answered HTTP 429.
-	ErrNoHealthyEndpoint = errors.New("every candidate is rate limited by its upstream")
+	// its upstream reported a rate limit or explicit overload.
+	ErrNoHealthyEndpoint = errors.New("every candidate is cooling down after an upstream rate limit or overload")
 	ErrUnavailable       = errors.New("endpoint resolver is unavailable")
 )
 
@@ -52,6 +52,21 @@ func (err *CapabilityUnavailableError) Error() string {
 
 func (err *CapabilityUnavailableError) Unwrap() error {
 	return ErrNoEndpoint
+}
+
+// PinnedServiceError says why the API provider a request named cannot serve
+// it. Name is empty when no provider has the ID.
+type PinnedServiceError struct {
+	Service contract.ServiceID
+	Name    string
+	Reason  contract.RoutingSkipReason
+}
+
+func (err *PinnedServiceError) Error() string {
+	if err.Name == "" {
+		return fmt.Sprintf("API provider %q does not exist", err.Service)
+	}
+	return fmt.Sprintf("API provider %q cannot serve the request: %s", err.Name, err.Reason)
 }
 
 // RateLimitedCandidatesError lists the cooldowns that left no candidate to
@@ -96,6 +111,9 @@ type ResolveRequest struct {
 	// Continuation keeps eligible targets available for exact affinity binding.
 	// Ingress must bind the response ID before attempting any target.
 	Continuation bool
+	// Service limits routing to the one API provider the client named. No
+	// other provider serves the request or takes over when it fails.
+	Service contract.ServiceID
 }
 
 type Resolved struct {
@@ -208,9 +226,9 @@ func (UnavailableResolver) Resolve(context.Context, ResolveRequest) (Resolved, e
 	return Resolved{}, ErrUnavailable
 }
 
-// RateLimitController applies the cooldown an upstream requested with HTTP
-// 429. RateLimitedUntil is checked immediately before each attempt, when the
-// candidate carries its final upstream protocol and model.
+// RateLimitController applies cooldowns for upstream rate limits and explicit
+// overloads. RateLimitedUntil is checked immediately before each attempt,
+// when the candidate carries its final upstream protocol and model.
 type RateLimitController interface {
 	RecordRateLimit(Resolved, time.Duration)
 	RateLimitedUntil(Resolved) time.Time
