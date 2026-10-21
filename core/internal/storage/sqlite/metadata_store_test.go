@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -210,5 +211,80 @@ func TestMetadataValueStatsCountSessionsAndTheirLastRequest(t *testing.T) {
 	}
 	if limited, _ := store.MetadataValueStats(ctx, "project", 1); len(limited) != 1 {
 		t.Fatalf("limit 1 = %+v", limited)
+	}
+}
+
+func TestWorkspaceValuesKeepTheFirstBindingUntilReplaced(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "metadata.db"))
+	defer store.Close()
+	ctx := context.Background()
+	for _, attribute := range []contract.MetadataAttribute{
+		{Key: "project", Label: "项目", Pattern: "^[a-z]+$", Marker: "memory-project", Owner: "powercontext"},
+		{Key: "env", Label: "环境", Pattern: "^(dev|prod)$", Owner: contract.MetadataOwnerUser},
+	} {
+		if err := store.CreateMetadataAttribute(ctx, attribute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspace := strings.Repeat("a", 64)
+	first := storagecontract.MetadataWorkspaceRecord{Key: "project", Workspace: workspace, Name: "astrlink", Value: "astrlink"}
+	if bound, err := store.PutWorkspaceValue(ctx, first, false); err != nil || !bound {
+		t.Fatalf("first binding = %v, %v", bound, err)
+	}
+	// Another session in the same directory binding another value does not
+	// move the workspace; the user's explicit choice does.
+	other := first
+	other.Value = "paseo"
+	if bound, err := store.PutWorkspaceValue(ctx, other, false); err != nil || bound {
+		t.Fatalf("second binding without replace = %v, %v", bound, err)
+	}
+	if values, err := store.WorkspaceValues(ctx, workspace); err != nil || values["project"].Value != "astrlink" || values["project"].Name != "astrlink" {
+		t.Fatalf("WorkspaceValues = %+v, %v", values, err)
+	}
+	if bound, err := store.PutWorkspaceValue(ctx, other, true); err != nil || !bound {
+		t.Fatalf("replace = %v, %v", bound, err)
+	}
+	if values, _ := store.WorkspaceValues(ctx, workspace); values["project"].Value != "paseo" {
+		t.Fatalf("replaced value = %+v", values)
+	}
+	env := storagecontract.MetadataWorkspaceRecord{Key: "env", Workspace: workspace, Name: "astrlink", Value: "dev"}
+	if _, err := store.PutWorkspaceValue(ctx, env, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutWorkspaceValue(ctx, storagecontract.MetadataWorkspaceRecord{Key: "project", Workspace: "short", Value: "x"}, false); !errors.Is(err, storagecontract.ErrInvalidArgument) {
+		t.Fatalf("a workspace that is no fingerprint: %v", err)
+	}
+	if count, err := store.CountWorkspaceValues(ctx, []string{"project"}); err != nil || count != 1 {
+		t.Fatalf("CountWorkspaceValues = %d, %v", count, err)
+	}
+	if removed, err := store.DeleteWorkspaceValues(ctx, []string{"project"}); err != nil || removed != 1 {
+		t.Fatalf("DeleteWorkspaceValues = %d, %v", removed, err)
+	}
+	if values, _ := store.WorkspaceValues(ctx, workspace); len(values) != 1 || values["env"].Value != "dev" {
+		t.Fatalf("clearing one attribute touched another: %+v", values)
+	}
+	if err := store.DeleteMetadataAttribute(ctx, "env"); err != nil {
+		t.Fatal(err)
+	}
+	if values, _ := store.WorkspaceValues(ctx, workspace); len(values) != 0 {
+		t.Fatalf("workspace values outlived their attribute: %+v", values)
+	}
+}
+
+func TestSessionBindingsTakeTheNewSources(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "metadata.db"))
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateMetadataAttribute(ctx, contract.MetadataAttribute{Key: "project", Label: "项目", Pattern: "^[a-z]+$", Owner: contract.MetadataOwnerUser}); err != nil {
+		t.Fatal(err)
+	}
+	for index, setBy := range []string{contract.MetadataSetByWorkspace, contract.MetadataSetByUserAnswer} {
+		record := storagecontract.MetadataValueRecord{TargetKind: storagecontract.MetadataTargetSession, TargetID: "session_" + string(rune('a'+index)), Key: "project", Value: "astrlink", SetBy: setBy, Turn: 1}
+		if err := store.PutMetadataValue(ctx, record); err != nil {
+			t.Fatalf("set by %s: %v", setBy, err)
+		}
+	}
+	if err := store.PutMetadataValue(ctx, storagecontract.MetadataValueRecord{TargetKind: storagecontract.MetadataTargetSession, TargetID: "session_x", Key: "project", Value: "astrlink", SetBy: "guess"}); err == nil {
+		t.Fatal("an unknown source was stored")
 	}
 }

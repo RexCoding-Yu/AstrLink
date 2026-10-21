@@ -21,7 +21,8 @@ const (
 )
 
 func (store *Store) ListPluginSettings(ctx context.Context) ([]storage.PluginSettingsRecord, error) {
-	rows, err := store.db.QueryContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json, created_at, updated_at
+	rows, err := store.db.QueryContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json,
+    excluded_clients_json, workspace_binding, auto_refresh, created_at, updated_at
 FROM plugin_settings ORDER BY plugin_key`)
 	if err != nil {
 		return nil, fmt.Errorf("read plugin settings: %w", err)
@@ -42,7 +43,8 @@ FROM plugin_settings ORDER BY plugin_key`)
 }
 
 func (store *Store) GetPluginSettings(ctx context.Context, plugin string) (storage.PluginSettingsRecord, error) {
-	row := store.db.QueryRowContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json, created_at, updated_at
+	row := store.db.QueryRowContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json,
+    excluded_clients_json, workspace_binding, auto_refresh, created_at, updated_at
 FROM plugin_settings WHERE plugin_key = ?`, plugin)
 	record, err := scanPluginSettings(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -55,14 +57,16 @@ type scanner interface{ Scan(...any) error }
 
 func scanPluginSettings(row scanner) (storage.PluginSettingsRecord, error) {
 	var record storage.PluginSettingsRecord
-	var capabilities, origins, config, created, updated string
-	if err := row.Scan(&record.Key, &record.Enabled, &capabilities, &origins, &record.Trusted, &record.TurnWaitMs, &config, &created, &updated); err != nil {
+	var capabilities, origins, config, excluded, created, updated string
+	if err := row.Scan(&record.Key, &record.Enabled, &capabilities, &origins, &record.Trusted, &record.TurnWaitMs, &config,
+		&excluded, &record.WorkspaceBinding, &record.AutoRefresh, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return record, err
 		}
 		return record, fmt.Errorf("read plugin settings: %w", err)
 	}
-	if json.Unmarshal([]byte(capabilities), &record.Capabilities) != nil || json.Unmarshal([]byte(origins), &record.Origins) != nil || !json.Valid([]byte(config)) {
+	if json.Unmarshal([]byte(capabilities), &record.Capabilities) != nil || json.Unmarshal([]byte(origins), &record.Origins) != nil ||
+		json.Unmarshal([]byte(excluded), &record.ExcludedClients) != nil || !json.Valid([]byte(config)) {
 		return record, fmt.Errorf("%w: plugin settings %s", storage.ErrInvalidRecord, record.Key)
 	}
 	record.Config = json.RawMessage(config)
@@ -102,16 +106,159 @@ func (store *Store) PutPluginSettings(ctx context.Context, record storage.Plugin
 	if wait < contract.MinPluginTurnWaitMs || wait > contract.MaxPluginTurnWaitMs {
 		return fmt.Errorf("%w: plugin turn wait must be %d to %d ms", storage.ErrInvalidArgument, contract.MinPluginTurnWaitMs, contract.MaxPluginTurnWaitMs)
 	}
+	if len(record.ExcludedClients) > contract.MaxPluginExcludedClients {
+		return fmt.Errorf("%w: a plugin is off for at most %d clients", storage.ErrInvalidArgument, contract.MaxPluginExcludedClients)
+	}
+	excluded, err := json.Marshal(nonNil(record.ExcludedClients))
+	if err != nil {
+		return fmt.Errorf("%w: plugin clients", storage.ErrInvalidArgument)
+	}
 	now := store.now().UTC().Format(time.RFC3339Nano)
-	if _, err := store.db.ExecContext(ctx, `INSERT INTO plugin_settings (plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO plugin_settings (plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json,
+    excluded_clients_json, workspace_binding, auto_refresh, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plugin_key) DO UPDATE SET enabled = excluded.enabled, granted_capabilities_json = excluded.granted_capabilities_json,
     network_origins_json = excluded.network_origins_json, privacy_trusted = excluded.privacy_trusted, turn_wait_ms = excluded.turn_wait_ms,
-    config_json = excluded.config_json, updated_at = excluded.updated_at`,
-		record.Key, record.Enabled, string(capabilities), string(origins), record.Trusted, wait, string(config), now, now); err != nil {
+    config_json = excluded.config_json, excluded_clients_json = excluded.excluded_clients_json,
+    workspace_binding = excluded.workspace_binding, auto_refresh = excluded.auto_refresh, updated_at = excluded.updated_at`,
+		record.Key, record.Enabled, string(capabilities), string(origins), record.Trusted, wait, string(config),
+		string(excluded), record.WorkspaceBinding, record.AutoRefresh, now, now); err != nil {
 		return fmt.Errorf("write plugin settings: %w", err)
 	}
 	return nil
+}
+
+func (store *Store) PluginHostSettings(ctx context.Context) (contract.PluginHostSettings, error) {
+	settings := contract.DefaultPluginHostSettings()
+	var document string
+	err := store.db.QueryRowContext(ctx, `SELECT document_json FROM plugin_host_settings WHERE id = 1`).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return settings, nil
+	}
+	if err != nil {
+		return settings, fmt.Errorf("read plugin host settings: %w", err)
+	}
+	// A setting the document lacks keeps its default.
+	if json.Unmarshal([]byte(document), &settings) != nil || settings.Validate() != nil {
+		return contract.DefaultPluginHostSettings(), fmt.Errorf("%w: plugin host settings", storage.ErrInvalidRecord)
+	}
+	return settings, nil
+}
+
+func (store *Store) PutPluginHostSettings(ctx context.Context, settings contract.PluginHostSettings) error {
+	if err := settings.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
+	}
+	document, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("%w: plugin host settings", storage.ErrInvalidArgument)
+	}
+	now := store.now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO plugin_host_settings (id, document_json, updated_at) VALUES (1, ?, ?)
+ON CONFLICT(id) DO UPDATE SET document_json = excluded.document_json, updated_at = excluded.updated_at`, string(document), now); err != nil {
+		return fmt.Errorf("write plugin host settings: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) PluginSession(ctx context.Context, plugin, session string) (storage.PluginSessionRecord, bool, error) {
+	row := store.db.QueryRowContext(ctx, `SELECT plugin_key, session_id, first_turn, paused, created_at, updated_at
+FROM plugin_sessions WHERE plugin_key = ? AND session_id = ?`, plugin, session)
+	record, err := scanPluginSession(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storage.PluginSessionRecord{}, false, nil
+	}
+	if err != nil {
+		return storage.PluginSessionRecord{}, false, err
+	}
+	return record, true, nil
+}
+
+func (store *Store) StartPluginSession(ctx context.Context, plugin, session string, turn int) (record storage.PluginSessionRecord, err error) {
+	if err := validPluginSession(plugin, session, turn); err != nil {
+		return record, err
+	}
+	transaction, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return record, fmt.Errorf("begin plugin session write: %w", err)
+	}
+	defer rollbackOnError(transaction, &err)
+	if err = store.ensurePluginSettings(ctx, transaction, plugin); err != nil {
+		return record, err
+	}
+	now := store.now().UTC().Format(time.RFC3339Nano)
+	if _, err = transaction.ExecContext(ctx, `INSERT INTO plugin_sessions (plugin_key, session_id, first_turn, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?) ON CONFLICT(plugin_key, session_id) DO NOTHING`, plugin, session, turn, now, now); err != nil {
+		err = fmt.Errorf("write plugin session: %w", err)
+		return record, err
+	}
+	if record, err = scanPluginSession(transaction.QueryRowContext(ctx, `SELECT plugin_key, session_id, first_turn, paused, created_at, updated_at
+FROM plugin_sessions WHERE plugin_key = ? AND session_id = ?`, plugin, session)); err != nil {
+		return record, err
+	}
+	err = transaction.Commit()
+	return record, err
+}
+
+func (store *Store) PausePluginSession(ctx context.Context, plugin, session string, paused bool, turn int) (record storage.PluginSessionRecord, err error) {
+	if err := validPluginSession(plugin, session, turn); err != nil {
+		return record, err
+	}
+	transaction, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return record, fmt.Errorf("begin plugin session write: %w", err)
+	}
+	defer rollbackOnError(transaction, &err)
+	if err = store.ensurePluginSettings(ctx, transaction, plugin); err != nil {
+		return record, err
+	}
+	now := store.now().UTC().Format(time.RFC3339Nano)
+	if _, err = transaction.ExecContext(ctx, `INSERT INTO plugin_sessions (plugin_key, session_id, first_turn, paused, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(plugin_key, session_id) DO UPDATE SET paused = excluded.paused, updated_at = excluded.updated_at`,
+		plugin, session, turn, paused, now, now); err != nil {
+		err = fmt.Errorf("write plugin session: %w", err)
+		return record, err
+	}
+	if record, err = scanPluginSession(transaction.QueryRowContext(ctx, `SELECT plugin_key, session_id, first_turn, paused, created_at, updated_at
+FROM plugin_sessions WHERE plugin_key = ? AND session_id = ?`, plugin, session)); err != nil {
+		return record, err
+	}
+	err = transaction.Commit()
+	return record, err
+}
+
+func (store *Store) CountPluginSessions(ctx context.Context, plugin string) (int, error) {
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_sessions WHERE plugin_key = ?`, plugin).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count plugin sessions: %w", err)
+	}
+	return count, nil
+}
+
+func validPluginSession(plugin, session string, turn int) error {
+	if plugin == "" || len(plugin) > 32 || session == "" || len(session) > 256 || turn < 0 {
+		return fmt.Errorf("%w: plugin session", storage.ErrInvalidArgument)
+	}
+	return nil
+}
+
+func scanPluginSession(row scanner) (storage.PluginSessionRecord, error) {
+	var record storage.PluginSessionRecord
+	var created, updated string
+	if err := row.Scan(&record.Plugin, &record.Session, &record.FirstTurn, &record.Paused, &created, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return record, err
+		}
+		return record, fmt.Errorf("read plugin session: %w", err)
+	}
+	var err error
+	if record.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return record, fmt.Errorf("%w: plugin session %s", storage.ErrInvalidRecord, record.Session)
+	}
+	if record.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+		return record, fmt.Errorf("%w: plugin session %s", storage.ErrInvalidRecord, record.Session)
+	}
+	return record, nil
 }
 
 func nonNil[T any](values []T) []T {
@@ -337,6 +484,18 @@ func (store *Store) DeletePluginValue(ctx context.Context, plugin, key string) e
 		return fmt.Errorf("delete plugin value: %w", err)
 	}
 	return nil
+}
+
+func (store *Store) DeletePluginValues(ctx context.Context, plugin string) (int, error) {
+	result, err := store.db.ExecContext(ctx, `DELETE FROM plugin_kv WHERE plugin_key = ?`, plugin)
+	if err != nil {
+		return 0, fmt.Errorf("delete plugin values: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete plugin values: %w", err)
+	}
+	return int(removed), nil
 }
 
 func (store *Store) PluginValueKeys(ctx context.Context, plugin, prefix string) ([]string, error) {

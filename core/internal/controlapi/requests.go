@@ -44,9 +44,10 @@ func (handler *Handler) registerRequestRecordRoutes() {
 	handler.mux.HandleFunc(RequestsPath+"/", handler.authenticatedBy(handler.requestRecordItem, requestRecordItemRole))
 }
 
-// requestSessionItemRole leaves changing a session's metadata to operators.
+// requestSessionItemRole leaves changing a session's metadata and its
+// plugins to operators.
 func requestSessionItemRole(request *http.Request) Role {
-	if !isSafeMethod(request.Method) && strings.Contains(request.URL.Path, "/metadata") {
+	if !isSafeMethod(request.Method) && (strings.Contains(request.URL.Path, "/metadata") || strings.Contains(request.URL.Path, "/plugins")) {
 		return RoleOperator
 	}
 	return RoleObserver
@@ -102,6 +103,10 @@ func (handler *Handler) requestSessionItem(writer http.ResponseWriter, request *
 	}
 	if _, rest, found := strings.Cut(strings.TrimPrefix(request.URL.Path, RequestSessionsPath+"/"), "/"); found && (rest == "metadata" || strings.HasPrefix(rest, "metadata/")) {
 		handler.sessionMetadata(writer, request)
+		return
+	}
+	if _, rest, found := strings.Cut(strings.TrimPrefix(request.URL.Path, RequestSessionsPath+"/"), "/"); found && (rest == "plugins" || strings.HasPrefix(rest, "plugins/")) {
+		handler.sessionPlugins(writer, request)
 		return
 	}
 	if request.Method != http.MethodGet {

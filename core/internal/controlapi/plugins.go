@@ -95,6 +95,12 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		}
 	case strings.HasPrefix(action, "credentials/"):
 		handler.pluginCredential(writer, request, target, strings.TrimPrefix(action, "credentials/"))
+	case action == "actions":
+		if allowMethods(writer, request, http.MethodPost) {
+			handler.pluginAction(writer, request, target)
+		}
+	case action == "workspaces" || action == "values":
+		handler.clearPluginData(writer, request, target, action)
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
 	}
@@ -165,13 +171,16 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	if target.Meta.Network != nil {
 		detail.NetworkPurpose = target.Meta.Network.Purpose
 	}
-	for _, hook := range []string{plugin.HookPrepareSession, plugin.HookPrepareTurn, plugin.HookObserveTurn, plugin.HookDescribeStatus, plugin.HookTestConnection} {
+	for _, hook := range []string{plugin.HookPrepareSession, plugin.HookPrepareTurn, plugin.HookObserveTurn, plugin.HookDescribeStatus, plugin.HookTestConnection, plugin.HookOnAction} {
 		if target.Has(hook) {
 			detail.Hooks = append(detail.Hooks, hook)
 		}
 	}
 	settings, err := handler.pluginStore.GetPluginSettings(ctx, target.Key)
-	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+	if errors.Is(err, storage.ErrNotFound) {
+		settings, err = storage.NewPluginSettingsRecord(target.Key), nil
+	}
+	if err != nil {
 		return contract.PluginDetail{}, err
 	}
 	if len(settings.Config) > 0 {
@@ -182,6 +191,8 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	if detail.TurnWaitMs == 0 {
 		detail.TurnWaitMs = contract.DefaultPluginTurnWaitMs
 	}
+	detail.ExcludedClients = append([]string{}, settings.ExcludedClients...)
+	detail.WorkspaceBinding, detail.AutoRefresh = settings.WorkspaceBinding, settings.AutoRefresh
 	for _, origin := range settings.Origins {
 		detail.NetworkOrigins = append(detail.NetworkOrigins, contract.PluginNetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext, Plaintext: plugin.Plaintext(origin.Origin), Setting: origin.Setting})
 	}
@@ -204,7 +215,50 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	for _, credit := range target.Meta.Credits {
 		detail.Credits = append(detail.Credits, contract.PluginCredit{Name: credit.Name, Owner: credit.Owner, License: credit.License, URL: credit.URL, Note: credit.Note})
 	}
+	detail.Storage = []contract.PluginStorageItem{}
+	for _, item := range target.Meta.Storage {
+		detail.Storage = append(detail.Storage, contract.PluginStorageItem{Label: item.Label, Content: item.Content, Retention: item.Retention})
+	}
+	if detail.HostStorage, err = handler.pluginHostStorage(ctx, target); err != nil {
+		return contract.PluginDetail{}, err
+	}
 	return detail, nil
+}
+
+// pluginHostStorage lists what the host keeps for a plugin, with how many
+// where the plugin page offers to clear them.
+func (handler *Handler) pluginHostStorage(ctx context.Context, target *plugin.Plugin) ([]contract.PluginHostStorage, error) {
+	kept := []contract.PluginHostStorage{}
+	count := func(kind string, value int) {
+		kept = append(kept, contract.PluginHostStorage{Kind: kind, Count: &value})
+	}
+	if len(target.Meta.Metadata) > 0 {
+		kept = append(kept, contract.PluginHostStorage{Kind: contract.PluginStoredSessionBindings})
+		if handler.metadataStore != nil {
+			workspaces, err := handler.metadataStore.CountWorkspaceValues(ctx, pluginAttributeKeys(target))
+			if err != nil {
+				return nil, err
+			}
+			count(contract.PluginStoredWorkspaceBindings, workspaces)
+		}
+	}
+	sessions, err := handler.pluginStore.CountPluginSessions(ctx, target.Key)
+	if err != nil {
+		return nil, err
+	}
+	count(contract.PluginStoredSessions, sessions)
+	kept = append(kept, contract.PluginHostStorage{Kind: contract.PluginStoredRecords})
+	if target.Has(plugin.HookPrepareSession) && slices.Contains(target.Meta.Capabilities, plugin.CapabilityInject) {
+		kept = append(kept, contract.PluginHostStorage{Kind: contract.PluginStoredResidentBlock})
+	}
+	if slices.Contains(target.Meta.Capabilities, plugin.CapabilityStorage) {
+		keys, err := handler.pluginStore.PluginValueKeys(ctx, target.Key, "")
+		if err != nil {
+			return nil, err
+		}
+		count(contract.PluginStoredValues, len(keys))
+	}
+	return kept, nil
 }
 
 func pluginSettings(settings []plugin.Setting) []contract.PluginSetting {
@@ -234,7 +288,7 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 	defer handler.pluginsMu.Unlock()
 	settings, err := handler.pluginStore.GetPluginSettings(ctx, target.Key)
 	if errors.Is(err, storage.ErrNotFound) {
-		settings, err = storage.PluginSettingsRecord{Key: target.Key}, nil
+		settings, err = storage.NewPluginSettingsRecord(target.Key), nil
 	}
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "could not read the plugin's settings")
@@ -305,6 +359,25 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 			return
 		}
 		settings.TurnWaitMs = *update.TurnWaitMs
+	}
+	if update.ExcludedClients != nil {
+		excluded := []string{}
+		for _, client := range *update.ExcludedClients {
+			if !contract.ClientType(client).Valid() {
+				invalid("unknown client " + client)
+				return
+			}
+			if !slices.Contains(excluded, client) {
+				excluded = append(excluded, client)
+			}
+		}
+		settings.ExcludedClients = excluded
+	}
+	if update.WorkspaceBinding != nil {
+		settings.WorkspaceBinding = *update.WorkspaceBinding
+	}
+	if update.AutoRefresh != nil {
+		settings.AutoRefresh = *update.AutoRefresh
 	}
 	if update.Config != nil {
 		config := bytes.TrimSpace(update.Config)
@@ -408,7 +481,7 @@ func (handler *Handler) testPlugin(writer http.ResponseWriter, ctx context.Conte
 	}
 	ctx, cancel := context.WithTimeout(ctx, pluginPageBudget)
 	defer cancel()
-	raw, info, err := target.Call(ctx, plugin.HookTestConnection, nil, plugin.CallOptions{NetworkBudget: pluginPageBudget})
+	raw, info, err := target.Call(ctx, plugin.HookTestConnection, handler.pluginPageView(), plugin.CallOptions{NetworkBudget: pluginPageBudget})
 	result := contract.PluginTestResult{ElapsedMs: int(info.Elapsed.Milliseconds()), Network: networkCount(info.Network)}
 	var failure *plugin.CallError
 	switch {
@@ -474,7 +547,7 @@ func (handler *Handler) pluginStatus(writer http.ResponseWriter, ctx context.Con
 	if target.Has(plugin.HookDescribeStatus) && target.Can(plugin.CapabilityViews) {
 		ctx, cancel := context.WithTimeout(ctx, pluginPageBudget)
 		defer cancel()
-		raw, _, err := target.Call(ctx, plugin.HookDescribeStatus, nil, plugin.CallOptions{NetworkBudget: pluginPageBudget})
+		raw, _, err := target.Call(ctx, plugin.HookDescribeStatus, handler.pluginPageView(), plugin.CallOptions{NetworkBudget: pluginPageBudget})
 		var failure *plugin.CallError
 		switch {
 		case errors.As(err, &failure):

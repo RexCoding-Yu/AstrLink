@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"unicode/utf8"
 )
@@ -20,6 +21,9 @@ const (
 	MaxPluginViewTextRunes      = 1024
 	MaxPluginRecordTitleRunes   = 32
 	MaxPluginRecordSummaryRunes = 256
+	MaxPluginRecordActions      = 3
+	MaxPluginActionLabelRunes   = 16
+	MaxPluginActionConfirmRunes = 300
 )
 
 type PluginViewBlockType string
@@ -211,6 +215,34 @@ type PluginRecord struct {
 	// Truncated marks a record the host cut to its limits, dropping what
 	// did not fit or was not valid.
 	Truncated bool `json:"truncated,omitempty"`
+	// Actions are the buttons the record shows, such as 「刷新记忆」. A
+	// click calls the plugin's onAction hook for the record's session.
+	Actions []PluginRecordAction `json:"actions,omitempty"`
+}
+
+// PluginRecordAction is a button on a plugin's record. Confirm, when set, is
+// asked before the click goes to the plugin.
+type PluginRecordAction struct {
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	Confirm string `json:"confirm,omitempty"`
+}
+
+var pluginActionIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// ValidPluginActionID reports whether id can name an action of a plugin
+// record: a lowercase letter, then up to 31 lowercase letters, digits and
+// underscores.
+func ValidPluginActionID(id string) bool { return pluginActionIDPattern.MatchString(id) }
+
+func (action PluginRecordAction) Validate() error {
+	if !ValidPluginActionID(action.ID) {
+		return fmt.Errorf("action id must be a lowercase letter followed by up to 31 lowercase letters, digits or underscores")
+	}
+	if err := validateBoundedText("action label", action.Label, MaxPluginActionLabelRunes, false); err != nil {
+		return err
+	}
+	return validateBoundedText("action confirm", action.Confirm, MaxPluginActionConfirmRunes, true)
 }
 
 func (record PluginRecord) Validate() error {
@@ -222,6 +254,19 @@ func (record PluginRecord) Validate() error {
 	}
 	if err := validateBoundedText("summary", record.Summary, MaxPluginRecordSummaryRunes, true); err != nil {
 		return err
+	}
+	if len(record.Actions) > MaxPluginRecordActions {
+		return fmt.Errorf("a plugin record has at most %d actions", MaxPluginRecordActions)
+	}
+	for index, action := range record.Actions {
+		if err := action.Validate(); err != nil {
+			return err
+		}
+		for _, other := range record.Actions[:index] {
+			if other.ID == action.ID {
+				return fmt.Errorf("a plugin record lists the action %q twice", action.ID)
+			}
+		}
 	}
 	return ValidatePluginView(record.View)
 }
@@ -236,6 +281,28 @@ const (
 	PluginSkipPluginError        = "plugin_error"
 	PluginSkipPrivacyBlocked     = "privacy_blocked"
 	PluginSkipPrivacyUnavailable = "privacy_unavailable"
+	// PluginSkipPausedAll: the user paused every plugin.
+	PluginSkipPausedAll = "paused_all"
+	// PluginSkipClientDisabled: the plugin is off for the request's client.
+	PluginSkipClientDisabled = "client_disabled"
+	// PluginSkipSessionPaused: the user paused the plugin in the session.
+	PluginSkipSessionPaused = "session_paused"
+	// PluginSkipOverBudget: the plugins before this one used up what one
+	// request may carry.
+	PluginSkipOverBudget = "over_budget"
+)
+
+// Why the host computed a session's resident block: the session's first
+// request since Core started, a binding that changed, the plugin's version,
+// settings or language that changed, a compacted history, the user's
+// refresh, or the automatic check for newer data.
+const (
+	PluginTriggerStart   = "start"
+	PluginTriggerBound   = "bound"
+	PluginTriggerConfig  = "config"
+	PluginTriggerCompact = "compact"
+	PluginTriggerManual  = "manual"
+	PluginTriggerAuto    = "auto"
 )
 
 // Where an injected block went.
@@ -266,6 +333,11 @@ type RequestPluginRecord struct {
 	// skipped_privacy, skipped_binding_turn, skipped_continuation,
 	// queue_full or disabled.
 	Observe string `json:"observe,omitempty"`
+	// Trigger tells why a resident block was computed, on the record of
+	// the request that first carried it.
+	Trigger string `json:"trigger,omitempty"`
+	// Actions are the plugin's buttons for the record's session.
+	Actions []PluginRecordAction `json:"actions,omitempty"`
 }
 
 // PluginInjection is what the host injected into one request for a plugin.
@@ -286,11 +358,16 @@ func (record RequestPluginRecord) Validate() error {
 	if err := validateBoundedText("hook", record.Hook, 32, false); err != nil {
 		return err
 	}
-	if err := (PluginRecord{Title: record.Title, Status: record.Status, Summary: record.Summary, View: record.View}).Validate(); err != nil {
+	if err := (PluginRecord{Title: record.Title, Status: record.Status, Summary: record.Summary, View: record.View, Actions: record.Actions}).Validate(); err != nil {
 		return err
 	}
 	if err := validateBoundedText("skipped_reason", record.SkippedReason, 64, true); err != nil {
 		return err
+	}
+	switch record.Trigger {
+	case "", PluginTriggerStart, PluginTriggerBound, PluginTriggerConfig, PluginTriggerCompact, PluginTriggerManual, PluginTriggerAuto:
+	default:
+		return fmt.Errorf("unknown plugin trigger %q", record.Trigger)
 	}
 	if err := validateBoundedText("observe", record.Observe, 64, true); err != nil {
 		return err

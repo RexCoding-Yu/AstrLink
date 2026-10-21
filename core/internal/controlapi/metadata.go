@@ -48,13 +48,20 @@ func (handler *Handler) metadataAttributesResource(writer http.ResponseWriter, r
 		}
 		return
 	}
-	if !contract.ValidMetadataKey(key) {
+	key, sub, _ := strings.Cut(key, "/")
+	if !contract.ValidMetadataKey(key) || (sub != "" && sub != "values") {
 		writeError(writer, http.StatusNotFound, "not_found", "metadata attribute not found")
 		return
 	}
 	current, found := handler.metadataAttribute(key)
 	if !found {
 		writeError(writer, http.StatusNotFound, "not_found", "metadata attribute not found")
+		return
+	}
+	if sub == "values" {
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.writeMetadataValues(writer, request.Context(), key)
+		}
 		return
 	}
 	switch request.Method {
@@ -66,6 +73,25 @@ func (handler *Handler) metadataAttributesResource(writer http.ResponseWriter, r
 		writer.Header().Set("Allow", "PATCH, DELETE")
 		writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "use PATCH or DELETE")
 	}
+}
+
+// maxMetadataValueStats bounds the values of an attribute the session
+// details offer to pick from.
+const maxMetadataValueStats = 200
+
+// writeMetadataValues lists the values of an attribute sessions are bound to,
+// the most recently used first, with how many sessions each.
+func (handler *Handler) writeMetadataValues(writer http.ResponseWriter, ctx context.Context, key string) {
+	stats, err := handler.metadataStore.MetadataValueStats(ctx, key, maxMetadataValueStats)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not read the metadata")
+		return
+	}
+	values := []contract.PluginBindingValue{}
+	for _, stat := range stats {
+		values = append(values, contract.PluginBindingValue{Value: stat.Value, Sessions: stat.Sessions, LastUsedAt: stat.LastUsedAt})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"values": values})
 }
 
 func (handler *Handler) metadataAttribute(key string) (contract.MetadataAttribute, bool) {
@@ -259,9 +285,9 @@ func (handler *Handler) sessionMetadata(writer http.ResponseWriter, request *htt
 		return
 	}
 	value := contract.MetadataNone
+	var input contract.SessionMetadataInput
 	switch request.Method {
 	case http.MethodPut:
-		var input contract.SessionMetadataInput
 		if !decodeControlJSON(writer, request, &input) {
 			return
 		}
@@ -290,6 +316,14 @@ func (handler *Handler) sessionMetadata(writer http.ResponseWriter, request *htt
 		writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not save the metadata")
 		return
 	}
+	// The session's workspace takes the first value the user picks, and a
+	// later one when the user says so.
+	if handler.pluginHost != nil {
+		if _, err := handler.pluginHost.BindWorkspace(request.Context(), string(id), key, value, input.Workspace); err != nil {
+			writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "saved, but the workspace could not take the value")
+			return
+		}
+	}
 	handler.writeSessionMetadata(writer, request.Context(), id)
 }
 
@@ -302,6 +336,22 @@ func (handler *Handler) writeSessionMetadata(writer http.ResponseWriter, ctx con
 	response := contract.SessionMetadata{Values: map[string]contract.SessionMetadataValue{}}
 	for key, value := range values {
 		response.Values[key] = contract.SessionMetadataValue{Value: value.Value, SetBy: value.SetBy, Turn: value.Turn, UpdatedAt: value.UpdatedAt.UTC()}
+	}
+	if host := handler.pluginHost; host != nil {
+		response.Choices = host.SessionChoices(string(id))
+		if name, ok := host.SessionWorkspace(string(id)); ok {
+			response.Workspace = &contract.SessionWorkspace{Name: name, Values: map[string]string{}}
+			for _, attribute := range handler.metadata.Attributes() {
+				bound, found, err := host.WorkspaceValue(ctx, string(id), attribute.Key)
+				if err != nil {
+					writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not read the metadata")
+					return
+				}
+				if found {
+					response.Workspace.Values[attribute.Key] = bound
+				}
+			}
+		}
 	}
 	writeJSON(writer, http.StatusOK, response)
 }

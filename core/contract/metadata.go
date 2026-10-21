@@ -37,11 +37,15 @@ const (
 )
 
 // How a stored value was set: a token's default, a marker in a model reply,
-// a marker the user sent, or the session details.
+// a marker the user sent, the user's answer naming one of the values a plugin
+// offered, the value the session's workspace was bound to, or the session
+// details.
 const (
 	MetadataSetByTokenDefault = "token_default"
 	MetadataSetByModelMarker  = "model_marker"
 	MetadataSetByUserMarker   = "user_marker"
+	MetadataSetByUserAnswer   = "user_answer"
+	MetadataSetByWorkspace    = "workspace"
 	MetadataSetByManual       = "manual"
 )
 
@@ -162,6 +166,19 @@ type AccessTokenMetadata struct {
 // SessionMetadata is what a session is bound to, by attribute key.
 type SessionMetadata struct {
 	Values map[string]SessionMetadataValue `json:"values"`
+	// Workspace is the working directory the session's last request named
+	// and what it is bound to; nil when the gateway knows none, as after a
+	// restart until the session's next request.
+	Workspace *SessionWorkspace `json:"workspace,omitempty"`
+	// Choices are the values plugins offered the session, by attribute key.
+	Choices map[string][]string `json:"choices,omitempty"`
+}
+
+// SessionWorkspace is a session's working directory, named by its last
+// element, and the value of each attribute it is bound to.
+type SessionWorkspace struct {
+	Name   string            `json:"name"`
+	Values map[string]string `json:"values"`
 }
 
 // SessionMetadataValue is one binding of a session: its value, how it was
@@ -173,9 +190,12 @@ type SessionMetadataValue struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// SessionMetadataInput sets one binding of a session by hand.
+// SessionMetadataInput sets one binding of a session by hand. Workspace
+// also binds the session's workspace to the value, for the sessions that
+// start there later.
 type SessionMetadataInput struct {
-	Value string `json:"value"`
+	Value     string `json:"value"`
+	Workspace bool   `json:"workspace,omitempty"`
 }
 
 // RequestMetadata is the metadata of one request, kept with its record.
@@ -220,6 +240,13 @@ type MetadataEvent struct {
 	// SetBy is where the value came from: header, or how a binding was set.
 	SetBy  string `json:"set_by,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// New marks a binding to a value no session had and none of the
+	// choices a plugin offered the session named: a new project.
+	New bool `json:"new,omitempty"`
+	// Normalized is the value as the marker wrote it when the gateway took
+	// a known value that differs from it only in case, hyphens or
+	// underscores.
+	Normalized string `json:"normalized,omitempty"`
 }
 
 // MaxRequestMetadataEvents bounds the events kept with one request.

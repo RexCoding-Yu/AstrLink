@@ -2,6 +2,7 @@ package contract
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -52,6 +53,69 @@ const (
 	MinPluginTurnWaitMs     = 1000
 	MaxPluginTurnWaitMs     = 5000
 )
+
+// Bounds of what all plugins together inject into one request, in bytes.
+const (
+	DefaultPluginInjectionBudgetBytes = 16 << 10
+	MinPluginInjectionBudgetBytes     = 4 << 10
+	MaxPluginInjectionBudgetBytes     = 64 << 10
+)
+
+// Interface languages, which what plugins inject follows. They are the
+// desktop's locales.
+const (
+	PluginLanguageEnglish  = "en"
+	PluginLanguageChinese  = "zh-CN"
+	PluginLanguageJapanese = "ja"
+	// DefaultPluginLanguage is the desktop's default locale, for a Core the
+	// desktop has not told its language yet.
+	DefaultPluginLanguage = PluginLanguageEnglish
+)
+
+// ValidPluginLanguage reports whether language is an interface language.
+func ValidPluginLanguage(language string) bool {
+	switch language {
+	case PluginLanguageEnglish, PluginLanguageChinese, PluginLanguageJapanese:
+		return true
+	}
+	return false
+}
+
+// PluginHostSettings are the settings of every plugin at once.
+type PluginHostSettings struct {
+	// Paused keeps every plugin out of requests, which then go out as they
+	// came.
+	Paused bool `json:"paused"`
+	// InjectionBudgetBytes bounds what all plugins inject into one request
+	// together. Past it, the blocks of the plugins later in key order stay
+	// out.
+	InjectionBudgetBytes int `json:"injection_budget_bytes"`
+	// Language is the interface language, en, zh-CN or ja. A session takes
+	// it when it starts and keeps it.
+	Language string `json:"language"`
+}
+
+// DefaultPluginHostSettings are the settings of a Core nobody changed them in.
+func DefaultPluginHostSettings() PluginHostSettings {
+	return PluginHostSettings{InjectionBudgetBytes: DefaultPluginInjectionBudgetBytes, Language: DefaultPluginLanguage}
+}
+
+func (settings PluginHostSettings) Validate() error {
+	if settings.InjectionBudgetBytes < MinPluginInjectionBudgetBytes || settings.InjectionBudgetBytes > MaxPluginInjectionBudgetBytes {
+		return fmt.Errorf("injection_budget_bytes must be %d to %d", MinPluginInjectionBudgetBytes, MaxPluginInjectionBudgetBytes)
+	}
+	if !ValidPluginLanguage(settings.Language) {
+		return fmt.Errorf("language must be en, zh-CN or ja")
+	}
+	return nil
+}
+
+// PluginHostSettingsUpdate changes what is set and keeps what is absent.
+type PluginHostSettingsUpdate struct {
+	Paused               *bool   `json:"paused,omitempty"`
+	InjectionBudgetBytes *int    `json:"injection_budget_bytes,omitempty"`
+	Language             *string `json:"language,omitempty"`
+}
 
 // States of a plugin in the plugin list.
 const (
@@ -117,13 +181,61 @@ type PluginDetail struct {
 	NetworkOrigins []PluginNetworkOrigin `json:"network_origins"`
 	PrivacyTrusted bool                  `json:"privacy_trusted"`
 	// TurnWaitMs is how long a request waits for the plugin's prepare hooks.
-	TurnWaitMs  int                       `json:"turn_wait_ms"`
+	TurnWaitMs int `json:"turn_wait_ms"`
+	// ExcludedClients are the client types the plugin is off for; it takes
+	// part in the requests of every other client, unknown ones included.
+	ExcludedClients []string `json:"excluded_clients"`
+	// WorkspaceBinding binds a new session to the value of the plugin's
+	// attributes its workspace had before.
+	WorkspaceBinding bool `json:"workspace_binding"`
+	// AutoRefresh checks a session's resident block for newer data now and
+	// then, and swaps it when it changed.
+	AutoRefresh bool                      `json:"auto_refresh"`
 	Credentials []PluginCredentialStatus  `json:"credentials"`
 	Metadata    []PluginMetadataAttribute `json:"metadata"`
 	// Settings are the fields of the plugin's settings form, in order.
 	Settings []PluginSetting `json:"settings"`
 	// Credits are the open-source projects the plugin credits.
 	Credits []PluginCredit `json:"credits"`
+	// Storage is what the plugin keeps, as its manifest declares it, and
+	// HostStorage what the host keeps for it.
+	Storage     []PluginStorageItem `json:"storage"`
+	HostStorage []PluginHostStorage `json:"host_storage"`
+}
+
+// PluginStorageItem is something a plugin says it keeps in its own store.
+type PluginStorageItem struct {
+	Label string `json:"label"`
+	// Content tells whether it holds conversation text.
+	Content   bool   `json:"content"`
+	Retention string `json:"retention"`
+}
+
+// What the host keeps for a plugin. The plugin page names each.
+const (
+	// Session bindings of the plugin's attributes: value, how and in which
+	// turn it was set.
+	PluginStoredSessionBindings = "session_bindings"
+	// Workspaces bound to a value: a keyed fingerprint of the path and its
+	// last element.
+	PluginStoredWorkspaceBindings = "workspace_bindings"
+	// The plugin's records in request records: counts, sizes, times and
+	// reasons.
+	PluginStoredRecords = "request_records"
+	// The plugin's part in each session: the turn it started in and
+	// whether the user paused it.
+	PluginStoredSessions = "plugin_sessions"
+	// The plugin's own values in astrlink.store.
+	PluginStoredValues = "plugin_values"
+	// The resident block a session carries, in memory only.
+	PluginStoredResidentBlock = "resident_block"
+)
+
+// PluginHostStorage is one kind of thing the host keeps for a plugin, and
+// how many it keeps now when it counts them.
+type PluginHostStorage struct {
+	Kind  string `json:"kind"`
+	Count *int   `json:"count,omitempty"`
 }
 
 // PluginSetting is a field of a plugin's settings form, as its manifest
@@ -199,6 +311,9 @@ type PluginSettingsUpdate struct {
 	NetworkOrigins      *[]PluginNetworkOriginInput `json:"network_origins,omitempty"`
 	PrivacyTrusted      *bool                       `json:"privacy_trusted,omitempty"`
 	TurnWaitMs          *int                        `json:"turn_wait_ms,omitempty"`
+	ExcludedClients     *[]string                   `json:"excluded_clients,omitempty"`
+	WorkspaceBinding    *bool                       `json:"workspace_binding,omitempty"`
+	AutoRefresh         *bool                       `json:"auto_refresh,omitempty"`
 	Config              json.RawMessage             `json:"config,omitempty"`
 	// PlaintextConsent lists the plain http origins of servers the user
 	// agrees to reach in the clear.
@@ -278,4 +393,59 @@ type PluginBindingValue struct {
 	Value      string     `json:"value"`
 	Sessions   int        `json:"sessions"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+}
+
+// MaxPluginExcludedClients bounds the clients a plugin is off for.
+const MaxPluginExcludedClients = 64
+
+// SessionPlugin is a plugin's part in one session, for the session's memory
+// page.
+type SessionPlugin struct {
+	Plugin string `json:"plugin"`
+	Name   string `json:"name"`
+	// Paused is set when the user paused the plugin in the session.
+	Paused bool `json:"paused"`
+	// FirstTurn is the turn the plugin first took part in, 0 for none yet.
+	FirstTurn int `json:"first_turn,omitempty"`
+	// Block is the resident block the session carries. It lives in memory
+	// only: nil after a restart until the session's next request.
+	Block *SessionPluginBlock `json:"block,omitempty"`
+	// RefreshPending is set while a refresh waits for the next request.
+	RefreshPending bool `json:"refresh_pending,omitempty"`
+}
+
+// SessionPluginBlock is a resident block as it goes into the session's
+// requests.
+type SessionPluginBlock struct {
+	Text       string    `json:"text"`
+	Bytes      int       `json:"bytes"`
+	Trigger    string    `json:"trigger"`
+	Language   string    `json:"language"`
+	ComputedAt time.Time `json:"computed_at"`
+}
+
+// SessionPluginInput pauses or resumes a plugin in a session.
+type SessionPluginInput struct {
+	Paused bool `json:"paused"`
+}
+
+// PluginActionInput is a click on a button of a plugin's record.
+type PluginActionInput struct {
+	Action  string `json:"action"`
+	Session string `json:"session"`
+}
+
+// PluginActionResult is what came of a click: a message from the plugin,
+// and whether the session's next request computes its block again.
+type PluginActionResult struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Refresh bool   `json:"refresh"`
+	// Reason is set when the call failed: timeout, plugin_error and so on.
+	Reason string `json:"reason,omitempty"`
+}
+
+// PluginClearResult says how many things a clearing removed.
+type PluginClearResult struct {
+	Removed int `json:"removed"`
 }

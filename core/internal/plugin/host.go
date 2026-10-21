@@ -106,6 +106,8 @@ type Store interface {
 type Services struct {
 	Fetcher Fetcher
 	Store   Store
+	// Metadata serves astrlink.meta.values.
+	Metadata MetadataStats
 	// Now is the clock of astrlink.clock.now; nil means time.Now.
 	Now func() time.Time
 }
@@ -129,11 +131,34 @@ type MetaValue struct {
 	Source string `json:"source"`
 }
 
-// SessionRef names the session and turn of a request.
+// SessionRef names the session and turn of a request. First marks the turn
+// the plugin first took part in: the session's first turn, or the first
+// since the plugin was enabled.
 type SessionRef struct {
-	ID   string `json:"id"`
-	Turn int    `json:"turn"`
+	ID    string `json:"id"`
+	Turn  int    `json:"turn"`
+	First bool   `json:"first,omitempty"`
 }
+
+// MetadataStats reads how sessions use the values of an attribute, for
+// astrlink.meta.values.
+type MetadataStats interface {
+	ValueStats(ctx context.Context, key string, limit int) ([]ValueStat, error)
+}
+
+// ValueStat is a value sessions are bound to: how many, and when one of them
+// last made a request, in milliseconds since the Unix epoch, 0 for never.
+type ValueStat struct {
+	Value      string `json:"value"`
+	Sessions   int    `json:"sessions"`
+	LastUsedAt int64  `json:"lastUsedAt"`
+}
+
+// Bounds of astrlink.meta.values.
+const (
+	defaultMetaValues = 50
+	maxMetaValues     = 200
+)
 
 // CallOptions describe one hook call.
 type CallOptions struct {
@@ -240,6 +265,7 @@ func (bound *instance) install() error {
 			"keys":   define("store.keys", 1, hostStoreKeys),
 		},
 		"config": map[string]any{"get": define("config.get", 0, hostConfigGet)},
+		"meta":   map[string]any{"values": define("meta.values", 2, hostMetaValues)},
 		"util":   map[string]any{"sha256": define("util.sha256", 1, hostSHA256)},
 		"log":    define("log", 2, hostLog),
 		"clock":  map[string]any{"now": define("clock.now", 0, hostClockNow)},
@@ -254,6 +280,46 @@ func hostRequestInfo(c *call, realm *moejs.Realm, _ []moejs.Value) (moejs.Value,
 		return moejs.Null(), nil
 	}
 	return realm.FromGo(c.options.Request)
+}
+
+// hostMetaValues returns the values of one of the plugin's own attributes
+// that sessions are bound to, the most recently used first.
+func hostMetaValues(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
+	if !c.granted(CapabilityRequest) {
+		return moejs.Undefined(), realm.TypeError("astrlink.meta.values needs the %s capability", CapabilityRequest)
+	}
+	if c.plugin.services.Metadata == nil {
+		return moejs.Undefined(), realm.TypeError("astrlink.meta.values is unavailable")
+	}
+	key, err := stringArg(realm, args, 0, "key")
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	if !slices.ContainsFunc(c.plugin.Meta.Metadata, func(attribute MetadataAttribute) bool { return attribute.Key == key }) {
+		return moejs.Undefined(), realm.RangeError("astrlink.meta.values reads only the attributes in meta.metadata")
+	}
+	limit := defaultMetaValues
+	if argument := moejs.Arg(args, 1); !argument.IsUndefined() {
+		number, err := realm.ToNumber(argument)
+		if err != nil {
+			return moejs.Undefined(), err
+		}
+		if number != number || number < 1 || number > maxMetaValues {
+			return moejs.Undefined(), realm.RangeError("astrlink.meta.values takes a limit of 1 to %d", maxMetaValues)
+		}
+		limit = int(number)
+	}
+	var stats []ValueStat
+	if waitErr := c.wait(func() { stats, err = c.plugin.services.Metadata.ValueStats(c.ctx, key, limit) }); waitErr != nil {
+		return moejs.Undefined(), waitErr
+	}
+	if err != nil {
+		return moejs.Undefined(), fmt.Errorf("astrlink.meta.values: %w", err)
+	}
+	if stats == nil {
+		stats = []ValueStat{}
+	}
+	return realm.FromGo(stats)
 }
 
 func hostConfigGet(c *call, realm *moejs.Realm, _ []moejs.Value) (moejs.Value, error) {

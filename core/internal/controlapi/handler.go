@@ -117,6 +117,9 @@ type Dependencies struct {
 	// without them the metadata routes report 503.
 	Metadata      MetadataRegistry
 	MetadataStore storage.MetadataStore
+	// PluginHost serves the settings of every plugin and the plugins' part
+	// in each session. Optional; without it those routes report 503.
+	PluginHost PluginHost
 }
 
 // RateLimitReleaser restores a service after an operator clears its risk.
@@ -195,6 +198,7 @@ type Handler struct {
 	syncManager        SyncManager
 	plugins            PluginRegistry
 	pluginStore        storage.PluginStore
+	pluginHost         PluginHost
 	pluginsMu          sync.Mutex
 	// pluginTests are the last connection test of each plugin.
 	pluginTestsMu sync.Mutex
@@ -275,6 +279,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		syncManager:        dependencies.Sync,
 		plugins:            dependencies.Plugins,
 		pluginStore:        dependencies.PluginStore,
+		pluginHost:         dependencies.PluginHost,
 		metadata:           dependencies.Metadata,
 		metadataStore:      dependencies.MetadataStore,
 		mux:                http.NewServeMux(),
@@ -292,6 +297,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 	handler.mux.HandleFunc(BuiltinToolsPath, handler.authenticated(handler.builtinToolResource, RoleOperator))
 	handler.mux.HandleFunc(PluginsPath, handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
 	handler.mux.HandleFunc(PluginsPath+"/", handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
+	handler.mux.HandleFunc(PluginHostPath, handler.authenticatedBy(handler.pluginHostResource, pluginHostRequiredRole))
 	handler.mux.HandleFunc(MetadataAttributesPath, handler.authenticated(handler.metadataAttributesResource, RoleObserver))
 	handler.mux.HandleFunc(MetadataAttributesPath+"/", handler.authenticated(handler.metadataAttributesResource, RoleObserver))
 	handler.mux.HandleFunc(RoutingSettingsPath, handler.authenticated(handler.routingSettingsResource, RoleObserver))

@@ -202,8 +202,12 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		return fail("configure local privacy filter: %w", err)
 	}
 	auditKey, err := store.GetAuditKey(ctx)
+	// The workspace key fingerprints the directories sessions run in, so a
+	// new session there takes the project of the last.
+	var workspaceKey []byte
 	if err == nil {
 		err = privacyFilter.PersistPlaceholders(auditKey, store)
+		workspaceKey = pluginhost.WorkspaceKey(auditKey)
 		clear(auditKey)
 	}
 	if err != nil {
@@ -308,13 +312,18 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Dir:      pluginDirectory,
 		Settings: hostapi.Settings{Store: store},
 		Services: plugin.Services{
-			Fetcher: &hostapi.Fetcher{Credentials: store},
-			Store:   hostapi.Store{Values: store},
+			Fetcher:  &hostapi.Fetcher{Credentials: store},
+			Store:    hostapi.Store{Values: store},
+			Metadata: hostapi.Metadata{Store: store},
 		},
 	})
 	pluginHost := pluginhost.New(pluginhost.Options{
-		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Records: store, Logf: logf,
+		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Store: store, Records: store,
+		WorkspaceKey: workspaceKey, Logf: logf,
 	})
+	if err := pluginHost.LoadSettings(ctx); err != nil {
+		logf("load the settings of the plugins: %v", err)
+	}
 	gatewayDependencies.Plugins = pluginHost
 	// One shared inference handler backs both control-plane seams: the builtin
 	// tool tester and the model classification caller used by the classifier
@@ -354,6 +363,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		PluginStore:        store,
 		Metadata:           requestMetadata,
 		MetadataStore:      store,
+		PluginHost:         pluginHost,
 	})
 	if err != nil {
 		return fail("configure persistent control API: %w", err)

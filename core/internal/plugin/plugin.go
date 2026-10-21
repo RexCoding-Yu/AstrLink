@@ -57,6 +57,9 @@ const (
 	HookObserveTurn    = "observeTurn"
 	HookDescribeStatus = "describeStatus"
 	HookTestConnection = "testConnection"
+	// HookOnAction handles a click on a button of one of the plugin's
+	// records, outside any request.
+	HookOnAction = "onAction"
 )
 
 var knownHooks = []string{
@@ -65,6 +68,7 @@ var knownHooks = []string{
 	HookObserveTurn,
 	HookDescribeStatus,
 	HookTestConnection,
+	HookOnAction,
 }
 
 // Limits bound one hook call.

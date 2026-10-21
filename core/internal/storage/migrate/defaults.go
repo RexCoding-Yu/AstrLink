@@ -1137,6 +1137,10 @@ END`,
 			// The user's choices for each plugin. Plugins come from the
 			// builtin set and the plugin directory; a row exists once the
 			// user changed something, and a plugin without one is disabled.
+			// excluded_clients_json lists the client types the plugin is off
+			// for; workspace_binding binds a new session to the value its
+			// workspace had; auto_refresh lets the host swap a session's
+			// resident block when the plugin's data changed.
 			`CREATE TABLE plugin_settings (
     plugin_key TEXT PRIMARY KEY CHECK(length(plugin_key) BETWEEN 1 AND 32),
     enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
@@ -1145,8 +1149,32 @@ END`,
     privacy_trusted INTEGER NOT NULL DEFAULT 0 CHECK(privacy_trusted IN (0, 1)),
     turn_wait_ms INTEGER NOT NULL DEFAULT 2500 CHECK(turn_wait_ms BETWEEN 1000 AND 5000),
     config_json TEXT NOT NULL DEFAULT '{}' CHECK(length(config_json) <= 65536),
+    excluded_clients_json TEXT NOT NULL DEFAULT '[]' CHECK(length(excluded_clients_json) <= 4096),
+    workspace_binding INTEGER NOT NULL DEFAULT 1 CHECK(workspace_binding IN (0, 1)),
+    auto_refresh INTEGER NOT NULL DEFAULT 0 CHECK(auto_refresh IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+)`,
+			// The settings of every plugin at once: the pause of them all,
+			// the budget of what they inject into one request, and the
+			// interface language what they inject follows. One row, absent
+			// until the first change.
+			`CREATE TABLE plugin_host_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    document_json TEXT NOT NULL CHECK(length(document_json) <= 4096),
+    updated_at TEXT NOT NULL
+)`,
+			// A plugin's part in one session: the turn it first took part in,
+			// which is where it may ask what the session lacks, and whether
+			// the user paused it there. Only numbers, never conversation text.
+			`CREATE TABLE plugin_sessions (
+    plugin_key TEXT NOT NULL REFERENCES plugin_settings(plugin_key) ON DELETE CASCADE,
+    session_id TEXT NOT NULL CHECK(length(session_id) BETWEEN 1 AND 256),
+    first_turn INTEGER NOT NULL CHECK(first_turn >= 0),
+    paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_key, session_id)
 )`,
 			// Credential slots a plugin declares, sealed under dek_secrets like
 			// builtin_tool_credentials. id is <plugin_key>/<name>, the key the
@@ -1191,11 +1219,23 @@ END`,
     target_id TEXT NOT NULL,
     key TEXT NOT NULL REFERENCES metadata_attributes(key) ON DELETE CASCADE,
     value TEXT NOT NULL,
-    source TEXT NOT NULL CHECK(source IN ('token_default', 'model_marker', 'user_marker', 'manual')),
+    source TEXT NOT NULL CHECK(source IN ('token_default', 'model_marker', 'user_marker', 'user_answer', 'workspace', 'manual')),
     turn INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (target_kind, target_id, key)
+)`,
+			// The value a workspace was bound to, for a new session there to
+			// start with. workspace is a keyed fingerprint of the directory's
+			// path and name its last element; the path itself is not kept.
+			`CREATE TABLE metadata_workspace_values (
+    key TEXT NOT NULL REFERENCES metadata_attributes(key) ON DELETE CASCADE,
+    workspace TEXT NOT NULL CHECK(length(workspace) = 64),
+    name TEXT NOT NULL CHECK(length(name) <= 256),
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (key, workspace)
 )`,
 			`ALTER TABLE request_records ADD COLUMN metadata_json TEXT`,
 			`ALTER TABLE request_records ADD COLUMN plugin_records_json TEXT`,

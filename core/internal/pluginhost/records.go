@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/injection"
+	"github.com/QuantumNous/astrlink/core/internal/metadata"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/view"
 )
@@ -33,8 +35,12 @@ const (
 	skipInjectFailed  = "injection_failed"
 )
 
-// maxBlockItems bounds the items of one block a plugin returns.
-const maxBlockItems = 256
+// maxBlockItems bounds the items of one block a plugin returns, and
+// maxChoices the values it offers for one attribute.
+const (
+	maxBlockItems = 256
+	maxChoices    = 50
+)
 
 // skipReason is a reason a plugin gives for skipping a turn.
 var skipReason = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -44,6 +50,9 @@ type hookResult struct {
 	system  injection.Block
 	context injection.Block
 	skip    string
+	// choices are the values a turn block offers for each attribute, for
+	// the user's answer to name one.
+	choices map[string][]string
 	record  contract.PluginRecord
 	// hasRecord is set when the plugin described its part itself.
 	hasRecord bool
@@ -55,17 +64,20 @@ type hookResult struct {
 }
 
 // parseResult reads a prepare hook's result. Undefined is an empty result.
-func parseResult(raw json.RawMessage, owner *plugin.Plugin) hookResult {
+// Choices count only for the plugin's own attributes, and only the values
+// those accept.
+func parseResult(raw json.RawMessage, owner *plugin.Plugin, registry *metadata.Registry) hookResult {
 	var result hookResult
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return result
 	}
 	var fields struct {
-		System  json.RawMessage `json:"system"`
-		Context json.RawMessage `json:"context"`
-		Skip    *string         `json:"skip"`
-		Record  json.RawMessage `json:"record"`
+		System  json.RawMessage     `json:"system"`
+		Context json.RawMessage     `json:"context"`
+		Skip    *string             `json:"skip"`
+		Choices map[string][]string `json:"choices"`
+		Record  json.RawMessage     `json:"record"`
 	}
 	if json.Unmarshal(trimmed, &fields) != nil {
 		result.invalid = true
@@ -88,6 +100,24 @@ func parseResult(raw json.RawMessage, owner *plugin.Plugin) hookResult {
 		result.record, result.hasRecord = view.ParseRecord(fields.Record)
 		if result.hasRecord && !owner.Can(plugin.CapabilityViews) {
 			result.record.View = nil
+		}
+	}
+	for key, values := range fields.Choices {
+		owned := slices.ContainsFunc(owner.Meta.Metadata, func(attribute plugin.MetadataAttribute) bool { return attribute.Key == key })
+		if !owned || registry == nil {
+			continue
+		}
+		var kept []string
+		for _, value := range values {
+			if len(kept) < maxChoices && value != contract.MetadataNone && registry.Valid(key, value) && !slices.Contains(kept, value) {
+				kept = append(kept, value)
+			}
+		}
+		if len(kept) > 0 {
+			if result.choices == nil {
+				result.choices = map[string][]string{}
+			}
+			result.choices[key] = kept
 		}
 	}
 	return result
@@ -125,11 +155,27 @@ func parseBlock(raw json.RawMessage) (injection.Block, bool) {
 // injected is what the injection did for one plugin.
 type injected struct {
 	outcome injection.Outcome
-	// dropped counts the turn block's items past the budget.
+	// dropped counts the turn block's items past the block's budget.
 	dropped int
-	// residentTitle and turnTitle are the titles the plugin gave the
-	// records that produced the blocks.
-	residentTitle, turnTitle string
+	// record is how the session's resident block came about, when the
+	// session has one; fresh is set on the first request that carries it.
+	record      residentRecord
+	kept, fresh bool
+	// overBudget is set when the plugin's blocks stayed out because the
+	// plugins before it used up the injection budget.
+	overBudget bool
+	// turnTitle is the title the plugin gave the record that settled the
+	// turn block.
+	turnTitle string
+}
+
+// residentTitle is the title the plugin gave the record of the resident
+// block, "" for none.
+func (result injected) residentTitle() string {
+	if result.kept && result.record.hasGiven {
+		return result.record.given.Title
+	}
+	return ""
 }
 
 // report builds the plugins' records and events from what the injection
@@ -140,11 +186,19 @@ func (run *Run) report(results []injected, failed bool) {
 	ended := time.Now().UTC()
 	for index, current := range run.parts {
 		var records []contract.RequestPluginRecord
-		if record, ok := run.sessionRecord(current, results[index], failed); ok {
-			records = append(records, record)
-		}
-		if record, ok := run.turnRecord(current, results[index], failed); ok {
-			records = append(records, record)
+		if current.off != "" {
+			if current.settle {
+				record := run.newRecord(current, plugin.HookPrepareSession, "")
+				record.Status, record.SkippedReason = contract.PluginRecordSkipped, current.off
+				records = append(records, record)
+			}
+		} else {
+			if record, ok := run.sessionRecord(current, results[index], failed); ok {
+				records = append(records, record)
+			}
+			if record, ok := run.turnRecord(current, results[index], failed); ok {
+				records = append(records, record)
+			}
 		}
 		if len(records) == 0 || len(run.records)+len(records) > contract.MaxRequestPluginRecords {
 			continue
@@ -163,19 +217,31 @@ func (run *Run) report(results []injected, failed bool) {
 	}
 }
 
-// sessionRecord describes the plugin's resident block in the request.
+// sessionRecord describes the plugin's resident block in the request: the
+// call it waited for, or the block a call computed after an earlier request
+// stopped waiting, on the first request that carries it.
 func (run *Run) sessionRecord(current *part, result injected, failed bool) (contract.RequestPluginRecord, bool) {
 	outcome := result.outcome
-	if current.sessionCall == nil && outcome.ResidentBytes == 0 && !outcome.NoSystem {
+	waited := current.sessionCall != nil && !current.background
+	if !waited && !result.fresh && outcome.ResidentBytes == 0 && !outcome.NoSystem && !result.overBudget {
 		return contract.RequestPluginRecord{}, false
 	}
-	record := run.newRecord(current, plugin.HookPrepareSession, result.residentTitle)
+	record := run.newRecord(current, plugin.HookPrepareSession, result.residentTitle())
 	dropped := 0
-	if current.sessionCall != nil {
+	switch {
+	case waited:
+		record.Trigger = current.trigger
 		run.describeCall(&record, current.sessionCall)
 		if called, ok := current.sessionCall.finished(); ok {
 			dropped = called.dropped
 		}
+	case result.fresh:
+		record.Trigger = result.record.trigger
+		describeKept(&record, result.record)
+		dropped = result.record.dropped
+	}
+	if result.kept && result.record.hasGiven && record.Actions == nil {
+		record.Actions = result.record.given.Actions
 	}
 	if outcome.ResidentBytes > 0 {
 		record.Injection = &contract.PluginInjection{
@@ -184,6 +250,8 @@ func (run *Run) sessionRecord(current *part, result injected, failed bool) (cont
 	}
 	if record.SkippedReason == "" {
 		switch {
+		case result.overBudget:
+			record.Status, record.SkippedReason = contract.PluginRecordSkipped, contract.PluginSkipOverBudget
 		case outcome.NoSystem:
 			record.SkippedReason = skipNoSystem
 		case failed:
@@ -193,11 +261,20 @@ func (run *Run) sessionRecord(current *part, result injected, failed bool) (cont
 	return record, true
 }
 
+// describeKept fills record from how a kept block came about.
+func describeKept(record *contract.RequestPluginRecord, kept residentRecord) {
+	record.ElapsedMs, record.Network = kept.info.elapsedMs, kept.info.network
+	if kept.hasGiven {
+		record.Title, record.Status, record.Summary = kept.given.Title, kept.given.Status, kept.given.Summary
+		record.View, record.Truncated, record.Actions = kept.given.View, kept.given.Truncated, kept.given.Actions
+	}
+}
+
 // turnRecord describes the plugin's turn block in the request.
 func (run *Run) turnRecord(current *part, result injected, failed bool) (contract.RequestPluginRecord, bool) {
 	outcome := result.outcome
 	called := current.turnCall != nil || current.skip != ""
-	waiting := !called && current.settle && !run.userMarker && run.prepares(current) && !run.checked()
+	waiting := !called && current.settle && !run.bindsOnly && run.prepares(current) && !run.checked()
 	if !called && !waiting && outcome.TurnBytes == 0 && outcome.Replayed == 0 && !outcome.NoOpening {
 		return contract.RequestPluginRecord{}, false
 	}
@@ -220,6 +297,8 @@ func (run *Run) turnRecord(current *part, result injected, failed bool) (contrac
 	}
 	if record.SkippedReason == "" {
 		switch {
+		case result.overBudget && current.turnCall != nil:
+			record.Status, record.SkippedReason = contract.PluginRecordSkipped, contract.PluginSkipOverBudget
 		case outcome.NoOpening:
 			record.SkippedReason = skipNoOpening
 		case failed && current.turnCall != nil:
@@ -272,10 +351,7 @@ func (run *Run) describeCall(record *contract.RequestPluginRecord, call *hookCal
 		return
 	}
 	record.ElapsedMs = int(call.info.Elapsed.Milliseconds())
-	record.Network = contract.PluginNetworkCount{
-		Requests: call.info.Network.Requests, Denied: call.info.Network.Denied,
-		Errors: call.info.Network.Errors, WaitMs: int(call.info.Network.Wait.Milliseconds()),
-	}
+	record.Network = networkOf(call.info)
 	if call.err != nil {
 		record.Status, record.SkippedReason = contract.PluginRecordFailed, contract.PluginSkipPluginError
 		var failure *plugin.CallError
@@ -287,7 +363,7 @@ func (run *Run) describeCall(record *contract.RequestPluginRecord, call *hookCal
 	result := call.result
 	if result.hasRecord {
 		record.Title, record.Status, record.Summary = result.record.Title, result.record.Status, result.record.Summary
-		record.View, record.Truncated = result.record.View, result.record.Truncated
+		record.View, record.Truncated, record.Actions = result.record.View, result.record.Truncated, result.record.Actions
 	}
 	switch {
 	case result.invalid:

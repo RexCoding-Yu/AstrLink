@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -319,6 +320,92 @@ VALUES ('token', ?, ?, ?, ?, ?, ?)`, tokenID, key, value, contract.MetadataSetBy
 		}
 	}
 	return transaction.Commit()
+}
+
+func (store *Store) WorkspaceValues(ctx context.Context, workspace string) (map[string]storage.MetadataWorkspaceRecord, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT key, workspace, name, value, created_at, updated_at
+FROM metadata_workspace_values WHERE workspace = ?`, workspace)
+	if err != nil {
+		return nil, fmt.Errorf("read workspace values: %w", err)
+	}
+	defer rows.Close()
+	values := map[string]storage.MetadataWorkspaceRecord{}
+	for rows.Next() {
+		var record storage.MetadataWorkspaceRecord
+		var created, updated string
+		if err := rows.Scan(&record.Key, &record.Workspace, &record.Name, &record.Value, &created, &updated); err != nil {
+			return nil, fmt.Errorf("read workspace values: %w", err)
+		}
+		if record.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+			return nil, fmt.Errorf("%w: workspace value %s", storage.ErrInvalidRecord, record.Key)
+		}
+		if record.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+			return nil, fmt.Errorf("%w: workspace value %s", storage.ErrInvalidRecord, record.Key)
+		}
+		values[record.Key] = record
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read workspace values: %w", err)
+	}
+	return values, nil
+}
+
+func (store *Store) PutWorkspaceValue(ctx context.Context, record storage.MetadataWorkspaceRecord, replace bool) (bool, error) {
+	if len(record.Workspace) != 64 || len(record.Name) > 256 || record.Key == "" || record.Value == "" {
+		return false, fmt.Errorf("%w: workspace value", storage.ErrInvalidArgument)
+	}
+	now := store.now().UTC().Format(time.RFC3339Nano)
+	statement := `INSERT INTO metadata_workspace_values (key, workspace, name, value, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key, workspace) DO NOTHING`
+	if replace {
+		statement = `INSERT INTO metadata_workspace_values (key, workspace, name, value, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key, workspace) DO UPDATE SET name = excluded.name, value = excluded.value, updated_at = excluded.updated_at`
+	}
+	result, err := store.db.ExecContext(ctx, statement, record.Key, record.Workspace, record.Name, record.Value, now, now)
+	if err != nil {
+		return false, fmt.Errorf("write workspace value: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("write workspace value: %w", err)
+	}
+	return changed > 0, nil
+}
+
+func (store *Store) CountWorkspaceValues(ctx context.Context, keys []string) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	var count int
+	query, args := workspaceKeysQuery(`SELECT COUNT(*) FROM metadata_workspace_values WHERE key IN (`, keys)
+	if err := store.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count workspace values: %w", err)
+	}
+	return count, nil
+}
+
+func (store *Store) DeleteWorkspaceValues(ctx context.Context, keys []string) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	query, args := workspaceKeysQuery(`DELETE FROM metadata_workspace_values WHERE key IN (`, keys)
+	result, err := store.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete workspace values: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete workspace values: %w", err)
+	}
+	return int(removed), nil
+}
+
+func workspaceKeysQuery(prefix string, keys []string) (string, []any) {
+	args := make([]any, len(keys))
+	for index, key := range keys {
+		args[index] = key
+	}
+	return prefix + strings.TrimSuffix(strings.Repeat("?, ", len(keys)), ", ") + ")", args
 }
 
 func validMetadataTarget(kind, id string) error {

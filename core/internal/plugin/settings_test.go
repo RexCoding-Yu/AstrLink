@@ -22,7 +22,11 @@ func settingsMeta() Meta {
 		{Key: HostSettingTrusted, Group: "隐私"},
 		{Key: "note", Label: "备注", Type: SettingText, Advanced: true, Placeholder: "可选"},
 		{Key: HostSettingOrigins, Advanced: true},
+		{Key: HostSettingClients, Group: "会话"},
+		{Key: HostSettingWorkspace, Group: "会话"},
+		{Key: HostSettingRefresh, Group: "会话"},
 	}
+	meta.Storage = []StorageItem{{Label: "项目对应的服务器编号", Retention: "停用插件时可以清除"}}
 	meta.Credits = []Credit{{Name: "PowerContext", Owner: "OceanBase", License: "Apache-2.0", URL: "https://github.com/oceanbase/powercontext", Note: "本插件只通过公开的 HTTP 接口通信。"}}
 	return meta
 }
@@ -73,6 +77,20 @@ func TestSettingsAndCreditsRejects(t *testing.T) {
 		{"credit without https", func(meta *Meta) { meta.Credits[0].URL = "http://github.com/oceanbase/powercontext" }, "https"},
 		{"credit with a bad license", func(meta *Meta) { meta.Credits[0].License = "Apache 2.0" }, "SPDX"},
 		{"credit without a name", func(meta *Meta) { meta.Credits[0].Name = "" }, "credits[0].name"},
+		{"workspace without an attribute", func(meta *Meta) { meta.Metadata = nil }, "$workspace needs an attribute"},
+		{"refresh without injecting", func(meta *Meta) {
+			meta.Capabilities = slices.DeleteFunc(meta.Capabilities, func(capability string) bool { return capability == CapabilityInject })
+		}, "$refresh needs the context.inject capability"},
+		{"clients with a label", func(meta *Meta) { meta.Settings[9].Label = "客户端" }, "takes only group and advanced"},
+		{"storage without the capability", func(meta *Meta) {
+			meta.Capabilities = slices.DeleteFunc(meta.Capabilities, func(capability string) bool { return capability == CapabilityStorage })
+		}, "meta.storage needs the storage capability"},
+		{"storage without a retention", func(meta *Meta) { meta.Storage[0].Retention = "" }, "meta.storage[0]"},
+		{"too much storage", func(meta *Meta) {
+			for range 8 {
+				meta.Storage = append(meta.Storage, meta.Storage[0])
+			}
+		}, "meta.storage has more than 8"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			meta := settingsMeta()

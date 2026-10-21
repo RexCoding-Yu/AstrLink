@@ -37,6 +37,18 @@ type MetadataValueStat struct {
 	LastUsedAt *time.Time
 }
 
+// MetadataWorkspaceRecord is the value a workspace was bound to, for the
+// sessions that start there. Workspace is a keyed fingerprint of the
+// directory's path and Name its last element; the path is not kept.
+type MetadataWorkspaceRecord struct {
+	Key       string
+	Workspace string
+	Name      string
+	Value     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type MetadataStore interface {
 	ListMetadataAttributes(context.Context) ([]contract.MetadataAttribute, error)
 	// CreateMetadataAttribute returns ErrConflict when the key or the marker
@@ -64,4 +76,15 @@ type MetadataStore interface {
 	DeleteMetadataValue(ctx context.Context, targetKind, targetID, key string) error
 	// ReplaceTokenMetadata makes values the whole of a token's defaults.
 	ReplaceTokenMetadata(ctx context.Context, tokenID contract.AccessTokenID, values map[string]string) error
+
+	// WorkspaceValues returns the values a workspace is bound to, by key.
+	WorkspaceValues(ctx context.Context, workspace string) (map[string]MetadataWorkspaceRecord, error)
+	// PutWorkspaceValue binds a workspace's value of an attribute. Without
+	// replace, a value bound before stays; bound reports whether record is
+	// what the workspace is bound to now.
+	PutWorkspaceValue(ctx context.Context, record MetadataWorkspaceRecord, replace bool) (bound bool, err error)
+	// CountWorkspaceValues counts the workspaces bound to a value of any of
+	// keys, and DeleteWorkspaceValues removes them.
+	CountWorkspaceValues(ctx context.Context, keys []string) (int, error)
+	DeleteWorkspaceValues(ctx context.Context, keys []string) (int, error)
 }

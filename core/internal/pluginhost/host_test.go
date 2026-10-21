@@ -89,7 +89,9 @@ type harness struct {
 	bindings *sqlite.Store
 	writes   chan string
 	// added gets what captures add to written request records.
-	added chan []contract.RequestPluginRecord
+	added    recordSink
+	manager  *plugin.Manager
+	registry *metadata.Registry
 }
 
 // recordSink stands for the request records captures add to.
@@ -134,13 +136,31 @@ func newHarness(t *testing.T, settings plugin.Settings, sources map[string]strin
 		}
 	}
 	added := make(recordSink, 4)
-	host := New(Options{Plugins: manager, Metadata: registry, Bindings: bindings, Records: added, Logf: t.Logf})
+	host := New(Options{
+		Plugins: manager, Metadata: registry, Bindings: bindings, Store: bindings, Records: added,
+		WorkspaceKey: []byte("workspace key"), Logf: t.Logf,
+	})
 	t.Cleanup(host.Close)
-	return &harness{host: host, bindings: bindings, writes: store.writes, added: added}
+	return &harness{host: host, bindings: bindings, writes: store.writes, added: added, manager: manager, registry: registry}
 }
 
+// restart is the same gateway after a restart: storage stays, memory goes.
+func (h *harness) restart(t *testing.T) {
+	t.Helper()
+	h.host = New(Options{
+		Plugins: h.manager, Metadata: h.registry, Bindings: h.bindings, Store: h.bindings, Records: h.added,
+		WorkspaceKey: []byte("workspace key"), Logf: t.Logf,
+	})
+	t.Cleanup(h.host.Close)
+	if err := h.host.LoadSettings(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// allCapabilities are the settings of a plugin the user enabled with every
+// capability, the other choices left as a new plugin has them.
 func allCapabilities() plugin.Settings {
-	return plugin.Settings{Enabled: true, Capabilities: []string{
+	return plugin.Settings{Enabled: true, WorkspaceBinding: true, Capabilities: []string{
 		plugin.CapabilityInject, plugin.CapabilityRequest, plugin.CapabilityNetwork, plugin.CapabilityStorage, plugin.CapabilityViews,
 	}}
 }
@@ -233,7 +253,8 @@ func TestASessionIsAskedThenBoundThenRecalled(t *testing.T) {
 	scanner := run.NewMarkerScanner()
 	scanner.Write("<memo-project>astrlink</memo-project>\n好的，先看分页。")
 	bound := run.Finish(context.Background(), scanner.Close(), true)
-	if len(bound) != 1 || bound[0] != (contract.MetadataEvent{Key: "project", Event: contract.MetadataEventBound, Value: "astrlink", SetBy: contract.MetadataSetByModelMarker}) {
+	// No session had the project and nothing offered it: a new project.
+	if len(bound) != 1 || bound[0] != (contract.MetadataEvent{Key: "project", Event: contract.MetadataEventBound, Value: "astrlink", SetBy: contract.MetadataSetByModelMarker, New: true}) {
 		t.Fatalf("Finish = %+v", bound)
 	}
 	if captures := run.Captures(); captures["memo"] != observeQueued {
