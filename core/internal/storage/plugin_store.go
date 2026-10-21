@@ -47,6 +47,18 @@ func NewPluginSettingsRecord(key string) PluginSettingsRecord {
 	return PluginSettingsRecord{Key: key, WorkspaceBinding: true, LookupEnabled: true}
 }
 
+// PluginActivity is what the plugins' statistics read of a request record:
+// when it started, its session, its token usage, its metadata and the
+// plugins' records. A part the record lacks or holds in a shape it cannot
+// read is nil.
+type PluginActivity struct {
+	StartedAt time.Time
+	SessionID string
+	Usage     *contract.Usage
+	Metadata  *contract.RequestMetadata
+	Records   []contract.RequestPluginRecord
+}
+
 // PluginSessionRecord is a plugin's part in one session: the turn it first
 // took part in and whether the user paused it there.
 type PluginSessionRecord struct {
@@ -115,6 +127,9 @@ type PluginStore interface {
 	PausePluginSession(ctx context.Context, plugin, session string, paused bool, turn int) (PluginSessionRecord, error)
 	// CountPluginSessions counts the sessions the plugin took part in.
 	CountPluginSessions(ctx context.Context, plugin string) (int, error)
+	// ScanPluginActivity visits the root request records started since,
+	// oldest first, with what the plugins' statistics read of them.
+	ScanPluginActivity(ctx context.Context, since time.Time, visit func(PluginActivity) error) error
 
 	// GetPluginValue returns found false for a key without a value.
 	GetPluginValue(ctx context.Context, plugin, key string) (value json.RawMessage, found bool, err error)

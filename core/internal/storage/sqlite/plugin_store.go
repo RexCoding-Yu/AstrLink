@@ -236,6 +236,49 @@ func (store *Store) CountPluginSessions(ctx context.Context, plugin string) (int
 	return count, nil
 }
 
+func (store *Store) ScanPluginActivity(ctx context.Context, since time.Time, visit func(storage.PluginActivity) error) error {
+	rows, err := store.db.QueryContext(ctx, `SELECT started_at, COALESCE(session_id, ''), usage_json, metadata_json, plugin_records_json
+FROM request_records WHERE parent_request_id IS NULL AND started_at >= ? ORDER BY started_at, id`, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("read plugin activity: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var started string
+		var usage, metadata, records sql.NullString
+		var activity storage.PluginActivity
+		if err := rows.Scan(&started, &activity.SessionID, &usage, &metadata, &records); err != nil {
+			return fmt.Errorf("read plugin activity: %w", err)
+		}
+		if activity.StartedAt, err = time.Parse(time.RFC3339Nano, started); err != nil {
+			return fmt.Errorf("%w: request started at %q", storage.ErrInvalidRecord, started)
+		}
+		// The statistics count what they can read and leave out the rest.
+		if usage.Valid && usage.String != "" {
+			var parsed contract.Usage
+			if json.Unmarshal([]byte(usage.String), &parsed) == nil {
+				activity.Usage = &parsed
+			}
+		}
+		if metadata.Valid && metadata.String != "" {
+			var parsed contract.RequestMetadata
+			if json.Unmarshal([]byte(metadata.String), &parsed) == nil {
+				activity.Metadata = &parsed
+			}
+		}
+		if records.Valid && records.String != "" {
+			_ = json.Unmarshal([]byte(records.String), &activity.Records)
+		}
+		if err := visit(activity); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read plugin activity: %w", err)
+	}
+	return nil
+}
+
 func validPluginSession(plugin, session string, turn int) error {
 	if plugin == "" || len(plugin) > 32 || session == "" || len(session) > 256 || turn < 0 {
 		return fmt.Errorf("%w: plugin session", storage.ErrInvalidArgument)

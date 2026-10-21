@@ -3,10 +3,14 @@ package controlapi
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/pluginstats"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 // PluginHostPath serves the settings of every plugin at once.
@@ -208,6 +212,50 @@ func (handler *Handler) clearPluginData(writer http.ResponseWriter, request *htt
 		return
 	}
 	writeJSON(writer, http.StatusOK, contract.PluginClearResult{Removed: removed})
+}
+
+// pluginStats sums the plugin's account over its last days, by the
+// gateway's calendar, from this computer's request records: counts, sizes,
+// durations and reasons only.
+func (handler *Handler) pluginStats(writer http.ResponseWriter, request *http.Request, target *plugin.Plugin) {
+	days := contract.DefaultPluginStatsDays
+	if raw := request.URL.Query().Get("days"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > contract.MaxPluginStatsDays {
+			writeError(writer, http.StatusUnprocessableEntity, "invalid_plugin_stats", "days is 1 to 30")
+			return
+		}
+		days = parsed
+	}
+	ctx := request.Context()
+	account := pluginstats.New(target.Key, pluginAttributeKeys(target), time.Local, time.Now(), days)
+	if err := handler.pluginStore.ScanPluginActivity(ctx, account.Since(), func(activity storage.PluginActivity) error {
+		account.Add(activity)
+		return nil
+	}); err != nil {
+		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "could not read the plugin's activity")
+		return
+	}
+	// Whether a session asked is still without a value, and whether one
+	// bound by its workspace moved, is a matter of its binding now.
+	current := map[string]map[string]storage.MetadataValueRecord{}
+	if handler.metadataStore != nil && len(target.Meta.Metadata) > 0 {
+		values, err := handler.metadataStore.ListMetadataValues(ctx, storage.MetadataTargetSession)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not read the sessions' bindings")
+			return
+		}
+		for _, value := range values {
+			if current[value.TargetID] == nil {
+				current[value.TargetID] = map[string]storage.MetadataValueRecord{}
+			}
+			current[value.TargetID][value.Key] = value
+		}
+	}
+	writeJSON(writer, http.StatusOK, account.Result(func(session, key string) (storage.MetadataValueRecord, bool) {
+		value, found := current[session][key]
+		return value, found
+	}))
 }
 
 func pluginAttributeKeys(target *plugin.Plugin) []string {

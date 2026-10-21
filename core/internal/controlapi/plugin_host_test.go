@@ -420,3 +420,54 @@ func storedCount(detail contract.PluginDetail, kind string) *int {
 	}
 	return nil
 }
+
+func TestPluginStatsSumTheRequestRecordsOfTheLastDays(t *testing.T) {
+	fixture := newPluginHostFixture(t)
+	handler, ctx := fixture.handler, context.Background()
+	insert := func(id, session string, read int, metadata *contract.RequestMetadata, records []contract.RequestPluginRecord) {
+		t.Helper()
+		sessionID := contract.SessionID(session)
+		if err := fixture.store.InsertRequestRecord(ctx, contract.RequestRecord{
+			ID: contract.RequestID(id), StartedAt: time.Now().UTC(), Status: contract.RequestStatusSucceeded,
+			InputProtocol: contract.ProtocolAnthropicMessages, SessionID: &sessionID, Audit: contract.NotCapturedAuditSummary(),
+			Usage:    &contract.Usage{InputTokens: 1000, OutputTokens: 10, TotalTokens: 1010, CacheReadTokens: &read},
+			Metadata: metadata, PluginRecords: records,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("request_stats_1", "session_1", 500, &contract.RequestMetadata{
+		Values: map[string]contract.MetadataValue{"project": {Value: "astrlink", Source: "session"}},
+		Events: []contract.MetadataEvent{{Key: "project", Event: contract.MetadataEventBound, Value: "astrlink", SetBy: contract.MetadataSetByWorkspace}},
+	}, []contract.RequestPluginRecord{
+		{Plugin: "loader", PluginVersion: "1.0.0", Hook: plugin.HookPrepareSession, Title: "Loader", Status: contract.PluginRecordOK, Trigger: contract.PluginTriggerStart, ElapsedMs: 40,
+			Injection: &contract.PluginInjection{Placement: contract.PluginPlacementSystem, InjectedBytes: 100}},
+		{Plugin: "loader", PluginVersion: "1.0.0", Hook: plugin.HookObserveTurn, Title: "Loader", Status: contract.PluginRecordOK},
+	})
+	insert("request_stats_2", "session_2", 100, nil, nil)
+	response := controlRequest(t, handler, http.MethodGet, PluginsPath+"/loader/stats", "", "", "")
+	stats := decodeBody[contract.PluginStats](t, response)
+	total := stats.Total
+	if response.Code != http.StatusOK || len(stats.Days) != contract.DefaultPluginStatsDays || stats.Days[6].Date != time.Now().Format(time.DateOnly) ||
+		total.Load.Count != 1 || total.Load.InjectedBytes != 100 || total.Write.OK != 1 || total.Binding.Workspace != 1 ||
+		total.Cache.With != (contract.PluginCacheShare{Requests: 1, InputTokens: 1000, CacheReadTokens: 500}) ||
+		total.Cache.Without != (contract.PluginCacheShare{Requests: 1, InputTokens: 1000, CacheReadTokens: 100}) {
+		t.Fatalf("stats = %d %s", response.Code, response.Body.String())
+	}
+	if stats := decodeBody[contract.PluginStats](t, controlRequest(t, handler, http.MethodGet, PluginsPath+"/loader/stats?days=30", "", "", "")); len(stats.Days) != 30 {
+		t.Fatalf("30 days = %d", len(stats.Days))
+	}
+	for _, days := range []string{"0", "31", "x"} {
+		if response := controlRequest(t, handler, http.MethodGet, PluginsPath+"/loader/stats?days="+days, "", "", ""); response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("days=%s = %d", days, response.Code)
+		}
+	}
+	// Numbers only: an observer reads them.
+	request := httptest.NewRequest(http.MethodGet, PluginsPath+"/loader/stats", nil)
+	request.Header.Set("Authorization", "Bearer "+testObserverToken)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("an observer = %d", recorder.Code)
+	}
+}

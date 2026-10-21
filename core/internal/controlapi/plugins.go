@@ -101,6 +101,10 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		}
 	case action == "workspaces" || action == "values" || action == "lookup-credentials":
 		handler.clearPluginData(writer, request, target, action)
+	case action == "stats":
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.pluginStats(writer, request, target)
+		}
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
 	}
