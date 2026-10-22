@@ -73,7 +73,7 @@ export const meta = {
   apiVersion: 1,
   key: "powercontext",
   name: "PowerContext 记忆",
-  version: "2.1.0",
+  version: "2.1.1",
   capabilities: [
     "context.inject",
     "request.read",
@@ -102,7 +102,7 @@ export const meta = {
   notice:
     "启用后，会话有了项目，就把这个项目的画像和最近更新的主题目录放进系统提示词，会话内不变。" +
     "新会话还没有项目时，只在第一轮问一次用户要纳入哪个项目，并列出已有的项目；同一个目录里的新会话会自动接上上次的项目。" +
-    "客户端和网关在同一台电脑上、能执行 shell 时，模型还可以自己查这个项目的记忆，也可以把值得记住的项目信息主动上报。" +
+    "客户端和网关在同一台电脑上、能执行 shell 时，Agent 还可以自己查这个项目的记忆，也可以把值得记住的项目信息主动上报。" +
     "每轮结束时把用户输入的文字记进 PowerContext；会话定下项目之前的几轮，定下后补写。整理成记忆、生成画像由服务器定时完成。",
   settings: [
     {
@@ -208,18 +208,18 @@ export const meta = {
       max: 10,
       step: 1,
       unit: "条",
-      help: "模型检索一次最多拿到几条记忆，各类记忆按相关度轮流取。",
+      help: "Agent 检索一次最多拿到几条记忆，各类记忆按相关度轮流取。",
     },
     {
       key: "report",
-      label: "允许模型上报",
+      label: "允许 Agent 上报",
       type: "switch",
       group: "上报",
       default: true,
       help:
-        "模型可以用 shell 把以后还用得上的项目信息（背景、目标、约定、决定、进展）主动记进会话绑定的项目，" +
+        "Agent 可以用 shell 把以后还用得上的项目信息（背景、目标、约定、决定、进展）主动记进会话绑定的项目，" +
         "和每轮的对话一样由服务器整理成记忆和画像。" +
-        "要先打开「供模型查询」；每轮最多上报 2 次，内容照样过隐私检查。",
+        "要先打开「允许 Agent 查询」；每轮最多上报 2 次，内容照样过隐私检查。",
     },
     { key: "$trusted", group: "隐私" },
     { key: "$origins", advanced: true },
@@ -230,7 +230,6 @@ export const meta = {
       owner: "OceanBase",
       license: "Apache-2.0",
       url: "https://github.com/oceanbase/powercontext",
-      note: "本插件不是 PowerContext 官方插件，只通过它公开的 HTTP 接口通信，不包含它的代码。",
     },
   ],
   storage: [
@@ -367,6 +366,8 @@ interface Texts {
   moreTopics: string;
   loadTitle: string;
   askTitle: string;
+  /** The title of a turn the plugin adds nothing to. */
+  turnTitle: string;
   writeTitle: string;
   refresh: string;
   refreshConfirm: string;
@@ -400,6 +401,8 @@ interface Texts {
   processingUnknown: string;
   lastSuccess: string;
   lastFailure: string;
+  /** What the server's processing failure codes mean; others show as given. */
+  failures: Record<string, string>;
   lastWrite: string;
   version: (version: string, ms: number) => string;
   unverified: string;
@@ -487,6 +490,7 @@ const TEXTS: Record<Language, Texts> = {
     moreTopics: "还有更多主题没有列出。",
     loadTitle: "记忆装载",
     askTitle: "询问项目",
+    turnTitle: "本轮补充",
     writeTitle: "记忆写入",
     refresh: "刷新记忆",
     refreshConfirm:
@@ -526,6 +530,16 @@ const TEXTS: Record<Language, Texts> = {
     processingUnknown: "由外部执行，状态未知",
     lastSuccess: "最近整理成功",
     lastFailure: "最近整理失败",
+    failures: {
+      model_configuration_error: "模型配置有误",
+      model_timeout: "模型超时",
+      model_unavailable: "模型不可用",
+      invalid_model_output: "模型输出无法解析",
+      worker_crash: "整理进程崩溃",
+      invalid_worker_result: "整理结果无效",
+      missing_durable_acknowledgement: "结果没有确认保存",
+      processing_failed: "整理失败",
+    },
     lastWrite: "最近写入",
     version: (version, ms) => "PowerContext " + version + " · " + ms + " ms",
     unverified: "这个版本没有验证过",
@@ -630,6 +644,7 @@ const TEXTS: Record<Language, Texts> = {
     moreTopics: "More topics are not listed here.",
     loadTitle: "Memory load",
     askTitle: "Project question",
+    turnTitle: "Turn notes",
     writeTitle: "Memory write",
     refresh: "Refresh memory",
     refreshConfirm:
@@ -669,6 +684,16 @@ const TEXTS: Record<Language, Texts> = {
     processingUnknown: "runs elsewhere, state unknown",
     lastSuccess: "Last processed",
     lastFailure: "Last processing failure",
+    failures: {
+      model_configuration_error: "model misconfigured",
+      model_timeout: "model timed out",
+      model_unavailable: "model unavailable",
+      invalid_model_output: "model output unreadable",
+      worker_crash: "worker crashed",
+      invalid_worker_result: "invalid worker result",
+      missing_durable_acknowledgement: "result not confirmed saved",
+      processing_failed: "processing failed",
+    },
     lastWrite: "Last write",
     version: (version, ms) => "PowerContext " + version + " · " + ms + " ms",
     unverified: "this version has not been verified",
@@ -787,6 +812,7 @@ const TEXTS: Record<Language, Texts> = {
     moreTopics: "ほかにもトピックがありますが、ここには載せていません。",
     loadTitle: "記憶の読み込み",
     askTitle: "プロジェクトの確認",
+    turnTitle: "このターンの補足",
     writeTitle: "記憶の書き込み",
     refresh: "記憶を更新",
     refreshConfirm:
@@ -829,6 +855,16 @@ const TEXTS: Record<Language, Texts> = {
     processingUnknown: "外部で実行、状態は不明",
     lastSuccess: "最後に整理できた時刻",
     lastFailure: "最後に整理に失敗した時刻",
+    failures: {
+      model_configuration_error: "モデルの設定に誤り",
+      model_timeout: "モデルがタイムアウト",
+      model_unavailable: "モデルが利用できない",
+      invalid_model_output: "モデルの出力を読めない",
+      worker_crash: "整理プロセスが異常終了",
+      invalid_worker_result: "整理結果が無効",
+      missing_durable_acknowledgement: "保存の確認が取れない",
+      processing_failed: "整理に失敗",
+    },
     lastWrite: "最後の書き込み",
     version: (version, ms) => "PowerContext " + version + " · " + ms + " ms",
     unverified: "このバージョンは未検証です",
@@ -1479,15 +1515,17 @@ function date(text: Texts, at: number): string {
 // user's whole answer is one of the names offered.
 export function prepareTurn(
   turn: AstrLinkPlugin.TurnView,
-): AstrLinkPlugin.PrepareTurnResult | undefined {
+): AstrLinkPlugin.PrepareTurnResult {
   const cfg = config();
+  const text = texts(turn.language);
+  // A turn the plugin adds nothing to still gets its own title in the
+  // request records, not the plugin's name.
   if (
     turn.meta.project !== undefined ||
     turn.session.first !== true ||
     cfg.askProject === false
   )
-    return undefined;
-  const text = texts(turn.language);
+    return { record: { title: text.turnTitle, status: "ok", summary: "" } };
   const limit = Math.min(Math.max(cfg.listProjects ?? 20, 0), 50);
   const listing: Listing =
     limit > 0
@@ -2125,7 +2163,10 @@ function processingItems(
   if (failed)
     items.push({
       label: text.lastFailure,
-      value: moment(text, failed.occurred_at) + " · " + failed.code,
+      value:
+        moment(text, failed.occurred_at) +
+        " · " +
+        (text.failures[failed.code] ?? failed.code),
     });
   return items;
 }

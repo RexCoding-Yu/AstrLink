@@ -252,7 +252,7 @@ const memoSettingsPlugin = `export const meta = {
     { key: "$wait", group: "Recall" },
     { key: "$origins", advanced: true },
   ],
-  credits: [{ name: "Memo server", owner: "Example", license: "Apache-2.0", url: "https://example.com/memo", note: "Talks to its HTTP API." }],
+  credits: [{ name: "Memo server", owner: "Example", license: "Apache-2.0", url: "https://example.com/memo" }],
 };
 export function testConnection() { return { status: "ok", summary: "Memo is up" }; }
 export function describeStatus() {
@@ -277,7 +277,7 @@ func TestPluginSettingsFormSavesServersAndChecksValues(t *testing.T) {
 		detail.Settings[1].Row != "Per turn" || string(detail.Settings[1].Default) != "4" || *detail.Settings[1].Max != 20 || detail.Settings[2].Key != plugin.HostSettingWait {
 		t.Fatalf("settings = %+v", detail.Settings)
 	}
-	if len(detail.Credits) != 1 || detail.Credits[0] != (contract.PluginCredit{Name: "Memo server", Owner: "Example", License: "Apache-2.0", URL: "https://example.com/memo", Note: "Talks to its HTTP API."}) {
+	if len(detail.Credits) != 1 || detail.Credits[0] != (contract.PluginCredit{Name: "Memo server", Owner: "Example", License: "Apache-2.0", URL: "https://example.com/memo"}) {
 		t.Fatalf("credits = %+v", detail.Credits)
 	}
 

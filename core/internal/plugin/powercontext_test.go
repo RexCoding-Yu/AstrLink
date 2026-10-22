@@ -484,12 +484,12 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 		t.Fatalf("the ask names the gateway:\n%s", result.Context)
 	}
 	// A turn that is not the first, or a session with a project, asks
-	// nothing.
+	// nothing; its record keeps a title of its own.
 	notFirst := powerContextView("", "zh-CN", nil)
 	notFirst["session"] = map[string]any{"id": "session_1", "turn": 2}
 	for _, view := range []map[string]any{notFirst, powerContextView("datav", "zh-CN", nil), powerContextView("none", "zh-CN", nil)} {
-		if got := h.call(HookPrepareTurn, view); got != "" && got != "null" {
-			t.Fatalf("prepareTurn = %s", got)
+		if quiet := decodeTurn(t, h.call(HookPrepareTurn, view)); quiet.Context != "" || quiet.Record.Title != "本轮补充" || quiet.Record.Summary != "" {
+			t.Fatalf("prepareTurn = %+v", quiet)
 		}
 	}
 	// English and Japanese sessions are asked in their language; a list cut
@@ -525,8 +525,8 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 	}
 	// The user may opt out of asking.
 	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test","askProject":false}`, used)
-	if got := h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)); got != "" && got != "null" {
-		t.Fatalf("prepareTurn with asking off = %s", got)
+	if quiet := decodeTurn(t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil))); quiet.Context != "" || quiet.Record.Title != "本轮补充" {
+		t.Fatalf("prepareTurn with asking off = %+v", quiet)
 	}
 }
 
@@ -636,7 +636,7 @@ func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 		got[item.Label] = item.Value
 	}
 	// In New York 03:04 UTC on the 21st is 23:04 on the 20th.
-	if got["自动整理"] != "已打开" || got["最近整理成功"] != "10 月 20 日 23:04" || got["最近整理失败"] != "10 月 20 日 11:00 · model_timeout" ||
+	if got["自动整理"] != "已打开" || got["最近整理成功"] != "10 月 20 日 23:04" || got["最近整理失败"] != "10 月 20 日 11:00 · 模型超时" ||
 		got["可检索"] != "原子记忆 / 主题记忆 / 经验 / 技能" {
 		t.Fatalf("view = %+v", got)
 	}

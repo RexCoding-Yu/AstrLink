@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -152,6 +153,52 @@ func TestDiscoverLetsTheDirectoryOverrideBuiltins(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("Discover =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestDiscoverReadsTheIconBesideTheSource(t *testing.T) {
+	png := "\x89PNG\r\n\x1a\nimage"
+	svg := `<?xml version="1.0"?><!-- mark --><svg xmlns="http://www.w3.org/2000/svg"/>`
+	builtin := fstest.MapFS{
+		"png/plugin.ts":        {Data: []byte("png")},
+		"png/icon.png":         {Data: []byte(png)},
+		"svg/plugin.ts":        {Data: []byte("svg")},
+		"svg/icon.svg":         {Data: []byte("\xef\xbb\xbf" + svg)},
+		"svg/icon.png":         {Data: []byte(png)},
+		"script/plugin.ts":     {Data: []byte("script")},
+		"script/icon.svg":      {Data: []byte(`<svg><script>alert(1)</script></svg>`)},
+		"script/icon.png":      {Data: []byte(png)},
+		"html/plugin.ts":       {Data: []byte("html")},
+		"html/icon.svg":        {Data: []byte(`<html><svg/></html>`)},
+		"large/plugin.ts":      {Data: []byte("large")},
+		"large/icon.png":       {Data: []byte(png + strings.Repeat("x", MaxIconBytes))},
+		"mislabeled/plugin.ts": {Data: []byte("mislabeled")},
+		"mislabeled/icon.png":  {Data: []byte("GIF89a")},
+		"broken/icon.png":      {Data: []byte(png)},
+	}
+	sources, err := Discover(builtin, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	icons := map[string]string{}
+	for _, source := range sources {
+		icons[source.Key] = source.Icon
+	}
+	pngURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(png))
+	want := map[string]string{
+		"png":        pngURL,
+		"svg":        "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte("\xef\xbb\xbf"+svg)),
+		"script":     pngURL,
+		"html":       "",
+		"large":      "",
+		"mislabeled": "",
+		// A plugin that does not load still shows its icon.
+		"broken": pngURL,
+	}
+	for key, icon := range want {
+		if icons[key] != icon {
+			t.Errorf("%s icon = %.60q, want %.60q", key, icons[key], icon)
+		}
 	}
 }
 

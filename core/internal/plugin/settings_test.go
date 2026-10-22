@@ -27,7 +27,7 @@ func settingsMeta() Meta {
 		{Key: HostSettingRefresh, Group: "会话"},
 	}
 	meta.Storage = []StorageItem{{Label: "项目对应的服务器编号", Retention: "停用插件时可以清除"}}
-	meta.Credits = []Credit{{Name: "PowerContext", Owner: "OceanBase", License: "Apache-2.0", URL: "https://github.com/oceanbase/powercontext", Note: "本插件只通过公开的 HTTP 接口通信。"}}
+	meta.Credits = []Credit{{Name: "PowerContext", Owner: "OceanBase", License: "Apache-2.0", URL: "https://github.com/oceanbase/powercontext"}}
 	return meta
 }
 

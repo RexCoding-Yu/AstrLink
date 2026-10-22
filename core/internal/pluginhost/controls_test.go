@@ -833,9 +833,14 @@ func TestALookupGoesOnlyToAShellOnThisMachine(t *testing.T) {
 	if _, sent := h.sendLookup(t, call{session: "session_2", turn: 1, body: shell, project: "astrlink"}, ""); strings.Contains(string(sent), "<lookup") {
 		t.Fatalf("a client on another machine got the usage: %s", sent)
 	}
-	_, sent := h.sendLookup(t, call{session: "session_3", turn: 1, body: shell, project: "astrlink"}, lookupBase)
+	run, sent := h.sendLookup(t, call{session: "session_3", turn: 1, body: shell, project: "astrlink"}, lookupBase)
 	usage := systemOf(sent)
 	token := credentialIn(t, usage)
+	// The record tells the usage apart from the plugin's own block.
+	records, _ := run.Report()
+	if record := recordOf(t, records, plugin.HookPrepareSession); record.Injection == nil || record.Injection.UsageBytes != len(usage) || record.Injection.InjectedBytes != len(usage) {
+		t.Fatalf("session record = %+v, injection %+v", record, record.Injection)
+	}
 	want := `<lookup name="finder">` + "\nSearch this project's memory by a sentence. Run it with your shell (read-only):\n" +
 		`curl -s -G http://127.0.0.1:18317/tools/finder/search -H "Authorization: Bearer ` + token + `" --data-urlencode "query=what to look up"` +
 		"\nAt most 3 lookups per turn; if nothing turns up, carry on with what you have and make nothing up.\n</lookup>"

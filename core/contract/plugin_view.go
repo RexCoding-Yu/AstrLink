@@ -374,6 +374,9 @@ type PluginInjection struct {
 	InjectedBytes  int    `json:"injected_bytes"`
 	ReplayedBlocks int    `json:"replayed_blocks"`
 	DroppedItems   int    `json:"dropped_items"`
+	// UsageBytes is the part of InjectedBytes that tells the model how to
+	// use the plugin's lookups, which the gateway adds itself.
+	UsageBytes int `json:"usage_bytes,omitempty"`
 }
 
 func (record RequestPluginRecord) Validate() error {
@@ -423,8 +426,8 @@ func (record RequestPluginRecord) Validate() error {
 		if injection.Placement != PluginPlacementSystem && injection.Placement != PluginPlacementTurnMessage {
 			return fmt.Errorf("unknown injection placement %q", injection.Placement)
 		}
-		if injection.InjectedBytes < 0 || injection.ReplayedBlocks < 0 || injection.DroppedItems < 0 {
-			return fmt.Errorf("injection counts must be non-negative")
+		if injection.InjectedBytes < 0 || injection.ReplayedBlocks < 0 || injection.DroppedItems < 0 || injection.UsageBytes < 0 || injection.UsageBytes > injection.InjectedBytes {
+			return fmt.Errorf("injection counts must be non-negative, the usage within what was injected")
 		}
 	}
 	return nil

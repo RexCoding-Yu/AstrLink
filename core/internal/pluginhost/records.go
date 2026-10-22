@@ -223,8 +223,10 @@ func (run *Run) report(results []injected, failed bool) {
 		if main.Status == contract.PluginRecordFailed {
 			status = contract.RequestStatusFailed
 		}
+		// The event goes by the plugin's name, the same in every request;
+		// what it did this time is the summary and its records.
 		run.events = append(run.events, contract.RequestEvent{
-			Kind: contract.RequestEventPlugin, Plugin: current.plugin.Key, Title: main.Title,
+			Kind: contract.RequestEventPlugin, Plugin: current.plugin.Key, Title: current.plugin.Meta.Name,
 			StartedAt: run.began.UTC(), EndedAt: &ended, Status: status,
 			Summary: contract.ClampRunes(main.Summary, contract.MaxEventSummaryRunes),
 		})
@@ -258,8 +260,11 @@ func (run *Run) sessionRecord(current *part, result injected, failed bool) (cont
 		record.Actions = result.record.given.Actions
 	}
 	if outcome.ResidentBytes > 0 {
+		// The usage of the plugin's lookups rides in the same block, after
+		// what the plugin gave, or alone when it gave nothing.
 		record.Injection = &contract.PluginInjection{
 			Placement: contract.PluginPlacementSystem, InjectedBytes: outcome.ResidentBytes, DroppedItems: dropped,
+			UsageBytes: min(len(current.usage), outcome.ResidentBytes),
 		}
 	}
 	if record.SkippedReason == "" {

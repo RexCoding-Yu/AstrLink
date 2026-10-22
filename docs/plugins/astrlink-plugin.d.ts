@@ -164,10 +164,8 @@ declare namespace AstrLinkPlugin {
     owner?: string;
     /** An SPDX identifier, such as Apache-2.0. */
     license?: string;
-    /** An https address. */
+    /** An https address; a GitHub repository also shows its stars. */
     url: string;
-    /** At most 200 characters. */
-    note?: string;
   }
 
   /**

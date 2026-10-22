@@ -205,6 +205,8 @@ type Handler struct {
 	pluginTests   map[string]contract.PluginLastTest
 	metadata      MetadataRegistry
 	metadataStore storage.MetadataStore
+	// repoStars are the stars of the GitHub repositories plugins credit.
+	repoStars *repoStars
 }
 
 func New(version contract.VersionResponse) *Handler {
@@ -282,6 +284,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		pluginHost:         dependencies.PluginHost,
 		metadata:           dependencies.Metadata,
 		metadataStore:      dependencies.MetadataStore,
+		repoStars:          newRepoStars(githubAPIBaseURL),
 		mux:                http.NewServeMux(),
 		observers:          newObserverTracker(),
 	}

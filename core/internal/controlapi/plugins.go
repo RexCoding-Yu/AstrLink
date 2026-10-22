@@ -105,6 +105,10 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodGet) {
 			handler.pluginStats(writer, request, target)
 		}
+	case action == "credits":
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.pluginCredits(writer, request.Context(), target)
+		}
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
 	}
@@ -134,6 +138,7 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 		Name:                  target.Key,
 		Source:                string(target.Origin),
 		File:                  target.File,
+		Icon:                  target.Icon,
 		Enabled:               target.Enabled(),
 		State:                 contract.PluginStateLoaded,
 		RequestedCapabilities: []string{},
@@ -223,7 +228,7 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	detail.Settings = pluginSettings(target.Meta.Settings)
 	detail.Credits = []contract.PluginCredit{}
 	for _, credit := range target.Meta.Credits {
-		detail.Credits = append(detail.Credits, contract.PluginCredit{Name: credit.Name, Owner: credit.Owner, License: credit.License, URL: credit.URL, Note: credit.Note})
+		detail.Credits = append(detail.Credits, contract.PluginCredit{Name: credit.Name, Owner: credit.Owner, License: credit.License, URL: credit.URL})
 	}
 	detail.Storage = []contract.PluginStorageItem{}
 	for _, item := range target.Meta.Storage {

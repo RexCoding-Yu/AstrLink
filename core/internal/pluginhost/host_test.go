@@ -339,7 +339,7 @@ func TestASessionIsAskedThenBoundThenRecalled(t *testing.T) {
 		turnRecord.Injection == nil || turnRecord.Injection.InjectedBytes != len(block) {
 		t.Fatalf("prepareTurn record = %+v", turnRecord)
 	}
-	if len(events) != 1 || events[0].Title != "记忆" || events[0].Summary != "召回 1/1" {
+	if len(events) != 1 || events[0].Title != "Memo" || events[0].Summary != "召回 1/1" {
 		t.Fatalf("events = %+v", events)
 	}
 
