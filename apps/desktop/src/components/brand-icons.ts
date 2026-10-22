@@ -17,6 +17,7 @@ export { default as DoubaoColor } from "@lobehub/icons/es/Doubao/components/Colo
 export { default as GeminiColor } from "@lobehub/icons/es/Gemini/components/Color";
 export { default as GemmaColor } from "@lobehub/icons/es/Gemma/components/Color";
 export { default as GithubCopilotMono } from "@lobehub/icons/es/GithubCopilot/components/Mono";
+export { default as GithubMono } from "@lobehub/icons/es/Github/components/Mono";
 export { default as GrokMono } from "@lobehub/icons/es/Grok/components/Mono";
 export { default as HunyuanColor } from "@lobehub/icons/es/Hunyuan/components/Color";
 export { default as KiloCodeMono } from "@lobehub/icons/es/KiloCode/components/Mono";

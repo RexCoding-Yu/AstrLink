@@ -136,7 +136,7 @@ it("shows the bindings a marker can make and where they came from", async () => 
   );
   expect(chips).toHaveLength(1);
   expect(chips[0].textContent).toBe("项目astrlink");
-  expect(chips[0].getAttribute("title")).toBe("模型回复 · 第 2 轮");
+  expect(chips[0].getAttribute("title")).toBe("询问后选定 · 第 2 轮");
 });
 
 it("shows nothing while no attribute has a marker", async () => {

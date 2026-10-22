@@ -4708,7 +4708,7 @@
       "network": "ネットワーク",
       "storage": "プラグインストレージ",
       "uiViews": "ビュー",
-      "modelTools": "モデルからの検索"
+      "modelTools": "エージェントからの検索"
     },
     "loadErrors": {
       "not_found": "plugin.ts も plugin.js もありません",
@@ -4798,20 +4798,20 @@
       "capabilities": "使用する権限"
     },
     "overview": {
-      "connection": "接続",
-      "server": "サーバー",
       "noServer": "未設定",
-      "lastTest": "最新のテスト",
       "notTested": "未テスト",
       "bindings": "バインド済みの{{label}}",
       "sessions": "セッション",
       "lastUsed": "最終使用",
       "none": "対象外",
       "noBindings": "まだ{{label}}にバインドされたセッションはありません",
-      "pluginStatus": "プラグインの状態",
-      "credits": "オープンソース",
       "statusUnread": "読み取れませんでした",
-      "statusErrorLabel": "プラグインのエラー"
+      "statusErrorLabel": "プラグインのエラー",
+      "gateway": "ローカルゲートウェイ",
+      "uses": "オープンソースプロジェクト {{name}} を使用",
+      "onGitHub": "GitHub で {{name}} を見る",
+      "onGitHubStars_one": "GitHub で {{name}} を見る（スター {{stars}}）",
+      "onGitHubStars_other": "GitHub で {{name}} を見る（スター {{stars}}）"
     },
     "settings": {
       "save": "保存",
@@ -4832,15 +4832,22 @@
       "consent": "「{{label}}」は平文 HTTP です。保存するには「平文 HTTP を許可」をオンにしてください",
       "replace": "変更",
       "keep": "変更しない",
-      "noOrigin": "トークンを保存する前にサーバーのアドレスを入力してください"
+      "noOrigin": "トークンを保存する前にサーバーのアドレスを入力してください",
+      "choices": {
+        "all": "すべて",
+        "none": "なし",
+        "clear": "すべて外す",
+        "selectAll": "すべて選択",
+        "count_one": "{{count}} 件",
+        "count_other": "{{count}} 件",
+        "separator": "、"
+      }
     },
     "host": {
       "pause": "すべてのプラグインを一時停止",
-      "pauseHelpLabel": "すべてのプラグインの一時停止について",
       "pauseHelp": "一時停止中はどのプラグインも動きません。読み込み・確認・書き込みを行わず、リクエストはそのまま送られます。各ターン最初のリクエストの記録に理由が残ります。再開すると元どおり動きます。",
       "pausedNotice": "すべてのプラグインを一時停止中です。リクエストはそのまま送られます。",
       "budget": "注入の上限",
-      "budgetHelpLabel": "注入の上限について",
       "budgetHelp": "すべてのプラグインが 1 回のリクエストに追加できる内容の合計です。超えた場合、順番が後のプラグインのブロックは入らず、リクエスト記録に「注入の上限を超過」と残ります。",
       "budgetValue": "{{value}} KB",
       "saveFailed": "プラグイン全体の設定を保存できませんでした。"
@@ -4873,64 +4880,48 @@
       "confirm": "オンにする"
     },
     "stored": {
-      "title": "保存しているもの",
+      "title": "保存データ",
       "kinds": {
         "session_bindings": {
           "label": "セッションの紐付け",
           "what": "各セッションが紐付いている値、紐付けた方法、何ターン目か。",
-          "where": "AstrLink データベース",
           "retention": "セッション記録と同じ期間"
         },
         "workspace_bindings": {
           "label": "ワークスペースと値の対応",
           "what": "作業ディレクトリのパスのフィンガープリントと最後の名前だけで、パス全体は保存しません。同じディレクトリの新しいセッションを自動で紐付けるのに使います。",
-          "where": "AstrLink データベース",
           "retention": "消去するまで"
         },
         "plugin_sessions": {
           "label": "各セッションの最初のターンと一時停止",
           "what": "プラグインが各セッションで最初に参加したターンと、そのセッションで一時停止しているかどうか。",
-          "where": "AstrLink データベース",
           "retention": "保持"
         },
         "request_records": {
           "label": "プラグインの記録",
           "what": "各リクエストでプラグインがしたこと：回数・サイズ・所要時間・理由。検索や報告の内容は含みません。",
-          "where": "リクエスト記録",
           "retention": "リクエスト記録と同じ期間"
         },
         "resident_block": {
           "label": "現在読み込んでいるブロック",
           "what": "セッションのシステムプロンプトで使っているプロジェクトの記憶。",
-          "where": "メモリ内のみ",
           "retention": "ゲートウェイを再起動すると消えます"
         },
         "plugin_values": {
           "label": "プラグインのストレージ",
-          "what": "プラグイン自身の小さなデータ。下の行はプラグインが保存していると申告している内容です。無効化後も残ります。",
-          "where": "AstrLink データベース",
+          "what": "プラグイン自身の小さなデータで、無効化後も残ります。プラグインは次のものを保存していると申告しています。",
           "retention": "消去するまで"
         },
         "lookup_credentials": {
           "label": "検索の認証情報",
           "what": "各セッションが検索と報告に使う認証情報。ハッシュで保持します。",
-          "where": "メモリ内のみ",
           "retention": "24 時間リクエストがないか再起動で無効"
         }
       },
-      "columns": {
-        "what": "内容",
-        "where": "保存先",
-        "content": "会話内容",
-        "retention": "保持",
-        "count": "件数"
-      },
       "holds": {
-        "none": "含まない",
         "memory": "記憶の内容を含む",
         "conversation": "会話内容を含む"
       },
-      "whatLabel": "{{label}}について",
       "clear": "消去",
       "clearTitle": {
         "workspaces": "ワークスペースの記録を消去しますか？",
@@ -4945,64 +4936,97 @@
       "clearFailed": "消去できませんでした。",
       "count_one": "{{count}} 件",
       "count_other": "{{count}} 件",
-      "revoke": "無効にする"
+      "revoke": "無効にする",
+      "helpLabel": "保存データについて",
+      "help": "このプラグインのために AstrLink が保存しているものを、保存場所ごとに並べています。明記したもの以外は会話の内容を含みません。",
+      "places": {
+        "database": "AstrLink データベース",
+        "memory": "メモリ内のみ",
+        "records": "リクエスト記録"
+      },
+      "retention": "保存期間：{{retention}}。",
+      "declared": "{{label}}（{{retention}}）"
     },
     "lookup": {
-      "label": "モデルからの検索",
-      "helpLabel": "モデルからの検索について",
-      "help": "モデルが詳細を必要とするとき、自分のシェルでプラグインの読み取り専用の検索を実行できます（1 ターンに最大 3 回）。プラグインが報告を受け付けるときは、残しておく価値のある内容をプラグインに渡すこともでき（1 ターンに最大 2 回）、プラグインの設定で報告だけをオフにできます。どちらもセッションに紐づくプロジェクトが対象です。クライアントとゲートウェイが同じコンピューターにあり、リクエストにシェルツールがあるときだけ、システムプロンプトに使い方とこのセッションの認証情報を付けます。プラグインを有効にするときに「モデルからの検索」を許可してください。このプラグインの検索と報告：",
+      "label": "エージェントの検索を許可",
+      "helpLabel": "エージェントの検索について",
+      "help": "エージェントが詳細を必要とするとき、自分のシェルでプラグインの読み取り専用の検索を実行できます（1 ターンに最大 3 回）。プラグインが報告を受け付けるときは、残しておく価値のある内容をプラグインに渡すこともでき（1 ターンに最大 2 回）、プラグインの設定で報告だけをオフにできます。どちらもセッションに紐づくプロジェクトが対象です。クライアントとゲートウェイが同じコンピューターにあり、リクエストにシェルツールがあるときだけ、システムプロンプトに使い方とこのセッションの認証情報を付けます。プラグインを有効にするときに「エージェントからの検索」を許可してください。このプラグインの検索と報告：",
       "toolSeparator": "：",
       "reportMark": "（報告）"
     },
     "effects": {
-      "title": "効果",
-      "helpLabel": "効果について",
-      "help": "直近 7 日間を、このコンピューターのリクエスト記録から集計します。回数・サイズ・所要時間・理由だけで、会話の内容は含まず、どこにも送信しません。追加した内容はバイト数で数え、およそ 3 バイトを 1 トークンとします。キャッシュヒットは入力トークンのうちキャッシュから読んだ割合で、「記憶あり」はプラグインが注入した内容を含むセッションです。",
+      "title": "動作状況",
+      "helpLabel": "動作状況について",
+      "help": "直近 7 日間を、このコンピューターのリクエスト記録から集計します。回数・サイズ・所要時間・理由だけで、会話の内容は含まず、どこにも送信しません。読み込みのコストは注入したバイト数から見積もり、およそ 3 バイトを 1 トークンとします。待ち時間は中央値です。小さな柱は日ごとの値で、右端が今日です。キャッシュヒットは入力トークンのうちキャッシュから読んだ割合で、「記憶あり」はプラグインが注入した内容を含むセッションです。",
       "empty": "直近 7 日間の記録はまだありません。",
-      "load": "読み込み",
-      "loadValue_one": "{{count}} 回 · 追加 {{size}}（約 {{tokens}} トークン）",
-      "loadValue_other": "{{count}} 回 · 追加 {{size}}（約 {{tokens}} トークン）",
-      "refreshes_one": "うち更新 {{count}} 回",
-      "refreshes_other": "うち更新 {{count}} 回",
-      "wait": "待ち時間の中央値 {{p50}} ms、遅い 5% {{p95}} ms",
+      "load": "読み込みのコスト",
+      "refreshes_one": "更新 {{count}} 回",
+      "refreshes_other": "更新 {{count}} 回",
+      "wait": "待ち時間 約 {{p50}} ms",
       "lookup": "検索",
-      "noLookups": "検索なし",
-      "lookupValue_one": "{{count}} 回",
-      "lookupValue_other": "{{count}} 回",
-      "hitRate": "結果あり {{rate}}",
-      "lookupSessions": "{{sessions}} セッション中 {{lookingUp}} が検索",
-      "lookupMs": "中央値 {{p50}} ms",
+      "hitRate": "ヒット {{rate}}",
       "refused_one": "拒否 {{count}} 回",
       "refused_other": "拒否 {{count}} 回",
-      "binding": "紐づけ",
-      "bindingValue": "ワークスペース自動 {{workspace}} · 既存を選択 {{picked}} · 新規 {{created}} · 入れない {{declined}} · 未回答 {{unanswered}}",
+      "binding": "紐づけの方法",
       "changed_one": "自動紐づけ後に変更 {{count}}",
       "changed_other": "自動紐づけ後に変更 {{count}}",
       "write": "書き込み",
-      "writeValue": "{{ok}} 件 · 失敗 {{failed}}",
-      "reported_one": "うちモデルの報告 {{count}} 件",
-      "reported_other": "うちモデルの報告 {{count}} 件",
+      "reported_one": "エージェントの報告 {{count}} 件",
+      "reported_other": "エージェントの報告 {{count}} 件",
       "problems": "問題",
-      "problemsValue": "失敗 {{failed}} · タイムアウト {{timeouts}} · プライバシー {{privacy}} · 予算超過 {{overBudget}}",
       "cache": "キャッシュヒット",
-      "cacheValue": "記憶あり {{with}} · その他のセッション {{without}}",
       "daily": "日ごとの内訳",
-      "dailyHelp": "各行はゲートウェイのタイムゾーンでの 1 日です。キャッシュヒットの列は「記憶ありのセッション / その他のセッション」です。そのほかは「効果」と同じく、回数・サイズ・理由だけで、会話の内容は含まず、送信もしません。",
+      "dailyHelp": "各行はゲートウェイのタイムゾーンでの 1 日で、動きのない日は灰色です。コストは注入したバイト数、結果は検索で結果があった割合、キャッシュヒットの列は「記憶ありのセッション / その他のセッション」です。そのほかは「動作状況」と同じく、回数・サイズ・理由だけで、会話の内容は含まず、送信もしません。",
       "dailyHelpLabel": "日ごとの内訳について",
       "writeCell": "{{ok}}（失敗 {{failed}}）",
       "cacheCell": "{{with}} / {{without}}",
       "columns": {
         "date": "日付",
         "loads": "読み込み",
-        "injected": "追加",
+        "injected": "コスト",
         "lookups": "検索",
-        "hits": "結果あり",
+        "hits": "結果",
         "bindings": "紐づけ",
         "writes": "書き込み",
         "problems": "問題",
         "cache": "キャッシュヒット"
+      },
+      "period": "直近 7 日間",
+      "tokens": "約 {{tokens}} トークン",
+      "loads_one": "読み込み {{count}} 回",
+      "loads_other": "読み込み {{count}} 回",
+      "times_one": "{{count}} 回",
+      "times_other": "{{count}} 回",
+      "lookupSessions_one": "{{count}} セッションで使用",
+      "lookupSessions_other": "{{count}} セッションで使用",
+      "entries_one": "{{count}} 件",
+      "entries_other": "{{count}} 件",
+      "writeFailed_one": "失敗 {{count}} 件",
+      "writeFailed_other": "失敗 {{count}} 件",
+      "noProblems": "正常に動作中",
+      "problemKinds": {
+        "failed_one": "失敗 {{count}}",
+        "failed_other": "失敗 {{count}}",
+        "timeouts_one": "タイムアウト {{count}}",
+        "timeouts_other": "タイムアウト {{count}}",
+        "privacy_one": "プライバシー {{count}}",
+        "privacy_other": "プライバシー {{count}}",
+        "over_budget_one": "予算超過 {{count}}",
+        "over_budget_other": "予算超過 {{count}}"
+      },
+      "ways": {
+        "workspace": "ワークスペースで自動",
+        "picked": "既存を選択",
+        "created": "新規",
+        "declined": "入れない",
+        "unanswered": "未回答"
+      },
+      "cacheSides": {
+        "with": "記憶あり",
+        "without": "その他のセッション"
       }
-    }
+    },
+    "headerHelpLabel": "プラグイン全体の設定について"
   },
   "pluginRecords": {
     "none": "このリクエストにプラグインの記録はありません。",
@@ -5043,10 +5067,10 @@
     "injection": "注入",
     "placement": {
       "system_append": "システムプロンプト",
-      "turn_message_prefix": "ターンの最初のメッセージの先頭"
+      "turn_message_prefix": "このターンのユーザーメッセージの先頭"
     },
-    "replayed_one": "過去のブロック {{count}} 件を再送",
-    "replayed_other": "過去のブロック {{count}} 件を再送",
+    "replayed_one": "以前のブロック {{count}} 件をそのまま",
+    "replayed_other": "以前のブロック {{count}} 件をそのまま",
     "dropped_one": "予算超過で {{count}} 件を除外",
     "dropped_other": "予算超過で {{count}} 件を除外",
     "network": "ネットワーク",
@@ -5069,7 +5093,7 @@
       "queue_full": "キューが満杯で記録できませんでした",
       "disabled": "オフ",
       "awaiting_reply": "応答でプロジェクトが決まるのを待機中",
-      "held_unbound": "プロジェクトが決まるまで保留",
+      "held_unbound": "プロジェクトが決まるまで保持し、決まったら書き込み",
       "skipped_unbound": "セッションにプロジェクトがないため記録しません"
     },
     "truncated": "上限を超えたため切り詰めました",
@@ -5121,7 +5145,9 @@
     "lookupResult": "結果 {{size}}",
     "lookupHits_one": "{{count}} 件",
     "lookupHits_other": "{{count}} 件",
-    "commands": "付けた検索"
+    "commands": "付けた検索",
+    "usageOnly": "検索の使い方だけ · {{placement}} +{{size}}",
+    "usagePart": "うち検索の使い方 {{size}}"
   },
   "metadata": {
     "title": "メタデータ",
@@ -5194,7 +5220,7 @@
     "saveFailed": "セッションのメタデータを保存できませんでした。",
     "turn": "{{source}} · {{turn}} ターン目",
     "setBy": {
-      "model_marker": "モデルの返答",
+      "model_marker": "確認して選択",
       "user_marker": "ユーザーのメッセージ",
       "manual": "手動で設定",
       "user_answer": "回答と一致",

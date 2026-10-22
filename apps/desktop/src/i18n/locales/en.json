@@ -4708,7 +4708,7 @@
       "network": "Network",
       "storage": "Plugin storage",
       "uiViews": "Views",
-      "modelTools": "Model lookups"
+      "modelTools": "Agent lookups"
     },
     "loadErrors": {
       "not_found": "No plugin.ts or plugin.js",
@@ -4798,20 +4798,20 @@
       "capabilities": "Permissions it uses"
     },
     "overview": {
-      "connection": "Connection",
-      "server": "Server",
       "noServer": "Not set",
-      "lastTest": "Last test",
       "notTested": "Not tested",
       "bindings": "Sessions by {{label}}",
       "sessions": "Sessions",
       "lastUsed": "Last used",
       "none": "Left out",
       "noBindings": "No session is bound to a {{label}} yet",
-      "pluginStatus": "Plugin status",
-      "credits": "Open source",
       "statusUnread": "Could not be read",
-      "statusErrorLabel": "The plugin's error"
+      "statusErrorLabel": "The plugin's error",
+      "gateway": "Local gateway",
+      "uses": "Built on the open-source project {{name}}",
+      "onGitHub": "View {{name}} on GitHub",
+      "onGitHubStars_one": "View {{name}} on GitHub, {{stars}} star",
+      "onGitHubStars_other": "View {{name}} on GitHub, {{stars}} stars"
     },
     "settings": {
       "save": "Save",
@@ -4832,15 +4832,22 @@
       "consent": "{{label}} is plain HTTP; tick Allow plain HTTP to save it",
       "replace": "Replace",
       "keep": "Keep",
-      "noOrigin": "Fill in the server address before saving the token"
+      "noOrigin": "Fill in the server address before saving the token",
+      "choices": {
+        "all": "All",
+        "none": "None",
+        "clear": "Clear",
+        "selectAll": "Select all",
+        "count_one": "{{count}} selected",
+        "count_other": "{{count}} selected",
+        "separator": ", "
+      }
     },
     "host": {
       "pause": "Pause all plugins",
-      "pauseHelpLabel": "About pausing all plugins",
       "pauseHelp": "While paused, no plugin runs: nothing is loaded, asked or written, and requests go out as they came. The first request of each turn records why. Resume to carry on.",
       "pausedNotice": "All plugins are paused; requests go out as they came.",
       "budget": "Injection budget",
-      "budgetHelpLabel": "About the injection budget",
       "budgetHelp": "What all plugins together may add to one request. Past it, the blocks of the plugins later in order stay out, and the request record says it went over the budget.",
       "budgetValue": "{{value}} KB",
       "saveFailed": "Couldn't save the settings of the plugins."
@@ -4873,64 +4880,48 @@
       "confirm": "Turn on"
     },
     "stored": {
-      "title": "What is kept",
+      "title": "Data kept",
       "kinds": {
         "session_bindings": {
           "label": "Session bindings",
           "what": "The value each session is bound to, how and in which turn.",
-          "where": "AstrLink database",
           "retention": "As long as the session's records"
         },
         "workspace_bindings": {
           "label": "Workspaces and their values",
           "what": "A fingerprint of the working directory's path and its last element, never the whole path, so that new sessions in the directory bind on their own.",
-          "where": "AstrLink database",
           "retention": "Until cleared"
         },
         "plugin_sessions": {
           "label": "First turn and pause per session",
           "what": "The turn the plugin first took part in each session, and whether the session paused it.",
-          "where": "AstrLink database",
           "retention": "Kept"
         },
         "request_records": {
           "label": "Plugin records",
           "what": "What the plugin did in each request: counts, sizes, times and reasons, never what a lookup or report said.",
-          "where": "Request records",
           "retention": "As long as the request records"
         },
         "resident_block": {
           "label": "The block a session carries",
           "what": "The project memory in the session's system prompt.",
-          "where": "Memory only",
           "retention": "Gone when the gateway restarts"
         },
         "plugin_values": {
           "label": "Plugin storage",
-          "what": "The plugin's own small data; the rows under it are what the plugin declares it keeps. Kept after the plugin is disabled.",
-          "where": "AstrLink database",
+          "what": "The plugin's own small data, kept after the plugin is disabled. The plugin declares it keeps these:",
           "retention": "Until cleared"
         },
         "lookup_credentials": {
           "label": "Lookup credentials",
           "what": "What each session runs lookups and reports with, kept as hashes.",
-          "where": "Memory only",
           "retention": "Void after 24 hours without a request, or a restart"
         }
       },
-      "columns": {
-        "what": "What",
-        "where": "Where",
-        "content": "Conversation text",
-        "retention": "Kept",
-        "count": "Count"
-      },
       "holds": {
-        "none": "None",
         "memory": "Memory content",
         "conversation": "Conversation text"
       },
-      "whatLabel": "About {{label}}",
       "count_one": "{{count}} item",
       "count_other": "{{count}} items",
       "clear": "Clear",
@@ -4945,64 +4936,97 @@
         "lookups": "The plugin's lookup credentials stop working at once, along with the commands the model already has. Each session's next request carries a new one; its system prompt changes, so its prompt cache is written once more."
       },
       "clearFailed": "Couldn't clear it.",
-      "revoke": "Revoke"
+      "revoke": "Revoke",
+      "helpLabel": "About the data kept",
+      "help": "What AstrLink keeps for this plugin, by where it is kept. None of it holds conversation text unless marked.",
+      "places": {
+        "database": "AstrLink database",
+        "memory": "Memory only",
+        "records": "Request records"
+      },
+      "retention": " Kept: {{retention}}.",
+      "declared": "{{label}} ({{retention}})"
     },
     "lookup": {
-      "label": "Model lookups",
-      "helpLabel": "About model lookups",
-      "help": "When the model needs details, it can run the plugin's read-only queries with its own shell, at most 3 a turn; when the plugin takes reports, the model can also hand it what is worth keeping, at most 2 a turn, and the plugin's settings can turn reports off on their own. Both work in the session's project. The system prompt carries how to run them and the session's credential only when the client runs on the same computer as the gateway and its request offers the model a shell. The plugin needs “Model lookups” granted when it is enabled. Its queries and reports:",
+      "label": "Let agents look things up",
+      "helpLabel": "About agent lookups",
+      "help": "When the agent needs details, it can run the plugin's read-only queries with its own shell, at most 3 a turn; when the plugin takes reports, the agent can also hand it what is worth keeping, at most 2 a turn, and the plugin's settings can turn reports off on their own. Both work in the session's project. The system prompt carries how to run them and the session's credential only when the client runs on the same computer as the gateway and its request offers a shell. The plugin needs “Agent lookups” granted when it is enabled. Its queries and reports:",
       "toolSeparator": ": ",
       "reportMark": " (report)"
     },
     "effects": {
-      "title": "Effect",
-      "helpLabel": "About the effect",
-      "help": "The last 7 days, summed from this computer’s request records: counts, sizes, durations and reasons only, no conversation text, and nothing is sent anywhere. Added content is counted in bytes; about 3 bytes make a token. Cache hits are the share of input tokens read from the prompt cache; “with memory” means sessions that carried something the plugin injected.",
+      "title": "Activity",
+      "helpLabel": "About the activity",
+      "help": "The last 7 days, summed from this computer’s request records: counts, sizes, durations and reasons only, no conversation text, and nothing is sent anywhere. What loading costs is estimated from the bytes injected, about 3 bytes a token; waits are medians. The small columns are the days, today on the right. Cache hits are the share of input tokens read from the prompt cache; “with memory” means sessions that carried something the plugin injected.",
       "empty": "No records in the last 7 days.",
-      "load": "Loads",
-      "loadValue_one": "{{count}} load · {{size}} added (about {{tokens}} tokens)",
-      "loadValue_other": "{{count}} loads · {{size}} added (about {{tokens}} tokens)",
-      "refreshes_one": "{{count}} of them a refresh",
-      "refreshes_other": "{{count}} of them refreshes",
-      "wait": "median wait {{p50}} ms, slowest 5% {{p95}} ms",
+      "load": "Load cost",
+      "refreshes_one": "{{count}} refresh",
+      "refreshes_other": "{{count}} refreshes",
+      "wait": "wait about {{p50}} ms",
       "lookup": "Lookups",
-      "noLookups": "No lookups",
-      "lookupValue_one": "{{count}} lookup",
-      "lookupValue_other": "{{count}} lookups",
-      "hitRate": "{{rate}} with results",
-      "lookupSessions": "{{lookingUp}} of {{sessions}} sessions looked up",
-      "lookupMs": "median {{p50}} ms",
+      "hitRate": "{{rate}} found something",
       "refused_one": "{{count}} refused",
       "refused_other": "{{count}} refused",
-      "binding": "Bindings",
-      "bindingValue": "workspace {{workspace}} · picked {{picked}} · new {{created}} · none {{declined}} · unanswered {{unanswered}}",
+      "binding": "How sessions were bound",
       "changed_one": "{{count}} changed after automatic binding",
       "changed_other": "{{count}} changed after automatic binding",
       "write": "Writes",
-      "writeValue": "{{ok}} written · {{failed}} failed",
-      "reported_one": "{{count}} reported by the model",
-      "reported_other": "{{count}} reported by the model",
+      "reported_one": "{{count}} reported by the agent",
+      "reported_other": "{{count}} reported by the agent",
       "problems": "Problems",
-      "problemsValue": "failed {{failed}} · timed out {{timeouts}} · privacy {{privacy}} · over budget {{overBudget}}",
       "cache": "Cache hits",
-      "cacheValue": "with memory {{with}} · other sessions {{without}}",
       "daily": "By day",
-      "dailyHelp": "Each row is a day in the gateway’s time zone. The cache hits column reads “sessions with memory / other sessions”. The rest counts as the effect card does: counts, sizes and reasons only, no conversation text, nothing sent anywhere.",
+      "dailyHelp": "Each row is a day in the gateway’s time zone; days without activity are grey. Cost is the bytes injected, results the share of lookups that found something, and the cache hits column reads “sessions with memory / other sessions”. The rest counts as the activity card does: counts, sizes and reasons only, no conversation text, nothing sent anywhere.",
       "dailyHelpLabel": "About the daily account",
       "writeCell": "{{ok}} ({{failed}} failed)",
       "cacheCell": "{{with}} / {{without}}",
       "columns": {
         "date": "Date",
         "loads": "Loads",
-        "injected": "Added",
+        "injected": "Cost",
         "lookups": "Lookups",
-        "hits": "With results",
+        "hits": "Results",
         "bindings": "Bindings",
         "writes": "Writes",
         "problems": "Problems",
         "cache": "Cache hits"
+      },
+      "period": "Last 7 days",
+      "tokens": "about {{tokens}} tokens",
+      "loads_one": "{{count}} load",
+      "loads_other": "{{count}} loads",
+      "times_one": "{{count}} time",
+      "times_other": "{{count}} times",
+      "lookupSessions_one": "used in {{count}} session",
+      "lookupSessions_other": "used in {{count}} sessions",
+      "entries_one": "{{count}} entry",
+      "entries_other": "{{count}} entries",
+      "writeFailed_one": "{{count}} failed",
+      "writeFailed_other": "{{count}} failed",
+      "noProblems": "Running fine",
+      "problemKinds": {
+        "failed_one": "{{count}} failed",
+        "failed_other": "{{count}} failed",
+        "timeouts_one": "{{count}} timed out",
+        "timeouts_other": "{{count}} timed out",
+        "privacy_one": "{{count}} stopped for privacy",
+        "privacy_other": "{{count}} stopped for privacy",
+        "over_budget_one": "{{count}} over budget",
+        "over_budget_other": "{{count}} over budget"
+      },
+      "ways": {
+        "workspace": "By workspace",
+        "picked": "Picked an existing one",
+        "created": "New",
+        "declined": "Left out",
+        "unanswered": "No answer"
+      },
+      "cacheSides": {
+        "with": "With memory",
+        "without": "Other sessions"
       }
-    }
+    },
+    "headerHelpLabel": "About the settings of all plugins"
   },
   "pluginRecords": {
     "none": "No plugin recorded anything for this request.",
@@ -5043,10 +5067,10 @@
     "injection": "Injected",
     "placement": {
       "system_append": "System prompt",
-      "turn_message_prefix": "Start of the turn's message"
+      "turn_message_prefix": "Start of the turn's user message"
     },
-    "replayed_one": "{{count}} earlier block replayed",
-    "replayed_other": "{{count}} earlier blocks replayed",
+    "replayed_one": "{{count}} earlier block kept",
+    "replayed_other": "{{count}} earlier blocks kept",
     "dropped_one": "{{count}} item over budget",
     "dropped_other": "{{count}} items over budget",
     "network": "Network",
@@ -5069,7 +5093,7 @@
       "queue_full": "dropped, the queue was full",
       "disabled": "off",
       "awaiting_reply": "waiting for the reply to set the project",
-      "held_unbound": "held until the session has a project",
+      "held_unbound": "held until the session picks a project, then written",
       "skipped_unbound": "not written, the session has no project"
     },
     "truncated": "Cut to its limits",
@@ -5121,7 +5145,9 @@
     "lookupResult": "result {{size}}",
     "lookupHits_one": "{{count}} hit",
     "lookupHits_other": "{{count}} hits",
-    "commands": "Lookups offered"
+    "commands": "Lookups offered",
+    "usageOnly": "Only the lookup usage · {{placement}} +{{size}}",
+    "usagePart": "lookup usage {{size}}"
   },
   "metadata": {
     "title": "Metadata",
@@ -5194,7 +5220,7 @@
     "saveFailed": "Couldn't save the session metadata.",
     "turn": "{{source}} · turn {{turn}}",
     "setBy": {
-      "model_marker": "Model reply",
+      "model_marker": "Chosen when asked",
       "user_marker": "User message",
       "manual": "Set by hand",
       "user_answer": "Answer matched",

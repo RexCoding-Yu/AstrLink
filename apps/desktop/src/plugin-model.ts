@@ -28,6 +28,8 @@ export interface PluginSummary {
   version: string;
   source: PluginSource;
   file?: string;
+  /** The plugin's icon as a data URL of a PNG or SVG image. */
+  icon?: string;
   enabled: boolean;
   state: "loaded" | "failed";
   error?: PluginLoadError;
@@ -300,8 +302,10 @@ export interface PluginCredit {
   /** An SPDX identifier such as Apache-2.0. */
   license?: string;
   url: string;
-  note?: string;
 }
+
+/** The GitHub stars of the repositories a plugin credits, by their address. */
+export type PluginCreditStars = Record<string, number>;
 
 /** The waits the plugin page offers, in milliseconds. */
 export const PLUGIN_TURN_WAITS = [
@@ -385,6 +389,8 @@ export interface PluginInjection {
   injected_bytes: number;
   replayed_blocks: number;
   dropped_items: number;
+  /** The part of injected_bytes that is the usage of the plugin's lookups. */
+  usage_bytes?: number;
 }
 
 /** A query the model ran, or a report it made: its size only, never what it sent or got. */
@@ -598,6 +604,18 @@ function parseLoadError(value: unknown, path: string): PluginLoadError {
   });
 }
 
+/**
+ * A plugin's icon, kept only as a data URL of a PNG or SVG image: the page
+ * puts it in an img, and anything else is left out rather than refused.
+ */
+function pluginIcon(value: unknown, path: string): string | undefined {
+  const icon = plugin.optionalString(value, path);
+  return icon &&
+    /^data:image\/(png|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(icon)
+    ? icon
+    : undefined;
+}
+
 function parseSummaryAt(value: unknown, path: string): PluginSummary {
   const summary = plugin.object(value, path);
   return defined({
@@ -610,6 +628,7 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
       `${path}.source`,
     ),
     file: plugin.optionalString(summary.file, `${path}.file`),
+    icon: pluginIcon(summary.icon, `${path}.icon`),
     enabled: plugin.boolean(summary.enabled, `${path}.enabled`),
     state: plugin.oneOf(
       summary.state,
@@ -721,7 +740,6 @@ export function parsePluginDetail(value: unknown): PluginDetail {
         owner: plugin.optionalString(credit.owner, `${path}.owner`),
         license: plugin.optionalString(credit.license, `${path}.license`),
         url: plugin.string(credit.url, `${path}.url`),
-        note: plugin.optionalString(credit.note, `${path}.note`),
       });
     }),
     excluded_clients:
@@ -939,6 +957,18 @@ export function parsePluginStats(value: unknown): PluginStats {
       .map((day, index) => parseDayStats(day, `$.days[${index}]`)),
     total: parseDayStats(stats.total, "$.total"),
   };
+}
+
+/** Reads the GitHub stars of the repositories a plugin credits. */
+export function parsePluginCreditStars(value: unknown): PluginCreditStars {
+  const answer = plugin.object(value, "$");
+  const stars = plugin.object(answer.stars ?? {}, "$.stars");
+  return Object.fromEntries(
+    Object.entries(stars).map(([url, count]) => [
+      url,
+      plugin.integer(count, `$.stars.${url}`),
+    ]),
+  );
 }
 
 /** Reads how many a clearing removed. */
@@ -1203,6 +1233,10 @@ export function parseRequestPluginRecords(
         dropped_items: plugin.integer(
           raw.dropped_items,
           `${injectionPath}.dropped_items`,
+        ),
+        usage_bytes: plugin.optionalInteger(
+          raw.usage_bytes,
+          `${injectionPath}.usage_bytes`,
         ),
       };
     }

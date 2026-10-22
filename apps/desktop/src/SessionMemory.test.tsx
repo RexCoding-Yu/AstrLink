@@ -88,11 +88,18 @@ const record = {
       plugin: "powercontext",
       plugin_version: "2.0.0",
       hook: "prepareTurn",
-      title: "PowerContext 记忆",
+      title: "本轮补充",
       status: "ok",
       summary: "",
       elapsed_ms: 1,
       network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+      // Earlier blocks kept in place, nothing new.
+      injection: {
+        placement: "turn_message_prefix",
+        injected_bytes: 0,
+        replayed_blocks: 1,
+        dropped_items: 0,
+      },
       observe: "queued",
     },
     {
@@ -151,12 +158,12 @@ afterEach(async () => {
   removeAnimations();
 });
 
-async function render(onSelectRequest = vi.fn()) {
+async function render(onSelectRequest = vi.fn(), records = [record]) {
   await act(async () => {
     root.render(
       <SessionMemory
         onSelectRequest={onSelectRequest}
-        records={[record]}
+        records={records}
         refreshKey="1"
         sessionId="session_1"
       />,
@@ -189,12 +196,44 @@ it("shows the project, how it was bound, and the block the session carries", asy
   );
   expect(memory?.textContent).not.toContain("别的插件");
   // A turn the plugin had nothing for stays in the request's own record.
-  expect(memory?.textContent).not.toContain("PowerContext 记忆完成");
+  expect(memory?.textContent).not.toContain("本轮补充");
   const row = [...container.querySelectorAll("button")].find((item) =>
     item.textContent?.includes("记忆装载 · 画像"),
   );
   await act(async () => row?.click());
   expect(onSelectRequest).toHaveBeenCalledWith(record.id);
+});
+
+it("lists a block that carried only the lookup usage as done", async () => {
+  await render(vi.fn(), [
+    {
+      ...record,
+      plugin_records: [
+        {
+          plugin: "powercontext",
+          plugin_version: "2.1.1",
+          hook: "prepareSession",
+          title: "记忆装载",
+          status: "skipped",
+          summary: "项目还没有画像和主题",
+          elapsed_ms: 21,
+          injection: {
+            placement: "system_append",
+            injected_bytes: 1229,
+            replayed_blocks: 0,
+            dropped_items: 0,
+            usage_bytes: 1229,
+          },
+          network: { requests: 5, denied: 0, errors: 0, wait_ms: 5 },
+        },
+      ],
+    } as RequestRecord,
+  ]);
+  const row = [...container.querySelectorAll("button")].find((item) =>
+    item.textContent?.includes("记忆装载"),
+  );
+  expect(row?.textContent).toContain("完成");
+  expect(row?.textContent).not.toContain("已跳过");
 });
 
 it("refreshes and pauses only after saying what it costs", async () => {
@@ -248,6 +287,8 @@ it("shows how the session's requests tell the model to look up", async () => {
   await render();
   const lookup = container.querySelector("[data-testid=session-memory-lookup]");
   expect(lookup?.textContent).toContain("Bearer mk-…");
+  // Folded: it matters while debugging, not at a glance.
+  expect(lookup?.closest("details")?.open).toBe(false);
   expect(container.textContent).toContain(
     "附在系统提示词里的查询方法（凭证已隐去）",
   );

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { FormMessage } from "@/components/FormMessage";
+import { HelpDisclosure } from "@/components/HelpDisclosure";
 import { HelpPopover } from "@/components/HelpPopover";
 import { LoadingState } from "@/components/LoadingState";
 import { Panel, PanelHeader } from "@/components/Panel";
@@ -18,6 +19,7 @@ import {
 } from "./bridge";
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
+import { shownStatus } from "./PluginRecordDetails";
 import type {
   MetadataAttribute,
   RequestPluginRecord,
@@ -48,19 +50,20 @@ type Pending = { kind: "refresh" | "pause" | "resume"; part: SessionPlugin };
  * A turn the plugin had nothing for, as a session with its project has: the
  * request's own record keeps it, the session's list leaves it out.
  */
+/** A turn the plugin added nothing to, at most keeping earlier blocks. */
 function idle(entry: RequestPluginRecord): boolean {
   return (
     entry.hook === "prepareTurn" &&
     entry.status === "ok" &&
     !entry.summary &&
     !entry.skipped_reason &&
-    !entry.injection
+    (!entry.injection || entry.injection.injected_bytes === 0)
   );
 }
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
 function formatMoment(iso: string): string {
@@ -304,17 +307,16 @@ export function SessionMemory({
               </p>
             )}
             {part.lookup ? (
-              <>
-                <p className="text-muted-foreground">
-                  {t("sessionMemory.lookup")}
-                </p>
+              // How the model may look things up matters while debugging, so
+              // it waits behind a fold.
+              <HelpDisclosure title={t("sessionMemory.lookup")}>
                 <pre
-                  className="max-h-60 overflow-auto rounded-md border bg-muted/40 p-2 font-mono text-micro leading-5 whitespace-pre-wrap"
+                  className="max-h-60 overflow-auto rounded-md border bg-muted/40 p-2 font-mono text-micro leading-5 whitespace-pre-wrap text-foreground"
                   data-testid="session-memory-lookup"
                 >
                   {part.lookup}
                 </pre>
-              </>
+              </HelpDisclosure>
             ) : null}
           </div>
         </Panel>
@@ -348,8 +350,8 @@ export function SessionMemory({
                       ? ` · ${t(`pluginRecords.skipReasons.${entry.skipped_reason}`, { defaultValue: entry.skipped_reason })}`
                       : ""}
                   </span>
-                  <StatusBadge tone={statusTones[entry.status]}>
-                    {t(`pluginRecords.status.${entry.status}`)}
+                  <StatusBadge tone={statusTones[shownStatus(entry)]}>
+                    {t(`pluginRecords.status.${shownStatus(entry)}`)}
                   </StatusBadge>
                 </Button>
               </li>

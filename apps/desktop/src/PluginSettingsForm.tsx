@@ -522,6 +522,17 @@ export function PluginSettingsForm({
           />
         );
       case "row":
+        // Switches side by side read as a choice of several: one select.
+        if (item.settings.every((setting) => setting.type === "switch"))
+          return (
+            <SwitchesRow
+              key={`row:${item.name}`}
+              name={item.name}
+              onValue={setValue}
+              settings={item.settings}
+              values={draft.values}
+            />
+          );
         return (
           <SettingRow
             help={item.settings.find((setting) => setting.help)?.help}
@@ -773,6 +784,63 @@ function FieldRow({
           </HelpPopover>
         </span>
       ) : null}
+    </SettingRow>
+  );
+}
+
+/**
+ * A row of switches as one multi-select: each switch an option, the ones on
+ * selected; the trigger names them.
+ */
+function SwitchesRow({
+  name,
+  settings,
+  values,
+  onValue,
+}: {
+  name: string;
+  settings: PluginSetting[];
+  values: Record<string, Value>;
+  onValue: (key: string, value: Value) => void;
+}) {
+  const t = useT();
+  return (
+    <SettingRow
+      help={settings.find((setting) => setting.help)?.help}
+      helpLabel={name}
+      label={name}
+    >
+      <MultiFilterSelect
+        allLabel={t("plugins.settings.choices.all")}
+        ariaLabel={name}
+        className="w-56"
+        clearLabel={t("plugins.settings.choices.clear")}
+        emptyMessage=""
+        everyLabel={t("plugins.settings.choices.all")}
+        label=""
+        noneLabel={t("plugins.settings.choices.none")}
+        onChange={(next) => {
+          for (const setting of settings)
+            onValue(setting.key, next.includes(setting.key));
+        }}
+        options={settings.map((setting) => ({
+          value: setting.key,
+          label: setting.label ?? setting.key,
+        }))}
+        searchable={false}
+        selectAllLabel={t("plugins.settings.choices.selectAll")}
+        selectedCountLabel={(count) =>
+          t("plugins.settings.choices.count", { count })
+        }
+        selectedText={(selected) =>
+          selected
+            .map((option) => option.label)
+            .join(t("plugins.settings.choices.separator"))
+        }
+        value={settings
+          .filter((setting) => values[setting.key] === true)
+          .map((setting) => setting.key)}
+      />
     </SettingRow>
   );
 }

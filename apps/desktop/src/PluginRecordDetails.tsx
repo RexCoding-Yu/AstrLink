@@ -75,7 +75,7 @@ const knownObserve = new Set([
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
 type Translate = ReturnType<typeof useT>;
@@ -127,6 +127,11 @@ function injectionText(entry: RequestPluginRecord, t: Translate): string {
     injection.dropped_items > 0
       ? t("pluginRecords.dropped", { count: injection.dropped_items })
       : "",
+    injection.usage_bytes
+      ? t("pluginRecords.usagePart", {
+          size: formatBytes(injection.usage_bytes),
+        })
+      : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -151,6 +156,19 @@ function networkText(entry: RequestPluginRecord, t: Translate): string {
 }
 
 /**
+ * The status a record shows: a block the plugin skipped while the request
+ * still carried the usage of its lookups was no skip as far as the request
+ * goes.
+ */
+export function shownStatus(
+  entry: RequestPluginRecord,
+): RequestPluginRecord["status"] {
+  return entry.status === "skipped" && (entry.injection?.usage_bytes ?? 0) > 0
+    ? "ok"
+    : entry.status;
+}
+
+/**
  * What a record says at a glance, and what waits behind it. The headline is
  * what the plugin did; the points under it are why, what it added to the
  * request and what became of the turn's capture; the rest, down to the
@@ -158,6 +176,7 @@ function networkText(entry: RequestPluginRecord, t: Translate): string {
  */
 function describe(entry: RequestPluginRecord, t: Translate) {
   const reason = skipReason(entry, t);
+  const usageOnly = shownStatus(entry) !== entry.status;
   const observe =
     entry.observe && entry.observe !== "queued"
       ? observeState(entry.observe, t)
@@ -174,7 +193,7 @@ function describe(entry: RequestPluginRecord, t: Translate) {
         : entry.trigger
       : "",
     entry.injection && entry.injection.injected_bytes > 0
-      ? t("pluginRecords.injected", {
+      ? t(usageOnly ? "pluginRecords.usageOnly" : "pluginRecords.injected", {
           placement: t(`pluginRecords.placement.${entry.injection.placement}`),
           size: formatBytes(entry.injection.injected_bytes),
         })
@@ -212,6 +231,7 @@ function describe(entry: RequestPluginRecord, t: Translate) {
     points,
     details,
     quiet,
+    usageOnly,
   };
 }
 
@@ -312,7 +332,7 @@ function PluginRecordRow({
   onAction: (action: PluginRecordAction) => void;
 }) {
   const t = useT();
-  const { headline, points, details, quiet } = describe(entry, t);
+  const { headline, points, details, quiet, usageOnly } = describe(entry, t);
   const view = entry.view && entry.view.length > 0 ? entry.view : null;
   const buttons = actions && actions.length > 0 ? actions : null;
   const line = (
@@ -327,7 +347,7 @@ function PluginRecordRow({
         >
           {entry.title}
         </span>
-        {entry.status !== "ok" ? (
+        {entry.status !== "ok" && !usageOnly ? (
           <span
             className={cn(
               "shrink-0 text-micro",

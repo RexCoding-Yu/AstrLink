@@ -10,6 +10,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getPlugin: vi.fn(),
   getPluginStatus: vi.fn(),
   getPluginStats: vi.fn(),
+  getPluginCreditStars: vi.fn(),
   updatePlugin: vi.fn(),
   testPlugin: vi.fn(),
   savePluginCredential: vi.fn(),
@@ -150,7 +151,6 @@ const memory: PluginDetail = {
       owner: "OceanBase",
       license: "Apache-2.0",
       url: "https://github.com/oceanbase/powercontext",
-      note: "本插件不是 PowerContext 官方插件。",
     },
   ],
   excluded_clients: [],
@@ -391,6 +391,9 @@ describe("PluginManager", () => {
     vi.clearAllMocks();
     removeAnimations = installDialogAnimations();
     bridgeMocks.listPlugins.mockResolvedValue(list);
+    bridgeMocks.getPluginCreditStars.mockResolvedValue({
+      "https://github.com/oceanbase/powercontext": 1367,
+    });
     bridgeMocks.getPlugin.mockImplementation(async (key: string) =>
       key === memory.key
         ? memory
@@ -490,10 +493,15 @@ describe("PluginManager", () => {
     const connection = document.querySelector(
       '[data-testid="plugin-connection"]',
     );
-    expect(connection?.textContent).toContain("http://192.0.2.1:9090");
-    expect(connection?.textContent).toContain("明文 HTTP");
-    expect(connection?.textContent).toContain("连接正常");
-    expect(connection?.textContent).toContain("PowerContext 1.3.0 · 190 ms");
+    // The plugin joined to AstrLink, switched off, with its server under it
+    // and the last test on the link.
+    const link = connection?.querySelector('[data-testid="plugin-link"]');
+    expect(link?.getAttribute("data-state")).toBe("off");
+    expect(link?.textContent).toContain("AstrLink本机网关已停用");
+    expect(link?.textContent).toContain("PowerContext 1.3.0 · 190 ms");
+    expect(link?.textContent).toContain(
+      "PowerContext 记忆192.0.2.1:9090明文 HTTP",
+    );
     expect(connection?.textContent).toContain("原子记忆 / 主题记忆");
     const bindings = document.querySelector('[data-testid="plugin-bindings"]');
     expect(bindings?.textContent).toContain("已绑定的项目");
@@ -502,32 +510,56 @@ describe("PluginManager", () => {
     expect(
       document.querySelector('[data-testid="plugin-own-status"]')?.textContent,
     ).toContain("已整理成记忆");
-    // The last 7 days in numbers, with what the plugin has: no lookups
-    // here, so no line for them.
+    // The last 7 days as a tile for each part the plugin has, with its days
+    // as small columns: no lookups here, so no tile for them.
     const effects = document.querySelector('[data-testid="plugin-effects"]');
-    expect(effects?.textContent).toContain(
-      "装载4 次 · 多带 60.0 KB（约 20,480 token） · 其中刷新 1 次 · 等待中位 310 ms，最慢 5% 1200 ms",
+    const tiles = [
+      ...(effects?.querySelectorAll('[data-testid="plugin-effect-tile"]') ??
+        []),
+    ].map((tile) => tile.textContent);
+    expect(tiles).toEqual([
+      "装载消耗约 2.05万 token装载 4 次 · 等待约 310 ms · 刷新 1 次",
+      "写入9 条Agent 上报 2 条 · 失败 1 条",
+      "问题3失败 1 · 超时 2",
+    ]);
+    const sparklines = effects?.querySelectorAll('[data-slot="sparkline"]');
+    expect(sparklines).toHaveLength(3);
+    const columns = sparklines?.[0]?.querySelectorAll("[data-value]") ?? [];
+    expect(columns).toHaveLength(7);
+    // Today, on the right, carries the load.
+    expect(columns[6]?.getAttribute("data-value")).toBe("20480");
+    expect(columns[0]?.getAttribute("data-value")).toBe("0");
+    // How sessions got their project, only the ways that happened.
+    const ways = document.querySelector(
+      '[data-testid="plugin-effect-bindings"]',
     );
-    expect(effects?.textContent).toContain(
-      "工作区自动 2 · 选已有 1 · 新建 1 · 不纳入 0 · 没回答 1 · 自动绑定后改掉 1",
+    expect(ways?.textContent).toBe(
+      "绑定方式按工作区自动2选了已有的1新建1没回答1自动绑定后改掉 1 次",
     );
-    expect(effects?.textContent).toContain(
-      "写入9 条 · 失败 1 · 其中模型上报 2 条",
-    );
-    expect(effects?.textContent).toContain(
-      "问题失败 1 · 超时 2 · 隐私拦截 0 · 超出预算 0",
-    );
-    expect(effects?.textContent).toContain(
-      "缓存命中开了记忆 82% · 其他会话 60%",
-    );
+    expect(
+      document.querySelector('[data-testid="plugin-effect-cache"]')
+        ?.textContent,
+    ).toBe("缓存命中开了记忆82%其他会话60%");
     expect(effects?.textContent).not.toContain("查询");
+    // The projects it is built on: a line, with GitHub's stars and mark.
     const credits = document.querySelector('[data-testid="plugin-credits"]');
-    expect(credits?.textContent).toContain("OceanBase · Apache License 2.0");
-    expect(credits?.textContent).toContain(
-      "本插件不是 PowerContext 官方插件。",
-    );
-    expect(credits?.querySelector("a")?.getAttribute("href")).toBe(
+    expect(credits?.textContent).toContain("使用了开源项目 PowerContext");
+    expect(
+      credits?.querySelector('[data-slot="github-repo-badge"]')?.textContent,
+    ).toContain("1,367");
+    expect(credits?.textContent).not.toContain("官方");
+    const repository = credits?.querySelector("a");
+    expect(repository?.getAttribute("href")).toBe(
       "https://github.com/oceanbase/powercontext",
+    );
+    expect(repository?.getAttribute("aria-label")).toBe(
+      "在 GitHub 上查看 PowerContext，1,367 颗星",
+    );
+    expect(repository?.getAttribute("title")).toBe(
+      "oceanbase/powercontext · Apache-2.0",
+    );
+    expect(bridgeMocks.getPluginCreditStars).toHaveBeenCalledWith(
+      "powercontext",
     );
     // What the plugin does stays behind the ? by its name.
     expect(document.body.textContent).not.toContain(
@@ -577,9 +609,7 @@ describe("PluginManager", () => {
     await click(button("重新扫描"));
     expect(
       document.querySelector('[data-testid="plugin-effects"]')?.textContent,
-    ).toContain(
-      "查询8 次 · 有结果 75% · 5 个会话里 2 个查过 · 耗时中位 640 ms · 拒绝 1 次",
-    );
+    ).toContain("查询8 次命中 75% · 2 个会话用过 · 拒绝 1 次");
   });
 
   it("lists the account day by day on the status page, today first", async () => {
@@ -595,7 +625,13 @@ describe("PluginManager", () => {
     expect(rows[0]?.textContent).toContain("9（失败 1）");
     expect(rows[0]?.textContent).toContain("82% / 60%");
     expect(rows[6]?.textContent).toContain("2026-10-15");
-    expect(daily?.querySelector("thead")?.textContent).not.toContain("查询");
+    const head = daily?.querySelector("thead")?.textContent;
+    expect(head).toContain("消耗");
+    expect(head).not.toContain("查询");
+    // Days without activity stay, greyed.
+    expect(rows[0]?.getAttribute("data-active")).toBe("true");
+    expect(rows[1]?.getAttribute("data-active")).toBe("false");
+    expect(rows[1]?.className).toContain("text-muted-foreground");
   });
 
   it("grants only the capabilities left ticked when enabling", async () => {
@@ -610,6 +646,7 @@ describe("PluginManager", () => {
       ],
     });
     await render();
+    await openTab("设置");
     await click(button("启用"));
     const summary = document.querySelector(
       '[data-testid="plugin-enable-summary"]',
@@ -642,6 +679,89 @@ describe("PluginManager", () => {
     expect(
       document.querySelector('[data-testid="plugin-row"]')?.textContent,
     ).toContain("运行中");
+    // Enabling brings the overview back, the plugin joined to AstrLink.
+    const link = document.querySelector('[data-testid="plugin-link"]');
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute("data-state")).not.toBe("off");
+  });
+
+  it("offers a row of switches as one choice of several", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      settings: [
+        ...memory.settings,
+        ...["atomic", "topics", "skills"].map((key, index) => ({
+          key: `scopes.${key}`,
+          label: ["原子记忆", "主题", "技能"][index],
+          type: "switch" as const,
+          group: "查询",
+          row: "查询范围",
+          default: true,
+        })),
+      ],
+    });
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    const scopes = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="查询范围"]',
+    );
+    if (!scopes) throw new Error("Missing the scope choice");
+    expect(scopes.textContent).toBe("全部");
+    // No switch of its own stays on the row.
+    expect(
+      scopes
+        .closest('[data-slot="setting-row"]')
+        ?.querySelector('[role="switch"]'),
+    ).toBeNull();
+    await act(async () => {
+      scopes.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0 }),
+      );
+      scopes.click();
+    });
+    // Three options need no search.
+    expect(
+      document.querySelector('input[aria-label="查询范围 search"]'),
+    ).toBeNull();
+    const skills = document.querySelector<HTMLButtonElement>(
+      'button[role="checkbox"][aria-label="技能"]',
+    );
+    if (!skills) throw new Error("Missing the skills option");
+    await click(skills);
+    expect(scopes.textContent).toBe("原子记忆、主题");
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+    await settleClosedLayer();
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith(
+      "powercontext",
+      expect.objectContaining({
+        config: expect.objectContaining({ scopes: { skills: false } }),
+      }),
+    );
+  });
+
+  it("keeps the help of the header in one ?", async () => {
+    await render();
+    const controls = document.querySelector(
+      '[data-testid="plugin-host-controls"]',
+    );
+    expect(controls?.querySelector("button[aria-label^='关于']")).toBeNull();
+    const help = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="关于插件的总设置"]',
+    );
+    if (!help) throw new Error("Missing the header help");
+    await click(help);
+    for (const part of [
+      "暂停期间所有插件都不运行",
+      "所有插件往一次请求里注入的内容合计",
+      "每个插件在这里有自己的文件夹",
+    ])
+      expect(document.body.textContent).toContain(part);
   });
 
   it("saves the settings form as one configuration", async () => {
@@ -830,7 +950,10 @@ describe("PluginManager", () => {
     const item = [
       ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
     ].find((entry) => entry.textContent?.includes("查询凭证")) as HTMLElement;
-    expect(item.textContent).toContain("只在内存里");
+    // Grouped where they are kept.
+    expect(
+      item.closest('[data-testid="plugin-stored-place"]')?.textContent,
+    ).toContain("只在内存里");
     expect(item.textContent).toContain("2 条");
     await click(button("作废", item));
     expect(bridgeMocks.clearPluginData).not.toHaveBeenCalled();
@@ -870,10 +993,10 @@ describe("PluginManager", () => {
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
     await render();
     await openTab("设置");
-    const lookup = control<HTMLButtonElement>("供模型查询");
+    const lookup = control<HTMLButtonElement>("允许 Agent 查询");
     expect(lookup.getAttribute("aria-checked")).toBe("true");
     const help = document.querySelector<HTMLButtonElement>(
-      'button[aria-label="关于供模型查询"]',
+      'button[aria-label="关于允许 Agent 查询"]',
     );
     if (!help) throw new Error("Missing the lookup help");
     await click(help);
@@ -899,7 +1022,7 @@ describe("PluginManager", () => {
   it("offers no lookup switch for a plugin without lookups", async () => {
     await render();
     await openTab("设置");
-    expect(document.body.textContent).not.toContain("供模型查询");
+    expect(document.body.textContent).not.toContain("允许 Agent 查询");
   });
 
   it("lists what is kept for the plugin and clears it after asking", async () => {
@@ -909,22 +1032,38 @@ describe("PluginManager", () => {
     expect(stored?.textContent).toContain("工作区和值的对应");
     expect(stored?.textContent).toContain("2 条");
     expect(stored?.textContent).toContain("当前装载块");
-    // One row each: what, where, whether it holds conversation text, how
-    // long; what each holds behind its ?.
+    // A column for each place, each thing with how much and its button;
+    // only what holds memory text says so.
+    const places = [
+      ...document.querySelectorAll('[data-testid="plugin-stored-place"]'),
+    ].map((place) => place.querySelector("h4")?.textContent);
+    expect(places).toEqual(["AstrLink 数据库", "只在内存里", "请求记录"]);
     const block = [
       ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
     ].find((item) => item.textContent?.includes("当前装载块"));
-    expect(block?.textContent).toContain("只在内存里含记忆内容网关重启就没了");
-    expect(
-      block?.querySelector('button[aria-label="关于当前装载块"]'),
-    ).not.toBeNull();
-    // What the plugin declares sits under its store.
-    const declared = document.querySelector(
-      '[data-testid="plugin-stored-declared"]',
+    expect(block?.textContent).toBe("当前装载块含记忆内容");
+    // What each one is, how long it stays and what the plugin declares
+    // all wait behind the card's one ?.
+    expect(stored?.querySelectorAll("button[aria-label^='关于']")).toHaveLength(
+      1,
     );
-    expect(declared?.textContent).toBe(
-      "项目在服务器上的编号不含一直保留，可在插件页清除",
+    expect(stored?.textContent).not.toContain("网关重启就没了");
+    await click(
+      stored?.querySelector('button[aria-label="关于数据存储"]') as HTMLElement,
     );
+    const help = document.querySelector('[data-testid="plugin-stored-help"]');
+    expect(help?.textContent).toContain(
+      "当前装载块会话系统提示词里正在用的那份项目记忆。保留：网关重启就没了。",
+    );
+    expect(help?.textContent).toContain(
+      "项目在服务器上的编号（一直保留，可在插件页清除）",
+    );
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+    await settleClosedLayer();
     const items = [
       ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
     ];
@@ -1031,22 +1170,22 @@ describe("PluginManager", () => {
   });
 
   it("shows the connection test it ran", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({ ...memory, enabled: true });
     bridgeMocks.getPluginStatus.mockResolvedValueOnce({
       ...status,
       last_test: undefined,
     });
     bridgeMocks.testPlugin.mockResolvedValue(status.last_test);
     await render();
-    expect(
-      document.querySelector('[data-testid="plugin-connection"]')?.textContent,
-    ).toContain("还没测试");
+    const link = () => document.querySelector('[data-testid="plugin-link"]');
+    expect(link()?.getAttribute("data-state")).toBe("idle");
+    expect(link()?.textContent).toContain("还没测试");
     await click(button("测试连接"));
     expect(bridgeMocks.testPlugin).toHaveBeenCalledWith("powercontext");
     // The overview reads the test back with what it changed in the counts.
     expect(bridgeMocks.getPluginStatus).toHaveBeenCalledTimes(2);
-    expect(
-      document.querySelector('[data-testid="plugin-connection"]')?.textContent,
-    ).toContain("连接正常");
+    expect(link()?.getAttribute("data-state")).toBe("connected");
+    expect(link()?.textContent).toContain("连接正常");
   });
 
   it("keeps the plugin's own status with the connection, once each", async () => {

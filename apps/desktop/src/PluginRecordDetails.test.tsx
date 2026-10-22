@@ -140,7 +140,7 @@ describe("PluginRecordDetails", () => {
     // The line: what the plugin did, then what it added; a capture that
     // went as usual says nothing.
     expect(memory?.textContent).toContain("记忆412 ms召回 3/9");
-    expect(memory?.textContent).toContain("本轮用户开口消息开头 +1.8 KiB");
+    expect(memory?.textContent).toContain("本轮用户消息开头 +1.8 KB");
     expect(memory?.textContent).not.toContain("已排队");
     expect(
       memory?.querySelector('[data-testid="plugin-record-details"]'),
@@ -151,7 +151,7 @@ describe("PluginRecordDetails", () => {
       '[data-testid="plugin-record-details"]',
     );
     expect(details?.textContent).toContain(
-      "本轮用户开口消息开头 · 1.8 KiB · 重放 2 段",
+      "本轮用户消息开头 · 1.8 KB · 沿用之前的 2 段",
     );
     expect(details?.textContent).toContain("3 个请求 · 等待 402 ms");
     expect(details?.textContent).not.toContain("拒绝");
@@ -171,6 +171,46 @@ describe("PluginRecordDetails", () => {
       failed?.querySelector('[data-testid="plugin-record-details"]')
         ?.textContent,
     ).toContain("1 个请求 · 等待 30 ms · 失败 1");
+  });
+
+  it("does not call a block skipped when the request still carries the lookup usage", async () => {
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            plugin_records: [
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.1",
+                hook: "prepareSession",
+                title: "记忆装载",
+                status: "skipped",
+                summary: "项目还没有画像和主题",
+                trigger: "bound",
+                elapsed_ms: 21,
+                injection: {
+                  placement: "system_append",
+                  injected_bytes: 1229,
+                  replayed_blocks: 0,
+                  dropped_items: 0,
+                  usage_bytes: 1229,
+                },
+                network: { requests: 5, denied: 0, errors: 0, wait_ms: 5 },
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    const [load] = document.querySelectorAll('[data-testid="plugin-record"]');
+    expect(load?.textContent).not.toContain("已跳过");
+    expect(load?.textContent).toContain("项目还没有画像和主题");
+    expect(load?.textContent).toContain("只附上查询方法 · 系统提示词 +1.2 KB");
+    await open(load);
+    expect(
+      load?.querySelector('[data-testid="plugin-record-details"]')?.textContent,
+    ).toContain("系统提示词 · 1.2 KB · 其中查询方法 1.2 KB");
   });
 
   it("shows a turn waiting for its project and what the capture wrote", async () => {
@@ -238,7 +278,7 @@ describe("PluginRecordDetails", () => {
     });
     expect(
       document.querySelector('[data-testid="plugin-record"]')?.textContent,
-    ).toContain("写入：留着，会话定下项目后补写");
+    ).toContain("写入：先记下，会话选定项目后补写");
     expect(write?.textContent).toContain("记忆写入");
     expect(write?.textContent).toContain("已写入 · 已整理成记忆");
   });
@@ -337,7 +377,7 @@ describe("PluginRecordDetails", () => {
     expect(
       search?.querySelector('[data-testid="plugin-record-lookup"]')
         ?.textContent,
-    ).toBe("search · 参数 12 字 · 结果 2.1 KiB · 3 条结果");
+    ).toBe("search · 参数 12 字 · 结果 2.1 KB · 3 条结果");
     expect(refused?.textContent).toContain("这一轮已经查满 3 次");
     await open(refused);
     expect(
