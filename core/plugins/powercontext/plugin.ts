@@ -1118,7 +1118,8 @@ export function prepareSession(
   const base = "/v1/scopes/" + scope + "/artifacts/";
   const policy = policyRequests(cfg, scope);
   // The profile is one artifact, read whole: its list item carries no text.
-  // A project without one answers 404.
+  // A project without one answers 503 artifact_owner_pending on 1.3, as an
+  // artifact nobody owns yet; whatever the reason, no profile is no profile.
   const responses = astrlink.http.fetch([
     request(cfg, "GET", base + "profile/profile"),
     request(cfg, "GET", base + "topic-memory?limit=100"),
@@ -1127,15 +1128,7 @@ export function prepareSession(
   const [profileResponse, topicResponse] = responses;
   if (policy.length > 0) settlePolicy(cfg, scope, responses[2]);
   if (profileResponse.status !== 200 && topicResponse.status !== 200)
-    return skipped(
-      text,
-      text.serverDown(
-        failure(
-          text,
-          profileResponse.status === 404 ? topicResponse : profileResponse,
-        ),
-      ),
-    );
+    return skipped(text, text.serverDown(failure(text, topicResponse)));
   const profile =
     profileResponse.status === 200
       ? ((profileResponse.json as ProfileArtifact).content?.content ?? "")
