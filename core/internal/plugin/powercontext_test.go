@@ -144,9 +144,10 @@ func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTP
 		}
 		return reply(200, `{"scope_id":"`+scope+`","generation_enabled":false,"activation_mode":"automatic","pending_candidate_id":null,"version":3,"updated_at":"2026-10-21T00:00:00Z"}`)
 	case strings.HasSuffix(target.Path, "/artifacts/profile/profile"):
-		// The profile artifact itself: its list item carries no text.
+		// The profile artifact itself: its list item carries no text. 1.3
+		// answers for one that does not exist as for one nobody owns yet.
 		if server.profile == "" {
-			return reply(404, `{"error":{"code":"not_found","message":"Not found."}}`)
+			return reply(503, `{"error":{"code":"artifact_owner_pending","message":"Access Control is unavailable.","details":null}}`)
 		}
 		content, _ := json.Marshal(server.profile)
 		return reply(200, `{"scope_id":"scp","family":"profile","artifact_id":"profile","revision":2,"content":{"schema":"powercontext.profile.v1","media_type":"text/markdown","content":`+string(content)+`},"sources":[],"artifacts":[],"content_digest":"sha256:0"}`)
