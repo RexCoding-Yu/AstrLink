@@ -16,10 +16,12 @@ import (
 )
 
 // What became of a turn's capture. A capture awaiting the reply is queued
-// once the reply binds the session, or skipped as unbound.
+// once the reply binds the session, else held until the session is bound,
+// or skipped as unbound when it cannot be held.
 const (
 	observeQueued             = "queued"
 	observeAwaiting           = "awaiting_reply"
+	observeHeld               = "held_unbound"
 	observeSkippedUnbound     = "skipped_unbound"
 	observeSkippedPrivacy     = "skipped_privacy"
 	observeSkippedBindingTurn = "skipped_binding_turn"

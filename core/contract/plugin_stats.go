@@ -84,10 +84,12 @@ type PluginBindingStats struct {
 	Changed    int `json:"changed"`
 }
 
-// PluginWriteStats counts what observeTurn reported.
+// PluginWriteStats counts what observeTurn and the model's reports wrote:
+// OK and Failed both, Reported the reports among OK.
 type PluginWriteStats struct {
-	OK     int `json:"ok"`
-	Failed int `json:"failed"`
+	OK       int `json:"ok"`
+	Failed   int `json:"failed"`
+	Reported int `json:"reported"`
 }
 
 // PluginProblemStats counts the plugin's records that failed or stayed out

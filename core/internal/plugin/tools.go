@@ -79,10 +79,10 @@ func (text Localized) valid(max int) bool {
 	return true
 }
 
-// Tool is a read-only query the plugin offers the model. The model runs it
-// through the gateway's lookup outlet with the session's own credential; the
-// gateway writes how into the request, in the session's language, from what
-// the tool declares here.
+// Tool is a query the plugin offers the model, or a report it takes from
+// it. The model runs it through the gateway's lookup outlet with the
+// session's own credential; the gateway writes how into the request, in the
+// session's language, from what the tool declares here.
 type Tool struct {
 	Name string `json:"name"`
 	// Description says what the query finds and when to run it.
@@ -92,6 +92,13 @@ type Tool struct {
 	// each of the plugin's attributes, such as listing the projects. The
 	// others need the values.
 	Unbound bool `json:"unbound,omitempty"`
+	// Writes marks a report: the model hands the plugin something to keep
+	// instead of reading. A report needs the session's values and has
+	// limits of its own.
+	Writes bool `json:"writes,omitempty"`
+	// Setting names a switch of the plugin's settings that turns the tool
+	// on and off; the gateway offers the tool only while it is on.
+	Setting string `json:"setting,omitempty"`
 }
 
 // ToolParam is a parameter of a query: a string or a number.
@@ -133,6 +140,15 @@ func validateTools(meta Meta) error {
 		}
 		if !tool.Description.valid(maxToolDescription) {
 			return fmt.Errorf("%s.description must be 1 to %d characters in each language it gives", where, maxToolDescription)
+		}
+		if tool.Writes && tool.Unbound {
+			return fmt.Errorf("%s: a report needs the session's values, so it cannot be unbound", where)
+		}
+		if tool.Setting != "" {
+			setting, declared := meta.Setting(tool.Setting)
+			if !declared || setting.Host() || setting.Type != SettingSwitch {
+				return fmt.Errorf("%s.setting %q must name a switch in meta.settings", where, tool.Setting)
+			}
 		}
 		if len(tool.Params) > maxToolParams {
 			return fmt.Errorf("%s has more than %d params", where, maxToolParams)
@@ -183,6 +199,12 @@ func validateToolParam(param ToolParam) error {
 		return fmt.Errorf("example must be 1 to %d characters", maxToolExample)
 	}
 	return nil
+}
+
+// Offers reports whether the plugin offers the model tool: always, or while
+// the switch the tool names is on.
+func (plugin *Plugin) Offers(tool Tool) bool {
+	return tool.Setting == "" || plugin.Meta.SwitchOn(plugin.Settings.Config, tool.Setting)
 }
 
 // Tool returns the query of name.

@@ -121,6 +121,33 @@ func TestConfigGetsTheDefaultsItLacks(t *testing.T) {
 	}
 }
 
+func TestSwitchOnReadsTheConfigThenTheDefault(t *testing.T) {
+	meta := settingsMeta()
+	for _, test := range []struct {
+		config string
+		want   bool
+	}{
+		{``, true},
+		{`{"askProject":false}`, false},
+		{`{"askProject":true}`, true},
+		{`{"askProject":null}`, true},
+		{`{"askProject":"no"}`, false},
+		{`[1]`, true},
+	} {
+		if got := meta.SwitchOn(json.RawMessage(test.config), "askProject"); got != test.want {
+			t.Fatalf("SwitchOn(%s) = %v, want %v", test.config, got, test.want)
+		}
+	}
+	// What is no switch of the plugin's is off, and so is a switch without
+	// a default that the config leaves out.
+	meta.Settings = append(meta.Settings, Setting{Key: "quiet", Label: "安静", Type: SettingSwitch})
+	for _, key := range []string{"style", "missing", HostSettingTrusted, "quiet"} {
+		if meta.SwitchOn(nil, key) {
+			t.Fatalf("SwitchOn(%s) = true", key)
+		}
+	}
+}
+
 func TestCheckConfigNamesTheSettingItGetsWrong(t *testing.T) {
 	meta := settingsMeta()
 	if err := meta.CheckConfig(json.RawMessage(`{"serverUrl":"http://192.0.2.10:9090/api","quotas":{"atomic-memory":2},"unknown":{"kept":true}}`)); err != nil {

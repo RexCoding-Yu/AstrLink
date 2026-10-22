@@ -208,13 +208,15 @@ type PluginDetail struct {
 	HostStorage []PluginHostStorage `json:"host_storage"`
 }
 
-// PluginTool is a query a plugin offers the model: its name and what it
-// says of itself in the interface language.
+// PluginTool is a query a plugin offers the model, or a report it takes:
+// its name and what it says of itself in the interface language.
 type PluginTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	// Unbound marks a query a session may run before it is bound.
 	Unbound bool `json:"unbound,omitempty"`
+	// Writes marks a report: the model hands the plugin something to keep.
+	Writes bool `json:"writes,omitempty"`
 }
 
 // PluginStorageItem is something a plugin says it keeps in its own store.

@@ -73,7 +73,7 @@ export const meta = {
   apiVersion: 1,
   key: "powercontext",
   name: "PowerContext 记忆",
-  version: "2.0.0",
+  version: "2.1.0",
   capabilities: [
     "context.inject",
     "request.read",
@@ -102,8 +102,8 @@ export const meta = {
   notice:
     "启用后，会话有了项目，就把这个项目的画像和最近更新的主题目录放进系统提示词，会话内不变。" +
     "新会话还没有项目时，只在第一轮问一次用户要纳入哪个项目，并列出已有的项目；同一个目录里的新会话会自动接上上次的项目。" +
-    "客户端和网关在同一台电脑上、能执行 shell 时，模型还可以自己查这个项目的记忆，查询只读。" +
-    "每轮结束时把用户输入的文字记进 PowerContext，整理成记忆、生成画像由服务器定时完成。",
+    "客户端和网关在同一台电脑上、能执行 shell 时，模型还可以自己查这个项目的记忆，也可以把值得记住的项目信息主动上报。" +
+    "每轮结束时把用户输入的文字记进 PowerContext；会话定下项目之前的几轮，定下后补写。整理成记忆、生成画像由服务器定时完成。",
   settings: [
     {
       key: "serverUrl",
@@ -210,6 +210,17 @@ export const meta = {
       unit: "条",
       help: "模型检索一次最多拿到几条记忆，各类记忆按相关度轮流取。",
     },
+    {
+      key: "report",
+      label: "允许模型上报",
+      type: "switch",
+      group: "上报",
+      default: true,
+      help:
+        "模型可以用 shell 把以后还用得上的项目信息（背景、目标、约定、决定、进展）主动记进会话绑定的项目，" +
+        "和每轮的对话一样由服务器整理成记忆和画像。" +
+        "要先打开「供模型查询」；每轮最多上报 2 次，内容照样过隐私检查。",
+    },
     { key: "$trusted", group: "隐私" },
     { key: "$origins", advanced: true },
   ],
@@ -303,6 +314,30 @@ export const meta = {
         { name: "cursor", type: "string", maxLength: 2000 },
       ],
     },
+    {
+      name: "note",
+      description: {
+        "zh-CN":
+          "知道了以后还用得上、而上面的画像和主题目录里没有的项目信息（背景、目标、约定、决定、进展）时，用一两句话记进本项目的记忆。",
+        en: "When you learn something about this project worth keeping (background, goals, conventions, decisions, progress) that the profile and topics above lack, note it in its memory in a sentence or two.",
+        ja: "このプロジェクトについて今後も役立ち、上のプロフィールとトピック一覧にない情報（背景・目標・取り決め・決定・進捗）を知ったら、一、二文でこのプロジェクトの記憶に記録します。",
+      },
+      writes: true,
+      setting: "report",
+      params: [
+        {
+          name: "text",
+          type: "string",
+          required: true,
+          maxLength: 1000,
+          example: {
+            "zh-CN": "要记下的内容",
+            en: "what to note",
+            ja: "記録する内容",
+          },
+        },
+      ],
+    },
   ],
 };
 
@@ -394,6 +429,11 @@ interface Texts {
   noProjects: string;
   moreProjects: (cursor: string) => string;
   narrower: string;
+  noteTitle: string;
+  noted: (project: string) => string;
+  noteSummary: (characters: number) => string;
+  noteFailed: (reason: string) => string;
+  writtenLate: (turn: number) => string;
 }
 
 const MONTHS = [
@@ -536,6 +576,12 @@ const TEXTS: Record<Language, Texts> = {
     moreProjects: (cursor) =>
       '还有更多：加上 --data-urlencode "cursor=' + cursor + '" 再查一次。',
     narrower: "还有更多，换个更具体的关键词再查。",
+    noteTitle: "记忆上报",
+    noted: (project) =>
+      "已记下，服务器会把它整理进项目 " + project + " 的记忆。",
+    noteSummary: (characters) => "上报 " + characters + " 字",
+    noteFailed: (reason) => "没有记下：" + reason,
+    writtenLate: (turn) => "已补写第 " + turn + " 轮",
   },
   en: {
     ask: "This session has no project memory selected yet. Do not interrupt the current task; at the end of this reply, ask the user whether to keep memory in a project: one listed below, or a new one.",
@@ -681,6 +727,17 @@ const TEXTS: Record<Language, Texts> = {
       cursor +
       '".',
     narrower: "There are more; try a narrower keyword.",
+    noteTitle: "Memory report",
+    noted: (project) =>
+      "Noted; the server will fold it into the memory of project " +
+      project +
+      ".",
+    noteSummary: (characters) =>
+      "Reported " +
+      characters +
+      (characters === 1 ? " character" : " characters"),
+    noteFailed: (reason) => "Not noted: " + reason,
+    writtenLate: (turn) => "Written late: turn " + turn,
   },
   ja: {
     ask: "このセッションにはまだプロジェクトの記憶が選ばれていません。今の作業は中断せず、この返信の最後に、記憶をプロジェクトに入れるか（下の既存のものか、新しく作るか）をユーザーに尋ねてください。",
@@ -828,6 +885,14 @@ const TEXTS: Record<Language, Texts> = {
       cursor +
       '" を付けてもう一度実行してください。',
     narrower: "さらにあります。もっと具体的なキーワードで検索してください。",
+    noteTitle: "記憶の報告",
+    noted: (project) =>
+      "記録しました。サーバーがプロジェクト " +
+      project +
+      " の記憶にまとめます。",
+    noteSummary: (characters) => "報告 " + characters + " 文字",
+    noteFailed: (reason) => "記録できませんでした：" + reason,
+    writtenLate: (turn) => "第 " + turn + " ターンを後から記録",
   },
 };
 
@@ -1494,6 +1559,49 @@ export function observeTurn(
   const problem = serverProblem(cfg, text);
   if (problem !== null)
     return written(text, project.value, "failed", text.writeFailed(problem));
+  const failed = writeSource(cfg, text, project.value, {
+    // A retry of the same turn is idempotent; the same words in another turn
+    // are another source.
+    id:
+      "astrlink:" +
+      project.value +
+      ":" +
+      turn.session.id +
+      ":" +
+      turn.session.turn +
+      ":" +
+      astrlink.util.sha256(typed),
+    content: typed,
+    metadata: {
+      origin: "astrlink",
+      client: turn.client,
+      session: turn.session.id,
+      turn: turn.session.turn,
+      project: project.value,
+    },
+  });
+  if (failed !== "")
+    return written(text, project.value, "failed", text.writeFailed(failed));
+  // A turn held until the session had its project is written late.
+  return written(
+    text,
+    project.value,
+    "ok",
+    turn.late === true ? text.writtenLate(turn.session.turn) : text.written,
+  );
+}
+
+// writeSource writes content into the project's scope, which the server
+// turns into memory and the profile on its own schedule, making the scope
+// when the server has none. It returns "" when the content was written, else
+// why not. A scope kept from before the server started over is gone: the
+// content goes to the project's scope as the server knows it now.
+function writeSource(
+  cfg: Config,
+  text: Texts,
+  project: string,
+  source: { id: string; content: string; metadata: Record<string, unknown> },
+): string {
   const write = (scope: string) =>
     astrlink.http.fetch(
       request(
@@ -1502,53 +1610,38 @@ export function observeTurn(
         "/v1/sources/content",
         {
           scope_id: scope,
-          // A retry of the same turn is idempotent; the same words in another
-          // turn are another source.
-          source_id:
-            "astrlink:" +
-            project.value +
-            ":" +
-            turn.session.id +
-            ":" +
-            turn.session.turn +
-            ":" +
-            astrlink.util.sha256(typed),
-          content: typed,
-          metadata: {
-            origin: "astrlink",
-            client: turn.client,
-            session: turn.session.id,
-            turn: turn.session.turn,
-            project: project.value,
-          },
+          source_id: source.id,
+          content: source.content,
+          metadata: source.metadata,
         },
         10000,
       ),
     );
-  let scope = scopeFor(cfg, project.value);
+  let scope = scopeFor(cfg, project);
   let response = scope === null ? null : write(scope);
-  // A scope kept from before the server started over is gone: the turn is
-  // written to the project's scope as the server knows it now.
   if (response !== null && gone(response)) {
-    forget(project.value);
-    scope = scopeFor(cfg, project.value);
+    forget(project);
+    scope = scopeFor(cfg, project);
     response = scope === null ? null : write(scope);
   }
-  if (response === null)
-    return written(
-      text,
-      project.value,
-      "failed",
-      text.writeFailed(text.fetch.network),
-    );
+  if (response === null) return text.fetch.network;
   if (response.status < 200 || response.status >= 300)
-    return written(
-      text,
-      project.value,
-      "failed",
-      text.writeFailed(failure(text, response)),
-    );
-  return written(text, project.value, "ok", text.written);
+    return failure(text, response);
+  return "";
+}
+
+// keepLastWrite keeps what the overview says of the last write.
+function keepLastWrite(
+  project: string,
+  status: "ok" | "failed",
+  summary: string,
+): void {
+  astrlink.store.set("last-write", {
+    at: astrlink.clock.now(),
+    project,
+    status,
+    summary,
+  });
 }
 
 // written is the capture's record, and what the overview says of the last one.
@@ -1558,12 +1651,7 @@ function written(
   status: "ok" | "failed",
   summary: string,
 ): AstrLinkPlugin.ObserveTurnResult {
-  astrlink.store.set("last-write", {
-    at: astrlink.clock.now(),
-    project,
-    status,
-    summary,
-  });
+  keepLastWrite(project, status, summary);
   return {
     record: {
       title: text.writeTitle,
@@ -1636,6 +1724,55 @@ function bound(text: string, limit: number): string {
   const start = text.slice(0, head).trim();
   const end = text.slice(tail).trim();
   return end === "" ? start : start + " " + end;
+}
+
+// note keeps what the model reported about the session's project as a
+// source, like a turn: the server turns it into memory and the profile on
+// its own schedule. The same words in one session are one source.
+function note(
+  cfg: Config,
+  text: Texts,
+  view: AstrLinkPlugin.ToolView,
+): AstrLinkPlugin.ToolResult {
+  const project = view.meta.project;
+  if (project === undefined || project.value === "none")
+    return reported(text, text.noProject, "skipped", text.noProject);
+  const content = String(view.input.text ?? "").trim();
+  const failed = writeSource(cfg, text, project.value, {
+    id:
+      "astrlink:" +
+      project.value +
+      ":" +
+      view.session.id +
+      ":note:" +
+      astrlink.util.sha256(content),
+    content,
+    metadata: {
+      origin: "astrlink",
+      kind: "model_note",
+      session: view.session.id,
+      turn: view.session.turn,
+      project: project.value,
+    },
+  });
+  if (failed !== "") {
+    const summary = text.noteFailed(failed);
+    keepLastWrite(project.value, "failed", summary);
+    return reported(text, summary, "failed", summary);
+  }
+  const summary = text.noteSummary(Array.from(content).length);
+  keepLastWrite(project.value, "ok", summary);
+  return reported(text, text.noted(project.value), "ok", summary);
+}
+
+// reported is a report's answer: what the model reads and its record.
+function reported(
+  text: Texts,
+  answer: string,
+  status: "ok" | "skipped" | "failed",
+  summary: string,
+): AstrLinkPlugin.ToolResult {
+  return { text: answer, record: { title: text.noteTitle, status, summary } };
 }
 
 // looked is a lookup's answer: what the model reads, how many things it
@@ -1898,10 +2035,10 @@ function listAllProjects(
   );
 }
 
-// The model's lookups, which it runs with its shell through the gateway
-// under its session's credential: search and read look in the session's
-// project, projects lists the projects. They only read; memory still comes
-// from what observeTurn records.
+// The model's tools, which it runs with its shell through the gateway under
+// its session's credential: search and read look in the session's project,
+// projects lists the projects, and note keeps what the model reports about
+// the project, as observeTurn keeps the turns.
 export function callTool(
   view: AstrLinkPlugin.ToolView,
 ): AstrLinkPlugin.ToolResult {
@@ -1910,8 +2047,11 @@ export function callTool(
   const problem = serverProblem(cfg, text);
   if (problem !== null) {
     const summary = text.serverDown(problem);
-    return looked(text, summary, 0, "failed", summary);
+    return view.name === "note"
+      ? reported(text, summary, "failed", summary)
+      : looked(text, summary, 0, "failed", summary);
   }
+  if (view.name === "note") return note(cfg, text, view);
   if (view.name === "projects") return listAllProjects(cfg, text, view.input);
   const project = view.meta.project;
   if (project === undefined || project.value === "none")

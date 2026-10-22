@@ -50,6 +50,10 @@ type TurnView struct {
 	SessionView
 	Stream bool     `json:"stream"`
 	User   UserText `json:"user"`
+	// Late marks a turn observeTurn sees after the fact: it came while the
+	// session had no value of the plugin's attributes, and is captured now
+	// that it has one, with that value.
+	Late bool `json:"late,omitempty"`
 }
 
 // UserText is the turn's opening user message: as sent, without the

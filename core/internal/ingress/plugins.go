@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -148,10 +150,12 @@ func loopbackCaller(remote string) bool {
 }
 
 // serveLookup serves the lookup outlet, GET or POST
-// /tools/{plugin}/{query}: the read-only queries plugins offer the model,
-// which it runs with its shell. Only a caller on this machine reaches it,
-// and no browser; the session's credential stands in for an access token.
-// Answers are plain text, for the model to read as a command's output.
+// /tools/{plugin}/{tool}: the queries plugins offer the model and the
+// reports they take from it, which it runs with its shell. A GET carries the
+// parameters in its query; a POST, as a JSON object or as the form curl
+// posts. Only a caller on this machine reaches it, and no browser; the
+// session's credential stands in for an access token. Answers are plain
+// text, for the model to read as a command's output.
 func (handler *Handler) serveLookup(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
 	reply := func(status int, text string) {
@@ -182,20 +186,25 @@ func (handler *Handler) serveLookup(writer http.ResponseWriter, request *http.Re
 		reply(http.StatusUnauthorized, "a lookup needs the credential in the usage")
 		return
 	}
+	// The first value of each parameter of a query string or a form.
+	firstValues := func(given url.Values) []byte {
+		values := map[string]string{}
+		for key, all := range given {
+			if len(all) > 0 {
+				values[key] = all[0]
+			}
+		}
+		encoded, _ := json.Marshal(values)
+		return encoded
+	}
 	var input []byte
 	switch request.Method {
 	case http.MethodGet:
-		values := map[string]string{}
-		for key, given := range request.URL.Query() {
-			if len(given) > 0 {
-				values[key] = given[0]
-			}
-		}
 		if len(request.URL.RawQuery) > pluginhost.MaxLookupBody {
 			reply(http.StatusRequestEntityTooLarge, "the lookup is too large")
 			return
 		}
-		input, _ = json.Marshal(values)
+		input = firstValues(request.URL.Query())
 	case http.MethodPost:
 		body, err := io.ReadAll(io.LimitReader(request.Body, pluginhost.MaxLookupBody+1))
 		if err != nil {
@@ -207,6 +216,14 @@ func (handler *Handler) serveLookup(writer http.ResponseWriter, request *http.Re
 			return
 		}
 		input = body
+		if media, _, _ := mime.ParseMediaType(request.Header.Get("Content-Type")); media == "application/x-www-form-urlencoded" {
+			form, err := url.ParseQuery(string(body))
+			if err != nil {
+				reply(http.StatusBadRequest, "the lookup could not be read")
+				return
+			}
+			input = firstValues(form)
+		}
 	default:
 		writer.Header().Set("Allow", "GET, POST")
 		reply(http.StatusMethodNotAllowed, "use GET or POST")

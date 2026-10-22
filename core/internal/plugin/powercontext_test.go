@@ -554,6 +554,68 @@ func TestThePowerContextPluginWritesWithoutProcessing(t *testing.T) {
 	}
 }
 
+func TestThePowerContextPluginWritesAHeldTurnLate(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	result := decodeResult[struct {
+		Record struct{ Status, Summary string } `json:"record"`
+	}](t, h.call(HookObserveTurn, powerContextView("paseo", "zh-CN", map[string]any{"late": true})))
+	if result.Record.Status != "ok" || result.Record.Summary != "已补写第 1 轮" {
+		t.Fatalf("a late turn = %+v", result)
+	}
+	sources := h.server.requests("POST", "/v1/sources/content")
+	if len(sources) != 1 || !strings.Contains(string(sources[0].JSON), `"source_id":"astrlink:paseo:session_1:1:`) {
+		t.Fatalf("sources = %+v", sources)
+	}
+}
+
+func TestThePowerContextPluginKeepsWhatTheModelReports(t *testing.T) {
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	// A report goes to the project's scope, made when the server has none,
+	// as a source of its own, and answers in plain words.
+	result := decodeResult[toolResult](t, h.call(HookCallTool, toolView("note", "brand-new", "zh-CN", map[string]any{"text": " 游标分页：最后一页返回空游标。 "})))
+	if result.Text != "已记下，服务器会把它整理进项目 brand-new 的记忆。" || result.Hits != nil ||
+		result.Record.Title != "记忆上报" || result.Record.Status != "ok" || result.Record.Summary != "上报 15 字" {
+		t.Fatalf("note = %+v", result)
+	}
+	sources := h.server.requests("POST", "/v1/sources/content")
+	if len(sources) != 1 {
+		t.Fatalf("sources = %+v", sources)
+	}
+	var sent struct {
+		ScopeID  string         `json:"scope_id"`
+		SourceID string         `json:"source_id"`
+		Content  string         `json:"content"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(sources[0].JSON, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.ScopeID != "scp_brand-new" || !strings.HasPrefix(sent.SourceID, "astrlink:brand-new:session_1:note:") || sent.Content != "游标分页：最后一页返回空游标。" ||
+		sent.Metadata["kind"] != "model_note" || sent.Metadata["origin"] != "astrlink" || sent.Metadata["turn"] != float64(2) {
+		t.Fatalf("sent %+v", sent)
+	}
+	// The same words in the session are the same source.
+	h.call(HookCallTool, toolView("note", "brand-new", "zh-CN", map[string]any{"text": "游标分页：最后一页返回空游标。"}))
+	if again := h.server.requests("POST", "/v1/sources/content"); len(again) != 2 || !strings.Contains(string(again[1].JSON), `"source_id":"`+sent.SourceID+`"`) {
+		t.Fatalf("the same report again = %+v", again)
+	}
+	// The overview tells the last write, a report as well as a turn.
+	last, _, _ := h.store.Get(context.Background(), "powercontext", "last-write")
+	if !strings.Contains(string(last), `"summary":"上报 15 字"`) {
+		t.Fatalf("last write = %s", last)
+	}
+	// A session without a project has nowhere to report to.
+	if none := decodeResult[toolResult](t, h.call(HookCallTool, toolView("note", "", "zh-CN", map[string]any{"text": "x"}))); none.Record.Status != "skipped" || none.Text != "会话还没有项目" {
+		t.Fatalf("a report without a project = %+v", none)
+	}
+	// A server that does not answer keeps nothing, and the model is told.
+	h.server.down = true
+	failed := decodeResult[toolResult](t, h.call(HookCallTool, toolView("note", "brand-new", "en", map[string]any{"text": "x"})))
+	if failed.Record.Status != "failed" || failed.Record.Title != "Memory report" || failed.Text != "Not noted: unreachable" {
+		t.Fatalf("a report to a server that is down = %+v", failed)
+	}
+}
+
 func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
 	test := decodeResult[struct {

@@ -201,7 +201,7 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	detail.Tools = []contract.PluginTool{}
 	language := handler.pluginPageView().Language
 	for _, tool := range target.Meta.Tools {
-		detail.Tools = append(detail.Tools, contract.PluginTool{Name: tool.Name, Description: tool.Description.In(language), Unbound: tool.Unbound})
+		detail.Tools = append(detail.Tools, contract.PluginTool{Name: tool.Name, Description: tool.Description.In(language), Unbound: tool.Unbound, Writes: tool.Writes})
 	}
 	for _, origin := range settings.Origins {
 		detail.NetworkOrigins = append(detail.NetworkOrigins, contract.PluginNetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext, Plaintext: plugin.Plaintext(origin.Origin), Setting: origin.Setting})

@@ -409,6 +409,23 @@ func (meta Meta) Setting(key string) (Setting, bool) {
 	return Setting{}, false
 }
 
+// SwitchOn reports whether the switch of key is on in config: its value
+// there, else its default, else off.
+func (meta Meta) SwitchOn(config json.RawMessage, key string) bool {
+	setting, declared := meta.Setting(key)
+	if !declared || setting.Host() || setting.Type != SettingSwitch {
+		return false
+	}
+	if object, ok := decodeObject(config); ok {
+		if value, found := lookup(object, setting.path()); found && value != nil {
+			on, isSwitch := value.(bool)
+			return isSwitch && on
+		}
+	}
+	var on bool
+	return json.Unmarshal(setting.Default, &on) == nil && on
+}
+
 // WithDefaults returns config with the defaults of the settings it has no
 // value for. A value in the way of a default's place keeps it out.
 func (meta Meta) WithDefaults(config json.RawMessage) json.RawMessage {
