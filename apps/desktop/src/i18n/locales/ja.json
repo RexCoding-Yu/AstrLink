@@ -4809,7 +4809,9 @@
       "none": "対象外",
       "noBindings": "まだ{{label}}にバインドされたセッションはありません",
       "pluginStatus": "プラグインの状態",
-      "credits": "オープンソース"
+      "credits": "オープンソース",
+      "statusUnread": "読み取れませんでした",
+      "statusErrorLabel": "プラグインのエラー"
     },
     "settings": {
       "save": "保存",
@@ -4875,36 +4877,60 @@
       "kinds": {
         "session_bindings": {
           "label": "セッションの紐付け",
-          "detail": "値・紐付けた方法・何ターン目か · AstrLink データベース · 会話内容なし · セッション記録と同じ期間"
+          "what": "各セッションが紐付いている値、紐付けた方法、何ターン目か。",
+          "where": "AstrLink データベース",
+          "retention": "セッション記録と同じ期間"
         },
         "workspace_bindings": {
           "label": "ワークスペースと値の対応",
-          "detail": "ディレクトリパスのフィンガープリントと最後の名前のみ、パスは保存しません · AstrLink データベース · 会話内容なし · 消去するまで"
+          "what": "作業ディレクトリのパスのフィンガープリントと最後の名前だけで、パス全体は保存しません。同じディレクトリの新しいセッションを自動で紐付けるのに使います。",
+          "where": "AstrLink データベース",
+          "retention": "消去するまで"
         },
         "plugin_sessions": {
-          "label": "各セッションでの最初のターンと一時停止",
-          "detail": "AstrLink データベース · 会話内容なし · 保持"
+          "label": "各セッションの最初のターンと一時停止",
+          "what": "プラグインが各セッションで最初に参加したターンと、そのセッションで一時停止しているかどうか。",
+          "where": "AstrLink データベース",
+          "retention": "保持"
         },
         "request_records": {
           "label": "プラグインの記録",
-          "detail": "回数・サイズ・所要時間・理由 · リクエスト記録内 · 会話内容なし · リクエスト記録と同じ期間"
+          "what": "各リクエストでプラグインがしたこと：回数・サイズ・所要時間・理由。検索や報告の内容は含みません。",
+          "where": "リクエスト記録",
+          "retention": "リクエスト記録と同じ期間"
         },
         "resident_block": {
           "label": "現在読み込んでいるブロック",
-          "detail": "メモリ内のみ · 記憶の内容を含む · ゲートウェイを再起動すると消えます"
+          "what": "セッションのシステムプロンプトで使っているプロジェクトの記憶。",
+          "where": "メモリ内のみ",
+          "retention": "ゲートウェイを再起動すると消えます"
         },
         "plugin_values": {
           "label": "プラグインのストレージ",
-          "detail": "プラグイン自身の小さなデータ · AstrLink データベース · 無効化後も残り、消去できます"
+          "what": "プラグイン自身の小さなデータ。下の行はプラグインが保存していると申告している内容です。無効化後も残ります。",
+          "where": "AstrLink データベース",
+          "retention": "消去するまで"
         },
         "lookup_credentials": {
           "label": "検索の認証情報",
-          "detail": "各セッションが検索に使う認証情報 · メモリ内のみ、ハッシュで保持 · 会話の内容は含まない · リクエストが 24 時間ないか、ゲートウェイが再起動すると無効"
+          "what": "各セッションが検索と報告に使う認証情報。ハッシュで保持します。",
+          "where": "メモリ内のみ",
+          "retention": "24 時間リクエストがないか再起動で無効"
         }
       },
-      "declared": "プラグインの申告：{{label}} · {{content}} · {{retention}}",
-      "withContent": "会話内容を含む",
-      "withoutContent": "会話内容なし",
+      "columns": {
+        "what": "内容",
+        "where": "保存先",
+        "content": "会話内容",
+        "retention": "保持",
+        "count": "件数"
+      },
+      "holds": {
+        "none": "含まない",
+        "memory": "記憶の内容を含む",
+        "conversation": "会話内容を含む"
+      },
+      "whatLabel": "{{label}}について",
       "clear": "消去",
       "clearTitle": {
         "workspaces": "ワークスペースの記録を消去しますか？",
@@ -5025,17 +5051,26 @@
     "dropped_other": "予算超過で {{count}} 件を除外",
     "network": "ネットワーク",
     "networkCount": "{{requests}} 件 · 拒否 {{denied}} · 失敗 {{errors}} · 待機 {{wait}} ms",
+    "injected": "{{placement}} +{{size}}",
+    "observeLine": "キャプチャ：{{state}}",
+    "networkShort_one": "{{count}} 件 · 待機 {{wait}} ms",
+    "networkShort_other": "{{count}} 件 · 待機 {{wait}} ms",
+    "networkDenied_one": "拒否 {{count}}",
+    "networkDenied_other": "拒否 {{count}}",
+    "networkErrors_one": "失敗 {{count}}",
+    "networkErrors_other": "失敗 {{count}}",
+    "quiet": "このターンに新しい内容はありません",
     "observe": "キャプチャ",
     "observeStates": {
       "queued": "キュー登録済み",
       "skipped_privacy": "プライバシーポリシーでスキップ",
-      "skipped_binding_turn": "スキップ: プロジェクト設定後に記録済み",
-      "skipped_continuation": "スキップ: ターン最初の呼び出しではありません",
-      "queue_full": "破棄: キューが満杯",
+      "skipped_binding_turn": "プロジェクトを決めたターンで記録済み",
+      "skipped_continuation": "ターン最初の呼び出しではないため記録しません",
+      "queue_full": "キューが満杯で記録できませんでした",
       "disabled": "オフ",
       "awaiting_reply": "応答でプロジェクトが決まるのを待機中",
-      "held_unbound": "保留中：プロジェクトが決まったら記録します",
-      "skipped_unbound": "スキップ: セッションにプロジェクトがありません"
+      "held_unbound": "プロジェクトが決まるまで保留",
+      "skipped_unbound": "セッションにプロジェクトがないため記録しません"
     },
     "truncated": "上限を超えたため切り詰めました",
     "metadata": "メタデータ",

@@ -4809,7 +4809,9 @@
       "none": "不纳入",
       "noBindings": "还没有会话绑定{{label}}",
       "pluginStatus": "插件状态",
-      "credits": "开源项目"
+      "credits": "开源项目",
+      "statusUnread": "没读出来",
+      "statusErrorLabel": "插件返回的错误"
     },
     "settings": {
       "save": "保存",
@@ -4875,36 +4877,60 @@
       "kinds": {
         "session_bindings": {
           "label": "会话绑定的值",
-          "detail": "值、怎么绑定的、第几轮 · AstrLink 数据库 · 不含对话内容 · 跟会话记录一样"
+          "what": "每个会话绑定的值、怎么绑定的、在第几轮绑定。",
+          "where": "AstrLink 数据库",
+          "retention": "跟会话记录一样"
         },
         "workspace_bindings": {
           "label": "工作区和值的对应",
-          "detail": "目录路径的指纹和最后一级目录名，不存路径 · AstrLink 数据库 · 不含对话内容 · 直到清除"
+          "what": "工作目录路径的指纹和最后一级目录名，不存完整路径，用来让同一目录的新会话自动绑定。",
+          "where": "AstrLink 数据库",
+          "retention": "直到清除"
         },
         "plugin_sessions": {
-          "label": "插件在每个会话里的第一轮和暂停状态",
-          "detail": "AstrLink 数据库 · 不含对话内容 · 一直保留"
+          "label": "各会话的第一轮和暂停",
+          "what": "插件在每个会话里第一次参与的是哪一轮，以及这个会话有没有暂停插件。",
+          "where": "AstrLink 数据库",
+          "retention": "一直保留"
         },
         "request_records": {
           "label": "插件记录",
-          "detail": "次数、字节数、耗时、原因 · 请求记录里 · 不含对话内容 · 跟请求记录一样"
+          "what": "插件在每个请求里做了什么：次数、字节数、耗时和原因，不含查询和上报的内容。",
+          "where": "请求记录",
+          "retention": "跟请求记录一样"
         },
         "resident_block": {
           "label": "当前装载块",
-          "detail": "只在内存里 · 含记忆内容 · 网关重启就没了"
+          "what": "会话系统提示词里正在用的那份项目记忆。",
+          "where": "只在内存里",
+          "retention": "网关重启就没了"
         },
         "plugin_values": {
           "label": "插件存储",
-          "detail": "插件自己存的小数据 · AstrLink 数据库 · 停用插件后仍保留，可以清除"
+          "what": "插件自己存的小数据，下面几行是插件声明它存了什么。停用插件后仍保留。",
+          "where": "AstrLink 数据库",
+          "retention": "直到清除"
         },
         "lookup_credentials": {
           "label": "查询凭证",
-          "detail": "各会话运行查询用的凭证 · 只在内存里，存的是哈希 · 不含对话内容 · 会话 24 小时没有请求或网关重启就作废"
+          "what": "各会话运行查询和上报用的凭证，只存哈希。",
+          "where": "只在内存里",
+          "retention": "24 小时没有请求或网关重启就作废"
         }
       },
-      "declared": "插件声明：{{label}} · {{content}} · {{retention}}",
-      "withContent": "含对话内容",
-      "withoutContent": "不含对话内容",
+      "columns": {
+        "what": "内容",
+        "where": "存放",
+        "content": "对话内容",
+        "retention": "保留",
+        "count": "数量"
+      },
+      "holds": {
+        "none": "不含",
+        "memory": "含记忆内容",
+        "conversation": "含对话内容"
+      },
+      "whatLabel": "关于{{label}}",
       "clear": "清除",
       "clearTitle": {
         "workspaces": "清除工作区记录？",
@@ -5025,17 +5051,26 @@
     "dropped_other": "超预算丢弃 {{count}} 条",
     "network": "网络",
     "networkCount": "{{requests}} 个请求 · 拒绝 {{denied}} · 失败 {{errors}} · 等待 {{wait}} ms",
+    "injected": "{{placement}} +{{size}}",
+    "observeLine": "写入：{{state}}",
+    "networkShort_one": "{{count}} 个请求 · 等待 {{wait}} ms",
+    "networkShort_other": "{{count}} 个请求 · 等待 {{wait}} ms",
+    "networkDenied_one": "拒绝 {{count}}",
+    "networkDenied_other": "拒绝 {{count}}",
+    "networkErrors_one": "失败 {{count}}",
+    "networkErrors_other": "失败 {{count}}",
+    "quiet": "这一轮没有新内容",
     "observe": "写入",
     "observeStates": {
       "queued": "已排队",
       "skipped_privacy": "被隐私策略跳过",
-      "skipped_binding_turn": "跳过：本轮已在绑定项目后写入",
-      "skipped_continuation": "跳过：不是本轮首个调用",
-      "queue_full": "丢弃：队列已满",
+      "skipped_binding_turn": "这一轮绑定项目时已写过",
+      "skipped_continuation": "不是这一轮的第一个调用，不再写",
+      "queue_full": "队列满了，没写",
       "disabled": "未开启",
       "awaiting_reply": "等回复确定项目",
-      "held_unbound": "留着：会话定下项目后补写",
-      "skipped_unbound": "跳过：会话没有项目"
+      "held_unbound": "留着，会话定下项目后补写",
+      "skipped_unbound": "会话没有项目，没写"
     },
     "truncated": "超出上限，已截断",
     "metadata": "元信息",

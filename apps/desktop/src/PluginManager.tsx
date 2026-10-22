@@ -451,7 +451,7 @@ export function PluginManager({
           variant="page"
         />
       ) : list !== null ? (
-        <SplitWorkspace className="grid-rows-[auto_minmax(360px,1fr)] @[720px]:grid-cols-[minmax(15rem,0.8fr)_minmax(0,1.7fr)]">
+        <SplitWorkspace className="grid-rows-[auto_minmax(360px,1fr)] @[720px]:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)]">
           <Panel className="flex min-h-0 flex-col overflow-hidden">
             <ul
               aria-label={t("plugins.listLabel")}

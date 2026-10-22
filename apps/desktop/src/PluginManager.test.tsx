@@ -830,7 +830,7 @@ describe("PluginManager", () => {
     const item = [
       ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
     ].find((entry) => entry.textContent?.includes("查询凭证")) as HTMLElement;
-    expect(item.textContent).toContain("只在内存里，存的是哈希");
+    expect(item.textContent).toContain("只在内存里");
     expect(item.textContent).toContain("2 条");
     await click(button("作废", item));
     expect(bridgeMocks.clearPluginData).not.toHaveBeenCalled();
@@ -909,8 +909,21 @@ describe("PluginManager", () => {
     expect(stored?.textContent).toContain("工作区和值的对应");
     expect(stored?.textContent).toContain("2 条");
     expect(stored?.textContent).toContain("当前装载块");
-    expect(stored?.textContent).toContain(
-      "插件声明：项目在服务器上的编号 · 不含对话内容 · 一直保留，可在插件页清除",
+    // One row each: what, where, whether it holds conversation text, how
+    // long; what each holds behind its ?.
+    const block = [
+      ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
+    ].find((item) => item.textContent?.includes("当前装载块"));
+    expect(block?.textContent).toContain("只在内存里含记忆内容网关重启就没了");
+    expect(
+      block?.querySelector('button[aria-label="关于当前装载块"]'),
+    ).not.toBeNull();
+    // What the plugin declares sits under its store.
+    const declared = document.querySelector(
+      '[data-testid="plugin-stored-declared"]',
+    );
+    expect(declared?.textContent).toBe(
+      "项目在服务器上的编号不含一直保留，可在插件页清除",
     );
     const items = [
       ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
@@ -1034,6 +1047,50 @@ describe("PluginManager", () => {
     expect(
       document.querySelector('[data-testid="plugin-connection"]')?.textContent,
     ).toContain("连接正常");
+  });
+
+  it("keeps the plugin's own status with the connection, once each", async () => {
+    bridgeMocks.getPluginStatus.mockResolvedValueOnce({
+      ...status,
+      view: [
+        {
+          type: "kv" as const,
+          items: [
+            { label: "可检索", value: "原子记忆" },
+            { label: "最近写入", value: "astrlink：已写入" },
+          ],
+        },
+      ],
+    });
+    await render();
+    const connection = document.querySelector(
+      '[data-testid="plugin-connection"]',
+    );
+    // A row the status repeats shows once, as the status says it now.
+    expect(connection?.textContent?.match(/可检索/g)).toHaveLength(1);
+    expect(connection?.textContent).toContain(
+      "可检索原子记忆最近写入astrlink：已写入",
+    );
+  });
+
+  it("says the plugin's status could not be read, and why behind a ?", async () => {
+    bridgeMocks.getPluginStatus.mockResolvedValueOnce({
+      ...status,
+      view: undefined,
+      view_error: "threw TypeError: boom",
+    });
+    await render();
+    expect(
+      document.querySelector('[data-testid="plugin-status-error"]')
+        ?.textContent,
+    ).toBe("没读出来");
+    expect(document.body.textContent).not.toContain("threw TypeError");
+    await click(
+      document.querySelector(
+        'button[aria-label="插件返回的错误"]',
+      ) as HTMLElement,
+    );
+    expect(document.body.textContent).toContain("threw TypeError: boom");
   });
 
   it("opens the first plugin a rescan finds", async () => {

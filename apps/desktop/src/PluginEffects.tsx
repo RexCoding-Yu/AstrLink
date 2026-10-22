@@ -189,7 +189,7 @@ export function EffectCard({
         <h3 className="text-xs font-semibold">{t("plugins.effects.title")}</h3>
       </PanelHeader>
       {active(total) ? (
-        <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 p-3 text-xs">
+        <dl className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-4 gap-y-2 p-3 text-xs">
           {rows.map(([label, value]) => (
             <div className="contents" key={label}>
               <dt className="text-muted-foreground">{label}</dt>
