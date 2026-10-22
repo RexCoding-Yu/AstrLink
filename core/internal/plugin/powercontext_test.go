@@ -31,7 +31,7 @@ type fakePowerContext struct {
 	profile  string
 	topics   []string
 	// processing is what capabilities say of automatic processing: on, off
-	// or absent.
+	// or absent; cut answers 200 without the body.
 	processing string
 	topicPages int
 	down       bool
@@ -102,6 +102,9 @@ func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTP
 			version = "1.3.0"
 		}
 		return reply(200, `{"package_version":"`+version+`"}`)
+	case request.Method == "GET" && target.Path == "/v1/capabilities" && server.processing == "cut":
+		// The status came, the body did not, as when a read times out.
+		return HTTPResponse{Status: 200, Error: FetchTimeout, Took: 3 * time.Second}
 	case request.Method == "GET" && target.Path == "/v1/capabilities":
 		background := `"automatic_processing_enabled":true`
 		if server.processing == "off" {
@@ -643,6 +646,16 @@ func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 	if !strings.Contains(status, `"Automatic processing","value":"off: no atomic memory is made"`) || !strings.Contains(status, `"Last write","value":"datav · Written · just now"`) {
 		t.Fatalf("describeStatus = %s", status)
 	}
+	// A status whose body never came shows nothing of the processing, and
+	// throws nothing.
+	h.server.processing = "cut"
+	if cut := h.call(HookDescribeStatus, map[string]any{"language": "en"}); strings.Contains(cut, "Automatic processing") || !strings.Contains(cut, `"Last write"`) {
+		t.Fatalf("describeStatus without the capabilities body = %s", cut)
+	}
+	if checked := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(checked, `"status":"ok"`) || strings.Contains(checked, `"view"`) {
+		t.Fatalf("testConnection without the capabilities body = %s", checked)
+	}
+	h.server.processing = "on"
 	h.server.version = "1.4.0"
 	if checked := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(checked, `"summary":"PowerContext 1.4.0 · 3 ms"`) {
 		t.Fatalf("a 1.4 server = %s", checked)

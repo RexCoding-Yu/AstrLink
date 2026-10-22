@@ -417,7 +417,12 @@ declare namespace AstrLinkPlugin {
   }
 
   interface HttpResponse {
-    /** 0 when no response arrived; error then says why. HTTP errors come back as they are. */
+    /**
+     * 0 when no response arrived; error then says why. HTTP errors come back
+     * as they are. A body that could not be read in full (too_large, or a
+     * timeout while it came) keeps the status that arrived, with error set
+     * and neither json nor text.
+     */
     status: number;
     /** The first value of each header, keyed in lowercase. */
     headers: Record<string, string>;

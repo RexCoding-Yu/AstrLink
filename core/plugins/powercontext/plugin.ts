@@ -1038,13 +1038,29 @@ function knownVersion(): string | null {
   return null;
 }
 
+// answered returns the JSON object a server answered with, in one of the
+// statuses given (200 when none), or null: another status, a body that is
+// no JSON object, or one the host could not read in full, which comes with
+// an error and no body whatever its status.
+function answered<T>(
+  response: AstrLinkPlugin.HttpResponse,
+  ...statuses: number[]
+): T | null {
+  const wanted = statuses.length > 0 ? statuses : [200];
+  if (response.error !== undefined || !wanted.includes(response.status))
+    return null;
+  const value = response.json;
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as T)
+    : null;
+}
+
 // Keeps the version a server-info response reports; false when the server
 // did not answer or is older than 1.3.
 function noteVersion(response: AstrLinkPlugin.HttpResponse): boolean {
-  if (response.status !== 200) return false;
-  const version = String(
-    (response.json as { package_version?: string }).package_version ?? "",
-  );
+  const info = answered<{ package_version?: string }>(response);
+  if (info === null) return false;
+  const version = String(info.package_version ?? "");
   astrlink.store.set("server", { version, at: astrlink.clock.now() });
   return supported(version);
 }
@@ -1125,8 +1141,9 @@ function findScope(cfg: Config, project: string): string | null | undefined {
         "&query_field=title&limit=100",
     ),
   );
-  if (found.status !== 200) return null;
-  const scope = ((found.json as Page<Scope>).items ?? []).find(
+  const page = answered<Page<Scope>>(found);
+  if (page === null) return null;
+  const scope = (page.items ?? []).find(
     (item) => item.title === project,
   )?.scope_id;
   if (typeof scope !== "string" || scope === "") return undefined;
@@ -1146,8 +1163,7 @@ function scopeFor(cfg: Config, project: string): string | null {
       idempotency_key: "astrlink:project:" + project,
     }),
   );
-  if (created.status !== 201 && created.status !== 200) return null;
-  const scope = (created.json as { scope_id?: string }).scope_id;
+  const scope = answered<{ scope_id?: string }>(created, 200, 201)?.scope_id;
   if (typeof scope !== "string" || scope === "") return null;
   astrlink.store.set("scope:" + project, scope);
   return scope;
@@ -1236,13 +1252,12 @@ export function prepareSession(
   if (profileResponse.status !== 200 && topicResponse.status !== 200)
     return skipped(text, text.serverDown(failure(text, topicResponse)));
   const profile =
-    profileResponse.status === 200
-      ? ((profileResponse.json as ProfileArtifact).content?.content ?? "")
-      : "";
+    answered<ProfileArtifact>(profileResponse)?.content?.content ?? "";
   const topics: Listed[] = [];
   let page = topicResponse;
-  for (let pages = 1; page.status === 200; pages++) {
-    const listed = page.json as Page<Listed>;
+  for (let pages = 1; ; pages++) {
+    const listed = answered<Page<Listed>>(page);
+    if (listed === null) break;
     topics.push(...(listed.items ?? []));
     if (!listed.next_cursor || pages === TOPIC_PAGES) break;
     page = astrlink.http.fetch(
@@ -1417,8 +1432,8 @@ function listProjects(
     if (known === null) batch.push(request(cfg, "GET", "/v1/server-info"));
     const [scopes, info] = astrlink.http.fetch(batch);
     const ready = known === null ? noteVersion(info) : supported(known);
-    if (ready && scopes.status === 200) {
-      const page = scopes.json as Page<Scope>;
+    const page = ready ? answered<Page<Scope>>(scopes) : null;
+    if (page !== null) {
       more = !!page.next_cursor;
       for (const item of page.items ?? []) {
         if (PROJECT_NAME.test(item.title) && !names.has(item.title)) {
@@ -1876,18 +1891,17 @@ function searchMemory(
   for (const { family, at, wordsAt } of searches) {
     const full = responses[at];
     const words = wordsAt >= 0 ? responses[wordsAt] : undefined;
-    const response =
-      full.status !== 200 && words?.status === 200 ? words : full;
-    if (response.status !== 200) {
+    const fullResults = answered<{ results?: SearchItem[] }>(full);
+    const results =
+      fullResults ??
+      (words ? answered<{ results?: SearchItem[] }>(words) : null);
+    if (results === null) {
       failed++;
       reason = reason || failure(text, full);
       continue;
     }
-    if (response === words) byWords++;
-    found.push({
-      family,
-      items: (response.json as { results?: SearchItem[] }).results ?? [],
-    });
+    if (fullResults === null) byWords++;
+    found.push({ family, items: results.results ?? [] });
   }
   if (found.length === 0) {
     const summary = text.searchFailed(reason);
@@ -1944,7 +1958,7 @@ function readTopic(
     const summary = text.searchFailed(failure(text, response));
     return looked(text, summary, 0, "failed", summary);
   }
-  const items = (response.json as { results?: SearchItem[] }).results ?? [];
+  const items = answered<{ results?: SearchItem[] }>(response)?.results ?? [];
   const wanted = title.trim().toLowerCase();
   const exact = items.find(
     (item) =>
@@ -1999,7 +2013,7 @@ function listAllProjects(
     const summary = text.serverDown(failure(text, response));
     return looked(text, summary, 0, "failed", summary);
   }
-  const page = response.json as Page<Scope>;
+  const page = answered<Page<Scope>>(response) ?? {};
   const names: string[] = [];
   const add = (name: string) => {
     if (PROJECT_NAME.test(name) && !names.includes(name)) names.push(name);
@@ -2088,9 +2102,9 @@ function processingItems(
   text: Texts,
   capabilities: AstrLinkPlugin.HttpResponse,
 ): Array<{ label: string; value: string }> {
-  if (capabilities.status !== 200) return [];
-  const extraction = (capabilities.json as { extraction?: Extraction | null })
-    .extraction;
+  const extraction = answered<{ extraction?: Extraction | null }>(
+    capabilities,
+  )?.extraction;
   if (!extraction) return [];
   const enabled = extraction.background?.automatic_processing_enabled;
   const items = [
@@ -2171,43 +2185,31 @@ export function testConnection(
     request(cfg, "GET", "/v1/server-info", undefined, 3000),
     request(cfg, "GET", "/v1/capabilities", undefined, 3000),
   ]);
-  if (info.status !== 200)
-    return { status: "error", summary: failure(text, info) };
-  const version = String(
-    (info.json as { package_version?: string }).package_version ?? "",
-  );
+  const served = answered<{ package_version?: string }>(info);
+  if (served === null) return { status: "error", summary: failure(text, info) };
+  const version = String(served.package_version ?? "");
   if (!supported(version))
     return { status: "error", summary: text.tooOld(version) };
   noteVersion(info);
-  const families =
-    capabilities.status === 200
-      ? ((capabilities.json as { artifact_families?: string[] })
-          .artifact_families ?? [])
-      : [];
-  const searchable = [
-    "atomic-memory",
-    "topic-memory",
-    "experience",
-    "skill",
-  ].filter((family) => families.includes(family));
+  // What the server can search, when it said.
+  const families = answered<{ artifact_families?: string[] }>(
+    capabilities,
+  )?.artifact_families;
+  const items: Array<{ label: string; value: string }> = [];
+  if (families !== undefined)
+    items.push({
+      label: text.searchable,
+      value: ["atomic-memory", "topic-memory", "experience", "skill"]
+        .filter((family) => families.includes(family))
+        .map((family) => text.families[family])
+        .join(" / "),
+    });
+  items.push(...processingItems(text, capabilities));
   return {
     status: "ok",
     summary:
       text.version(version, info.took_ms) +
       (verified(version) ? "" : " · " + text.unverified),
-    view: [
-      {
-        type: "kv",
-        items: [
-          {
-            label: text.searchable,
-            value: searchable
-              .map((family) => text.families[family])
-              .join(" / "),
-          },
-          ...processingItems(text, capabilities),
-        ],
-      },
-    ],
+    view: items.length > 0 ? [{ type: "kv", items }] : undefined,
   };
 }
