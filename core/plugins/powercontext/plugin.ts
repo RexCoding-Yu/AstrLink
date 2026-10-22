@@ -956,10 +956,10 @@ function modern(): boolean {
   return atLeast(knownVersion() ?? "", 1, 4);
 }
 
-// The plugin was written against 1.3; later versions work as far as their
-// API stays the same, which nobody has checked yet.
+// The versions the plugin was run against end to end: 1.3, and 1.4 on a
+// database it started. Later ones work as far as their API stays the same.
 function verified(version: string): boolean {
-  return version.startsWith("1.3.");
+  return version.startsWith("1.3.") || version.startsWith("1.4.");
 }
 
 // The version the server reported in the last 10 minutes, if any.
@@ -1014,6 +1014,35 @@ function failure(text: Texts, response: AstrLinkPlugin.HttpResponse): string {
   )?.error;
   const detail = error?.details?.errors?.[0]?.msg ?? error?.message ?? "";
   return "HTTP " + response.status + (detail ? " " + detail.slice(0, 80) : "");
+}
+
+// fetchAll sends requests at once. PowerContext 1.4 makes a new scope's
+// access bindings on first use, and concurrent first reads race there: the
+// losers answer 409 idempotency-key. Those are sent again, one at a time.
+function fetchAll(
+  requests: AstrLinkPlugin.HttpRequest[],
+): AstrLinkPlugin.HttpResponse[] {
+  return astrlink.http
+    .fetch(requests)
+    .map((response, index) =>
+      response.status === 409 ? astrlink.http.fetch(requests[index]) : response,
+    );
+}
+
+// gone reports whether the server no longer knows a scope the plugin kept,
+// as after the server starts over with a new database.
+function gone(response: AstrLinkPlugin.HttpResponse): boolean {
+  const code = (response.json as { error?: { code?: string } } | null)?.error
+    ?.code;
+  return response.status === 404 && code === "scope_not_found";
+}
+
+// forget drops what the plugin kept of a project's scope, which the server
+// no longer knows: the next call finds or makes it again.
+function forget(project: string): void {
+  const kept = astrlink.store.get("scope:" + project);
+  if (typeof kept === "string") astrlink.store.delete("policy:" + kept);
+  astrlink.store.delete("scope:" + project);
 }
 
 // findScope finds the scope a project has on the server by its title, which
@@ -1113,18 +1142,30 @@ export function prepareSession(
   if (cfg.resident === false) return skipped(text, text.residentOff);
   const problem = serverProblem(cfg, text);
   if (problem !== null) return skipped(text, text.serverDown(problem));
-  const scope = scopeFor(cfg, project.value);
+  let scope: string | null = null;
+  let policy: AstrLinkPlugin.HttpRequest[] = [];
+  let responses: AstrLinkPlugin.HttpResponse[] = [];
+  // A scope kept from before the server started over is gone: the plugin
+  // forgets it and finds or makes the project's scope again, once.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    scope = scopeFor(cfg, project.value);
+    if (scope === null)
+      return skipped(text, text.serverDown(text.fetch.network));
+    const base = "/v1/scopes/" + scope + "/artifacts/";
+    policy = policyRequests(cfg, scope);
+    // The profile is one artifact, read whole: its list item carries no
+    // text. A project without one answers 503 artifact_owner_pending on
+    // 1.3, as an artifact nobody owns yet; no profile is no profile.
+    responses = fetchAll([
+      request(cfg, "GET", base + "profile/profile"),
+      request(cfg, "GET", base + "topic-memory?limit=100"),
+      ...policy,
+    ]);
+    if (attempt > 0 || !responses.some(gone)) break;
+    forget(project.value);
+  }
   if (scope === null) return skipped(text, text.serverDown(text.fetch.network));
   const base = "/v1/scopes/" + scope + "/artifacts/";
-  const policy = policyRequests(cfg, scope);
-  // The profile is one artifact, read whole: its list item carries no text.
-  // A project without one answers 503 artifact_owner_pending on 1.3, as an
-  // artifact nobody owns yet; whatever the reason, no profile is no profile.
-  const responses = astrlink.http.fetch([
-    request(cfg, "GET", base + "profile/profile"),
-    request(cfg, "GET", base + "topic-memory?limit=100"),
-    ...policy,
-  ]);
   const [profileResponse, topicResponse] = responses;
   if (policy.length > 0) settlePolicy(cfg, scope, responses[2]);
   if (profileResponse.status !== 200 && topicResponse.status !== 200)
@@ -1453,44 +1494,53 @@ export function observeTurn(
   const problem = serverProblem(cfg, text);
   if (problem !== null)
     return written(text, project.value, "failed", text.writeFailed(problem));
-  const scope = scopeFor(cfg, project.value);
-  if (scope === null)
+  const write = (scope: string) =>
+    astrlink.http.fetch(
+      request(
+        cfg,
+        "POST",
+        "/v1/sources/content",
+        {
+          scope_id: scope,
+          // A retry of the same turn is idempotent; the same words in another
+          // turn are another source.
+          source_id:
+            "astrlink:" +
+            project.value +
+            ":" +
+            turn.session.id +
+            ":" +
+            turn.session.turn +
+            ":" +
+            astrlink.util.sha256(typed),
+          content: typed,
+          metadata: {
+            origin: "astrlink",
+            client: turn.client,
+            session: turn.session.id,
+            turn: turn.session.turn,
+            project: project.value,
+          },
+        },
+        10000,
+      ),
+    );
+  let scope = scopeFor(cfg, project.value);
+  let response = scope === null ? null : write(scope);
+  // A scope kept from before the server started over is gone: the turn is
+  // written to the project's scope as the server knows it now.
+  if (response !== null && gone(response)) {
+    forget(project.value);
+    scope = scopeFor(cfg, project.value);
+    response = scope === null ? null : write(scope);
+  }
+  if (response === null)
     return written(
       text,
       project.value,
       "failed",
       text.writeFailed(text.fetch.network),
     );
-  const response = astrlink.http.fetch(
-    request(
-      cfg,
-      "POST",
-      "/v1/sources/content",
-      {
-        scope_id: scope,
-        // A retry of the same turn is idempotent; the same words in another
-        // turn are another source.
-        source_id:
-          "astrlink:" +
-          project.value +
-          ":" +
-          turn.session.id +
-          ":" +
-          turn.session.turn +
-          ":" +
-          astrlink.util.sha256(typed),
-        content: typed,
-        metadata: {
-          origin: "astrlink",
-          client: turn.client,
-          session: turn.session.id,
-          turn: turn.session.turn,
-          project: project.value,
-        },
-      },
-      10000,
-    ),
-  );
   if (response.status < 200 || response.status >= 300)
     return written(
       text,
@@ -1642,14 +1692,14 @@ function hitText(
 // searchMemory searches each kind of memory the settings leave on at once and
 // takes their results in turns, rank by rank: the kinds' scores do not
 // compare. A full search not back in time gives way to the search by words
-// beside it.
+// beside it. null when the server no longer knows the scope.
 function searchMemory(
   cfg: Config,
   text: Texts,
   scope: string,
   query: string,
   limit: number,
-): AstrLinkPlugin.ToolResult {
+): AstrLinkPlugin.ToolResult | null {
   const families = FAMILIES.filter(([, setting]) => cfg[setting] !== false).map(
     ([family]) => family,
   );
@@ -1680,7 +1730,8 @@ function searchMemory(
       : -1;
     return { family, at, wordsAt };
   });
-  const responses = astrlink.http.fetch(batch);
+  const responses = fetchAll(batch);
+  if (responses.some(gone)) return null;
   const found: Array<{ family: string; items: SearchItem[] }> = [];
   let failed = 0;
   let byWords = 0;
@@ -1731,13 +1782,13 @@ function searchMemory(
 
 // readTopic finds a topic by a search of its title, words alone: the one
 // titled so, or else the closest, with its whole text within the bytes a
-// lookup returns.
+// lookup returns. null when the server no longer knows the scope.
 function readTopic(
   cfg: Config,
   text: Texts,
   scope: string,
   title: string,
-): AstrLinkPlugin.ToolResult {
+): AstrLinkPlugin.ToolResult | null {
   const response = astrlink.http.fetch(
     request(
       cfg,
@@ -1751,6 +1802,7 @@ function readTopic(
       SEARCH_TIMEOUT_MS,
     ),
   );
+  if (gone(response)) return null;
   if (response.status !== 200) {
     const summary = text.searchFailed(failure(text, response));
     return looked(text, summary, 0, "failed", summary);
@@ -1864,24 +1916,30 @@ export function callTool(
   const project = view.meta.project;
   if (project === undefined || project.value === "none")
     return looked(text, text.noProject, 0, "skipped", text.noProject);
-  // A lookup never makes a scope: a project the server does not know has
-  // no memory yet.
-  const scope = findScope(cfg, project.value);
-  if (scope === null) {
-    const summary = text.serverDown(text.fetch.network);
-    return looked(text, summary, 0, "failed", summary);
-  }
-  if (scope === undefined)
-    return looked(text, text.noMemory, 0, "ok", text.noMemory);
-  if (view.name === "read")
-    return readTopic(cfg, text, scope, String(view.input.topic ?? ""));
   const most = Math.min(Math.max(Math.round(cfg.lookupLimit ?? 5), 1), 10);
   const asked = view.input.limit;
   const limit =
     typeof asked === "number"
       ? Math.min(Math.max(Math.round(asked), 1), most)
       : most;
-  return searchMemory(cfg, text, scope, String(view.input.query ?? ""), limit);
+  // A lookup never makes a scope: a project the server does not know has
+  // no memory yet. A scope kept from before the server started over is
+  // forgotten and found again, once.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const scope = findScope(cfg, project.value);
+    if (scope === null) {
+      const summary = text.serverDown(text.fetch.network);
+      return looked(text, summary, 0, "failed", summary);
+    }
+    if (scope === undefined) break;
+    const result =
+      view.name === "read"
+        ? readTopic(cfg, text, scope, String(view.input.topic ?? ""))
+        : searchMemory(cfg, text, scope, String(view.input.query ?? ""), limit);
+    if (result !== null) return result;
+    forget(project.value);
+  }
+  return looked(text, text.noMemory, 0, "ok", text.noMemory);
 }
 
 // processingItems says whether the server turns records into memory on its
