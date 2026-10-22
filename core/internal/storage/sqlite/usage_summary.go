@@ -17,6 +17,12 @@ import (
 // GetUsageSummary streams only the fields used by inference statistics. Detailed
 // plans, events, audit data, cursors, discovery and retry children stay in the database.
 func (store *Store) GetUsageSummary(ctx context.Context, options storage.UsageSummaryOptions) (storage.UsageSummary, error) {
+	return cachedHistoryRead(ctx, store.db, &store.usageSummaries, options, func(conn *sql.Conn) (storage.UsageSummary, error) {
+		return getUsageSummary(ctx, conn, options)
+	})
+}
+
+func getUsageSummary(ctx context.Context, reader historyReader, options storage.UsageSummaryOptions) (storage.UsageSummary, error) {
 	result := storage.UsageSummary{
 		ByDay: []storage.UsageTimeBucket{}, ByHour: []storage.UsageTimeBucket{},
 		ByService: []storage.UsageGroup{}, ByModel: []storage.UsageGroup{}, ByToken: []storage.UsageGroup{},
@@ -25,7 +31,7 @@ func (store *Store) GetUsageSummary(ctx context.Context, options storage.UsageSu
 	if err != nil {
 		return result, err
 	}
-	tokenWhitelist, err := store.currentAccessTokenIDs(ctx)
+	tokenWhitelist, err := currentAccessTokenIDs(ctx, reader)
 	if err != nil {
 		return result, err
 	}
@@ -35,17 +41,18 @@ func (store *Store) GetUsageSummary(ctx context.Context, options storage.UsageSu
 	// model, then a routing redirect target, then the client's model.
 	// Pending calls have no outcome yet, the client abandoned cancelled ones,
 	// and a policy block never reached a provider, so none of them counts as a
-	// request or a failure. This matches the desktop, where a recorded
-	// "blocked" is its own outcome rather than a failure, and where a legacy
-	// row stored as succeeded with a 4xx/5xx counts as failed.
-	rows, err := store.db.QueryContext(ctx, `SELECT started_at, status, http_status,
+	// request or a failure; they only add to StatusCounts. This matches the
+	// desktop, where a recorded "blocked" is its own outcome rather than a
+	// failure, and where a legacy row stored as succeeded with a 4xx/5xx
+	// counts as failed.
+	rows, err := reader.QueryContext(ctx, `SELECT started_at, status, http_status,
     service_id, COALESCE(
         NULLIF(json_extract(NULLIF(recovery_json, ''), '$.upstream_model'), ''),
         NULLIF(json_extract(NULLIF(model_redirect_json, ''), '$.to'), ''),
         requested_model), local_access_token_id, usage_json, latency_ms
 FROM request_records
 WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
-  AND status IN ('succeeded', 'failed') AND input_protocol NOT IN (?, ?)`,
+  AND input_protocol NOT IN (?, ?)`,
 		options.From.UTC().Format("2006-01-02T15:04:05"), options.To.UTC().Format("2006-01-02T15:04:05"),
 		string(contract.ProtocolOpenAIModels), string(contract.ProtocolGoogleModels))
 	if err != nil {
@@ -56,13 +63,26 @@ WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
 	services, models, tokens := map[string]*storage.UsageGroup{}, map[string]*storage.UsageGroup{}, map[string]*storage.UsageGroup{}
 	performance := map[string]*servicePerformance{}
 	tokenPerformance := map[string]*servicePerformance{}
+	var startedAt, status string
+	var httpStatus, latency sql.NullInt64
+	var service, model, localAccessTokenID, usageJSON sql.NullString
 	for rows.Next() {
-		var startedAt, status string
-		var httpStatus sql.NullInt64
-		var latency sql.NullInt64
-		var service, model, localAccessTokenID, usageJSON sql.NullString
 		if err := rows.Scan(&startedAt, &status, &httpStatus, &service, &model, &localAccessTokenID, &usageJSON, &latency); err != nil {
 			return result, fmt.Errorf("scan usage summary: %w", err)
+		}
+		switch contract.RequestStatus(status) {
+		case contract.RequestStatusSucceeded, contract.RequestStatusFailed:
+		case contract.RequestStatusBlocked:
+			result.StatusCounts.Blocked++
+			continue
+		case contract.RequestStatusCancelled:
+			result.StatusCounts.Cancelled++
+			continue
+		case contract.RequestStatusPending:
+			result.StatusCounts.Pending++
+			continue
+		default:
+			return result, fmt.Errorf("%w: usage status", storage.ErrInvalidRecord)
 		}
 		started, err := time.Parse(time.RFC3339Nano, startedAt)
 		if err != nil {
@@ -104,11 +124,13 @@ WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
 		// consumes no tokens and is not a request here, so it only ever adds to
 		// FailedRequests.
 		if status == "failed" || (httpStatus.Valid && httpStatus.Int64 >= 400) {
+			result.StatusCounts.Failed++
 			for _, target := range targets {
 				target.FailedRequests++
 			}
 			continue
 		}
+		result.StatusCounts.Succeeded++
 		var usage contract.Usage
 		if usageJSON.Valid {
 			if err := json.Unmarshal([]byte(usageJSON.String), &usage); err != nil || usage.Validate() != nil {

@@ -3,8 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { WorkspaceSnapshotProvider } from "./workspace-snapshots";
-import { BillingOverview, useBillingSummary } from "./BillingOverview";
-import type { BillingSummary } from "./pricing-model";
+import { useBillingSummary } from "./BillingOverview";
+import {
+  billingAmount,
+  type BillingAmounts,
+  type BillingSummary,
+} from "./pricing-model";
 
 const mocks = vi.hoisted(() => ({
   getBillingSummary: vi.fn(),
@@ -14,17 +18,25 @@ vi.mock("./pricing-bridge", () => mocks);
 
 let root: Root;
 let container: HTMLDivElement;
+
+function amounts(amount: string, requests: number): BillingAmounts {
+  return {
+    amount_usd: amount,
+    priced: requests,
+    unpriced: 0,
+    pending: 0,
+    revalued: 0,
+    requests,
+  };
+}
+
 const summary: BillingSummary = {
   from: "2026-09-01",
   to: "2026-10-01",
-  amount_usd: "18.42",
-  priced: 10,
-  unpriced: 0,
-  pending: 0,
-  revalued: 0,
-  requests: 10,
+  ...amounts("18.42", 10),
   by_model: [],
   by_token: [],
+  by_service: [],
 };
 beforeEach(() => {
   vi.clearAllMocks();
@@ -52,10 +64,7 @@ function OverviewBilling({
     revision,
   });
   return (
-    <BillingOverview
-      loading={billing.status === "loading"}
-      summary={billing.summary}
-    />
+    <output>{billing.summary ? billingAmount(billing.summary) : ""}</output>
   );
 }
 

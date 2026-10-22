@@ -8,6 +8,7 @@ package view
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -71,11 +72,45 @@ func recordFrom(object map[string]any) (contract.PluginRecord, bool) {
 	record := contract.PluginRecord{Title: title, Status: status, Summary: summary}
 	view, viewCut := BlocksFrom(object["view"])
 	record.View = view
-	record.Truncated = cut || summaryCut || viewCut
+	actions, actionsCut := actionsFrom(object["actions"])
+	record.Actions = actions
+	record.Truncated = cut || summaryCut || viewCut || actionsCut
 	if record.Validate() != nil {
 		return contract.PluginRecord{}, false
 	}
 	return record, true
+}
+
+// actionsFrom reads a record's buttons. One that is not valid, repeats an id
+// or comes past the limit is dropped, and the record marked truncated.
+func actionsFrom(value any) ([]contract.PluginRecordAction, bool) {
+	if value == nil {
+		return nil, false
+	}
+	values, isArray := value.([]any)
+	if !isArray {
+		return nil, true
+	}
+	truncated := false
+	var actions []contract.PluginRecordAction
+	for _, entry := range values {
+		object, isObject := entry.(map[string]any)
+		if !isObject || len(actions) == contract.MaxPluginRecordActions {
+			truncated = true
+			continue
+		}
+		label, labelCut := text(object["label"], contract.MaxPluginActionLabelRunes, false)
+		confirm, confirmCut := text(object["confirm"], contract.MaxPluginActionConfirmRunes, false)
+		action := contract.PluginRecordAction{ID: stringOf(object["id"]), Label: label, Confirm: confirm}
+		repeated := slices.ContainsFunc(actions, func(other contract.PluginRecordAction) bool { return other.ID == action.ID })
+		if action.Validate() != nil || repeated {
+			truncated = true
+			continue
+		}
+		truncated = truncated || labelCut || confirmCut
+		actions = append(actions, action)
+	}
+	return actions, truncated
 }
 
 func decode(raw json.RawMessage) (any, bool) {

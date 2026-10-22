@@ -246,6 +246,8 @@
     "quit": "AstrLinkを終了",
     "quitHint": "プロセスを終了",
     "autostart": "ログイン時にAstrLinkを起動",
+    "autostartHidden": "自動起動時にトレイに格納",
+    "autostartHiddenHint": "ログイン時の自動起動でのみ格納します。手動で開くとメインウィンドウが表示されます。",
     "trayHint": "トレイアイコンをクリック（どちらのボタンでも）するとパネルが開きます。ウィンドウを開く操作、ゲートウェイの制御、終了は、すべてパネル内にあります。",
     "trayKicker": "トレイパネル",
     "trayPanelHint": "トレイアイコンから開くパネルです。変更はすぐに反映され、プレビューが実際のパネルです。",
@@ -436,7 +438,9 @@
         "policies": "プライバシーポリシー",
         "policiesHint": "マスキングとリクエスト本文のポリシー",
         "pricing": "料金",
-        "pricingHint": "価格の紐付け、予算、請求日"
+        "pricingHint": "価格の紐付け、予算、請求日",
+        "tokens": "アクセストークン",
+        "tokensHint": "クライアントがこのゲートウェイに提示するトークン（値も含む）"
       },
       "scopeNeedsServices": "プロバイダーに含まれる",
       "passphraseTitle": "同期パスフレーズ",
@@ -465,6 +469,14 @@
       "pendingChanges_one": "待機中の変更 {{count}} 件",
       "pendingChanges_other": "待機中の変更 {{count}} 件",
       "pendingChangesNone": "待機中の変更はありません。",
+      "firstSyncPending": "このデバイスは、まだこのリモートと設定パッケージを交換していません。初回の同期では、このデバイスで変更していない部分についてリモートの設定を取り込みます。",
+      "forcePush": "強制プッシュ",
+      "forcePushHint": "オフ。有効にすると、次回の同期でこのデバイスの設定がリモートを上書きします。",
+      "forcePushArmedHint": "有効：次回の同期でリモートを上書きします。保存しても有効のままです。",
+      "forcePushTitle": "このデバイスの設定でリモートを上書きしますか？",
+      "forcePushBody": "次回の同期では、リモート上のパッケージを統合せず、このデバイスの設定で置き換えます。リモートにあってこのデバイスにない内容は破棄され、他のデバイスも次回の同期で削除します。この設定は一度だけ働き、以降の同期は再び統合になります。",
+      "forcePushConfirm": "強制プッシュを有効にする",
+      "forcePushArmed": "強制プッシュが有効です：次回の同期でこのデバイスの設定がリモートを上書きします。",
       "lastSynced": "前回の同期",
       "nextRun": "次回の実行",
       "never": "なし",
@@ -496,7 +508,9 @@
         "local_kept": "このデバイスを保持",
         "remote_kept": "リモートを保持",
         "deleted": "削除済み",
-        "tie_kept_local": "同時刻：このデバイスを保持"
+        "tie_kept_local": "同時刻：このデバイスを保持",
+        "remote_adopted": "リモートを採用",
+        "force_pushed": "強制プッシュ済み"
       },
       "kind": {
         "service": "プロバイダー",
@@ -504,7 +518,9 @@
         "service_proxy_credential": "プロキシキー",
         "builtin_tool_credential": "ツールキー",
         "policy": "プライバシーポリシー",
-        "pricing_config": "料金"
+        "pricing_config": "料金",
+        "remote": "リモート",
+        "access_token": "アクセストークン"
       }
     }
   },
@@ -728,7 +744,6 @@
     "usageDetails": "この統計について",
     "hourlyUsageNote": "過去 24 時間に記録されたリクエストとトークンを、ローカルのタイムゾーンで 1 時間ごとに集計します。",
     "costComingSoon": "費用の見積もりは、後から提供されます。",
-    "rankedByTokens": "トークン順",
     "modelCount_one": "{{count}} 件のモデル",
     "modelCount_other": "{{count}} 件のモデル",
     "chartBlocked": "利用状況の推移は、ゲートウェイの準備ができると表示されます。",
@@ -759,10 +774,8 @@
     "cache": "キャッシュ",
     "cacheRead": "キャッシュ読み取り",
     "cacheWrite": "キャッシュ書き込み",
-    "cacheHits": "キャッシュヒット",
+    "cacheHits": "キャッシュヒット率",
     "cacheHitRate": "キャッシュヒット率",
-    "configured": "設定済み",
-    "enabled": "有効",
     "emptyServices": "APIプロバイダーはまだありません。",
     "emptyServicesHint": "New API かサブスクリプションを追加すると、使い始められます。",
     "usageBlocked": "モデルの利用状況は、ゲートウェイの準備ができてから集計されます。",
@@ -796,11 +809,26 @@
     "tokenUsageCount": "{{count}} トークン",
     "tokenRequests": "リクエスト {{count}} 件",
     "tokenFailureRate": "失敗率 {{rate}}",
-    "tokenFailureDetail": "失敗 {{count}} 件 / リクエスト合計 {{total}} 件。クリックするとリクエストを表示します。",
-    "tokenFailureExplanation": "失敗率は、選択した期間の失敗したリクエスト数を、リクエストの合計で割った値です。記録の状態が失敗、または HTTP ステータスが 400 以上のリクエストを失敗として数えます。アクセストークンが無効だという意味ではありません。アクセストークンの行をクリックすると、リクエストと具体的な原因を確認できます。",
+    "tokenFailureDetail": "失敗 {{count}} 件 / リクエスト合計 {{total}} 件。クリックすると失敗したリクエストだけを表示します。",
+    "tokenFailureExplanation": "失敗率は、選択した期間の失敗したリクエスト数を、リクエストの合計で割った値です。記録の状態が失敗、または HTTP ステータスが 400 以上のリクエストを失敗として数えます。アクセストークンが無効だという意味ではありません。アクセストークンの行をクリックすると、リクエストと具体的な原因を確認できます。失敗率をクリックすると、失敗したリクエストだけを表示します。",
     "tokenCostCoverageLabel": "トークン利用について",
     "tokenCostCoverage": "トークン費用に含まれるのは、アクセストークンに帰属する課金項目だけです。より古い課金項目は合計費用に残ることがありますが、この順位には出ません。未価格、または保留中の項目だけのトークンは、費用が「—」になります。",
     "noAccessTokenUsage": "この期間にアクセストークンの利用はありません。",
+    "requestStatus": "リクエスト状態",
+    "statusTotal": "合計 {{count}} 件",
+    "statusOpenHint": "この呼び出しを含むセッションを表示",
+    "statusBlocked": "ゲートウェイの準備ができるとリクエスト状態を表示します",
+    "statusFailed": "リクエスト状態を集計できません",
+    "dailyRequests": "日別リクエスト",
+    "hourlyRequests": "時間別リクエスト",
+    "dailyRequestsChart": "選択した期間の日ごとの成功と失敗のリクエスト",
+    "hourlyRequestsChart": "過去 24 時間の時間ごとの成功と失敗のリクエスト",
+    "statusChartHint": "バーをクリックするとこれらのリクエストを表示します",
+    "configured": "設定済み",
+    "enabled": "有効",
+    "rankedByTokens": "トークン順",
+    "statusAndTokens": "リクエスト状態とアクセストークン",
+    "costNote": "金額は各モデルの公式 API 価格で換算しています。プロバイダーの実際の請求額とは異なる場合があります。",
     "systemDetails": "システムの詳細",
     "systemDetailsHint": "バージョン、待受アドレス、プロトコルの機能",
     "protocolCapabilities": "プロトコルの機能",
@@ -812,7 +840,30 @@
     "aggregatingModels": "モデルの利用状況を計算しています…",
     "noSuccessfulRequests": "この期間に成功したリクエストはありません。",
     "modelUsageHint": "成功した呼び出しは、モデルのトークン別に集計されます。",
-    "requestTimes": "{{value}} 回"
+    "requestTimes": "{{value}} 回",
+    "openRecords": "{{name}} のリクエストを表示",
+    "serviceSettings": "{{name}} の設定",
+    "serviceModels_one": "{{count}} 件のモデルを設定済み",
+    "serviceModels_other": "{{count}} 件のモデルを設定済み",
+    "serviceNoModels": "モデルはまだ設定されていません",
+    "modelProviders_one": "{{count}} 件の APIプロバイダーが提供",
+    "modelProviders_other": "{{count}} 件の APIプロバイダーが提供",
+    "modelNoProviders": "このモデルを載せている APIプロバイダーはありません",
+    "disabledService": "{{name}}（無効）",
+    "moreItems": "ほか {{count}} 件"
+  },
+  "usageRange": {
+    "custom": "カスタム",
+    "start": "開始",
+    "end": "終了",
+    "apply": "適用",
+    "today": "今日",
+    "problem": {
+      "invalid": "開始日と終了日を選んでください",
+      "order": "終了日は開始日以降にしてください",
+      "future": "開始日は今日以前にしてください",
+      "too_long": "一度に選べるのは 365 日までです"
+    }
   },
   "services": {
     "responsesWebSocket": "Responses WebSocket",
@@ -852,11 +903,11 @@
     "columnUsage": "サブスクリプション利用枠",
     "columnBilling": "費用",
     "columnPerformance": "キャッシュ / TPS",
-    "cacheUtilization": "キャッシュ率",
+    "cacheUtilization": "キャッシュヒット率",
     "performanceRange": "キャッシュと TPS の期間",
     "performanceError": "統計を利用不可",
-    "performanceDetailsFor": "{{name}} のキャッシュ率と TPS を表示",
-    "performanceDetailsTitle": "キャッシュ率と TPS",
+    "performanceDetailsFor": "{{name}} のキャッシュヒット率と TPS を表示",
+    "performanceDetailsTitle": "キャッシュヒット率と TPS",
     "performancePeriod": "期間",
     "performanceToday": "今日",
     "performanceRequests": "成功 {{count}} 件",
@@ -864,7 +915,7 @@
     "performanceCalculation": "計算方法",
     "performanceWindowsHint": "今日はローカル時刻の午前 0 時から始まります。直近 7 日と 30 日には今日が含まれます。集計対象は保持されているリクエスト履歴のみで、TPS の単位はトークン/秒です。",
     "performanceScope": "各期間について、このAPIプロバイダーの保持されている成功した推論リクエストを集計します。1 分ごとに更新します。失敗、再試行の子リクエスト、モデル検出は除外します。データがない場合は — と表示します。",
-    "cacheUtilizationHint": "キャッシュ率 = キャッシュ読み取りトークン合計 ÷ 入力トークン合計（キャッシュの読み取りと書き込みを含む）です。利用量が完全で、有効なキャッシュ読み取りが明示されているリクエストだけを含めます。キャッシュが報告されていないものは 0% として扱いません。",
+    "cacheUtilizationHint": "キャッシュヒット率 = キャッシュ読み取りトークン合計 ÷ 入力トークン合計（キャッシュの読み取りと書き込みを含む）です。利用量が完全で、有効なキャッシュ読み取りが明示されているリクエストだけを含めます。キャッシュが報告されていないものは 0% として扱いません。",
     "performanceSpeedHint": "TPS（トークン/秒）= 出力トークン合計 ÷ リクエスト所要時間の合計です。所要時間には最初のトークンまでの待ち時間を含み、ストリーミングと非ストリーミングの両方を数えます。利用量が完全で、出力が 0 より大きいリクエストだけを含めます。",
     "performanceSamples": "対象サンプル: キャッシュ {{cache}} 件、TPS {{speed}} 件。",
     "columnStatus": "状態",
@@ -886,6 +937,7 @@
     "configuredAria": "設定済みのAPIプロバイダー",
     "enableNamed": "{{name}} を有効にする",
     "moreNamed": "{{name}} のその他の操作",
+    "openInTerminal": "ターミナルで開く…",
     "openaiAccount": "OpenAI アカウント {{hint}}",
     "modelCount": "モデル {{count}} 件",
     "openModels": "{{name}} のモデル一覧を開く",
@@ -1070,6 +1122,8 @@
     "localConvert": "{{protocol}} のローカル変換",
     "notEnabled": "（未有効）",
     "passthrough": "パススルー",
+    "perModelFormat": "モデルごとの形式で転送",
+    "capabilityHintPerModel": "有効にしたプロトコルで、接続できるクライアントが決まります。リクエストは各モデルの上流の形式で OpenCode に送られます。形式は「対応モデル」で変更できます。",
     "authBearer": "APIキー（Bearer）",
     "authAnthropic": "Anthropic APIキー",
     "authGoogle": "Google APIキー",
@@ -1247,7 +1301,22 @@
     "deleteMissing": "これらを削除（{{count}}）",
     "deleteMissingTitle": "アップストリームに未掲載のモデルを削除しますか？",
     "deleteMatches": "一致を削除（{{count}}）",
-    "clear": "消去"
+    "clear": "消去",
+    "select": "選択",
+    "moreActions": "その他のモデル操作",
+    "selectModel": "{{label}} を選択",
+    "selectedCount_one": "{{count}} 件のモデルを選択中",
+    "selectedCount_other": "{{count}} 件のモデルを選択中",
+    "setFormat": "形式を指定",
+    "deleteSelectedTitle": "選択したモデルを削除しますか？",
+    "format": "上流に送る形式",
+    "formatHint": "どの入口から来たリクエストも、選んだ形式に変換してから送信します。",
+    "formatFor": "{{label}} を上流に送る形式を指定",
+    "formatTag": "{{format}} 形式",
+    "formatTagTitle": "リクエストは {{format}} 形式に変換してから上流に送信します",
+    "formatFollowEntry": "入口プロトコルの設定に従う",
+    "formatDefaultBuiltin": "デフォルト（{{format}}）",
+    "formatResetBuiltin": "デフォルトに戻す"
   },
   "tokens": {
     "search": "アクセストークンを検索",
@@ -1259,6 +1328,8 @@
     "unknown": "不明",
     "nameRequired": "トークン名を入力してください。",
     "nameTooLong": "トークン名は 64 文字以内です。",
+    "nameTaken": "同じ名前のトークンがすでにあります。別の名前を入力してください。",
+    "limitReached": "アクセストークンが上限数に達しています。使わないトークンを削除してから作成してください。",
     "created": "「{{name}}」を作成しました。クライアントは、今すぐこれで接続できます。",
     "createFailed": "アクセストークンを作成できません。",
     "copyManual": "自動でコピーできませんでした。トークンを手動で選択してください。",
@@ -1739,6 +1810,21 @@
     "recommended": " · 推奨",
     "recommendedModel": "推奨",
     "unsupported": " · 現在は非対応",
+    "unsupportedRequiresMacOS26": " · macOS 26 以降が必要",
+    "coreMLVariantGPU": "Core ML FP16 · GPU（推奨）",
+    "coreMLVariantNeuralEngine": "Core ML FP16 · Neural Engine（低速）",
+    "coreMLVariantAllUnits": "Core ML FP16 · すべての演算ユニット",
+    "coreMLCompileOnEnable": "Core ML 版を使い始めると、AstrLink はすぐにこの Mac 向けにモデルをコンパイルし、進行状況を表示します。初回は 15〜25 秒ほどかかり、2 回目以降はすぐに起動します。",
+    "preparingModel": "ローカルモデルを準備しています…",
+    "modelCompiling": "この Mac 向けにモデルをコンパイルしています。初回は 15〜25 秒ほどかかります…",
+    "modelCompilingLocalFallback": "準備ができるまでは、前のローカルモデルがリクエストをチェックします。",
+    "modelCompilingRegexFallback": "準備ができるまでは、正規表現ルールがリクエストをチェックします。",
+    "modelCompilingWait": "準備ができるまで、リクエストは待機します。",
+    "modelReadyOnMac": "この Mac 向けのコンパイルが終わり、使用できます。",
+    "modelPrepareFailedLocalFallback": "このモデルをこの Mac で準備できませんでした。前のローカルモデルが引き続きリクエストをチェックします。",
+    "modelPrepareFailedRegexFallback": "このモデルをこの Mac で準備できませんでした。正規表現ルールが引き続きリクエストをチェックします。",
+    "modelPrepareFailedBlocked": "このモデルをこの Mac で準備できませんでした。モデルが使えるようになるか、別のモデルを選ぶまで、リクエストはブロックされます。",
+    "retryPrepare": "再試行",
     "checkAndInstall": "確認してインストール",
     "updateAvailableHint": "バージョン {{version}} を利用できます",
     "updateTo": "v{{version}} に更新",
@@ -2069,7 +2155,7 @@
     "emptyDiscovery": "一致するモデル検出のリクエストはありません。",
     "clearFilters": "フィルターをクリア",
     "clearFilterNamed": "フィルターをクリア：{{label}}",
-    "failedToday": "今日失敗があるセッション",
+    "callStatus": "{{status}}の呼び出し",
     "readFailed": "リクエストを読み取れません。",
     "controlUnavailable": "コントロールプレーンに到達できません。再試行しています。",
     "auditReadFailed": "監査設定を読み取れません。",
@@ -2102,6 +2188,11 @@
     "clearTokenFilter": "選択をクリア",
     "selectedTokens": "{{count}} 件を選択中",
     "noAccessTokenResults": "一致するアクセストークンはありません。",
+    "time": "期間",
+    "searchModels": "モデルを検索",
+    "clearModelFilter": "選択をクリア",
+    "selectedModels": "{{count}} 件を選択中",
+    "noModelResults": "一致するモデルはありません。",
     "loadEarlier": "より前のリクエストを読み込む",
     "confirmEnable": "有効にする",
     "confirmDelete": "削除する",
@@ -2289,8 +2380,6 @@
     "retried": "{{count}} 回の再試行後に成功",
     "upstreamStatus": "アップストリーム HTTP {{status}}",
     "toolFailed": "ツール失敗",
-    "toolDone": "結果あり",
-    "toolNoResult": "クライアントから結果なし",
     "toolArgs": "引数",
     "toolOutput": "結果",
     "toolTextClipped": "ここでは先頭 {{limit}} だけを残しています。残りはインスペクターにあります。",
@@ -2653,7 +2742,7 @@
     "down": "↓ {{percent}}%",
     "flat": "横ばい",
     "noYesterday": "昨日のリクエストなし",
-    "cacheHit": "キャッシュヒット",
+    "cacheHit": "キャッシュヒット率",
     "topModel": "上位のモデル",
     "topClient": "上位のクライアント",
     "lastRequest": "直前のリクエスト",
@@ -2765,6 +2854,11 @@
       "exited": "ゲートウェイが予期せず終了",
       "recoveryStopped": "{{message}}。自動復旧は {{attempts}} 回の試行後に停止しました。",
       "recoveryFailed": "ゲートウェイの自動復旧に失敗しました：{{error}}"
+    },
+    "terminal": {
+      "banner": "AstrLink：このウィンドウの {{client}} は「{{service}}」だけを使います。",
+      "exited": "{{client}} を終了しました。ここで再び起動すると、普段の設定で動きます。",
+      "automationDenied": "ウィンドウを開くには、AstrLink が {{terminal}} を操作する許可が必要です。「システム設定 › プライバシーとセキュリティ › オートメーション」で AstrLink の下にある {{terminal}} をオンにして、もう一度試してください。"
     }
   },
   "failure": {
@@ -2788,6 +2882,8 @@
     "maxDelay": "再試行の最大待機（ms）",
     "backoffHint": "失敗が続くと待機時間は延び、上限は 60,000 ms です。アップストリームの待機がそれより長い場合、切り替えが許されていれば予備を使います。",
     "useGlobalTimeout": "ゲートウェイの基本応答タイムアウトを使う（設定）",
+    "globalTimeoutSeconds": "設定は現在 {{seconds}} 秒です。",
+    "globalTimeoutUnlimited": "設定は現在 0（無制限）です。応答開始のタイムアウトルールは発動せず、応答が始まらないアップストリームからも切り替えません。",
     "timeout": "応答開始タイムアウト（秒）",
     "timeoutHint": "0 は無制限です。応答ヘッダーを待つ時間だけを制限し、すでにストリーミングしている長い応答は切り詰めません。",
     "errorRules": "これらのエラーのとき",
@@ -2798,11 +2894,13 @@
     "retryRulesHint": "有効にすると、設定した再試行の方針で続行します。無効にすると、エラーを返します。",
     "networkError": "接続失敗または中断",
     "responseTimeout": "応答開始のタイムアウト",
+    "responseTimeoutInactive": "待機時間の上限がないため、このルールは発動しません",
     "httpCode": "HTTP {{code}}",
+    "streamCode": "ストリーム内のエラー（HTTP {{code}} として処理）",
     "removeCode": "HTTP {{code}} のルールを削除",
     "addStatus": "エラーステータスを追加（400–599）",
     "addRule": "ルールを追加",
-    "otherErrors": "有効にしたリクエストの修復は、まず独立して実行されます。修復できない、または修復しても失敗したときは、エラールールを適用します。一覧にない HTTP エラーはそのまま返します。すでに始まっている応答は、再試行、修復、切り替えを行いません。",
+    "otherErrors": "有効にしたリクエストの修復は、まず独立して実行されます。修復できない、または修復しても失敗したときは、エラールールを適用します。一覧にない HTTP エラーはそのまま返します。出力が始まる前にストリーム内で返されたエラーは、対応するステータスコードのルールに従います。たとえば過負荷は 503 として扱います。すでに始まっている応答は、再試行、修復、切り替えを行いません。",
     "invalid": "再試行回数、待機時間、エラールールを確認してください。最大の待機時間は、最初の待機時間より短くできません。",
     "serviceSummary": "再試行が許されたエラーは、最大 {{count}} 回まで追加で試行し、最初の待機は約 {{delay}} ms です。",
     "order": "失敗したあとの処理",
@@ -2882,14 +2980,16 @@
       "session_binding": "会話の継続: セッションアフィニティ",
       "response_affinity": "Responses の継続: 直前のレスポンスはこの APIプロバイダーから",
       "websocket_connection": "WebSocket 接続: 接続を開いた APIプロバイダー",
-      "failover": "フェイルオーバー: 先に試した APIプロバイダーが失敗または拒否"
+      "failover": "フェイルオーバー: 先に試した APIプロバイダーが失敗または拒否",
+      "client_pin": "クライアント指定：リクエストがこの APIプロバイダーを指名"
     },
     "selectionsShort": {
       "priority": "優先度順",
       "session_binding": "セッションアフィニティ",
       "response_affinity": "直前のレスポンスを継続",
       "websocket_connection": "同じ WebSocket 接続",
-      "failover": "フェイルオーバー"
+      "failover": "フェイルオーバー",
+      "client_pin": "クライアント指定"
     },
     "plans": {
       "native": "そのまま転送",
@@ -3377,6 +3477,11 @@
     "model": "モデル",
     "modelHint": "互換のあるモデルを検索するか、モデル名を入力します。",
     "modelPlaceholder": "モデルを検索または入力",
+    "contextWindow": "コンテキスト上限（トークン）",
+    "maxTokens": "1 回の出力上限（トークン）",
+    "piDefault": "空欄なら Pi の既定値 {{tokens}}",
+    "limitsHint": "サブスクリプションでは公式 API より上限が小さい場合があります。大きすぎると、長い会話や長い返答が拒否されることがあります。",
+    "limitInvalid": "1 から 100000000 までの整数を入力するか、空欄にしてください。",
     "modelsLoading": "モデルを読み込んでいます…",
     "modelsFailed": "一部のモデルを読み込めませんでした。モデル ID は入力できます。",
     "defaultModel": "既定 / マルチモーダル（任意）",
@@ -3400,13 +3505,14 @@
       "elsewhere": "別のインスタンス",
       "modified": "外部で変更済み",
       "cc_switch": "CC Switch 経由",
-      "invalid": "設定を読み取れない"
+      "invalid": "設定を読み取れない",
+      "other_token": "別のトークン"
     },
-    "usesToken": "{{client}} は現在「{{name}}」を使っています。更新すると「{{current}}」に切り替わります。",
-    "usesOtherToken": "{{client}} は現在、別のアクセストークンを使っています。更新すると「{{current}}」に切り替わります。",
+    "usesToken": "{{client}} は現在「{{name}}」を使っています。切り替えると「{{current}}」を使います。",
+    "usesOtherToken": "{{client}} は現在、別のアクセストークンを使っています。切り替えると「{{current}}」を使います。",
     "modifiedHint": "この設定は AstrLink が書き込んだ後に変更されたため、ポートが変わっても更新されなくなりました。もう一度書き込むと元に戻ります。",
     "ccSwitchManagedHint": "{{client}} は現在 CC Switch が管理しています。ゲートウェイのポートが変わったら、CC Switch でアドレスを更新してください。AstrLink に再び管理させるには、「設定を書き込む」を選んでください。",
-    "elsewhereHint": "{{client}} は、このコンピューター上の別の AstrLink に接続しています。更新すると、代わりにこちらへ接続します。",
+    "elsewhereHint": "{{client}} は、このコンピューター上の別の AstrLink に接続しています。切り替えると、代わりにこちらへ接続します。",
     "invalidHint": "設定ファイルの形式に誤りがあるため、AstrLink は変更しません。直してから、もう一度書き込んでください。",
     "configFile": "設定ファイル",
     "place": "場所",
@@ -3416,6 +3522,7 @@
     "wslNetwork": "既定では、WSL 内のクライアントはこのコンピューターの {{url}} に到達できません。%UserProfile%\\.wslconfig の [wsl2] に networkingMode=mirrored を追加し、wsl --shutdown を実行してから WSL を開き直してください。",
     "write": "設定を書き込む",
     "update": "設定を更新",
+    "useThisToken": "このトークンに切り替える",
     "writing": "書き込んでいます…",
     "written": "{{client}} の設定を書き込みました。使うには {{client}} を開き直してください。",
     "writeFailed": "設定を書き込めませんでした。",
@@ -3518,7 +3625,7 @@
     "serviceSearch": "APIプロバイダーの検索API",
     "imagesApi": "カスタムImages API",
     "upstreamHint": "選択したAPIプロバイダーのResponses APIを使います。実行モデルが同じ種類の組み込みツールを呼び出し、結果は元のリクエストのメインモデルに戻ります。",
-    "externalSearchHint": "検索、ページの読み取り、テキストの検索にTavily互換APIを使います。下のAPIベースURLと、別に保存したキーで接続します。Codexがキャッシュ結果のみを求めても、Tavilyはライブのページを取得します。",
+    "externalSearchHint": "検索、ページの読み取り、テキストの検索にTavily互換APIを使います。下のAPIベースURLと、別に保存したキーで接続します。Codexがキャッシュ結果のみを求めても、Tavilyはライブのページを取得します。DeepSeekのURLは自動で対応します。",
     "externalImagesHint": "画像の生成または編集に、OpenAI Images互換APIを使います。下のAPIベースURLと、別に保存したキーで接続します。",
     "serviceImagesHint": "選択したAPIプロバイダー自身の画像APIで画像を生成または編集し、そのAPIプロバイダーに設定済みのキーとプロキシを再利用します。参照画像がある場合、MiniMaxはその人物を保ったまま新しい画像を生成します。",
     "serviceSearchHint": "選択したAPIプロバイダー自身のウェブ検索API /v1/alpha/search を使い、そのAPIプロバイダーに設定済みのキーとプロキシを再利用します。公式のCodexクライアントは、検索時にこのAPIを呼び出します。Codexからの検索は、下のモデルで送信されます。別のクライアントが web_search を呼び出すと、ゲートウェイが同じ検索リクエストを代わりに送ります。",
@@ -3557,9 +3664,21 @@
     "help": "リクエスト画像の圧縮について",
     "enable": "リクエスト画像の圧縮を有効にする",
     "hint": "転送前にリクエスト内の画像を WebP へ変換し、アップロード帯域を節約します。",
-    "description": "転送前に、リクエストへインラインされた base64 画像を WebP として再エンコードし、アップロード帯域を減らします。OpenAI Chat、Responses、Anthropic Messages、Gemini のリクエストに適用します。WebP の方が小さい場合にだけ画像を置き換えます。非可逆モードでは、PNG または GIF について可逆の方が小さいとき、可逆で送信します。",
-    "keptHelp": "画像 URL、ファイル ID、WebP 画像、アニメーション GIF はそのまま送信します。同じ画像は常に同じバイト列になるため、複数ターンの会話でもアップストリームのプロンプトキャッシュに当たります。高解像度のスクリーンショットを初めて圧縮する場合、通常は 10 分の数秒かかります。",
-    "recordHelp": "リクエストのトレースにある COMPRESS 行は、各リクエストが再エンコードした画像の数と、サイズの変化を示します。モデルはピクセルサイズで画像のトークンを数えるため、圧縮してもトークン使用量は減りません。",
+    "demo": {
+      "client": "クライアント",
+      "model": "モデル",
+      "files": {
+        "screenshot": "キャプチャ",
+        "photo": "写真",
+        "animation": "アニメ",
+        "link": "画像リンク"
+      },
+      "text": {
+        "lossless": "画面キャプチャはピクセルを変えずに WebP へ変換し、サイズを小さくします。写真は可逆 WebP にすると大きくなるため、そのまま送信します。",
+        "lossy": "写真も WebP に変換して小さくします。細かい文字はぼやけることがあります。画面キャプチャは可逆の方が小さければ、可逆で送信します。"
+      },
+      "notes": "同じ画像は毎回同じ結果になるため、プロンプトキャッシュはそのまま効きます。大きな画面キャプチャを初めて圧縮するときは 10 分の数秒かかります。モデルはピクセルサイズで画像のトークンを数えるため、トークン使用量は変わりません。"
+    },
     "mode": "モード",
     "modes": {
       "lossless": "可逆",
@@ -3616,7 +3735,9 @@
       "status": "ローカルの Core が {{status}} を返しました。再試行し、それでも失敗する場合はログを確認してください。",
       "codeUnknown": "ローカルの Core がエラー {{code}} を返しました。再試行し、それでも失敗する場合はログを確認してください。",
       "unknownDryRunProtocol": "AstrLink はそのプロトコルにまだ対応していません。一覧から対応しているプロトコルを選んでください。",
-      "dimensionInUse": "削除または名前を変更したディメンションが、まだルーティングルールで使われています。先にルーティンググループで、そのディメンションを使う条件を削除してから保存してください。"
+      "dimensionInUse": "削除または名前を変更したディメンションが、まだルーティングルールで使われています。先にルーティンググループで、そのディメンションを使う条件を削除してから保存してください。",
+      "classifierModelUnavailable": "分類に使うモデルを呼び出せません。選択した API プロバイダーが削除または無効化されたか、そのモデルを提供していません。分類モデルを選び直してから保存してください。",
+      "routingReference": "ルーティンググループがこの API プロバイダーのモデルを使っています。先に「インテリジェントルーティング › ルーティンググループ」で該当するメンバーを置き換えてから、削除・無効化するか、モデルを外してください。"
     }
   },
   "classifier": {
@@ -3642,7 +3763,7 @@
     "credentialMissing": "キー未設定",
     "deleteKey": "キーを削除",
     "prompt": "分類器のプロンプト",
-    "promptHint": "分類器に送る指示です。組み込みの既定プロンプトが入力済みです。{{labels}} は現在有効な task_type のラベルに、{{dim.name}} はそのカスタムディメンションの定義と選択肢に置き換わります。",
+    "promptHint": "分類器に送る指示です。既定のプロンプトはすべてのディメンションを書き出し、ディメンションの追加や削除に合わせて更新されます。編集した後は自動では更新されないので、新しいディメンションは「プレースホルダーを挿入」で追加できます。プレースホルダー（タスクの種類は task_type）：{{dim.<ディメンション名>.name}} は名前、{{dim.<ディメンション名>.description}} は説明、{{dim.<ディメンション名>.options}} は選択肢とそれぞれの説明、{{dim.<ディメンション名>}} はその 3 つすべてです。従来の {{labels}} も引き続き使えます。既存のモデルで分類する場合は、プロンプトの後に回答形式が追加され、プロンプトに書かれていないディメンションの説明も補われます。分類器が実際に受け取った指示はドライランの結果で確認できます。",
     "advanced": "詳細設定",
     "timeout": "タイムアウト（ms）",
     "timeoutHint": "分類器の 1 回の呼び出しにかける時間の上限で、最大 {{max}} ms です。タイムアウトしてもメインのリクエストは止まりません。そのリクエストはモデルルーティンググループの既定のメンバーが処理し、理由はリクエスト履歴に記録されます。",
@@ -3664,7 +3785,7 @@
       "has-query": "エンドポイントにクエリ文字列やフラグメントを含めることはできません。"
     },
     "dryRun": {
-      "textHint": "テキストは、クラウドの分類器に送られる前に、このマシン上でプライバシーフィルタを通ります。分類器が受け取るのはマスキング後の内容です。",
+      "textHint": "テキストは、分類器に送られる前に、このマシン上でプライバシーフィルタを通ります。分類器が受け取るのはマスキング後の内容です。",
       "runHint": "実行するたびに分類器を実際に 1 回呼び出すため、分類 1 回分の費用がかかります。ローカルのシミュレーションではなく、会話中のモデルも使いません。",
       "runHintLabel": "ドライランの費用について",
       "running": "実行中…",
@@ -4163,7 +4284,7 @@
       "input_bytes": "リクエスト本文のサイズ",
       "input_text_runes": "テキストの文字数",
       "estimated_input_context_tokens": "コンテキスト長の推定値",
-      "literal_keyword": "大文字と小文字を区別せず、テキストを検索",
+      "literal_keyword": "最新のユーザー発言内を検索",
       "system_time": "ゲートウェイのローカル時刻"
     },
     "groups": {
@@ -4227,7 +4348,8 @@
       "anyOf": "いずれかに一致",
       "noneOf": "いずれにも一致しない",
       "manageOptions": "選択肢は「分類器 › 分類ディメンション」で管理します。",
-      "manageOptionsAction": "管理する",
+      "manageOptionsAction": "分類器でオプションを管理",
+      "helpLabel": "この条件について",
       "noOptions": "この項目には、まだ選べる値がありません。",
       "localNote": "ゲートウェイがローカルで読み取ります。分類器は呼び出しません。",
       "countMode": "比較方法",
@@ -4245,7 +4367,7 @@
       "containsNone": "いずれも含まない",
       "keywords": "キーワード",
       "keywordsPlaceholder": "入力して Enter を押す",
-      "keywordsNote": "リクエストのテキスト内を検索します。大文字と小文字は区別せず、最大 {{max}} 件です。",
+      "keywordsNote": "最新のユーザーメッセージ内を検索します。大文字と小文字は区別せず、最大 {{max}} 件です。",
       "removeKeyword": "キーワード {{value}} を削除",
       "timeStart": "開始",
       "timeEnd": "終了",
@@ -4266,7 +4388,7 @@
   },
   "dryRunTab": {
     "inputTitle": "テストするテキスト",
-    "inputPlaceholder": "リクエストのテキストを入力（例：ユーザーがモデルに送る最初のメッセージ）",
+    "inputPlaceholder": "ユーザーがモデルに送るメッセージを入力",
     "facts": "リクエスト条件",
     "factsTitle": "模擬リクエストの条件",
     "factsHint": "未入力の条件は不明として扱われ、それに依存するルールは一致しません。",
@@ -4303,15 +4425,15 @@
     "callsClassifier": "分類器を 1 回呼び出します",
     "durationMs": "{{ms}} ms",
     "idleTitle": "まだドライランを実行していません",
-    "idleHint": "リクエストのテキストを入力し、「テストを開始」を選んでください。結果には、使われるモデルが最初に表示され、続いて分類器の回答と各ルールの判定が表示されます。",
+    "idleHint": "ユーザーのメッセージを入力し、「テストを開始」を選んでください。結果には、使われるモデルが最初に表示され、続いて分類器の回答と各ルールの判定が表示されます。",
     "runningHint": "分類器を呼び出し、ルールを判定しています…",
     "outcomeRule": "ルール {{index}} で選ばれた {{model}}（{{provider}}）が使われます",
-    "outcomeRuleId": "ルール {{rule}} で選ばれた {{model}}（{{provider}}）が使われます",
+    "outcomeUnlistedRule": "ルールで選ばれた {{model}}（{{provider}}）が使われます",
     "outcomeDefault": "一致するルールがないため、「それ以外の場合」のモデル {{model}}（{{provider}}）が使われます",
     "outcomeTargetMissing": "ルール {{index}} に一致しましたが、そのモデルはもうこのルーティンググループにないため、「それ以外の場合」のモデルを使います。",
-    "notConfigured": "分類器がまだ設定されていないため、今回は分類器を呼び出さず、ルールも判定していません。",
+    "notConfigured": "分類器が無効か設定が完了していないため、今回は分類器を呼び出していません。分類器に依存するルールは不明として扱います。",
     "privacyStopped": "プライバシー検査を通過しなかったため（{{reason}}）、今回は分類器を呼び出さず、ルールも判定していません。",
-    "groupMissing": "ルーティンググループ {{group}} が見つからないため、今回は分類器の回答だけを表示します。",
+    "groupMissing": "ルーティンググループ {{group}} が見つからないため、今回はルールを判定していません。",
     "unsaved": "{{group}} には未保存の変更があります。今回は保存済みのバージョンを使います。",
     "classifierTitle": "分類器の回答",
     "taskType": "タスクの種類",
@@ -4319,6 +4441,7 @@
     "noAnswer": "未回答",
     "candidates": "候補の順位",
     "sanitized": "分類器が受け取ったテキスト（マスキング済み）",
+    "instruction": "分類器が受け取った指示",
     "rulesTitle": "ルールの判定",
     "editRules": "ルールを編集",
     "noRules": "このルーティンググループにはルールがないため、すべてのリクエストで「それ以外の場合」のモデルを使います。",
@@ -4365,6 +4488,7 @@
     "dimensionsDescription": "分類器はリクエストごとにこれらの質問に答え、ルールはその回答に応じてモデルを選べます。すべてのルーティンググループで共通です。",
     "dimensionCount": "カスタム {{count}} / {{max}}",
     "dimensionLimit": "カスタムディメンションは最大 {{max}} 件です（タスクの種類は組み込みのため数に含みません）。",
+    "dimensionLimitLabel": "カスタムディメンションの上限",
     "addDimension": "ディメンションを追加",
     "taskType": "タスクの種類",
     "builtIn": "組み込み",
@@ -4380,7 +4504,7 @@
     "unnamedOption": "名前なし",
     "dimensionName": "ディメンション名",
     "dimensionNamePlaceholder": "例：topic",
-    "dimensionPlaceholderHint": "プロンプトでは次のプレースホルダーで参照します：",
+    "dimensionPlaceholderHint": "プロンプトでは次のように参照できます：",
     "dimensionDescription": "説明",
     "dimensionDescriptionPlaceholder": "このディメンションで何を判断するかを分類器に伝えます。例：リクエストの業務トピック",
     "editDimension": "ディメンション {{name}} を編集",
@@ -4389,11 +4513,19 @@
     "labelsDiverge": "ルーティンググループ間で、タスクの種類の選択肢が一致していません。ここには最初のグループのものを表示しています。保存すると、すべてのグループがこの一覧に統一されます。",
     "labelsNoGroups": "ルーティンググループはまだありません。タスクの種類の選択肢はルーティンググループに保存されるため、先にルーティンググループを作成してください。",
     "labelLimit": "選択肢は最大 {{max}} 件です。",
+    "taskTypeHelpLabel": "タスクタイプのオプションについて",
     "routingLoadFailed": "ルーティンググループを読み取れなかったため、現在はタスクの種類の選択肢を変更できません。",
     "advancedSummary": "タイムアウト {{timeout}} ms · 低信頼度しきい値 {{threshold}} · プロンプト {{prompt}}",
     "promptDefault": "既定",
     "promptCustom": "カスタマイズ済み",
     "resetPrompt": "既定のプロンプトに戻す",
+    "insertPlaceholder": "プレースホルダーを挿入",
+    "placeholderParts": {
+      "name": "名前",
+      "description": "説明",
+      "options": "選択肢",
+      "all": "すべて"
+    },
     "saved": "すべての変更を保存しました",
     "unsaved": "未保存の変更",
     "dimensionErrors": {
@@ -4401,6 +4533,7 @@
       "nameEmpty": "ディメンション名を入力してください。",
       "nameTooLong": "ディメンション名が長すぎます。",
       "nameBraces": "ディメンション名に波括弧は使えません。波括弧はプロンプトのプレースホルダーの区切りに使われます。",
+      "nameFieldSuffix": "ディメンション名の末尾に .name、.description、.options は使えません。プレースホルダーではこれらの接尾辞でディメンションの一部を指します。",
       "nameWhitespace": "ディメンション名の先頭と末尾に空白は使えません（途中の空白は使えます）。",
       "nameReservedTaskType": "task_type は組み込みのディメンションです。選択肢は上の「タスクの種類」の行で管理します。",
       "nameReservedBuiltin": "この名前は組み込みフィールドが使っています。組み込みフィールドはリクエスト自体から読み取るため、ルールはこのディメンションではなく、組み込みの値を参照することになります。",
@@ -4441,14 +4574,14 @@
   "routingProcess": {
     "yes": "はい",
     "no": "いいえ",
-    "keywordFound": "リクエストに「{{keyword}}」が含まれています",
-    "keywordMissing": "リクエストに「{{keyword}}」は含まれていません",
-    "keywordsFound_one": "リクエストに、これらのキーワードのうち {{count}} 個が含まれています",
-    "keywordsFound_other": "リクエストに、これらのキーワードのうち {{count}} 個が含まれています",
-    "keywordsMissing": "リクエストには、これらのキーワードがいずれも含まれていません",
+    "keywordFound": "ユーザーのメッセージに「{{keyword}}」が含まれています",
+    "keywordMissing": "ユーザーのメッセージに「{{keyword}}」は含まれていません",
+    "keywordsFound_one": "ユーザーのメッセージに、これらのキーワードのうち {{count}} 個が含まれています",
+    "keywordsFound_other": "ユーザーのメッセージに、これらのキーワードのうち {{count}} 個が含まれています",
+    "keywordsMissing": "ユーザーのメッセージには、これらのキーワードがいずれも含まれていません",
     "title": "インテリジェントルーティング",
     "chosenByRule": "ルール {{index}} により {{model}}（{{provider}}）を選択しました。",
-    "chosenByRuleId": "ルール {{rule}} により {{model}}（{{provider}}）を選択しました。",
+    "chosenByUnlistedRule": "ルールにより {{model}}（{{provider}}）を選択しました。",
     "chosenByDefault": "{{model}}（{{provider}}）を選択しました。条件を満たすルールがなかったため、「それ以外の場合」のモデルを使用しました。",
     "bindingReused": "このセッションで以前選択した {{model}}（{{provider}}）を引き続き使用しました（{{time}} まで有効）。",
     "bindingReusedNoTime": "このセッションで以前選択した {{model}}（{{provider}}）を引き続き使用しました。",
@@ -4473,9 +4606,12 @@
     "copyJson": "JSON をコピー",
     "versionLegacy": "アップグレード前",
     "fieldsTitle": "読み取った条件",
-    "fieldKnown": "取得済み"
+    "fieldKnown": "取得済み",
+    "removedRule": "削除されたルール",
+    "removedMember": "グループから外されたモデル"
   },
   "controlErrors": {
+    "model_routing_reference": "ルーティンググループがこの API プロバイダーのモデルを使っています。先に「インテリジェントルーティング › ルーティンググループ」で該当するメンバーを置き換えてから、削除・無効化するか、モデルを外してください。",
     "image_provider_not_found": "画像生成に選んだ APIプロバイダーは、もう存在しません。別の APIプロバイダーを選ぶか、画像生成をオフにしてください。",
     "image_provider_unsupported": "画像生成に選んだ APIプロバイダーには Images API がありません。「APIプロバイダーの Images API」は、OpenAI、OpenAI 互換、New API、MiniMax の APIプロバイダーで使えます。Codex サブスクリプションでは、Responses · image_generation を選んでください。",
     "search_provider_not_found": "ウェブ検索に選んだ APIプロバイダーは、もう存在しません。別の APIプロバイダーを選ぶか、ウェブ検索をオフにしてください。",
@@ -4571,7 +4707,8 @@
       "requestRead": "ターンのテキストを読む",
       "network": "ネットワーク",
       "storage": "プラグインストレージ",
-      "uiViews": "ビュー"
+      "uiViews": "ビュー",
+      "modelTools": "モデルからの検索"
     },
     "loadErrors": {
       "not_found": "plugin.ts も plugin.js もありません",
@@ -4694,6 +4831,148 @@
       "replace": "変更",
       "keep": "変更しない",
       "noOrigin": "トークンを保存する前にサーバーのアドレスを入力してください"
+    },
+    "host": {
+      "pause": "すべてのプラグインを一時停止",
+      "pauseHelpLabel": "すべてのプラグインの一時停止について",
+      "pauseHelp": "一時停止中はどのプラグインも動きません。読み込み・確認・書き込みを行わず、リクエストはそのまま送られます。各ターン最初のリクエストの記録に理由が残ります。再開すると元どおり動きます。",
+      "pausedNotice": "すべてのプラグインを一時停止中です。リクエストはそのまま送られます。",
+      "budget": "注入の上限",
+      "budgetHelpLabel": "注入の上限について",
+      "budgetHelp": "すべてのプラグインが 1 回のリクエストに追加できる内容の合計です。超えた場合、順番が後のプラグインのブロックは入らず、リクエスト記録に「注入の上限を超過」と残ります。",
+      "budgetValue": "{{value}} KB",
+      "saveFailed": "プラグイン全体の設定を保存できませんでした。"
+    },
+    "clients": {
+      "label": "対象のクライアント",
+      "helpLabel": "対象のクライアントについて",
+      "help": "チェックを外したクライアントのリクエストにはプラグインが関わりません。読み込み・確認・書き込みを行わず、そのまま送られます。判別できないクライアントは「その他」です。クライアント自身の記憶機能と重ならないようにするのに使えます。",
+      "all": "すべてのクライアント",
+      "none": "どのクライアントにも適用しない",
+      "search": "クライアントを検索",
+      "empty": "一致するクライアントはありません",
+      "selectAll": "すべて選択",
+      "clear": "すべて解除",
+      "other": "その他",
+      "count_one": "{{count}} 個のクライアント",
+      "count_other": "{{count}} 個のクライアント"
+    },
+    "workspace": {
+      "label": "ワークスペースで自動紐付け",
+      "helpLabel": "ワークスペースでの自動紐付けについて",
+      "help": "セッションで初めてプロジェクトを選んだとき、「この作業ディレクトリ → このプロジェクト」を記録し、同じディレクトリの新しいセッションは最初のターンから自動で紐付きます。このコンピューターには、ディレクトリパスのフィンガープリントと最後の名前だけを保存します。"
+    },
+    "refresh": {
+      "label": "自動更新",
+      "helpLabel": "自動更新について",
+      "help": "各セッションで最大 10 分に 1 回プラグインのデータが更新されたか確認し、更新があったときだけ新しいブロックに替えます。替えるたびに、このセッションのプロンプトキャッシュはもう一度書き込まれます。既定ではオフです。",
+      "confirmTitle": "自動更新をオンにしますか？",
+      "confirmBody": "プラグインのデータが更新されると、セッションは新しいブロックに替わります。システムプロンプトが変わるため、それ以降の会話全体がもう一度プロンプトキャッシュに書き込まれ、長いセッションでは数万トークン多くかかることがあります。確認は各セッションで最大 10 分に 1 回です。",
+      "confirm": "オンにする"
+    },
+    "stored": {
+      "title": "保存しているもの",
+      "kinds": {
+        "session_bindings": {
+          "label": "セッションの紐付け",
+          "detail": "値・紐付けた方法・何ターン目か · AstrLink データベース · 会話内容なし · セッション記録と同じ期間"
+        },
+        "workspace_bindings": {
+          "label": "ワークスペースと値の対応",
+          "detail": "ディレクトリパスのフィンガープリントと最後の名前のみ、パスは保存しません · AstrLink データベース · 会話内容なし · 消去するまで"
+        },
+        "plugin_sessions": {
+          "label": "各セッションでの最初のターンと一時停止",
+          "detail": "AstrLink データベース · 会話内容なし · 保持"
+        },
+        "request_records": {
+          "label": "プラグインの記録",
+          "detail": "回数・サイズ・所要時間・理由 · リクエスト記録内 · 会話内容なし · リクエスト記録と同じ期間"
+        },
+        "resident_block": {
+          "label": "現在読み込んでいるブロック",
+          "detail": "メモリ内のみ · 記憶の内容を含む · ゲートウェイを再起動すると消えます"
+        },
+        "plugin_values": {
+          "label": "プラグインのストレージ",
+          "detail": "プラグイン自身の小さなデータ · AstrLink データベース · 無効化後も残り、消去できます"
+        },
+        "lookup_credentials": {
+          "label": "検索の認証情報",
+          "detail": "各セッションが検索に使う認証情報 · メモリ内のみ、ハッシュで保持 · 会話の内容は含まない · リクエストが 24 時間ないか、ゲートウェイが再起動すると無効"
+        }
+      },
+      "declared": "プラグインの申告：{{label}} · {{content}} · {{retention}}",
+      "withContent": "会話内容を含む",
+      "withoutContent": "会話内容なし",
+      "clear": "消去",
+      "clearTitle": {
+        "workspaces": "ワークスペースの記録を消去しますか？",
+        "values": "プラグインのストレージを消去しますか？",
+        "lookups": "検索の認証情報を無効にしますか？"
+      },
+      "clearConfirm": {
+        "workspaces": "消去すると、新しいセッションは作業ディレクトリから自動でプロジェクトに紐付かず、最初のターンで再び確認します。紐付け済みのセッションは変わりません。",
+        "values": "プロジェクトのサーバー上の ID など、プラグイン自身の小さなデータを消去します。必要になったときにプラグインが取り直します。記憶そのものは変わりません。",
+        "lookups": "このプラグインの検索の認証情報がただちに無効になり、モデルが受け取った検索コマンドも使えなくなります。各セッションの次のリクエストで新しい認証情報に替わり、システムプロンプトが変わるため、プロンプトキャッシュがもう一度書き込まれます。"
+      },
+      "clearFailed": "消去できませんでした。",
+      "count_one": "{{count}} 件",
+      "count_other": "{{count}} 件",
+      "revoke": "無効にする"
+    },
+    "lookup": {
+      "label": "モデルからの検索",
+      "helpLabel": "モデルからの検索について",
+      "help": "モデルが詳細を必要とするとき、自分のシェルでプラグインの読み取り専用の検索を実行できます。検索対象はセッションに紐づくプロジェクトで、1 ターンに最大 3 回です。クライアントとゲートウェイが同じコンピューターにあり、リクエストにシェルツールがあるときだけ、システムプロンプトに実行方法とこのセッションの認証情報を付けます。プラグインを有効にするときに「モデルからの検索」を許可してください。このプラグインの検索：",
+      "toolSeparator": "："
+    },
+    "effects": {
+      "title": "効果",
+      "helpLabel": "効果について",
+      "help": "直近 7 日間を、このコンピューターのリクエスト記録から集計します。回数・サイズ・所要時間・理由だけで、会話の内容は含まず、どこにも送信しません。追加した内容はバイト数で数え、およそ 3 バイトを 1 トークンとします。キャッシュヒットは入力トークンのうちキャッシュから読んだ割合で、「記憶あり」はプラグインが注入した内容を含むセッションです。",
+      "empty": "直近 7 日間の記録はまだありません。",
+      "load": "読み込み",
+      "loadValue_one": "{{count}} 回 · 追加 {{size}}（約 {{tokens}} トークン）",
+      "loadValue_other": "{{count}} 回 · 追加 {{size}}（約 {{tokens}} トークン）",
+      "refreshes_one": "うち更新 {{count}} 回",
+      "refreshes_other": "うち更新 {{count}} 回",
+      "wait": "待ち時間の中央値 {{p50}} ms、遅い 5% {{p95}} ms",
+      "lookup": "検索",
+      "noLookups": "検索なし",
+      "lookupValue_one": "{{count}} 回",
+      "lookupValue_other": "{{count}} 回",
+      "hitRate": "結果あり {{rate}}",
+      "lookupSessions": "{{sessions}} セッション中 {{lookingUp}} が検索",
+      "lookupMs": "中央値 {{p50}} ms",
+      "refused_one": "拒否 {{count}} 回",
+      "refused_other": "拒否 {{count}} 回",
+      "binding": "紐づけ",
+      "bindingValue": "ワークスペース自動 {{workspace}} · 既存を選択 {{picked}} · 新規 {{created}} · 入れない {{declined}} · 未回答 {{unanswered}}",
+      "changed_one": "自動紐づけ後に変更 {{count}}",
+      "changed_other": "自動紐づけ後に変更 {{count}}",
+      "write": "書き込み",
+      "writeValue": "{{ok}} 件 · 失敗 {{failed}}",
+      "problems": "問題",
+      "problemsValue": "失敗 {{failed}} · タイムアウト {{timeouts}} · プライバシー {{privacy}} · 予算超過 {{overBudget}}",
+      "cache": "キャッシュヒット",
+      "cacheValue": "記憶あり {{with}} · その他のセッション {{without}}",
+      "daily": "日ごとの内訳",
+      "dailyHelp": "各行はゲートウェイのタイムゾーンでの 1 日です。キャッシュヒットの列は「記憶ありのセッション / その他のセッション」です。そのほかは「効果」と同じく、回数・サイズ・理由だけで、会話の内容は含まず、送信もしません。",
+      "dailyHelpLabel": "日ごとの内訳について",
+      "writeCell": "{{ok}}（失敗 {{failed}}）",
+      "cacheCell": "{{with}} / {{without}}",
+      "columns": {
+        "date": "日付",
+        "loads": "読み込み",
+        "injected": "追加",
+        "lookups": "検索",
+        "hits": "結果あり",
+        "bindings": "紐づけ",
+        "writes": "書き込み",
+        "problems": "問題",
+        "cache": "キャッシュヒット"
+      }
     }
   },
   "pluginRecords": {
@@ -4714,7 +4993,19 @@
       "plugin_error": "プラグインのエラー",
       "privacy_blocked": "プライバシーポリシーでブロック",
       "privacy_unavailable": "プライバシー検査を利用できません",
-      "search_failed": "一部の検索が失敗し、一致なし"
+      "search_failed": "一部の検索が失敗し、一致なし",
+      "paused_all": "すべてのプラグインを一時停止中",
+      "client_disabled": "このクライアントではオフ",
+      "session_paused": "このセッションでは一時停止中",
+      "over_budget": "注入の上限を超過",
+      "invalid_result": "プラグインの結果が無効",
+      "no_system_channel": "追加できるシステムプロンプトがありません",
+      "no_opening_message": "このターンに追加できるユーザーメッセージがありません",
+      "injection_failed": "注入に失敗し、リクエストはそのまま送られました",
+      "rate_limited": "検索が多すぎます",
+      "turn_limit": "このターンの 3 回を使い切りました",
+      "unbound": "セッションにまだプロジェクトがありません",
+      "invalid_input": "パラメーターが正しくありません"
     },
     "injection": "注入",
     "placement": {
@@ -4756,7 +5047,37 @@
       "bound": "設定:",
       "rebound": "変更:",
       "cleared": "解除"
-    }
+    },
+    "trigger": "理由",
+    "triggers": {
+      "start": "初回の読み込み",
+      "bound": "プロジェクトを紐付けた直後",
+      "config": "設定または言語が変更された",
+      "compact": "compact 後に更新",
+      "manual": "手動で更新",
+      "auto": "自動更新"
+    },
+    "actionDone": "完了しました",
+    "actionFailed": "完了できませんでした：{{reason}}",
+    "setBy": {
+      "token_default": "トークンの既定値",
+      "model_marker": "モデルのマーカー",
+      "user_marker": "ユーザーのマーカー",
+      "user_answer": "回答と一致",
+      "workspace": "ワークスペース",
+      "manual": "手動",
+      "header": "リクエストヘッダー"
+    },
+    "metadataNew": "新しいプロジェクト",
+    "metadataNormalized": "元の表記 {{value}}",
+    "actionFailedPlain": "完了できませんでした。",
+    "lookup": "検索",
+    "lookupInput_one": "入力 {{count}} 文字",
+    "lookupInput_other": "入力 {{count}} 文字",
+    "lookupResult": "結果 {{size}}",
+    "lookupHits_one": "{{count}} 件",
+    "lookupHits_other": "{{count}} 件",
+    "commands": "付けた検索"
   },
   "metadata": {
     "title": "メタデータ",
@@ -4818,8 +5139,8 @@
   "sessionMetadata": {
     "title": "セッションのメタデータ",
     "helpLabel": "セッションのメタデータについて",
-    "help": "入力した値は属性の検証ルールで確認されます。none はこのセッションを対象外にします。",
-    "unbindHelp": "解除すると none が保存されます。このセッションは想起・記録・確認の対象外になり、履歴の古いマーカー行で再び紐付くこともありません。ここで値を入れるか、マーカー行だけを送ると再び紐付きます。",
+    "help": "一覧から既存の値を選ぶか、「新しいプロジェクト…」を選んで名前を入力します。値は属性の検証ルールに合っている必要があります。",
+    "unbindHelp": "解除すると none を保存します。このセッションは読み込み・書き込み・確認の対象外になり、履歴内の古いマーカーで再び紐付くこともありません。必要なときはここで選び直すか、会話でマーカーだけの 1 行を送ってください。",
     "none": "対象外",
     "notBound": "未設定",
     "unboundValue": "未設定",
@@ -4831,7 +5152,76 @@
     "setBy": {
       "model_marker": "モデルの返答",
       "user_marker": "ユーザーのメッセージ",
-      "manual": "手動で設定"
-    }
+      "manual": "手動で設定",
+      "user_answer": "回答と一致",
+      "workspace": "ワークスペース"
+    },
+    "workspaceHelp": "このセッションは {{name}} ディレクトリで動いています。ディレクトリで最初に選んだ値が、そこで始まる新しいセッションに使われます。",
+    "neverUsed": "未使用",
+    "offered": "最初のターンで提示",
+    "newValue": "新しいプロジェクト…",
+    "newValueLabel": "新しい{{label}}",
+    "newValuePlaceholder": "小文字の英字・数字・. _ -",
+    "workspaceFollow": "今後 {{name}} の新しいセッションもこれを使う（現在は {{previous}}）",
+    "usage_one": "{{count}} セッション · {{ago}}",
+    "usage_other": "{{count}} セッション · {{ago}}"
+  },
+  "serviceTerminal": {
+    "title": "「{{name}}」をターミナルで開く",
+    "description": "このターミナルのクライアントは、この APIプロバイダーだけを使います。プロバイダーでエラーが起きると、リクエストはそのまま失敗します。普段のクライアント設定はそのままです。",
+    "client": "クライアント",
+    "noClient": "先に Claude Code か Codex をインストールしてください。",
+    "directory": "起動フォルダー",
+    "directoryHint": "クライアントはこのフォルダーで起動します。",
+    "chooseDirectory": "フォルダーを選択…",
+    "model": "モデル",
+    "claudeModelPlaceholder": "Claude Code 標準のモデル",
+    "codexModelPlaceholder": "Codex の設定にあるモデル",
+    "claudeModelHint": "選んだモデルは Claude Code のバックグラウンド処理にも使われます。",
+    "terminal": "ターミナル",
+    "noTerminal": "このコンピューターで AstrLink が開けるターミナルアプリが見つかりません。",
+    "open": "ターミナルを開く",
+    "opening": "開いています…",
+    "opened": "{{terminal}} で {{client}} を開きました",
+    "failed": "ターミナルを開けませんでした：{{error}}",
+    "disabled": "この APIプロバイダーはオフです。オンにするまで、ターミナルからのリクエストは失敗します。",
+    "signedOut": "このアカウントはサインインしていません。サインインするまで、ターミナルからのリクエストは失敗します。"
+  },
+  "sessionMemory": {
+    "tab": "記憶",
+    "loadFailed": "このセッションの記憶を読み込めませんでした。",
+    "actionFailed": "操作を完了できませんでした。",
+    "changeProject": "変更",
+    "project": "プロジェクト",
+    "workspace": "作業ディレクトリ",
+    "noPlugins": "ブロックを読み込むプラグインは有効になっていません。",
+    "refresh": "記憶を更新",
+    "pause": "このセッションで一時停止",
+    "resume": "再開",
+    "paused": "一時停止中",
+    "refreshPending": "次のリクエストで読み込み直します",
+    "helpLabel": "セッションの記憶について",
+    "help": "読み込んだ内容はシステムプロンプトの末尾に置かれ、セッション内では変わりません。compact 後、手動更新、または自動更新がオンのときだけ新しくなります。メモリ内にだけあり、ゲートウェイを再起動すると次のリクエストで計算し直します。",
+    "firstTurn": "{{turn}} ターン目から参加",
+    "noBlock": "このセッションは今ブロックを読み込んでいません。ゲートウェイの再起動後は、次のリクエストで計算し直します。",
+    "records": "記録",
+    "confirm": {
+      "refresh": {
+        "title": "「{{name}}」を更新しますか？",
+        "body": "このセッションの次のリクエストで読み込み直します。システムプロンプトが変わるため、プロンプトキャッシュはもう一度書き込まれます。",
+        "action": "更新"
+      },
+      "pause": {
+        "title": "このセッションで「{{name}}」を一時停止しますか？",
+        "body": "一時停止中は読み込みも検索の案内も書き込みも行わず、リクエストはそのまま送られます。このセッションの検索の認証情報は無効になり、すでにコンテキストにある内容は取り消されません。システムプロンプトが変わるため、プロンプトキャッシュはもう一度書き込まれます。",
+        "action": "一時停止"
+      },
+      "resume": {
+        "title": "「{{name}}」を再開しますか？",
+        "body": "読み込みと書き込みを再開します。システムプロンプトが変わるため、プロンプトキャッシュはもう一度書き込まれます。",
+        "action": "再開"
+      }
+    },
+    "lookup": "システムプロンプトに付けた検索の方法（認証情報は伏せています）"
   }
 }

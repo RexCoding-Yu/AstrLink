@@ -38,6 +38,13 @@ var (
 	ErrUpstream              = errors.New("upstream model discovery failed")
 )
 
+// Discovery is one model-list probe: the model ids, sorted, and the format
+// the list names for each model it serves in exactly one.
+type Discovery struct {
+	Models    []string
+	Protocols []contract.ModelProtocol
+}
+
 type Prober struct {
 	secrets       secretstore.SecretStore
 	subscriptions *subscription.Manager
@@ -62,20 +69,20 @@ func (prober *Prober) ProbeService(
 	ctx context.Context,
 	service contract.Service,
 	protocol contract.ProtocolID,
-) ([]string, error) {
+) (Discovery, error) {
 	var err error
 	ctx, err = networkproxy.Bind(ctx, service, prober.secrets)
 	if err != nil {
-		return nil, err
+		return Discovery{}, err
 	}
 	if !serviceSupportsDiscovery(service, protocol) {
-		return nil, ErrUnsupported
+		return Discovery{}, ErrUnsupported
 	}
 	if service.Kind.IsSubscription() {
-		return prober.probeSubscription(ctx, service.ID, protocol)
+		return listed(prober.probeSubscription(ctx, service.ID, protocol))
 	}
 	if service.HTTP == nil {
-		return nil, ErrUnsupported
+		return Discovery{}, ErrUnsupported
 	}
 	return prober.ProbeHTTP(ctx, service.ID, service.Kind, *service.HTTP, nil, protocol)
 }
@@ -87,43 +94,43 @@ func (prober *Prober) ProbeHTTP(
 	connection contract.HTTPConnection,
 	credential []byte,
 	protocol contract.ProtocolID,
-) ([]string, error) {
+) (Discovery, error) {
 	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	if !kind.IsHTTP() || !kindSupportsDiscovery(kind, protocol) {
-		return nil, ErrUnsupported
+		return Discovery{}, ErrUnsupported
 	}
 	if err := connection.Validate(serviceID); err != nil {
-		return nil, fmt.Errorf("%w: invalid HTTP connection", ErrUnsupported)
+		return Discovery{}, fmt.Errorf("%w: invalid HTTP connection", ErrUnsupported)
 	}
 	secret := append([]byte(nil), credential...)
 	defer clear(secret)
 	if connection.Auth.Scheme != contract.AuthSchemeNone && len(secret) == 0 {
 		if connection.CredentialRef == "" || prober == nil || prober.secrets == nil {
-			return nil, ErrCredentialUnavailable
+			return Discovery{}, ErrCredentialUnavailable
 		}
 		ref, err := secretstore.ParseRef(connection.CredentialRef)
 		if err != nil {
-			return nil, ErrCredentialUnavailable
+			return Discovery{}, ErrCredentialUnavailable
 		}
 		secret, err = prober.secrets.Get(probeContext, ref)
 		if err != nil {
 			if errors.Is(probeContext.Err(), context.DeadlineExceeded) {
-				return nil, context.DeadlineExceeded
+				return Discovery{}, context.DeadlineExceeded
 			}
-			return nil, fmt.Errorf("%w: %v", ErrCredentialUnavailable, err)
+			return Discovery{}, fmt.Errorf("%w: %v", ErrCredentialUnavailable, err)
 		}
 	}
 	headers, err := authorizationHeaders(providerapi.Auth(kind, protocol, connection.Auth), secret)
 	if err != nil {
-		return nil, err
+		return Discovery{}, err
 	}
 	if kind == contract.ServiceKindAnthropic || kind == contract.ServiceKindKimiCoding || kind == contract.ServiceKindMiniMaxCoding || kind == contract.ServiceKindGLMCoding {
 		headers.Set("Anthropic-Version", "2023-06-01")
 	}
 	baseURL, err := url.Parse(connection.BaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid base URL", ErrUnsupported)
+		return Discovery{}, fmt.Errorf("%w: invalid base URL", ErrUnsupported)
 	}
 	baseURL = providerapi.BaseURL(kind, protocol, baseURL)
 	return prober.probeHTTPPages(probeContext, baseURL.String(), headers, protocol, kind == contract.ServiceKindAnthropic, connection.ModelListPath)
@@ -163,12 +170,14 @@ func (prober *Prober) probeSubscription(
 	if account.Provider == contract.SubscriptionProviderClaudeCode {
 		headers := make(http.Header)
 		accountauth.ApplyClaudeAPIHeaders(headers, tokens, prober.subscriptions.ClaudeIdentity(probeContext))
-		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, true, "")
+		discovery, err := prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, true, "")
+		return discovery.Models, err
 	}
 	if account.Provider == contract.SubscriptionProviderXAIGrok {
 		headers := make(http.Header)
 		accountauth.ApplyGrokAPIHeaders(headers, tokens, prober.subscriptions.GrokClientVersion(probeContext))
-		return prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, false, "")
+		discovery, err := prober.probeHTTPPages(probeContext, prober.subscriptions.APIBaseURLFor(account.Provider), headers, protocol, false, "")
+		return discovery.Models, err
 	}
 	if account.Provider == contract.SubscriptionProviderFactoryDroid {
 		// Factory publishes no model endpoint; the list is the one it documents.
@@ -205,10 +214,10 @@ func (prober *Prober) probeHTTPPages(
 	protocol contract.ProtocolID,
 	anthropic bool,
 	customPath string,
-) ([]string, error) {
+) (Discovery, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid base URL", ErrUnsupported)
+		return Discovery{}, fmt.Errorf("%w: invalid base URL", ErrUnsupported)
 	}
 	probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
@@ -220,7 +229,7 @@ func (prober *Prober) probeHTTPPages(
 	}
 	nextToken := ""
 	seenTokens := make(map[string]struct{})
-	ids := make([]string, 0)
+	models := make([]listedModel, 0)
 	totalBytes := 0
 	for page := 0; page < maxProbePages; page++ {
 		incoming := &url.URL{Path: path}
@@ -240,7 +249,7 @@ func (prober *Prober) probeHTTPPages(
 		target := transport.JoinTargetURL(base, incoming)
 		request, requestErr := http.NewRequestWithContext(probeContext, http.MethodGet, target.String(), nil)
 		if requestErr != nil {
-			return nil, fmt.Errorf("%w: create request", ErrUnsupported)
+			return Discovery{}, fmt.Errorf("%w: create request", ErrUnsupported)
 		}
 		request.Header = headers.Clone()
 		request.Header.Set("Accept", "application/json")
@@ -248,51 +257,58 @@ func (prober *Prober) probeHTTPPages(
 		response, requestErr := prober.client.Do(request)
 		if requestErr != nil {
 			if errors.Is(probeContext.Err(), context.DeadlineExceeded) {
-				return nil, context.DeadlineExceeded
+				return Discovery{}, context.DeadlineExceeded
 			}
-			return nil, fmt.Errorf("%w: request failed", ErrUpstream)
+			return Discovery{}, fmt.Errorf("%w: request failed", ErrUpstream)
 		}
 		remaining := maxResponseBytes - totalBytes
 		if remaining <= 0 {
 			_ = response.Body.Close()
-			return nil, fmt.Errorf("%w: cumulative response exceeds limit", ErrUpstream)
+			return Discovery{}, fmt.Errorf("%w: cumulative response exceeds limit", ErrUpstream)
 		}
 		body, readErr := transport.ReadResponseBody(response, int64(remaining))
 		_ = response.Body.Close()
 		if readErr != nil {
 			if errors.Is(probeContext.Err(), context.DeadlineExceeded) {
-				return nil, context.DeadlineExceeded
+				return Discovery{}, context.DeadlineExceeded
 			}
-			return nil, fmt.Errorf("%w: read response: %w", ErrUpstream, readErr)
+			return Discovery{}, fmt.Errorf("%w: read response: %w", ErrUpstream, readErr)
 		}
 		totalBytes += len(body)
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			return nil, fmt.Errorf("%w: status %d", ErrUpstream, response.StatusCode)
+			return Discovery{}, fmt.Errorf("%w: status %d", ErrUpstream, response.StatusCode)
 		}
-		pageIDs, token, more, decodeErr := decodePage(body, protocol, anthropic)
+		pageModels, token, more, decodeErr := decodePage(body, protocol, anthropic)
 		if decodeErr != nil {
-			return nil, decodeErr
+			return Discovery{}, decodeErr
 		}
-		ids = append(ids, pageIDs...)
-		if len(ids) > maxProbeModelIDs {
-			return nil, fmt.Errorf("%w: too many model identifiers", ErrUpstream)
+		models = append(models, pageModels...)
+		if len(models) > maxProbeModelIDs {
+			return Discovery{}, fmt.Errorf("%w: too many model identifiers", ErrUpstream)
 		}
 		if !more {
-			return normalizeProbeIDs(ids)
+			return discoveryOf(models)
 		}
 		if token == "" {
-			return nil, fmt.Errorf("%w: pagination token missing", ErrUpstream)
+			return Discovery{}, fmt.Errorf("%w: pagination token missing", ErrUpstream)
 		}
 		if _, repeated := seenTokens[token]; repeated {
-			return nil, fmt.Errorf("%w: pagination token repeated", ErrUpstream)
+			return Discovery{}, fmt.Errorf("%w: pagination token repeated", ErrUpstream)
 		}
 		seenTokens[token] = struct{}{}
 		nextToken = token
 	}
-	return nil, fmt.Errorf("%w: pagination limit exceeded", ErrUpstream)
+	return Discovery{}, fmt.Errorf("%w: pagination limit exceeded", ErrUpstream)
 }
 
-func decodePage(body []byte, protocol contract.ProtocolID, anthropic bool) ([]string, string, bool, error) {
+// listedModel is one entry of an upstream model list and the format the list
+// names for it, if any.
+type listedModel struct {
+	id     string
+	format contract.ProtocolID
+}
+
+func decodePage(body []byte, protocol contract.ProtocolID, anthropic bool) ([]listedModel, string, bool, error) {
 	if protocol == contract.ProtocolGoogleModels {
 		var page struct {
 			Models []struct {
@@ -303,15 +319,16 @@ func decodePage(body []byte, protocol contract.ProtocolID, anthropic bool) ([]st
 		if err := json.Unmarshal(body, &page); err != nil || page.Models == nil {
 			return nil, "", false, fmt.Errorf("%w: invalid Gemini response", ErrUpstream)
 		}
-		ids := make([]string, 0, len(page.Models))
+		models := make([]listedModel, 0, len(page.Models))
 		for _, model := range page.Models {
-			ids = append(ids, strings.TrimPrefix(model.Name, "models/"))
+			models = append(models, listedModel{id: strings.TrimPrefix(model.Name, "models/")})
 		}
-		return ids, page.NextPageToken, page.NextPageToken != "", nil
+		return models, page.NextPageToken, page.NextPageToken != "", nil
 	}
 	var page struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                     string          `json:"id"`
+			SupportedEndpointTypes json.RawMessage `json:"supported_endpoint_types"`
 		} `json:"data"`
 		HasMore bool   `json:"has_more"`
 		LastID  string `json:"last_id"`
@@ -319,11 +336,79 @@ func decodePage(body []byte, protocol contract.ProtocolID, anthropic bool) ([]st
 	if err := json.Unmarshal(body, &page); err != nil || page.Data == nil {
 		return nil, "", false, fmt.Errorf("%w: invalid model response", ErrUpstream)
 	}
-	ids := make([]string, 0, len(page.Data))
+	models := make([]listedModel, 0, len(page.Data))
 	for _, model := range page.Data {
-		ids = append(ids, model.ID)
+		models = append(models, listedModel{id: model.ID, format: listedFormat(model.SupportedEndpointTypes)})
 	}
-	return ids, page.LastID, anthropic && page.HasMore, nil
+	return models, page.LastID, anthropic && page.HasMore, nil
+}
+
+// newAPIFormats maps the chat entries of New API's supported_endpoint_types
+// to model formats. Its other entries (compaction, search, images,
+// embeddings, rerank, video) name no format.
+var newAPIFormats = map[string]contract.ProtocolID{
+	"openai":          contract.ProtocolOpenAIChat,
+	"openai-response": contract.ProtocolOpenAIResponses,
+	"anthropic":       contract.ProtocolAnthropicMessages,
+	"gemini":          contract.ProtocolGoogleGenerateContent,
+}
+
+// listedFormat is the one format a New API model list names for a model, or
+// empty when it names several or none. Chat alone pins nothing: New API lists
+// an OpenAI channel's models that way yet takes their Responses requests as
+// sent, so pinning Chat would only convert those requests.
+func listedFormat(raw json.RawMessage) contract.ProtocolID {
+	var types []string
+	if len(raw) == 0 || json.Unmarshal(raw, &types) != nil {
+		return ""
+	}
+	format := contract.ProtocolID("")
+	for _, name := range types {
+		next, ok := newAPIFormats[name]
+		if !ok || next == format {
+			continue
+		}
+		if format != "" {
+			return ""
+		}
+		format = next
+	}
+	if format == contract.ProtocolOpenAIChat {
+		return ""
+	}
+	return format
+}
+
+// discoveryOf normalizes the listed ids and keeps the format of each model's
+// first listing.
+func discoveryOf(models []listedModel) (Discovery, error) {
+	ids := make([]string, 0, len(models))
+	formats := make(map[string]contract.ProtocolID, len(models))
+	for _, model := range models {
+		ids = append(ids, model.id)
+		if _, seen := formats[model.id]; !seen {
+			formats[model.id] = model.format
+		}
+	}
+	normalized, err := normalizeProbeIDs(ids)
+	if err != nil {
+		return Discovery{}, err
+	}
+	discovery := Discovery{Models: normalized}
+	for _, id := range normalized {
+		if format := formats[id]; format != "" {
+			discovery.Protocols = append(discovery.Protocols, contract.ModelProtocol{Model: id, Protocol: format})
+		}
+	}
+	return discovery, nil
+}
+
+// listed wraps a probe that reports model ids only.
+func listed(ids []string, err error) (Discovery, error) {
+	if err != nil {
+		return Discovery{}, err
+	}
+	return Discovery{Models: ids}, nil
 }
 
 func normalizeProbeIDs(ids []string) ([]string, error) {

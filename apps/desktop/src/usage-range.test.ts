@@ -10,10 +10,16 @@ import {
   cacheHitRate,
   dayTokenStack,
   DEFAULT_USAGE_RANGE_PRESET,
+  emptyUsageStatusCounts,
   emptyUsageSummary,
   emptyUsageTotals,
+  customRangeDays,
+  customRangeProblem,
   formatCacheHitPercent,
+  hourlyUsageWindow,
   isUsageRangePreset,
+  parseDayKey,
+  usageRangeKey,
   localDayKey,
   localDayWindow,
   mergeCatalogServiceUsage,
@@ -24,7 +30,6 @@ import {
   UNATTRIBUTED_SERVICE_LABEL,
   UNKNOWN_MODEL_LABEL,
   UNKNOWN_SERVICE_LABEL,
-  usageBarPercent,
   usageRangeDays,
   usageWindowDayKeys,
 } from "./usage-range";
@@ -199,6 +204,7 @@ describe("usage range windows", () => {
 
     expect(summary.capped).toBe(true);
     expect(summary.totals).toEqual(emptyUsageTotals());
+    expect(summary.status_counts).toEqual(emptyUsageStatusCounts());
     expect(summary.by_day).toHaveLength(7);
     expect(summary.by_token).toEqual([]);
     expect(summary.by_hour).toEqual([]);
@@ -231,6 +237,66 @@ describe("usage range windows", () => {
       13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
       10, 11, 12,
     ]);
+  });
+
+  it("reads a custom range as whole local days that stay put", () => {
+    const range = { from: "2026-02-27", to: "2026-03-02" };
+    const window = resolveUsageWindow(range, new Date(2026, 8, 4, 12));
+    expect(window.preset).toBe("custom");
+    expect(window.from).toBe(new Date(2026, 1, 27).toISOString());
+    expect(window.to).toBe(new Date(2026, 2, 3).toISOString());
+    expect(usageWindowDayKeys(window)).toEqual([
+      "2026-02-27",
+      "2026-02-28",
+      "2026-03-01",
+      "2026-03-02",
+    ]);
+    expect(customRangeDays(range)).toBe(4);
+    expect(hourlyUsageWindow(window)).toBe(false);
+    expect(emptyUsageSummary(window).by_hour).toEqual([]);
+    expect(usageRangeKey(range)).toBe("2026-02-27~2026-03-02");
+    expect(usageRangeKey("30d")).toBe("30d");
+  });
+
+  it("reads a single custom day hour by hour", () => {
+    const window = resolveUsageWindow(
+      { from: "2026-09-03", to: "2026-09-03" },
+      new Date(2026, 8, 4, 12),
+    );
+    expect(hourlyUsageWindow(window)).toBe(true);
+    const summary = emptyUsageSummary(window);
+    expect(summary.by_day.map((bucket) => bucket.date)).toEqual(["2026-09-03"]);
+    expect(summary.by_hour.map((bucket) => bucket.hour)).toEqual(
+      Array.from({ length: 24 }, (_, hour) => hour),
+    );
+  });
+
+  it("explains why a custom range cannot be read", () => {
+    const now = new Date(2026, 8, 4, 12);
+    expect(
+      customRangeProblem({ from: "2026-09-01", to: "2026-09-04" }, now),
+    ).toBeNull();
+    expect(customRangeProblem({ from: "", to: "2026-09-04" }, now)).toBe(
+      "invalid",
+    );
+    expect(
+      customRangeProblem({ from: "2026-02-30", to: "2026-03-01" }, now),
+    ).toBe("invalid");
+    expect(
+      customRangeProblem({ from: "2026-09-04", to: "2026-09-01" }, now),
+    ).toBe("order");
+    expect(
+      customRangeProblem({ from: "2026-09-05", to: "2026-09-06" }, now),
+    ).toBe("future");
+    // A year of days is the most Core sums, leap day or not.
+    expect(
+      customRangeProblem({ from: "2025-09-05", to: "2026-09-04" }, now),
+    ).toBeNull();
+    expect(
+      customRangeProblem({ from: "2025-09-04", to: "2026-09-04" }, now),
+    ).toBe("too_long");
+    expect(parseDayKey("2026-09-04")?.getDate()).toBe(4);
+    expect(parseDayKey("2026-9-4")).toBeNull();
   });
 });
 
@@ -348,6 +414,35 @@ describe("usage aggregation", () => {
     expect(aggregate.totals.requests).toBe(1);
     expect(aggregate.totals.failed_requests).toBe(2);
     expect(aggregate.totals.total_tokens).toBe(2);
+    expect(aggregate.scanned_records).toBe(3);
+  });
+
+  it("counts every root model call by outcome beside the requests", () => {
+    const aggregate = aggregateUsageRecords([
+      record({ input_tokens: 1, output_tokens: 1, total_tokens: 2 }),
+      record(null, { status: "failed" }),
+      record(null, { status: "succeeded", http_status: 502 }),
+      record(null, { status: "blocked" }),
+      record(null, { status: "cancelled" }),
+      record(null, { status: "pending" }),
+      record(null, {
+        id: "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        parent_request_id: "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        attempt_index: 1,
+        status: "blocked",
+      }),
+      record(null, { input_protocol: "openai.models", status: "failed" }),
+    ]);
+
+    expect(aggregate.status_counts).toEqual({
+      succeeded: 1,
+      failed: 2,
+      blocked: 1,
+      cancelled: 1,
+      pending: 1,
+    });
+    expect(aggregate.totals.requests).toBe(1);
+    expect(aggregate.totals.failed_requests).toBe(2);
     expect(aggregate.scanned_records).toBe(3);
   });
 
@@ -739,18 +834,6 @@ describe("usage presentation helpers", () => {
     expect(modelUsageLabel("gpt-4o")).toBe("gpt-4o");
     expect(modelUsageLabel(null)).toBe(UNKNOWN_MODEL_LABEL());
     expect(modelUsageLabel("   ")).toBe(UNKNOWN_MODEL_LABEL());
-  });
-
-  it("computes relative bar widths from the busiest group", () => {
-    const groups = [
-      { total_tokens: 80 },
-      { total_tokens: 20 },
-      { total_tokens: 0 },
-    ];
-    expect(usageBarPercent(80, groups)).toBe(100);
-    expect(usageBarPercent(20, groups)).toBe(25);
-    expect(usageBarPercent(0, groups)).toBe(0);
-    expect(usageBarPercent(10, [{ total_tokens: 0 }])).toBe(0);
   });
 
   it("merges catalog services with usage and keeps unmatched ids", () => {

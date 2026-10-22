@@ -39,6 +39,9 @@ const (
 	// CapabilityViews lets the hooks return views for request records and
 	// the plugin page.
 	CapabilityViews = "ui.views"
+	// CapabilityTools lets the model run the read-only queries the plugin
+	// declares in meta.tools, through the gateway's lookup outlet.
+	CapabilityTools = "model.tools"
 )
 
 var knownCapabilities = []string{
@@ -47,6 +50,7 @@ var knownCapabilities = []string{
 	CapabilityNetwork,
 	CapabilityStorage,
 	CapabilityViews,
+	CapabilityTools,
 }
 
 // Hooks a plugin may export. Each is optional; whether a plugin exports one
@@ -57,6 +61,12 @@ const (
 	HookObserveTurn    = "observeTurn"
 	HookDescribeStatus = "describeStatus"
 	HookTestConnection = "testConnection"
+	// HookOnAction handles a click on a button of one of the plugin's
+	// records, outside any request.
+	HookOnAction = "onAction"
+	// HookCallTool runs a query of meta.tools the model sent to the lookup
+	// outlet, outside any request.
+	HookCallTool = "callTool"
 )
 
 var knownHooks = []string{
@@ -65,6 +75,8 @@ var knownHooks = []string{
 	HookObserveTurn,
 	HookDescribeStatus,
 	HookTestConnection,
+	HookOnAction,
+	HookCallTool,
 }
 
 // Limits bound one hook call.

@@ -22,13 +22,19 @@ const (
 )
 
 // The host's own settings, which a plugin may place in its form: how long a
-// request waits for it, whether its text skips the privacy check, and the
-// addresses it may reach beside its servers. A form that does not place
-// them shows them on its own.
+// request waits for it, whether its text skips the privacy check, the
+// addresses it may reach beside its servers, the clients it is off for,
+// whether a new session takes the value its workspace had, and whether the
+// host swaps a session's resident block for newer data. A form that does
+// not place them shows them on its own.
 const (
-	HostSettingWait    = "$wait"
-	HostSettingTrusted = "$trusted"
-	HostSettingOrigins = "$origins"
+	HostSettingWait      = "$wait"
+	HostSettingTrusted   = "$trusted"
+	HostSettingOrigins   = "$origins"
+	HostSettingClients   = "$clients"
+	HostSettingWorkspace = "$workspace"
+	HostSettingRefresh   = "$refresh"
+	HostSettingLookup    = "$lookup"
 )
 
 // Limits of the settings and credits a manifest declares.
@@ -142,13 +148,25 @@ func validateSetting(meta Meta, setting Setting) error {
 	}
 	if setting.Host() {
 		switch setting.Key {
-		case HostSettingWait, HostSettingTrusted:
+		case HostSettingWait, HostSettingTrusted, HostSettingClients:
 		case HostSettingOrigins:
 			if !meta.NeedsNetwork() {
 				return errors.New("$origins needs the network capability")
 			}
+		case HostSettingWorkspace:
+			if len(meta.Metadata) == 0 {
+				return errors.New("$workspace needs an attribute in meta.metadata")
+			}
+		case HostSettingRefresh:
+			if !slices.Contains(meta.Capabilities, CapabilityInject) {
+				return errors.New("$refresh needs the context.inject capability")
+			}
+		case HostSettingLookup:
+			if len(meta.Tools) == 0 {
+				return errors.New("$lookup needs a query in meta.tools")
+			}
 		default:
-			return fmt.Errorf("%q is not a host setting; the host has $wait, $trusted and $origins", setting.Key)
+			return fmt.Errorf("%q is not a host setting; the host has $wait, $trusted, $origins, $clients, $workspace, $refresh and $lookup", setting.Key)
 		}
 		if setting.Label != "" || setting.Type != "" || setting.Row != "" || setting.Help != "" || len(setting.Default) > 0 ||
 			setting.Required || setting.Min != nil || setting.Max != nil || setting.Step != nil || setting.Unit != "" ||

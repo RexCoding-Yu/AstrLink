@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
@@ -71,7 +72,9 @@ func TestInspectRequestShapeReadsEveryProtocol(t *testing.T) {
 				{"type":"web_search_call","id":"ws1","status":"completed"},
 				{"type":"computer_call_output","call_id":"c3","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AAAA"}},
 				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"patched"}]}]}`,
-			want: shapeCounts{toolDeclarations: 3, toolCalls: 3, toolMessages: 3, assistantMessages: 1, mediaParts: 2, mediaKind: "image"},
+			// Four model turns: reasoning with the shell call, the patch, the web
+			// search, and the closing message; each tool result ends one.
+			want: shapeCounts{toolDeclarations: 3, toolCalls: 3, toolMessages: 3, assistantMessages: 4, mediaParts: 2, mediaKind: "image"},
 		},
 		{
 			name:     "responses string input",
@@ -103,11 +106,11 @@ func TestInspectRequestShapeReadsEveryProtocol(t *testing.T) {
 // Facts read from the body stay unknown for a request whose shape was never
 // read, rather than reading as zero tools and no media.
 func TestModelRoutingFactsLeaveUnreadShapeUnknown(t *testing.T) {
-	facts := modelRoutingFacts(Request{Protocol: contract.ProtocolOpenAIChat}, nil)
+	facts := modelRoutingFacts(Request{Protocol: contract.ProtocolOpenAIChat}, nil, time.Now())
 	if facts.MediaKind != "" || facts.HasImage != nil || facts.HasTools != nil || facts.ToolCallCount != nil || facts.EstimatedInputContextTokens != nil {
 		t.Fatalf("facts = %+v, want the body facts unknown", facts)
 	}
-	facts = modelRoutingFacts(Request{Protocol: contract.ProtocolOpenAIChat, shape: shapeOf(t, contract.ProtocolOpenAIChat, `{"messages":[{"role":"user","content":"hi"}]}`)}, nil)
+	facts = modelRoutingFacts(Request{Protocol: contract.ProtocolOpenAIChat, shape: shapeOf(t, contract.ProtocolOpenAIChat, `{"messages":[{"role":"user","content":"hi"}]}`)}, nil, time.Now())
 	if facts.MediaKind != "none" || facts.HasImage == nil || *facts.HasImage || facts.HasTools == nil || *facts.HasTools {
 		t.Fatalf("facts = %+v, want known and empty", facts)
 	}

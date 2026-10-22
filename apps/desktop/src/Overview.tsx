@@ -1,11 +1,12 @@
 import { isWebEdition } from "./edition";
-import { BillingOverview, useBillingSummary } from "./BillingOverview";
+import { useBillingSummary, type BillingStatus } from "./BillingOverview";
 import {
   memo,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ReactElement,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -16,17 +17,20 @@ import {
   ArrowUpRight,
   Boxes,
   Check,
+  CircleDollarSign,
   Copy,
   Plus,
   RefreshCw,
   RotateCcw,
+  Settings,
   SlidersHorizontal,
   SquareStack,
 } from "@/components/icons";
 
 import { ActionHint } from "@/components/ActionHint";
+import { ChartTooltipCard } from "@/components/ChartTooltip";
+import { BreakdownRow, breakdownShare } from "@/components/BreakdownRow";
 import { CompactCount } from "@/components/CompactCount";
-import { DataRow } from "@/components/DataRow";
 import { EmptyState } from "@/components/EmptyState";
 import { ExternalLink } from "@/components/ExternalLink";
 import {
@@ -47,24 +51,25 @@ import { useOverviewLayout, type OverviewModuleId } from "./overview-layout";
 import { PaginatedList } from "@/components/PaginatedList";
 import { StatusBadge } from "@/components/StatusBadge";
 import { StatusDot } from "@/components/StatusDot";
+import { TokenClientMarks } from "@/components/TokenClientMarks";
+import { UsageRangePicker } from "@/components/UsageRangePicker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
   Bar,
   BarChart,
   CartesianGrid,
   ResponsiveContainer,
-  Tooltip,
+  Tooltip as ChartTooltip,
   XAxis,
   YAxis,
 } from "recharts";
@@ -72,12 +77,20 @@ import type { BarShapeProps, TooltipContentProps } from "recharts";
 
 import type { AccessTokenCatalog } from "./AccessTokenManager";
 import { phaseLabel, phaseTone, type AppSnapshot } from "./core-model";
-import { billingAmount, type BillingSummary } from "./pricing-model";
+import {
+  billingAmount,
+  type BillingAmounts,
+  type BillingSummary,
+} from "./pricing-model";
+import { billingNoteText } from "./PricingWorkspace";
 import {
   formatCompactNumber,
   formatExactNumber,
 } from "./format-compact-number";
 import type { CopyState } from "./copy-feedback";
+import { clientsUsing, useClientConfigs } from "./use-client-configs";
+import type { RecordsTarget } from "./request-live-model";
+import { statusLabel, type RequestStatus } from "./request-record-model";
 import { currentLocale, i18n, useT } from "./i18n";
 import { PageHeader } from "./PageHeader";
 import { ActionGroup } from "@/components/ActionGroup";
@@ -89,19 +102,20 @@ import {
   dayTokenStack,
   emptyUsageTotals,
   formatCacheHitPercent,
-  isUsageRangePreset,
+  hourlyUsageWindow,
   mergeCatalogServiceUsage,
   modelUsageLabel,
-  usageBarPercent,
+  usageRangeKey,
   USAGE_RANGE_PRESETS,
   type DayTokenStackSeries,
   type MergedServiceUsage,
   type UsageDayBucket,
   type UsageGroup,
-  type UsageRangePreset,
+  type UsageRange,
   type UsageState,
   type UsageStatus,
   type UsageSummary,
+  type UsageStatusCounts,
   type UsageTotals,
 } from "./usage-range";
 
@@ -112,10 +126,25 @@ export interface ServiceCatalog {
   stale: boolean;
 }
 
+// Five tiles: the last spans the narrow two-column grid's final row.
 const USAGE_METRIC_GRID =
-  "gap-3 bg-transparent [&>div]:rounded-md [&>div]:border @min-[640px]/workspace-surface:grid-cols-[1fr_1fr_1.4fr_1fr]";
+  "gap-3 bg-transparent [&>div]:rounded-md [&>div]:border [&>div:last-child]:col-span-2 @min-[640px]/workspace-surface:grid-cols-[1fr_1fr_1.4fr_1fr_1fr] @min-[640px]/workspace-surface:[&>div:last-child]:col-span-1";
 
 const USAGE_BREAKDOWN_HEADER = "min-h-14 flex-wrap items-center py-2";
+
+/** Rows a breakdown page shows; see `PaginatedList`. */
+const BREAKDOWN_PAGE_SIZE = 5;
+/**
+ * Room for one to five rows. Side-by-side lists share the height of the
+ * longer page, so their footers stay level without holding empty rows.
+ */
+const BREAKDOWN_LIST_HEIGHT = [
+  "min-h-15",
+  "min-h-30",
+  "min-h-45",
+  "min-h-60",
+  "min-h-75",
+] as const;
 
 export function Overview({
   catalog,
@@ -130,16 +159,16 @@ export function Overview({
   onOpenOnboarding,
   onDismissOnboardingHint,
   showOnboardingHint = false,
+  onOpenRecords,
   onOpenService,
-  onOpenTokenRecords,
   onRefreshServices,
   onRefresh,
   onRestart,
-  onUsagePresetChange,
+  onUsageRangeChange,
   snapshot,
   tokenCatalog,
   usage,
-  usagePreset,
+  usageRange,
 }: {
   catalog: ServiceCatalog;
   copyState: CopyState;
@@ -153,21 +182,24 @@ export function Overview({
   onOpenOnboarding?: () => void;
   onDismissOnboardingHint?: () => void;
   showOnboardingHint?: boolean;
+  /** Request records narrowed to a row; the caller adds the usage range. */
+  onOpenRecords: (target: RecordsTarget) => void;
+  /** The provider's settings. */
   onOpenService: (serviceId: string) => void;
-  onOpenTokenRecords: (tokenId: string) => void;
   onRefreshServices: () => void;
   onRefresh: () => void;
   onRestart: () => void;
-  onUsagePresetChange: (preset: UsageRangePreset) => void;
+  onUsageRangeChange: (range: UsageRange) => void;
   snapshot: AppSnapshot | null;
   tokenCatalog: AccessTokenCatalog;
   usage: UsageState;
-  usagePreset: UsageRangePreset;
+  usageRange: UsageRange;
 }) {
   const t = i18n.t.bind(i18n);
   const [view, setView] = useState<"chart" | "heatmap">(() =>
-    usagePreset === "1d" || usagePreset === "7d" ? "chart" : "heatmap",
+    usageRange === "1d" || usageRange === "7d" ? "chart" : "heatmap",
   );
+  const rangeKey = usageRangeKey(usageRange);
   const [editingLayout, setEditingLayout] = useState(false);
   const layout = useOverviewLayout();
   const footerRef = useRef<HTMLDivElement>(null);
@@ -221,6 +253,17 @@ export function Overview({
     summary?.by_service ?? [],
   );
   const modelRows = summary?.by_model ?? [];
+  const costs = breakdownCosts(billingSummary);
+  const breakdownHeight =
+    BREAKDOWN_LIST_HEIGHT[
+      Math.min(
+        BREAKDOWN_PAGE_SIZE,
+        Math.max(1, serviceRows.length, modelRows.length),
+      ) - 1
+    ];
+  // The grain follows the summary on screen, which a wider range replaces
+  // only once it has loaded.
+  const hourly = summary ? hourlyUsageWindow(summary.window) : false;
   const systemDetailRows: Array<[string, ReactNode] | null> = [
     isWebEdition
       ? null
@@ -265,7 +308,7 @@ export function Overview({
   const moduleLabels: Record<OverviewModuleId, string> = {
     usage: t("overview.usageSummary"),
     "providers-models": t("overview.providersAndModels"),
-    tokens: t("overview.byAccessToken"),
+    tokens: t("overview.statusAndTokens"),
     access: t("overview.apiAddress"),
     system: t("overview.systemDetails"),
   };
@@ -287,7 +330,7 @@ export function Overview({
             <HelpPopover label={t("overview.usageDetails")}>
               <p>
                 {t(
-                  usagePreset === "1d"
+                  usageRange === "1d"
                     ? "overview.hourlyUsageNote"
                     : "overview.usageNote",
                 )}
@@ -304,9 +347,9 @@ export function Overview({
                 setView(next);
                 if (
                   next === "heatmap" &&
-                  (usagePreset === "1d" || usagePreset === "7d")
+                  (usageRange === "1d" || usageRange === "7d")
                 )
-                  onUsagePresetChange("1y");
+                  onUsageRangeChange("1y");
               }}
               options={[
                 { value: "heatmap", label: t("overview.heatmap") },
@@ -314,10 +357,21 @@ export function Overview({
               ]}
             />
             <span aria-hidden="true" className="h-4 w-px bg-border" />
-            <UsageRangeSelect
-              onChange={onUsagePresetChange}
-              preset={usagePreset}
-              calendar={view === "heatmap"}
+            <UsageRangePicker
+              ariaLabel={t("overview.rangeLabel")}
+              className="min-w-24"
+              onChange={(next) => {
+                if (next !== null) onUsageRangeChange(next);
+              }}
+              // A calendar of one or seven days says less than a bar chart.
+              presets={
+                view === "heatmap"
+                  ? USAGE_RANGE_PRESETS.filter(
+                      (preset) => preset !== "1d" && preset !== "7d",
+                    )
+                  : USAGE_RANGE_PRESETS
+              }
+              value={usageRange}
             />
           </ActionGroup>
         </div>
@@ -367,6 +421,19 @@ export function Overview({
                   title: null,
                 }}
               />
+              <UsageMetric
+                detail={
+                  billingSummary
+                    ? billingNoteText(t, billingSummary) || undefined
+                    : undefined
+                }
+                icon={<CircleDollarSign />}
+                label={t("pricing.officialAmount")}
+                metric={{
+                  text: billingSummary ? billingAmount(billingSummary) : "—",
+                  title: t("overview.costNote"),
+                }}
+              />
             </MetricGroup>
             <Panel aria-labelledby="activity-heading">
               <h3 className="sr-only" id="activity-heading">
@@ -379,19 +446,13 @@ export function Overview({
                 />
               ) : (
                 <UsageDayChart
-                  grain={usagePreset === "1d" ? "hour" : "day"}
+                  grain={hourly ? "hour" : "day"}
                   points={
-                    usagePreset === "1d"
-                      ? (summary?.by_hour ?? [])
-                      : (summary?.by_day ?? [])
+                    hourly ? (summary?.by_hour ?? []) : (summary?.by_day ?? [])
                   }
                   status={usage.status}
                 />
               )}
-              <BillingOverview
-                loading={billingStatus === "loading"}
-                summary={billingSummary}
-              />
             </Panel>
             {usage.status === "loading" ? (
               <div
@@ -477,9 +538,9 @@ export function Overview({
           </PanelHeader>
 
           <PaginatedList
-            key={usagePreset}
+            key={rangeKey}
             items={serviceRows}
-            itemsClassName="min-h-75"
+            itemsClassName={breakdownHeight}
             label={t("overview.byService")}
             footer={
               <Button
@@ -497,9 +558,11 @@ export function Overview({
             {(visibleRows) => (
               <ServiceUsageBody
                 catalog={catalog}
+                costs={costs.byService}
                 catalogUnknown={catalogUnknown}
                 isReady={isReady}
                 onAddService={onAddService}
+                onOpenRecords={onOpenRecords}
                 onOpenService={onOpenService}
                 onRefreshServices={onRefreshServices}
                 rows={serviceRows}
@@ -528,9 +591,9 @@ export function Overview({
             </h2>
           </PanelHeader>
           <PaginatedList
-            key={usagePreset}
+            key={rangeKey}
             items={modelRows}
-            itemsClassName="min-h-75"
+            itemsClassName={breakdownHeight}
             label={t("overview.byModel")}
             footer={
               <span className="text-xs text-muted-foreground">
@@ -548,7 +611,10 @@ export function Overview({
           >
             {(visibleRows) => (
               <ModelUsageBody
+                costs={costs.byModel}
+                onOpenRecords={onOpenRecords}
                 rows={modelRows}
+                services={catalog.items}
                 visibleRows={visibleRows}
                 showBar={
                   usage.status === "ready" &&
@@ -562,18 +628,33 @@ export function Overview({
       </div>
     ),
     tokens: (
-      <TokenUsagePanel
-        billingStatus={billingStatus}
-        billingSummary={billingSummary}
-        isReady={isReady}
-        onOpenTokenRecords={onOpenTokenRecords}
-        onRefresh={onRefresh}
-        status={usage.status}
-        tokenCatalog={tokenCatalog}
-        tokensUnknown={tokensUnknown}
-        usage={summary}
-        usagePreset={usagePreset}
-      />
+      // How the calls ended over the range, beside the tokens that made them.
+      <div className="grid min-w-0 grid-cols-1 gap-3 @min-[640px]/workspace-surface:grid-cols-2">
+        <RequestStatusChart
+          counts={
+            usage.status === "blocked" || usage.status === "error"
+              ? null
+              : (summary?.status_counts ?? null)
+          }
+          grain={hourly ? "hour" : "day"}
+          onOpenRecords={onOpenRecords}
+          points={hourly ? (summary?.by_hour ?? []) : (summary?.by_day ?? [])}
+          status={usage.status}
+        />
+        <TokenUsagePanel
+          billingStatus={billingStatus}
+          billingSummary={billingSummary}
+          inferenceURL={inferenceURL}
+          isReady={isReady}
+          onOpenRecords={onOpenRecords}
+          onRefresh={onRefresh}
+          rangeKey={rangeKey}
+          status={usage.status}
+          tokenCatalog={tokenCatalog}
+          tokensUnknown={tokensUnknown}
+          usage={summary}
+        />
+      </div>
     ),
     access: (
       <Panel
@@ -981,27 +1062,30 @@ function compareTokenUsageRows(
 function TokenUsagePanel({
   billingStatus,
   billingSummary,
+  inferenceURL,
   isReady,
-  onOpenTokenRecords,
+  onOpenRecords,
   onRefresh,
+  rangeKey,
   status,
   tokenCatalog,
   tokensUnknown,
   usage,
-  usagePreset,
 }: {
-  billingStatus: "idle" | "loading" | "ready" | "error";
+  billingStatus: BillingStatus;
   billingSummary: BillingSummary | null;
+  inferenceURL: string;
   isReady: boolean;
-  onOpenTokenRecords: (tokenId: string) => void;
+  onOpenRecords: (target: RecordsTarget) => void;
   onRefresh: () => void;
+  rangeKey: string;
   status: UsageStatus;
   tokenCatalog: AccessTokenCatalog;
   tokensUnknown: boolean;
   usage: UsageSummary | null;
-  usagePreset: UsageRangePreset;
 }) {
   const t = i18n.t.bind(i18n);
+  const { configs: clientConfigs } = useClientConfigs(inferenceURL);
   const rows = useMemo(
     () => mergeTokenUsageRows(tokenCatalog, usage, billingSummary),
     [billingSummary, tokenCatalog, usage],
@@ -1035,7 +1119,7 @@ function TokenUsagePanel({
         </h2>
       </PanelHeader>
       <PaginatedList
-        key={usagePreset}
+        key={rangeKey}
         items={sortedRows}
         itemsClassName="min-h-24"
         label={t("overview.byAccessToken")}
@@ -1114,7 +1198,7 @@ function TokenUsagePanel({
           const stale = status === "error";
           const placeholder = "—";
           return (
-            <div>
+            <TooltipProvider delayDuration={ROW_HINT_DELAY_MS}>
               {visibleRows.map((row) => {
                 const requests = tokenRequestCount(row);
                 const failureRate =
@@ -1125,100 +1209,94 @@ function TokenUsagePanel({
                     : billingStatus === "loading"
                       ? t("common.loading")
                       : t("pricing.unavailable");
+                const openRecords = () => onOpenRecords({ tokenId: row.id });
+                const recordsHint = t("overview.openRecords", {
+                  name: row.name,
+                });
                 return (
-                  <Button
-                    className="grid h-auto min-h-14 w-full grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 rounded-none border-b bg-transparent px-4 py-2.5 text-left font-normal text-foreground hover:bg-muted"
+                  // The whole row opens the token's records; the counts sit
+                  // above that button as their own, and the text around them
+                  // lets clicks through to it.
+                  <div
+                    className="relative grid min-h-14 grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 border-b px-4 py-2.5 text-left last:border-b-0 hover:bg-muted"
+                    data-testid="token-usage-row"
                     key={row.id}
-                    onClick={() => onOpenTokenRecords(row.id)}
-                    type="button"
-                    variant="ghost"
                   >
-                    <span
-                      className="min-w-0 truncate text-sm font-medium"
-                      title={row.name}
-                    >
-                      {row.name}
+                    <RowHint hint={recordsHint}>
+                      <Button
+                        aria-label={recordsHint}
+                        className="absolute inset-0 h-auto rounded-none p-0 hover:bg-transparent focus-visible:ring-inset"
+                        onClick={openRecords}
+                        type="button"
+                        variant="ghost"
+                      />
+                    </RowHint>
+                    <span className="pointer-events-none relative flex min-w-0 items-center gap-1.5">
+                      <span
+                        className="min-w-0 truncate text-sm font-medium"
+                        data-slot="token-usage-name"
+                      >
+                        {row.name}
+                      </span>
+                      <TokenClientMarks
+                        className="pointer-events-auto"
+                        clients={clientsUsing(clientConfigs, row.id)}
+                      />
                     </span>
-                    <span className="text-right text-sm font-semibold tabular-nums">
+                    <span className="pointer-events-none relative text-right text-sm font-semibold tabular-nums">
                       {stale
                         ? placeholder
                         : formatCompactNumber(row.usage.total_tokens)}
                     </span>
-                    <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-micro text-muted-foreground tabular-nums">
-                      <span>
-                        {t("overview.tokenRequests", {
-                          count: stale
-                            ? placeholder
-                            : formatExactNumber(requests),
-                        })}
-                      </span>
+                    <span className="pointer-events-none relative flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-micro text-muted-foreground tabular-nums">
+                      {stale ? (
+                        <span>
+                          {t("overview.tokenRequests", { count: placeholder })}
+                        </span>
+                      ) : (
+                        <RowLink hint={recordsHint} onClick={openRecords}>
+                          {t("overview.tokenRequests", {
+                            count: formatExactNumber(requests),
+                          })}
+                        </RowLink>
+                      )}
                       {!stale &&
                       failureRate !== null &&
                       row.usage.failed_requests > 0 ? (
-                        <span
-                          title={t("overview.tokenFailureDetail", {
-                            count: formatExactNumber(row.usage.failed_requests),
-                            total: formatExactNumber(requests),
-                          })}
-                        >
-                          <span aria-hidden="true" className="mr-2">
-                            ·
-                          </span>
-                          {t("overview.tokenFailureRate", {
-                            rate: `${(failureRate * 100).toFixed(1)}%`,
-                          })}
-                        </span>
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <RowLink
+                            hint={t("overview.tokenFailureDetail", {
+                              count: formatExactNumber(
+                                row.usage.failed_requests,
+                              ),
+                              total: formatExactNumber(requests),
+                            })}
+                            onClick={() =>
+                              onOpenRecords({
+                                tokenId: row.id,
+                                status: "failed",
+                              })
+                            }
+                          >
+                            {t("overview.tokenFailureRate", {
+                              rate: `${(failureRate * 100).toFixed(1)}%`,
+                            })}
+                          </RowLink>
+                        </>
                       ) : null}
                     </span>
-                    <span className="self-start text-right text-micro text-muted-foreground tabular-nums">
+                    <span className="pointer-events-none relative self-start text-right text-micro text-muted-foreground tabular-nums">
                       {amount}
                     </span>
-                  </Button>
+                  </div>
                 );
               })}
-            </div>
+            </TooltipProvider>
           );
         }}
       </PaginatedList>
     </Panel>
-  );
-}
-
-function UsageRangeSelect({
-  onChange,
-  preset,
-  calendar = false,
-}: {
-  onChange: (preset: UsageRangePreset) => void;
-  preset: UsageRangePreset;
-  calendar?: boolean;
-}) {
-  const t = i18n.t.bind(i18n);
-  return (
-    <Select
-      value={preset}
-      onValueChange={(value) => {
-        if (isUsageRangePreset(value)) onChange(value);
-      }}
-    >
-      <SelectTrigger
-        aria-label={t("overview.rangeLabel")}
-        size="sm"
-        className="min-w-24 border-border text-xs"
-      >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent align="end">
-        {USAGE_RANGE_PRESETS.filter(
-          (candidate) =>
-            !calendar || (candidate !== "1d" && candidate !== "7d"),
-        ).map((candidate) => (
-          <SelectItem key={candidate} value={candidate}>
-            {t(`overview.range.${candidate}`)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
   );
 }
 
@@ -1270,7 +1348,7 @@ function UsagePanelSkeleton() {
       role="status"
     >
       <MetricGroup className={USAGE_METRIC_GRID}>
-        {Array.from({ length: 4 }, (_, index) => (
+        {Array.from({ length: 5 }, (_, index) => (
           <Metric
             key={index}
             label={
@@ -1487,7 +1565,7 @@ const UsageDayChart = memo(function UsageDayChart({
                 tickLine={false}
                 width={56}
               />
-              <Tooltip
+              <ChartTooltip
                 content={(props) => (
                   <DayTooltip {...props} originRef={chartRef} />
                 )}
@@ -1679,6 +1757,306 @@ function DayTooltip({
   );
 }
 
+const STATUS_SERIES = [
+  {
+    status: "succeeded",
+    dataKey: "requests",
+    fill: "var(--success)",
+    active: "var(--success-foreground)",
+    swatch: "bg-success",
+  },
+  {
+    status: "failed",
+    dataKey: "failed_requests",
+    fill: "var(--destructive)",
+    active: "var(--danger-foreground)",
+    swatch: "bg-destructive",
+  },
+] as const;
+
+/** Outcomes the buckets do not split by day, named under the chart. */
+const STATUS_OTHERS = ["blocked", "cancelled", "pending"] as const;
+
+type StatusPoint = UsageTotals & { date: string; hour?: number };
+
+/**
+ * Completed and failed calls per day, or per hour over the last day, in the
+ * look of the token chart. A bar opens the request records for its day and
+ * outcome; the legend opens them for the whole range.
+ */
+const RequestStatusChart = memo(function RequestStatusChart({
+  counts,
+  grain,
+  onOpenRecords,
+  points,
+  status,
+}: {
+  counts: UsageStatusCounts | null;
+  grain: "day" | "hour";
+  onOpenRecords: (target: RecordsTarget) => void;
+  points: StatusPoint[];
+  status: UsageStatus;
+}) {
+  const t = useT();
+  const chartRef = useRef<HTMLDivElement>(null);
+  const unavailable = status === "blocked" || status === "error";
+  const hourly = grain === "hour";
+  const total = counts
+    ? Object.values(counts).reduce((sum, count) => sum + count, 0)
+    : 0;
+  const empty =
+    status === "ready" &&
+    !points.some((point) => point.requests + point.failed_requests > 0);
+  const shapes = useMemo(() => {
+    const open = (requestStatus: RequestStatus, point: StatusPoint) =>
+      // An hour is no day of its own, so it opens the range on screen.
+      onOpenRecords(
+        point.hour == null
+          ? {
+              status: requestStatus,
+              range: { from: point.date, to: point.date },
+            }
+          : { status: requestStatus },
+      );
+    return {
+      succeeded: statusBarShape("succeeded", open),
+      failed: statusBarShape("failed", open),
+    };
+  }, [onOpenRecords]);
+  const data = points.map((point) => ({ ...point, slot: chartSlot(point) }));
+  const others = counts ? STATUS_OTHERS.filter((key) => counts[key] > 0) : [];
+
+  return (
+    <Panel
+      aria-busy={status === "loading"}
+      aria-labelledby="request-status-heading"
+      className="flex flex-col"
+      data-testid="request-status-panel"
+    >
+      <PanelHeader
+        actions={
+          counts && !unavailable ? (
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {t("overview.statusTotal", { count: formatExactNumber(total) })}
+            </span>
+          ) : undefined
+        }
+        className={USAGE_BREAKDOWN_HEADER}
+      >
+        <h2 className="text-sm font-semibold" id="request-status-heading">
+          {t("overview.requestStatus")}
+        </h2>
+      </PanelHeader>
+      <div
+        className="flex flex-1 flex-col px-4 py-3.5"
+        data-slot="status-chart"
+      >
+        <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          <span className="text-micro font-medium text-muted-foreground">
+            {t(hourly ? "overview.hourlyRequests" : "overview.dailyRequests")}
+          </span>
+          {counts ? (
+            <div className="-mr-1.5 flex flex-wrap items-center justify-end gap-1">
+              {STATUS_SERIES.map((series) => (
+                <Button
+                  className="h-6 gap-1.5 px-1.5 text-micro font-normal text-muted-foreground"
+                  data-status={series.status}
+                  disabled={counts[series.status] === 0}
+                  key={series.status}
+                  onClick={() => onOpenRecords({ status: series.status })}
+                  title={t("overview.statusOpenHint")}
+                  type="button"
+                  variant="ghost"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={cn("size-1.5 rounded-sm", series.swatch)}
+                  />
+                  {statusLabel(series.status)}
+                  <span className="font-medium text-foreground tabular-nums">
+                    {formatExactNumber(counts[series.status])}
+                  </span>
+                </Button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <div
+          aria-label={t(
+            hourly
+              ? "overview.hourlyRequestsChart"
+              : "overview.dailyRequestsChart",
+          )}
+          // At least the token chart's height; a taller panel beside it
+          // lends the rest.
+          className="relative mt-3 min-h-44 flex-1"
+          ref={chartRef}
+          role="img"
+        >
+          {unavailable ? (
+            <EmptyState
+              className="h-full border-0 py-4"
+              title={t(
+                status === "blocked"
+                  ? "overview.statusBlocked"
+                  : "overview.statusFailed",
+              )}
+            />
+          ) : (
+            <ResponsiveContainer height="100%" width="100%">
+              <BarChart
+                barCategoryGap="22%"
+                data={data}
+                margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
+              >
+                <CartesianGrid
+                  stroke="var(--border)"
+                  strokeDasharray="3 3"
+                  vertical={false}
+                />
+                <XAxis
+                  axisLine={AXIS_LINE}
+                  dataKey={hourly ? "slot" : "date"}
+                  interval={hourly ? 2 : xAxisInterval(points.length)}
+                  tick={AXIS_TICK}
+                  tickFormatter={(value: string) =>
+                    hourly ? hourTickLabel(value) : dayLabel(value, "short")
+                  }
+                  tickLine={false}
+                />
+                <YAxis
+                  allowDecimals={false}
+                  axisLine={false}
+                  tick={AXIS_TICK}
+                  tickFormatter={(value: number) => formatCompactNumber(value)}
+                  tickLine={false}
+                  width={40}
+                />
+                <ChartTooltip
+                  content={(props) => (
+                    <StatusTooltip {...props} originRef={chartRef} />
+                  )}
+                  cursor={{ fill: "var(--accent)" }}
+                  isAnimationActive={false}
+                  wrapperStyle={{ display: "none" }}
+                />
+                {STATUS_SERIES.map((series) => (
+                  <Bar
+                    activeBar={{ fill: series.active }}
+                    dataKey={series.dataKey}
+                    fill={series.fill}
+                    isAnimationActive={false}
+                    key={series.status}
+                    maxBarSize={28}
+                    shape={shapes[series.status]}
+                    stackId="requests"
+                  />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+          {empty ? (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center pb-6">
+              <span className="rounded-md bg-card px-3 py-2 text-xs text-muted-foreground">
+                {t("overview.noUsage")}
+              </span>
+            </div>
+          ) : null}
+        </div>
+        {others.length ? (
+          <p className="mt-2 flex flex-wrap gap-x-3 text-micro text-muted-foreground tabular-nums">
+            {others.map((key) => (
+              <span key={key}>
+                {statusLabel(key)}{" "}
+                {t("overview.requestTimes", {
+                  value: formatExactNumber(counts?.[key] ?? 0),
+                })}
+              </span>
+            ))}
+          </p>
+        ) : null}
+      </div>
+    </Panel>
+  );
+});
+
+function statusBarShape(
+  requestStatus: (typeof STATUS_SERIES)[number]["status"],
+  open: (requestStatus: RequestStatus, point: StatusPoint) => void,
+) {
+  return function StatusBarShape(props: BarShapeProps) {
+    const { fill, height, payload, width, x, y } = props;
+    if (x == null || y == null || width == null || height == null) return null;
+    const point = payload as StatusPoint;
+    // Failures sit on top, so completed calls round only without them.
+    const top = requestStatus === "failed" || !(point.failed_requests > 0);
+    return (
+      <rect
+        className="cursor-pointer"
+        data-date={point.date}
+        data-hour={point.hour}
+        data-status={requestStatus}
+        data-testid="status-day"
+        fill={fill}
+        height={Math.max(0, height)}
+        onClick={() => open(requestStatus, point)}
+        rx={top ? 2 : 0}
+        width={width}
+        x={x}
+        y={y}
+      />
+    );
+  };
+}
+
+function StatusTooltip({
+  active,
+  coordinate,
+  originRef,
+  payload,
+}: TooltipContentProps & { originRef: RefObject<HTMLDivElement | null> }) {
+  const t = i18n.t.bind(i18n);
+  const point = payload[0]?.payload as StatusPoint | undefined;
+  if (!point) return null;
+  const calls = point.requests + point.failed_requests;
+  return (
+    <ChartTooltipCard
+      active={active}
+      coordinate={coordinate}
+      data-slot="status-day-tooltip"
+      originRef={originRef}
+      placementKey={chartSlot(point)}
+    >
+      <strong className="text-xs font-medium">{chartPointLabel(point)}</strong>
+      {STATUS_SERIES.map((series) => (
+        <span
+          className="flex items-center gap-1.5 tabular-nums"
+          key={series.status}
+        >
+          <span
+            aria-hidden="true"
+            className={cn("size-1.5 rounded-sm", series.swatch)}
+          />
+          {statusLabel(series.status)}:{" "}
+          {formatExactNumber(point[series.dataKey])}
+        </span>
+      ))}
+      {calls > 0 ? (
+        <span className="tabular-nums">
+          {t("overview.tokenFailureRate", {
+            rate: `${((point.failed_requests * 100) / calls).toFixed(1)}%`,
+          })}
+        </span>
+      ) : null}
+      {calls > 0 ? (
+        <span className="text-muted-foreground">
+          {t("overview.statusChartHint")}
+        </span>
+      ) : null}
+    </ChartTooltipCard>
+  );
+}
+
 function xAxisInterval(count: number): number | "preserveStartEnd" {
   if (count <= 7) return 0;
   return Math.max(1, Math.ceil(count / 5) - 1);
@@ -1687,8 +2065,10 @@ function xAxisInterval(count: number): number | "preserveStartEnd" {
 function ServiceUsageBody({
   catalog,
   catalogUnknown,
+  costs,
   isReady,
   onAddService,
+  onOpenRecords,
   onOpenService,
   onRefreshServices,
   rows,
@@ -1698,8 +2078,10 @@ function ServiceUsageBody({
 }: {
   catalog: ServiceCatalog;
   catalogUnknown: boolean;
+  costs: ReadonlyMap<string, BillingAmounts>;
   isReady: boolean;
   onAddService: () => void;
+  onOpenRecords: (target: RecordsTarget) => void;
   onOpenService: (serviceId: string) => void;
   onRefreshServices: () => void;
   rows: MergedServiceUsage[];
@@ -1769,46 +2151,98 @@ function ServiceUsageBody({
     );
   }
 
+  const servicesById = new Map(
+    catalog.items.map((service) => [service.id, service]),
+  );
   return (
-    <div>
-      {visibleRows.map((row) => (
-        <UsageBreakdownRow
-          barPercent={usageBarPercent(row.total_tokens, rows)}
-          key={row.id ?? "unattributed"}
-          label={row.name}
-          leading={
-            <StatusDot
-              tone={
-                row.enabled === true
-                  ? "positive"
-                  : row.enabled === false
-                    ? "neutral"
-                    : "pending"
-              }
-            />
-          }
-          onClick={
-            row.in_catalog && row.id
-              ? () => onOpenService(row.id as string)
-              : undefined
-          }
-          requests={row.requests}
-          showBar={showBar}
-          status={status}
-          tokens={row.total_tokens}
-        />
-      ))}
-    </div>
+    <TooltipProvider delayDuration={ROW_HINT_DELAY_MS}>
+      {visibleRows.map((row) => {
+        // Rows of deleted providers and unattributed calls have nothing to open.
+        const service =
+          row.in_catalog && row.id ? servicesById.get(row.id) : undefined;
+        return (
+          <UsageBreakdownRow
+            action={
+              service ? (
+                <IconButton
+                  className="text-muted-foreground"
+                  label={t("overview.serviceSettings", {
+                    name: service.name,
+                  })}
+                  onClick={() => onOpenService(service.id)}
+                  type="button"
+                >
+                  <Settings aria-hidden="true" />
+                </IconButton>
+              ) : (
+                // Holds the settings column so the figures stay in line.
+                <span aria-hidden="true" className="block size-7" />
+              )
+            }
+            barPercent={breakdownShare(row.total_tokens, tokenTotals(rows))}
+            cost={row.id ? costs.get(row.id) : undefined}
+            hint={
+              service
+                ? t("overview.openRecords", { name: service.name })
+                : undefined
+            }
+            key={row.id ?? "unattributed"}
+            label={row.name}
+            labelDetail={
+              service ? (
+                <NameDetail
+                  empty={t("overview.serviceNoModels")}
+                  items={service.models.map((model) => ({
+                    key: model,
+                    label: model,
+                  }))}
+                  summary={t("overview.serviceModels", {
+                    count: service.models.length,
+                  })}
+                  title={service.name}
+                />
+              ) : undefined
+            }
+            leading={
+              <StatusDot
+                tone={
+                  row.enabled === true
+                    ? "positive"
+                    : row.enabled === false
+                      ? "neutral"
+                      : "pending"
+                }
+              />
+            }
+            onClick={
+              service
+                ? () => onOpenRecords({ serviceId: service.id })
+                : undefined
+            }
+            requests={row.requests}
+            showBar={showBar}
+            status={status}
+            tokens={row.total_tokens}
+          />
+        );
+      })}
+    </TooltipProvider>
   );
 }
 
 function ModelUsageBody({
+  costs,
+  onOpenRecords,
   rows,
+  services,
   visibleRows,
   showBar,
   status,
 }: {
+  costs: ReadonlyMap<string, BillingAmounts>;
+  onOpenRecords: (target: RecordsTarget) => void;
   rows: UsageGroup[];
+  services: Service[];
   visibleRows: UsageGroup[];
   showBar: boolean;
   status: UsageStatus;
@@ -1848,15 +2282,52 @@ function ModelUsageBody({
   }
 
   return (
-    <div>
+    <TooltipProvider delayDuration={ROW_HINT_DELAY_MS}>
       {visibleRows.map((row) => {
         const label = modelUsageLabel(row.id);
+        const model = row.id;
+        // Usage groups by the model sent upstream, which is what a provider's
+        // model list names.
+        const providers = model
+          ? services.filter((service) => service.models.includes(model))
+          : [];
         return (
           <UsageBreakdownRow
-            barPercent={usageBarPercent(row.total_tokens, rows)}
+            barPercent={breakdownShare(row.total_tokens, tokenTotals(rows))}
+            cost={model ? costs.get(model) : undefined}
+            hint={
+              model ? t("overview.openRecords", { name: label }) : undefined
+            }
             key={row.id ?? "unknown-model"}
             label={label}
-            leading={<ModelBrandIcon model={row.id} />}
+            labelDetail={
+              model ? (
+                <NameDetail
+                  empty={t("overview.modelNoProviders")}
+                  items={providers.map((service) => ({
+                    key: service.id,
+                    label: service.enabled
+                      ? service.name
+                      : t("overview.disabledService", { name: service.name }),
+                  }))}
+                  summary={t("overview.modelProviders", {
+                    count: providers.length,
+                  })}
+                  title={label}
+                />
+              ) : undefined
+            }
+            leading={
+              model ? (
+                <ModelBrandIcon model={model} />
+              ) : (
+                // A blank mark keeps the name in line with the others.
+                <span aria-hidden="true" className="block size-3.5" />
+              )
+            }
+            onClick={
+              model ? () => onOpenRecords({ models: [model] }) : undefined
+            }
             requests={row.requests}
             showBar={showBar}
             status={status}
@@ -1864,13 +2335,131 @@ function ModelUsageBody({
           />
         );
       })}
-    </div>
+    </TooltipProvider>
   );
 }
 
+const ROW_HINT_DELAY_MS = 400;
+// A tooltip holds a few lines; the rest is a count.
+const DETAIL_ITEMS = 8;
+
+/**
+ * Who stands behind a row's name: a provider's models, or the providers that
+ * list a model.
+ */
+function NameDetail({
+  empty,
+  items,
+  summary,
+  title,
+}: {
+  empty: string;
+  items: Array<{ key: string; label: string }>;
+  summary: string;
+  title: string;
+}) {
+  const t = i18n.t.bind(i18n);
+  const shown = items.slice(0, DETAIL_ITEMS);
+  return (
+    <span className="grid gap-1 text-left" data-slot="usage-name-detail">
+      <strong className="font-medium break-all">{title}</strong>
+      <span className="opacity-75">{items.length ? summary : empty}</span>
+      {shown.length ? (
+        <ul className="grid gap-0.5">
+          {shown.map((item) => (
+            <li className="truncate" key={item.key}>
+              {item.label}
+            </li>
+          ))}
+          {items.length > shown.length ? (
+            <li className="opacity-75">
+              {t("overview.moreItems", { count: items.length - shown.length })}
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
+    </span>
+  );
+}
+
+/** What clicking does, shown while the pointer rests on it or it has focus. */
+function RowHint({ children, hint }: { children: ReactElement; hint: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent sideOffset={4}>{hint}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** A count in a clickable row that opens a narrower list of its own. */
+function RowLink({
+  children,
+  hint,
+  onClick,
+}: {
+  children: ReactNode;
+  hint: string;
+  onClick: () => void;
+}) {
+  return (
+    <RowHint hint={hint}>
+      <Button
+        className="pointer-events-auto h-auto rounded-xs p-0 font-normal text-inherit underline-offset-2 hover:text-foreground"
+        onClick={onClick}
+        size="xs"
+        type="button"
+        variant="link"
+      >
+        {children}
+      </Button>
+    </RowHint>
+  );
+}
+
+function tokenTotals(rows: Array<Pick<UsageGroup, "total_tokens">>) {
+  return rows.map((row) => row.total_tokens);
+}
+
+/** What the range cost per API provider and per model, for the rows. */
+function breakdownCosts(billing: BillingSummary | null): {
+  byService: ReadonlyMap<string, BillingAmounts>;
+  byModel: ReadonlyMap<string, BillingAmounts>;
+} {
+  const byService = new Map(
+    (billing?.by_service ?? []).map((row) => [row.service_id, row]),
+  );
+  // Usage lists a model once; billing lists it once per official provider
+  // that priced it, so those listings are added up for the row.
+  const byModel = new Map<string, BillingAmounts>();
+  for (const row of billing?.by_model ?? []) {
+    const listed = byModel.get(row.model);
+    byModel.set(
+      row.model,
+      listed
+        ? {
+            amount_usd: String(
+              Number(listed.amount_usd) + Number(row.amount_usd),
+            ),
+            priced: listed.priced + row.priced,
+            unpriced: listed.unpriced + row.unpriced,
+            pending: listed.pending + row.pending,
+            revalued: listed.revalued + row.revalued,
+            requests: listed.requests + row.requests,
+          }
+        : row,
+    );
+  }
+  return { byService, byModel };
+}
+
 function UsageBreakdownRow({
+  action,
   barPercent,
+  cost,
+  hint,
   label,
+  labelDetail,
   leading,
   onClick,
   requests,
@@ -1878,8 +2467,13 @@ function UsageBreakdownRow({
   status,
   tokens,
 }: {
+  action?: ReactNode;
   barPercent: number;
+  /** The row's API-equivalent cost, beside its call count. */
+  cost?: BillingAmounts;
+  hint?: string;
   label: string;
+  labelDetail?: ReactNode;
   leading?: ReactNode;
   onClick?: () => void;
   requests: number;
@@ -1889,80 +2483,50 @@ function UsageBreakdownRow({
 }) {
   const t = i18n.t.bind(i18n);
   const requestMetric = compactMetric(requests, status);
-  const content = (
-    <>
-      {leading}
-      <span className="flex min-w-0 flex-1 flex-col">
-        <strong
-          className="overflow-hidden text-sm font-medium text-ellipsis whitespace-nowrap"
-          title={label}
-        >
-          {label}
-        </strong>
-        {showBar ? (
-          <span
-            aria-hidden="true"
-            className="mt-1.5 block h-1 overflow-hidden rounded-full bg-muted"
-          >
-            <span
-              className="block h-full rounded-full bg-primary/40"
-              style={{ width: `${barPercent}%` }}
-            />
-          </span>
-        ) : null}
-      </span>
-      <span className="flex shrink-0 flex-col items-end">
-        <CompactCount
-          className="text-sm font-semibold tracking-tight"
-          value={usageCountValue(tokens, status)}
-        />
-        <span
-          className="text-micro text-muted-foreground tabular-nums"
-          title={
-            requestMetric.title
-              ? t("overview.requestTimes", { value: requestMetric.title })
-              : undefined
-          }
-        >
-          {t("overview.requestTimes", { value: requestMetric.text })}
-        </span>
-      </span>
-    </>
-  );
-
-  if (onClick) {
-    return (
-      <Button
-        className="grid h-15 min-w-0 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-none border-b bg-transparent px-4 py-2.5 text-left font-normal text-foreground hover:bg-muted"
-        onClick={onClick}
-        type="button"
-        variant="ghost"
-      >
-        {content}
-      </Button>
-    );
-  }
-
+  // An unpriced row has no amount to show; its title says why.
+  const amount = cost && cost.priced > 0 ? billingAmount(cost) : null;
+  const requestText = t("overview.requestTimes", { value: requestMetric.text });
   return (
-    <DataRow className="grid h-15 grid-cols-[auto_minmax(0,1fr)_auto] items-center py-2.5">
-      {content}
-    </DataRow>
+    <BreakdownRow
+      action={action}
+      detail={amount ? `${requestText} · ${amount}` : requestText}
+      detailTitle={
+        [
+          requestMetric.title
+            ? t("overview.requestTimes", { value: requestMetric.title })
+            : "",
+          cost ? billingNoteText(t, cost) : "",
+        ]
+          .filter(Boolean)
+          .join(" · ") || undefined
+      }
+      hint={hint}
+      label={label}
+      labelDetail={labelDetail}
+      leading={leading}
+      onClick={onClick}
+      share={showBar ? barPercent : null}
+      value={<CompactCount value={usageCountValue(tokens, status)} />}
+    />
   );
 }
 
 function UsageMetric({
   children,
+  detail,
   label,
   metric,
   icon,
 }: {
   children?: ReactNode;
+  detail?: ReactNode;
   label: string;
   icon?: ReactNode;
   metric?: CompactMetric;
 }) {
   return (
     <Metric
+      detail={detail}
       icon={icon}
       label={label}
       title={metric?.title ?? undefined}

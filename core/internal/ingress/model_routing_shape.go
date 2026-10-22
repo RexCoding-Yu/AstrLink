@@ -109,22 +109,39 @@ func (shape *requestShape) inspectOpenAIChat(raw []byte) {
 
 func (shape *requestShape) inspectOpenAIResponses(raw []byte) {
 	shape.toolDeclarations = arrayLength(gjson.GetBytes(raw, "tools"))
+	// Responses spreads one model turn over several items (reasoning, text,
+	// tool calls), where Chat and Anthropic keep it in one assistant message.
+	// A run of model items counts as one assistant message, so the same
+	// conversation counts the same in every format.
+	modelTurn := false
+	noteModelItem := func() {
+		if !modelTurn {
+			shape.assistantMessages++
+			modelTurn = true
+		}
+	}
 	// A bare string input is one user message of text, which counts nothing.
 	for _, item := range arrayItems(gjson.GetBytes(raw, "input")) {
 		switch kind := item.Get("type").Str; {
 		case kind == "" || kind == "message":
 			if item.Get("role").Str == "assistant" {
-				shape.assistantMessages++
+				noteModelItem()
+			} else {
+				modelTurn = false
 			}
 			shape.inspectContentParts(item.Get("content"))
+		case kind == "reasoning":
+			noteModelItem()
 		// Each client-executed tool family pairs a <name>_call item with a
 		// <name>_call_output item: function, custom tool, local shell and
 		// computer use. Hosted tools (web search, file search, MCP) carry
 		// their result inside the call item.
 		case strings.HasSuffix(kind, "_call_output"):
+			modelTurn = false
 			shape.toolMessages++
 			shape.inspectContentParts(item.Get("output"))
 		case strings.HasSuffix(kind, "_call"):
+			noteModelItem()
 			shape.toolCalls++
 		}
 	}

@@ -144,6 +144,22 @@ describe("routeRowSummary", () => {
     ).toBe("new-api");
   });
 
+  it("says when the client named the provider itself", () => {
+    const pinned = routed("native · service_newapi", "succeeded");
+    expect(
+      routeRowSummary(
+        pinned,
+        {
+          service_id: "service_newapi",
+          events: [pinned],
+          routing_decision: { selected: "client_pin", skipped: [] },
+        },
+        services,
+        true,
+      ),
+    ).toBe("new-api · 客户端指定");
+  });
+
   it("stands a call no provider could take on the decision alone", () => {
     expect(
       routeRowSummary(

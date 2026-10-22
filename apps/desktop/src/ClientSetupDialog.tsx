@@ -29,6 +29,7 @@ import { SegmentedControl } from "@/components/SegmentedControl";
 import { ModelSelect } from "@/components/ModelSelect";
 import { FormMessage } from "@/components/FormMessage";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -62,7 +63,9 @@ import {
   type ClientConfigStatus,
   type ClientProxyCheck,
   type DirectClient,
+  maxPiLimit,
 } from "./client-config-model";
+import { getOfficialModelLimits } from "./pricing-bridge";
 import {
   astrlinkAutoModelId,
   type ModelRedirect,
@@ -140,8 +143,22 @@ const claudeTiers = [
   "fableModel",
 ] as const;
 
-/** The model fields as the form holds them; only Claude Code shows the tiers. */
-type ModelFields = Record<"model" | (typeof claudeTiers)[number], string>;
+const piLimits = ["contextWindow", "maxTokens"] as const;
+
+/** What Pi assumes for a model whose entry names no limit. */
+const piDefaults: Record<(typeof piLimits)[number], number> = {
+  contextWindow: 128000,
+  maxTokens: 16384,
+};
+
+/**
+ * The model fields as the form holds them; only Claude Code shows the tiers,
+ * and only Pi the limits.
+ */
+type ModelFields = Record<
+  "model" | (typeof claudeTiers)[number] | (typeof piLimits)[number],
+  string
+>;
 
 const noModels: ModelFields = {
   model: "",
@@ -149,25 +166,45 @@ const noModels: ModelFields = {
   sonnetModel: "",
   opusModel: "",
   fableModel: "",
+  contextWindow: "",
+  maxTokens: "",
 };
 
-const stateTones: Record<
-  Exclude<ClientConfigState, "not_configured">,
-  StatusTone
-> = {
+/** A typed limit in tokens: undefined when blank, null when invalid. */
+function piLimit(text: string): number | null | undefined {
+  const value = text.trim();
+  if (!value) return undefined;
+  const tokens = /^[0-9]{1,9}$/.test(value) ? Number(value) : 0;
+  return tokens >= 1 && tokens <= maxPiLimit ? tokens : null;
+}
+
+/** A badge's label: the config's state, or that another token holds it. */
+type ConfigLabel = Exclude<ClientConfigState, "not_configured"> | "other_token";
+
+const stateTones: Record<ConfigLabel, StatusTone> = {
   configured: "positive",
   outdated: "pending",
   elsewhere: "neutral",
   modified: "pending",
   cc_switch: "neutral",
   invalid: "negative",
+  other_token: "neutral",
 };
 
-/** A config's state, once AstrLink or CC Switch wrote it. */
-function stateBadge(status: ClientConfigStatus) {
-  return status.state === "not_configured" ? null : (
-    <StatusBadge tone={stateTones[status.state]}>
-      {i18n.t(`clientSetup.state.${status.state}`)}
+/**
+ * A config's state, once AstrLink or CC Switch wrote it. The dialog sets up
+ * one token, so a config written with another token says so instead.
+ */
+function stateBadge(status: ClientConfigStatus, tokenId: string) {
+  if (status.state === "not_configured") return null;
+  const label: ConfigLabel =
+    status.token_id !== tokenId &&
+    ["configured", "outdated", "modified"].includes(status.state)
+      ? "other_token"
+      : status.state;
+  return (
+    <StatusBadge tone={stateTones[label]}>
+      {i18n.t(`clientSetup.state.${label}`)}
     </StatusBadge>
   );
 }
@@ -375,13 +412,15 @@ function DesktopClientSetupDialog({
     };
   }, []);
 
-  // The place a card stands for: the chosen one, else where it is installed.
+  // The place a card stands for: the chosen one, else where this token is
+  // configured, else where it is installed.
   const statusOf = (id: ClientConfigClient, place?: string | null) => {
     const places = placesOf(overview, id);
     return (
       (place !== undefined
         ? places.find((status) => status.wsl === place)
         : undefined) ??
+      places.find((status) => status.token_id === token.id) ??
       places.find((status) => status.detected) ??
       overview?.clients.find(
         (status) => status.client === id && status.wsl === null,
@@ -399,12 +438,19 @@ function DesktopClientSetupDialog({
   };
   const usable = (id: ClientConfigClient) =>
     ["direct", "cc-switch"].includes(availability(id));
+  const firstUsable = (preferred: (id: ClientConfigClient) => boolean) =>
+    clientSetupClients.find(({ id }) => usable(id) && preferred(id))?.id;
   // Wait for the status before picking a card, so the choice does not jump.
+  // Open on a client this token is configured in, else on one nobody set up,
+  // so a first write leaves other tokens' clients alone.
   const client =
     (choice && usable(choice) ? choice : null) ??
     (overview === null
       ? null
-      : (clientSetupClients.find(({ id }) => usable(id))?.id ?? null));
+      : (firstUsable((id) => statusOf(id)?.token_id === token.id) ??
+        firstUsable((id) => statusOf(id)?.state === "not_configured") ??
+        firstUsable(() => true) ??
+        null));
   const mode = client ? availability(client) : null;
   const places = client ? placesOf(overview, client) : [];
   const status = client ? statusOf(client, placeChoice) : undefined;
@@ -413,15 +459,74 @@ function DesktopClientSetupDialog({
   const label = client ? clientLabel(client) : "";
   const isClaude = client === "claude";
   const draftKey = `${client}:${place ?? ""}`;
-  const currentModels = { ...noModels, ...status?.models };
+  const currentModels: ModelFields = {
+    ...noModels,
+    ...Object.fromEntries(
+      Object.entries(status?.models ?? {}).map(([key, value]) => [
+        key,
+        String(value),
+      ]),
+    ),
+  };
   const modelFields = drafts[draftKey] ?? currentModels;
   const editModel = (field: keyof ModelFields, value: string) =>
-    setDrafts((current) => ({
-      ...current,
-      [draftKey]: { ...(current[draftKey] ?? currentModels), [field]: value },
-    }));
+    setDrafts((current) => {
+      const fields = current[draftKey] ?? currentModels;
+      // Limits describe a model; another model starts from its own.
+      const limits =
+        client === "pi" && field === "model" && value !== fields.model
+          ? { contextWindow: "", maxTokens: "" }
+          : {};
+      return {
+        ...current,
+        [draftKey]: { ...fields, ...limits, [field]: value },
+      };
+    });
   const modelRequired = !isClaude && !modelFields.model.trim();
+  const limitsInvalid =
+    client === "pi" &&
+    piLimits.some((key) => piLimit(modelFields[key]) === null);
+  const cannotWrite = modelRequired || limitsInvalid;
+  // Pi's limits start from the official model's; the user can change them or
+  // clear them for Pi's defaults. Each model is looked up once per place.
+  const prefilled = useRef(new Set<string>());
+  const piModel = client === "pi" ? modelFields.model.trim() : "";
+  const limitsBlank = !modelFields.contextWindow && !modelFields.maxTokens;
+  useEffect(() => {
+    const key = `${draftKey}\n${piModel}`;
+    if (!piModel || !limitsBlank || prefilled.current.has(key)) return;
+    prefilled.current.add(key);
+    void getOfficialModelLimits(piModel).then(
+      (limits) => {
+        if (!active.current || !limits) return;
+        const tokens = (count: number) => (count > 0 ? String(count) : "");
+        setDrafts((current) => {
+          const fields = current[draftKey] ?? currentModels;
+          if (
+            fields.model.trim() !== piModel ||
+            fields.contextWindow ||
+            fields.maxTokens
+          ) {
+            return current;
+          }
+          return {
+            ...current,
+            [draftKey]: {
+              ...fields,
+              contextWindow: tokens(limits.contextTokens),
+              maxTokens: tokens(limits.outputTokens),
+            },
+          };
+        });
+      },
+      () => undefined,
+    );
+    // currentModels is rebuilt each render; the place and model decide.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftKey, piModel, limitsBlank]);
   const configured = status?.token_id != null;
+  // Writing over another token's config moves the client to this token.
+  const owned = status?.token_id === token.id;
   // CC Switch writes a client where its directory settings point, which for
   // Claude Code and Codex can be one WSL distribution. Only that place
   // offers its import.
@@ -451,13 +556,19 @@ function DesktopClientSetupDialog({
   }, [checksProxy, inferenceURL]);
 
   // Removing needs a readable file; an unreadable one is left for the user.
+  // Another token's config is removed from that token's dialog. A token this
+  // gateway lacks has no dialog, so its config can be removed from any.
   const removable =
-    mode === "direct" && configured && status && status.state !== "invalid"
+    mode === "direct" &&
+    configured &&
+    status &&
+    status.state !== "invalid" &&
+    (owned || !tokens.some((item) => item.id === status.token_id))
       ? { client: status.client, wsl: status.wsl }
       : null;
   const otherToken =
-    status?.token_id != null && status.token_id !== token.id
-      ? tokens.find((item) => item.id === status.token_id)
+    configured && !owned
+      ? tokens.find((item) => item.id === status?.token_id)
       : undefined;
 
   const hasEntry = serviceHasEntry;
@@ -640,14 +751,23 @@ function DesktopClientSetupDialog({
     ) : null;
   };
 
-  const models = (): ClientConfigModels =>
-    isClaude
-      ? Object.fromEntries(
-          Object.entries(modelFields)
-            .map(([key, value]) => [key, value.trim()])
-            .filter(([, value]) => value),
-        )
-      : { model: modelFields.model.trim() };
+  const models = (): ClientConfigModels => {
+    if (isClaude) {
+      return Object.fromEntries(
+        (["model", ...claudeTiers] as const)
+          .map((key) => [key, modelFields[key].trim()])
+          .filter(([, value]) => value),
+      );
+    }
+    const fields: ClientConfigModels = { model: modelFields.model.trim() };
+    if (client === "pi") {
+      for (const key of piLimits) {
+        const tokens = piLimit(modelFields[key]);
+        if (tokens) fields[key] = tokens;
+      }
+    }
+    return fields;
+  };
 
   const begin = (next: NonNullable<typeof busy>) => {
     if (pending.current) return false;
@@ -668,11 +788,12 @@ function DesktopClientSetupDialog({
   }): Promise<boolean> => {
     const protocol = protocols[target.client];
     const entries = new Map(
-      Object.values(target.models).flatMap((modelID) =>
-        requiredEntries(modelID ?? "", protocol).map(
+      Object.values(target.models).flatMap((modelID) => {
+        if (typeof modelID !== "string") return [];
+        return requiredEntries(modelID, protocol).map(
           (entry) => [entry.service.id, entry.service] as const,
-        ),
-      ),
+        );
+      }),
     );
     for (const service of entries.values()) {
       try {
@@ -764,7 +885,7 @@ function DesktopClientSetupDialog({
   };
 
   const importWithCCSwitch = async () => {
-    if (!client || modelRequired || !begin("cc-switch")) return;
+    if (!client || cannotWrite || !begin("cc-switch")) return;
     try {
       const target = {
         tokenId: token.id,
@@ -787,7 +908,7 @@ function DesktopClientSetupDialog({
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (!client || modelRequired) return;
+    if (!client || cannotWrite) return;
     if (!isDirectClient(client)) {
       void importWithCCSwitch();
       return;
@@ -823,7 +944,7 @@ function DesktopClientSetupDialog({
         if (!card || card.state === "not_configured") return null;
         // Reads like the clients only CC Switch configures.
         if (card.state === "cc_switch") return t("clientSetup.state.cc_switch");
-        return stateBadge(card);
+        return stateBadge(card, token.id);
     }
   };
 
@@ -846,7 +967,9 @@ function DesktopClientSetupDialog({
         className="w-[calc(100vw_-_2rem)] max-w-none sm:max-w-3xl"
       >
         <DialogHeader className="text-left">
-          <DialogTitle>{t("clientSetup.title")}</DialogTitle>
+          <DialogTitle>
+            {t("clientSetup.configureToken", { name: token.name })}
+          </DialogTitle>
           <DialogDescription>{t("clientSetup.description")}</DialogDescription>
         </DialogHeader>
         <form className="grid gap-4" onSubmit={submit}>
@@ -916,7 +1039,7 @@ function DesktopClientSetupDialog({
                         item.wsl === null
                           ? t("clientSetup.placeLocal")
                           : t("agentDebug.wslPlace", { name: item.wsl }),
-                      badge: stateBadge(item),
+                      badge: stateBadge(item, token.id),
                     }))}
                     value={place ?? localPlace}
                     onValueChange={(value) => {
@@ -979,10 +1102,6 @@ function DesktopClientSetupDialog({
                 <FormMessage tone="error">
                   {t("clientSetup.invalidHint")}
                 </FormMessage>
-              ) : status?.state === "modified" ? (
-                <FormMessage tone="warning">
-                  {t("clientSetup.modifiedHint")}
-                </FormMessage>
               ) : status?.state === "cc_switch" ? (
                 <FormMessage tone="notice">
                   {t("clientSetup.ccSwitchManagedHint", { client: label })}
@@ -991,7 +1110,7 @@ function DesktopClientSetupDialog({
                 <FormMessage tone="notice">
                   {t("clientSetup.elsewhereHint", { client: label })}
                 </FormMessage>
-              ) : status?.token_id != null && status.token_id !== token.id ? (
+              ) : configured && !owned ? (
                 <FormMessage tone="notice">
                   {otherToken
                     ? t("clientSetup.usesToken", {
@@ -1003,6 +1122,10 @@ function DesktopClientSetupDialog({
                         client: label,
                         current: token.name,
                       })}
+                </FormMessage>
+              ) : status?.state === "modified" ? (
+                <FormMessage tone="warning">
+                  {t("clientSetup.modifiedHint")}
                 </FormMessage>
               ) : null}
               {proxy ? (
@@ -1044,6 +1167,44 @@ function DesktopClientSetupDialog({
                 />
               </Field>
               {entryNote(modelFields.model)}
+              {client === "pi" && (
+                <div className="grid gap-1.5">
+                  <div className="grid gap-3 min-[540px]:grid-cols-2">
+                    {piLimits.map((key) => (
+                      <Field
+                        key={key}
+                        htmlFor={`client-setup-${key}`}
+                        label={t(`clientSetup.${key}`)}
+                      >
+                        <Input
+                          id={`client-setup-${key}`}
+                          inputMode="numeric"
+                          autoComplete="off"
+                          value={modelFields[key]}
+                          placeholder={t("clientSetup.piDefault", {
+                            tokens: piDefaults[key],
+                          })}
+                          aria-invalid={piLimit(modelFields[key]) === null}
+                          onChange={(event) =>
+                            editModel(key, event.target.value)
+                          }
+                          maxLength={9}
+                          disabled={working}
+                        />
+                      </Field>
+                    ))}
+                  </div>
+                  {limitsInvalid ? (
+                    <FormMessage tone="error">
+                      {t("clientSetup.limitInvalid")}
+                    </FormMessage>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      {t("clientSetup.limitsHint")}
+                    </span>
+                  )}
+                </div>
+              )}
               {isClaude && (
                 <div className="grid gap-3 min-[540px]:grid-cols-2">
                   {claudeTiers.map((key) => (
@@ -1137,7 +1298,7 @@ function DesktopClientSetupDialog({
               <Button
                 type="button"
                 variant="outline"
-                disabled={working || modelRequired}
+                disabled={working || cannotWrite}
                 onClick={() => void importWithCCSwitch()}
               >
                 <CCSwitchIcon size={16} />
@@ -1150,7 +1311,7 @@ function DesktopClientSetupDialog({
               </Button>
             ) : null}
             {mode === "cc-switch" ? (
-              <Button type="submit" disabled={working || modelRequired}>
+              <Button type="submit" disabled={working || cannotWrite}>
                 <CCSwitchIcon size={16} />
                 {t(
                   busy === "cc-switch"
@@ -1165,16 +1326,18 @@ function DesktopClientSetupDialog({
                 disabled={
                   working ||
                   mode !== "direct" ||
-                  modelRequired ||
+                  cannotWrite ||
                   status?.state === "invalid"
                 }
               >
                 {t(
                   busy === "write"
                     ? "clientSetup.writing"
-                    : configured
+                    : owned
                       ? "clientSetup.update"
-                      : "clientSetup.write",
+                      : configured
+                        ? "clientSetup.useThisToken"
+                        : "clientSetup.write",
                 )}
               </Button>
             )}

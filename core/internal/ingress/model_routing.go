@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/autoclassifier"
@@ -150,11 +149,17 @@ func (handler *Handler) applyModelRouting(ctx context.Context, session *recordSe
 	needsClassification := modelRoutingNeedsClassification(*group, dimensions)
 	// Rules read the request's text only through the classifier and keyword
 	// conditions; a group with neither never pays for the inspection.
+	// Counts reveal none of the text, so they come from the request as sent;
+	// only the text itself is read through the privacy policy.
+	facts := modelRoutingFacts(classified, session, handler.now())
 	view := classified
 	if needsClassification || group.ReferencesField("literal_keyword") {
 		view = handler.modelRoutingTextView(ctx, session, classified)
+		facts.LiteralText = ""
+		if view.routingUserTextKnown {
+			facts.LiteralText = view.routingUserText
+		}
 	}
-	facts := modelRoutingFacts(view, session)
 	var taskType modelrouting.TaskTypeOutcome
 	if needsClassification {
 		taskType = handler.modelRoutingTaskType(ctx, view, *group, classifier)
@@ -394,7 +399,12 @@ func (handler *Handler) persistModelRoutingBinding(ctx context.Context, session 
 		Model: decision.MemberModel, ConfigSnapshotVersion: decision.ConfigSnapshotVersion, RequestID: origin,
 		CreatedAt: modelRoutingBindingTime(now), UpdatedAt: modelRoutingBindingTime(now), ExpiresAt: expires,
 	}
-	if err := store.UpsertModelRoutingBinding(ctx, binding, session.startedAt); err != nil {
+	// A client may hang up as soon as the response is delivered — Codex does
+	// on the terminal event — so the write must not depend on its connection,
+	// as the provider binding and response affinity do not.
+	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 500*time.Millisecond)
+	defer cancel()
+	if err := store.UpsertModelRoutingBinding(persist, binding, session.startedAt); err != nil {
 		if session.persistLogf != nil {
 			session.persistLogf("model routing binding write failed: %v", err)
 		}
@@ -516,12 +526,18 @@ func modelRoutingDecisionFromBinding(binding contract.ModelRoutingBinding, virtu
 	}
 }
 
-func modelRoutingFacts(classified Request, session *recordSession) contract.ModelRoutingFacts {
+func modelRoutingFacts(classified Request, session *recordSession, now time.Time) contract.ModelRoutingFacts {
 	facts := contract.ModelRoutingFacts{
-		Protocol:       string(classified.Protocol),
-		Streaming:      routingBoolPtr(classified.Streaming),
-		Continuation:   routingBoolPtr(classified.PreviousResponseID != ""),
-		InputTextRunes: routingIntPtr(utf8.RuneCountInString(classified.Conversation.LastUserText)),
+		Protocol:     string(classified.Protocol),
+		Streaming:    routingBoolPtr(classified.Streaming),
+		Continuation: routingBoolPtr(classified.PreviousResponseID != ""),
+	}
+	// Keyword conditions and the character count read the user's latest
+	// message, the text the rule editor and the dry-run speak of; the protocol
+	// envelope around it would match field names and miss escaped text.
+	if classified.routingUserTextKnown {
+		facts.InputTextRunes = routingIntPtr(classified.routingUserTextRunes)
+		facts.LiteralText = classified.routingUserText
 	}
 	// Facts read from the body's structure stay unknown when the body could
 	// not be read, so a rule on them neither matches nor misfires on zeros.
@@ -541,15 +557,7 @@ func modelRoutingFacts(classified Request, session *recordSession) contract.Mode
 	}
 	// One clock sample per request: system_time leaves read this instant, in
 	// the OS local timezone, so all rows in one evaluation see the same time.
-	now := time.Now()
 	facts.SystemTime = &now
-	if classified.routingText != "" {
-		facts.LiteralText = classified.routingText
-	} else if classified.Conversation.LastUserText != "" {
-		facts.LiteralText = classified.Conversation.LastUserText
-	} else {
-		facts.LiteralText = classified.InputPreview
-	}
 	facts.UserMessageCount = routingIntPtr(classified.Conversation.UserTurnCount)
 	if session != nil && session.turn != nil {
 		facts.TurnCount = routingIntPtr(session.turn.Index)
@@ -579,24 +587,23 @@ func (handler *Handler) loadClassifierSettings(ctx context.Context, session *rec
 // inference path and the control-plane dry-run share; every classification
 // source below fills that carrier and never derives facts on its own.
 func (handler *Handler) modelRoutingTaskType(ctx context.Context, classified Request, group contract.ModelRoutingGroup, settings contract.ClassifierSettings) modelrouting.TaskTypeOutcome {
-	// The classification input is the user's actual message, never the
-	// sanitized protocol envelope: routingText is the full redacted request
-	// body, which is not "one sentence" and routinely embeds JSON.
-	text := classified.lastUserText
-	if text == "" {
-		text = classified.Conversation.LastUserText
+	// The classification input is the user's latest message as routing reads
+	// it, never the protocol envelope. A request built without that view (the
+	// retired auto path) falls back to its classifier text.
+	text := classified.routingUserText
+	if !classified.routingUserTextKnown {
+		text = classified.lastUserText
 	}
-	if strings.TrimSpace(text) == "" {
+	text, ok := classificationText(text)
+	if !ok {
 		return modelrouting.TaskTypeOutcome{Code: autoclassifier.FallbackUnavailable}
-	}
-	if len(text) > 64*1024 {
-		text = text[:64*1024]
 	}
 	if settings.CloudConfigured() {
 		return handler.modelRoutingTaskTypeCloud(ctx, text, group, settings)
 	}
-	if existingModelConfigured(settings) {
-		return handler.modelRoutingTaskTypeExistingModel(ctx, text, group, settings)
+	if settings.ExistingModelConfigured() {
+		outcome, _ := handler.modelRoutingTaskTypeExistingModel(ctx, text, &group, settings)
+		return outcome
 	}
 	if handler.classifier == nil {
 		return modelrouting.TaskTypeOutcome{Code: autoclassifier.FallbackUnavailable}
@@ -642,54 +649,62 @@ func (handler *Handler) modelRoutingTaskType(ctx context.Context, classified Req
 	return result
 }
 
-func existingModelConfigured(settings contract.ClassifierSettings) bool {
-	return settings.Enabled && settings.Source() == contract.ClassifierSourceExistingModel &&
-		settings.ExistingModel != nil &&
-		settings.ExistingModel.ServiceID != "" &&
-		settings.ExistingModel.Model != ""
+// classificationText bounds what every classifier source is given: a blank
+// text has nothing to classify, and a longer one is cut to 64 KiB.
+func classificationText(text string) (string, bool) {
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	if len(text) > 64*1024 {
+		text = text[:64*1024]
+	}
+	return text, true
 }
 
-// classificationInstruction compiles the existing_model classification
-// instruction from one immutable label snapshot. The output constraint's JSON
-// shape demand and schema section is the whole instruction, so nothing stored
-// can drop the shape requirement the strict parser depends on. There is
-// deliberately no fallback to the legacy bare-label DefaultClassifierPrompt —
-// an obedient answer to it can never parse.
-func classificationInstruction(labels []string, dimensions []contract.ClassifierDimension) (string, error) {
-	// The sub-call re-enters the pipeline as a native /v1/responses request;
-	// with no verified native capability recorded the plan is JSON-only, and
-	// SystemPrompt is identical in every constraint mode. With no dimensions
-	// declared this is byte-identical to the single-dimension instruction.
-	constraint, err := classifieroutput.PlanWithDimensions(contract.ProtocolOpenAIResponses, nil, labels, dimensions)
-	if err != nil {
-		return "", err
+// ExistingModelTaskType classifies text through the existing_model source the
+// way a live request does: the same bounds on the text, instruction, call,
+// strict parsing and failure codes. The classifier dry-run calls it, so a
+// preview cannot classify differently from production, and its standalone
+// call keeps no request record. group may be nil; the labels then come from
+// the classifier settings alone. The second result is the score the model
+// gave its label, reported even below the threshold.
+func (handler *Handler) ExistingModelTaskType(ctx context.Context, text string, group *contract.ModelRoutingGroup, settings contract.ClassifierSettings) (modelrouting.TaskTypeOutcome, float64) {
+	text, ok := classificationText(text)
+	if !ok || !settings.ExistingModelConfigured() {
+		return modelrouting.TaskTypeOutcome{Code: autoclassifier.FallbackUnavailable}, 0
 	}
-	return constraint.SystemPrompt(), nil
+	return handler.modelRoutingTaskTypeExistingModel(ctx, text, group, settings)
 }
 
 // modelRoutingTaskTypeExistingModel classifies through an existing gateway
 // model: one bounded in-process generation call, then the shared strict
 // extraction core. Every failure maps to a fallback code; classification
-// never blocks the request (fail-open is not negotiable).
-func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, text string, group contract.ModelRoutingGroup, settings contract.ClassifierSettings) modelrouting.TaskTypeOutcome {
-	plan := settings.ResolveCallPlan(&group)
+// never blocks the request (fail-open is not negotiable). A nil group takes
+// its labels from the classifier settings. The second result is the score the
+// model gave its label, set on low confidence too, where the outcome leaves
+// the label unknown.
+func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, text string, group *contract.ModelRoutingGroup, settings contract.ClassifierSettings) (modelrouting.TaskTypeOutcome, float64) {
+	plan := settings.ResolveCallPlan(group)
 	result := modelrouting.TaskTypeOutcome{
 		ClassifierID:           "existing_model",
 		LowConfidenceThreshold: plan.LowConfidenceThreshold,
 	}
-	instruction, err := classificationInstruction(plan.Labels, plan.Dimensions)
+	// The rendered classifier prompt opens the instruction and the answer
+	// format closes it, so no stored prompt can drop the shape the strict
+	// parser depends on.
+	instruction, err := classifieroutput.ExistingModelInstruction(plan)
 	if err != nil {
 		// Unreachable with a validated group (the label snapshot is never
 		// empty), but a broken catalog must still fail open, not block.
 		result.Code = "classifier_unavailable"
-		return result
+		return result, 0
 	}
 	start := time.Now()
 	assistantText, err := handler.ClassifyModel(ctx, settings.ExistingModel.ServiceID, settings.ExistingModel.Model, instruction, text, plan.TimeoutMS)
 	result.DurationMS = int(time.Since(start).Milliseconds())
 	if err != nil {
 		result.Code = existingModelFailureCode(ctx, err)
-		return result
+		return result, 0
 	}
 	var parsed classifieroutput.TaskType
 	if len(plan.Dimensions) == 0 {
@@ -699,10 +714,10 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 		if parsed, err = classifieroutput.ParseTaskType(assistantText, plan.Labels); err != nil {
 			if errors.Is(err, classifieroutput.ErrRefusal) {
 				result.Code = "classifier_refusal"
-				return result
+				return result, 0
 			}
 			result.Code = "classifier_invalid_output"
-			return result
+			return result, 0
 		}
 	} else {
 		// Multi dimension: one envelope keyed by dimension name, task_type
@@ -713,10 +728,10 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 		if dimensionErr != nil {
 			if errors.Is(dimensionErr, classifieroutput.ErrRefusal) {
 				result.Code = "classifier_refusal"
-				return result
+				return result, 0
 			}
 			result.Code = "classifier_invalid_output"
-			return result
+			return result, 0
 		}
 		taskType, ok := dimensions[contract.BuiltInTaskTypeDimension]
 		if !ok {
@@ -724,7 +739,7 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 			// routing decision still needs a task_type, so this is the same
 			// unusable reply as a malformed one.
 			result.Code = "classifier_invalid_output"
-			return result
+			return result, 0
 		}
 		result.Dimensions = dimensionScores(dimensions)
 		// Carry the ranked sequence through: the evaluator's scored-fallback
@@ -732,9 +747,9 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 		// for every group as soon as one custom dimension was configured.
 		parsed = classifieroutput.TaskType{Label: taskType.Label, Score: taskType.Score, Candidates: taskType.Candidates}
 	}
-	if !group.ValidTaskTypeLabel(parsed.Label) {
+	if group != nil && !group.ValidTaskTypeLabel(parsed.Label) {
 		result.Code = "classifier_invalid_output"
-		return result
+		return result, 0
 	}
 	if parsed.Score < plan.LowConfidenceThreshold {
 		// Low confidence is not a failure and never takes a fallback: this
@@ -745,12 +760,12 @@ func (handler *Handler) modelRoutingTaskTypeExistingModel(ctx context.Context, t
 		// tells that apart from a real fallback.
 		result.Code = modelrouting.CodeClassifierLowConfidence
 		result.Candidates = autoclassifierCandidates(parsed.Candidates)
-		return result
+		return result, parsed.Score
 	}
 	result.Value = parsed.Label
 	result.Confidence = parsed.Score
 	result.Candidates = autoclassifierCandidates(parsed.Candidates)
-	return result
+	return result, parsed.Score
 }
 
 // dimensionScores moves the strict extraction core's parsed dimensions onto

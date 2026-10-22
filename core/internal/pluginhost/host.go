@@ -1,8 +1,11 @@
 // Package pluginhost runs the plugins' part in inference requests: the views
 // a plugin reads, the privacy check of what leaves for a plugin, the
 // prepareSession and prepareTurn hooks within the turn's budget, the blocks
-// they return, the session bindings marker lines make, and the observeTurn
-// queue.
+// they return, the session bindings marker lines, answers and workspaces
+// make, and the observeTurn queue. It also keeps what the user controls of
+// that part: the pause of every plugin, the clients a plugin is off for, the
+// sessions it is paused in, the budget of what plugins inject, and the
+// refresh of a session's resident block.
 //
 // Plugins never hold a request up for long and never fail one: whatever goes
 // wrong on their side costs the request its injection or its capture, and the
@@ -19,7 +22,9 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -50,6 +55,11 @@ const (
 	bindingTimeout = 500 * time.Millisecond
 	// recordAppendTimeout bounds adding a capture's record to its request.
 	recordAppendTimeout = 5 * time.Second
+	// refreshInterval is how often the automatic refresh checks a session's
+	// resident block for newer data, and how often a compacted history may
+	// refresh it: a client's subagents can look like compactions as they
+	// come and go.
+	refreshInterval = 10 * time.Minute
 )
 
 // ErrBlocked is what Input.Inspect returns when the privacy policy blocks
@@ -60,11 +70,27 @@ var ErrBlocked = errors.New("the privacy policy blocks the text")
 type Options struct {
 	Plugins  *plugin.Manager
 	Metadata *metadata.Registry
-	// Bindings keeps the sessions' metadata values.
+	// Bindings keeps the sessions' metadata values and the workspaces'.
 	Bindings storage.MetadataStore
+	// Store keeps the plugins' part in each session and the settings of
+	// every plugin.
+	Store PluginStore
 	// Records adds what captures report to the records of their requests.
 	Records RecordAppender
-	Logf    func(string, ...any)
+	// WorkspaceKey keys the fingerprints of workspaces. Without it a new
+	// session never takes the value its workspace had.
+	WorkspaceKey []byte
+	Logf         func(string, ...any)
+}
+
+// PluginStore keeps what the host stores for plugins; *sqlite.Store
+// satisfies it.
+type PluginStore interface {
+	PluginHostSettings(context.Context) (contract.PluginHostSettings, error)
+	PutPluginHostSettings(context.Context, contract.PluginHostSettings) error
+	PluginSession(ctx context.Context, plugin, session string) (storage.PluginSessionRecord, bool, error)
+	StartPluginSession(ctx context.Context, plugin, session string, turn int) (storage.PluginSessionRecord, error)
+	PausePluginSession(ctx context.Context, plugin, session string, paused bool, turn int) (storage.PluginSessionRecord, error)
 }
 
 // RecordAppender adds plugin records to a request record already written.
@@ -74,34 +100,49 @@ type RecordAppender interface {
 
 // Host runs the plugins' part in requests. It is safe for concurrent use.
 type Host struct {
-	plugins  *plugin.Manager
-	metadata *metadata.Registry
-	bindings storage.MetadataStore
-	ledger   *injection.Ledger
-	sessions *sessions
-	observe  *observeQueue
-	records  RecordAppender
-	logf     func(string, ...any)
+	plugins      *plugin.Manager
+	metadata     *metadata.Registry
+	bindings     storage.MetadataStore
+	store        PluginStore
+	ledger       *injection.Ledger
+	sessions     *sessions
+	lookups      *lookups
+	observe      *observeQueue
+	records      RecordAppender
+	workspaceKey []byte
+	logf         func(string, ...any)
+	// settings are the settings of every plugin, as requests read them.
+	settings atomic.Pointer[contract.PluginHostSettings]
 	// budget, when set, stands for every plugin's wait; tests shorten it.
 	budget time.Duration
+	// now is the host's clock; tests move it.
+	now func() time.Time
 }
 
-// New returns a Host. Close stops it.
+// New returns a Host with the default settings of every plugin until
+// LoadSettings reads the stored ones. Close stops it.
 func New(options Options) *Host {
 	logf := options.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Host{
-		plugins:  options.Plugins,
-		metadata: options.Metadata,
-		bindings: options.Bindings,
-		ledger:   injection.NewLedger(),
-		sessions: newSessions(),
-		observe:  newObserveQueue(logf),
-		records:  options.Records,
-		logf:     logf,
+	host := &Host{
+		plugins:      options.Plugins,
+		metadata:     options.Metadata,
+		bindings:     options.Bindings,
+		store:        options.Store,
+		ledger:       injection.NewLedger(),
+		sessions:     newSessions(),
+		lookups:      newLookups(),
+		observe:      newObserveQueue(logf),
+		records:      options.Records,
+		workspaceKey: options.WorkspaceKey,
+		logf:         logf,
+		now:          time.Now,
 	}
+	defaults := contract.DefaultPluginHostSettings()
+	host.settings.Store(&defaults)
+	return host
 }
 
 // turnWait is how long a request waits for candidate.
@@ -154,6 +195,14 @@ type Input struct {
 	// see them; ErrBlocked when the policy blocks them, another error when
 	// the check failed. nil when no policy applies.
 	Inspect func(ctx context.Context, texts []string) ([]string, error)
+	// Redacts reports whether the privacy policy puts placeholders in place
+	// of what it finds: then what a plugin the user does not trust keeps
+	// holds placeholders too. nil when no policy applies.
+	Redacts func(ctx context.Context) bool
+	// LookupBase is the address the client reached the gateway at, such as
+	// http://127.0.0.1:18317, when the client runs on this machine: only
+	// then can the model run a lookup. "" otherwise.
+	LookupBase string
 }
 
 // Run is the plugins' part in one request.
@@ -162,12 +211,31 @@ type Run struct {
 	input Input
 	began time.Time
 	turn  turn
+	// settings are the settings of every plugin when the request began.
+	settings contract.PluginHostSettings
+	// system and first fingerprint the request's system prompt and what its
+	// history opens with, to tell a compacted history.
+	system, first string
+	// place is the workspace the request names.
+	place workspace
+	// workspaceKeys are the attributes whose plugins bind a new session to
+	// the value its workspace had.
+	workspaceKeys map[string]bool
+	// known are the values of each attribute the session was offered or
+	// other sessions are bound to, read once a marker needs them.
+	known map[string][]string
 	// values are the session's bindings; nil when they could not be read.
 	values   map[string]storage.MetadataValueRecord
 	metadata contract.RequestMetadata
-	// userMarker is set when the turn's opening message is one marker line:
-	// it binds the session and is neither recalled for nor captured.
-	userMarker bool
+	// bindsOnly is set when the turn's opening message only binds the
+	// session: one marker line, or an answer naming an offered value. The
+	// turn gets no turn block and nothing of it is captured.
+	bindsOnly bool
+	// shell is set when the request offers the model a shell to run
+	// lookups with; stamp is what the request tells the session's lookup
+	// credentials.
+	shell bool
+	stamp lookupStamp
 	// turnKey names the request's turn: its index and its opening message.
 	// The index alone is not enough: a session linked through an older
 	// record can give two turns the same index.
@@ -192,12 +260,28 @@ type part struct {
 	plugin *plugin.Plugin
 	info   plugin.RequestInfo
 	view   SessionView
+	// off says why the plugin stays out of the request: every plugin
+	// paused, its client excluded or the session paused. "" when it takes
+	// part.
+	off string
 	// deadline is when the request stops waiting for the plugin.
 	deadline    time.Time
 	residentKey string
-	// sessionCall is prepareSession's call, nil when the cached block
-	// serves.
+	metaKey     string
+	// sessionCall is the prepareSession call the request waits for, nil
+	// when the kept block serves, and trigger why it runs. A background
+	// call, the automatic refresh, is not waited for.
 	sessionCall *hookCall
+	trigger     string
+	background  bool
+	// starts is set when the plugin takes part in the session for the
+	// first time.
+	starts bool
+	// bound is set when the session has a value of each of the plugin's
+	// attributes, none excluded; usage is the usage of its lookups the
+	// system prompt carries, "" for none.
+	bound bool
+	usage string
 	// settle is set on the call that settles the plugin's block for the
 	// turn; turnCall is its prepareTurn call, skip why there is none.
 	settle   bool
@@ -209,12 +293,14 @@ type part struct {
 	awaited *TurnView
 }
 
-// hookCall is a hook call running in the background.
+// hookCall is a hook call running in the background. text is the block a
+// prepareSession call rendered.
 type hookCall struct {
 	done   chan struct{}
 	result hookResult
 	info   plugin.CallInfo
 	err    error
+	text   string
 }
 
 // Begin starts the plugins' part in a request, or returns nil when no
@@ -229,25 +315,50 @@ func (host *Host) Begin(ctx context.Context, input Input) *Run {
 	}
 	var plugins []*plugin.Plugin
 	for _, candidate := range host.plugins.Current().Plugins() {
-		if candidate.Enabled() && (candidate.Has(plugin.HookPrepareSession) || candidate.Has(plugin.HookPrepareTurn) || candidate.Has(plugin.HookObserveTurn)) {
+		if candidate.Enabled() && takesPart(candidate) {
 			plugins = append(plugins, candidate)
 		}
 	}
 	if len(plugins) == 0 {
 		return nil
 	}
-	run := &Run{host: host, input: input, began: time.Now(), turn: readTurn(input.Protocol, input.Body), ready: make(chan struct{})}
+	run := &Run{
+		host: host, input: input, began: time.Now(), settings: host.Settings(),
+		turn: readTurn(input.Protocol, input.Body), ready: make(chan struct{}),
+	}
 	if opening, ok := host.ledger.Opening(input.Protocol, input.Body); ok && input.Turn > 0 {
 		run.turnKey = strconv.Itoa(input.Turn) + ":" + opening
 	}
-	events := run.bind(ctx)
+	if run.settings.Paused {
+		// Every plugin stays out and the request goes out as it came; the
+		// turn's first call says why.
+		close(run.ready)
+		run.plan(plugins)
+		return run
+	}
+	run.shell = input.LookupBase != "" && declaresShell(input.Protocol, input.Body)
+	run.system = host.ledger.Fingerprint(systemText(input.Protocol, input.Body))
+	if run.turn.first != "" {
+		run.first = host.ledger.Fingerprint(run.turn.first)
+	}
+	run.locate()
+	events := run.bind(ctx, plugins)
 	if host.metadata != nil {
 		run.metadata = host.metadata.Resolve(input.Header, input.Token, run.values)
 	}
 	run.metadata.Events = clampEvents(append(events, run.metadata.Events...))
+	run.load(ctx, plugins)
 	run.plan(plugins)
+	run.start(ctx)
 	go run.work()
 	return run
+}
+
+// takesPart reports whether a plugin has a part in requests: a hook that
+// runs in them, or lookups whose usage goes with them.
+func takesPart(candidate *plugin.Plugin) bool {
+	return candidate.Has(plugin.HookPrepareSession) || candidate.Has(plugin.HookPrepareTurn) || candidate.Has(plugin.HookObserveTurn) ||
+		(candidate.Has(plugin.HookCallTool) && len(candidate.Meta.Tools) > 0)
 }
 
 // Metadata is the request's metadata: its values, with the session's
@@ -259,6 +370,94 @@ func (run *Run) Metadata() contract.RequestMetadata {
 	return run.metadata
 }
 
+// locate finds the workspace the request names, once for each system prompt
+// and opening of the session: a session's requests repeat them.
+func (run *Run) locate() {
+	host := run.host
+	key := run.system + "/" + run.first
+	host.sessions.mutex.Lock()
+	session := host.sessions.session(run.input.Session)
+	if session.workspaceFor == key {
+		run.place = session.workspace
+		host.sessions.mutex.Unlock()
+		return
+	}
+	host.sessions.mutex.Unlock()
+	place := readWorkspace(host.workspaceKey, run.input.Protocol, run.input.Body, run.turn.messages)
+	host.sessions.mutex.Lock()
+	session = host.sessions.session(run.input.Session)
+	session.workspace, session.workspaceFor = place, key
+	host.sessions.mutex.Unlock()
+	run.place = place
+}
+
+// load reads the plugins' part in the session from storage: the turn each
+// first took part in and whether the user paused it. Each is read once while
+// the host keeps the session.
+func (run *Run) load(ctx context.Context, plugins []*plugin.Plugin) {
+	host := run.host
+	host.sessions.mutex.Lock()
+	var missing []string
+	for _, candidate := range plugins {
+		state := host.sessions.plugin(run.input.Session, candidate.Key)
+		if host.store == nil {
+			state.loaded = true
+		}
+		if !state.loaded {
+			missing = append(missing, candidate.Key)
+		}
+	}
+	host.sessions.mutex.Unlock()
+	if len(missing) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, bindingTimeout)
+	defer cancel()
+	for _, key := range missing {
+		record, found, err := host.store.PluginSession(ctx, key, run.input.Session)
+		if err != nil {
+			host.logf("read the plugin's part in the session: %v", err)
+			continue
+		}
+		host.sessions.mutex.Lock()
+		state := host.sessions.plugin(run.input.Session, key)
+		if !state.loaded {
+			state.loaded = true
+			if found {
+				state.firstTurn, state.paused = record.FirstTurn, record.Paused
+			}
+		}
+		host.sessions.mutex.Unlock()
+	}
+}
+
+// start keeps the turn each plugin took part in the session for the first
+// time. Storage keeps the first turn it was told; a different one corrects
+// what the host assumed.
+func (run *Run) start(ctx context.Context) {
+	host := run.host
+	if host.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bindingTimeout)
+	defer cancel()
+	for _, current := range run.parts {
+		if !current.starts {
+			continue
+		}
+		record, err := host.store.StartPluginSession(ctx, current.plugin.Key, run.input.Session, run.input.Turn)
+		if err != nil {
+			host.logf("keep the plugin's part in the session: %v", err)
+			continue
+		}
+		if record.FirstTurn != run.input.Turn {
+			host.sessions.mutex.Lock()
+			host.sessions.plugin(run.input.Session, current.plugin.Key).firstTurn = record.FirstTurn
+			host.sessions.mutex.Unlock()
+		}
+	}
+}
+
 // plan settles what each plugin does in the request and starts the
 // prepareSession calls, which read no user text.
 func (run *Run) plan(plugins []*plugin.Plugin) {
@@ -267,46 +466,87 @@ func (run *Run) plan(plugins []*plugin.Plugin) {
 	for key, value := range run.metadata.Values {
 		meta[key] = plugin.MetaValue{Value: value.Value, Source: value.Source}
 	}
+	now := host.now()
 	host.sessions.mutex.Lock()
 	defer host.sessions.mutex.Unlock()
+	session := host.sessions.session(run.input.Session)
+	if session.language == "" {
+		session.language = run.settings.Language
+	}
+	compacted := !run.settings.Paused && session.compacted(run.system, run.first)
+	run.stamp = lookupStamp{
+		seen: now, request: run.input.RequestID, turn: run.input.Turn, turnKey: run.turnKey,
+		scope:  LookupScope{Protocol: run.input.Protocol, Model: run.input.Model, Token: run.input.Token},
+		client: run.input.Client, language: session.language, meta: meta,
+	}
+	defer host.lookups.touch(run.input.Session, run.stamp)
 	for _, candidate := range plugins {
 		read := candidate.Can(plugin.CapabilityRequest)
 		view := SessionView{
 			Protocol: string(run.input.Protocol), Model: run.input.Model, Client: run.input.Client,
 			Meta: map[string]plugin.MetaValue{}, Session: plugin.SessionRef{ID: run.input.Session, Turn: run.input.Turn},
+			Language: session.language,
 		}
 		if read {
 			view.Meta = meta
+			if run.place.known() {
+				view.Workspace = &WorkspaceView{Name: run.place.name}
+			}
 		}
-		current := &part{
-			plugin:   candidate,
-			view:     view,
-			deadline: run.began.Add(host.turnWait(candidate)),
-			info: plugin.RequestInfo{
-				Protocol: view.Protocol, Model: view.Model, Client: view.Client, Stream: run.input.Stream,
-				Meta: view.Meta, Session: &plugin.SessionRef{ID: run.input.Session, Turn: run.input.Turn},
-			},
-			residentKey: residentKey(candidate, view.Meta),
+		state := host.sessions.plugin(run.input.Session, candidate.Key)
+		current := &part{plugin: candidate, deadline: run.began.Add(host.turnWait(candidate))}
+		current.settle = run.turn.opened && run.turnKey != "" && state.settled != run.turnKey
+		switch {
+		case run.settings.Paused:
+			current.off = contract.PluginSkipPausedAll
+		case candidate.Settings.Excludes(run.input.Client):
+			current.off = contract.PluginSkipClientDisabled
+		case state.paused:
+			current.off = contract.PluginSkipSessionPaused
 		}
 		run.parts = append(run.parts, current)
-		state := host.sessions.plugin(run.input.Session, candidate.Key)
-		inject := candidate.Can(plugin.CapabilityInject)
-		current.settle = run.turn.opened && run.turnKey != "" && state.settled != run.turnKey
+		if current.off != "" {
+			// The turn's first call says why the plugin stays out; its
+			// other calls say nothing.
+			current.view = view
+			if current.settle {
+				state.settled = run.turnKey
+			}
+			continue
+		}
+		if current.settle && state.firstTurn == 0 && run.input.Turn > 0 {
+			state.firstTurn, current.starts = run.input.Turn, true
+		}
+		view.Session.First = state.firstTurn != 0 && state.firstTurn == run.input.Turn
+		ref := view.Session
+		current.view = view
+		current.info = plugin.RequestInfo{
+			Protocol: view.Protocol, Model: view.Model, Client: view.Client, Stream: run.input.Stream,
+			Meta: view.Meta, Session: &ref,
+		}
+		current.metaKey = metaKey(view.Meta)
+		current.residentKey = residentKey(candidate, view.Language, current.metaKey)
+		current.bound = true
+		for _, attribute := range candidate.Meta.Metadata {
+			if value, found := run.metadata.Values[attribute.Key]; !found || value.Value == contract.MetadataNone {
+				current.bound = false
+			}
+		}
+		if current.bound && run.lookupOpen(current) {
+			token := host.lookups.issue(lookupKey{run.input.Session, candidate.Key}, candidate, run.stamp)
+			current.usage = lookupUsage(run.input.LookupBase, token, candidate, view.Language)
+		}
+		if candidate.Can(plugin.CapabilityInject) && candidate.Has(plugin.HookPrepareSession) {
+			run.planResident(current, state, compacted, now)
+		}
+		if !current.settle || run.bindsOnly {
+			continue
+		}
 		unbound := false
 		for _, attribute := range candidate.Meta.Metadata {
 			if _, found := run.metadata.Values[attribute.Key]; !found {
 				unbound = true
 			}
-		}
-		// A session computes its resident block once, again when what the
-		// block was computed from changed, and on each turn while it lacks
-		// a value of the plugin's attributes: the block then asks for it.
-		if inject && candidate.Has(plugin.HookPrepareSession) &&
-			(!state.computed || state.residentKey != current.residentKey || (current.settle && unbound)) {
-			current.sessionCall = run.startSession(current)
-		}
-		if !current.settle || run.userMarker {
-			continue
 		}
 		if candidate.Has(plugin.HookObserveTurn) && read {
 			switch {
@@ -323,35 +563,111 @@ func (run *Run) plan(plugins []*plugin.Plugin) {
 	}
 }
 
-// startSession calls prepareSession in the background. Its block, once it
-// comes, serves the session from then on.
-func (run *Run) startSession(current *part) *hookCall {
+// planResident settles whether the request computes the plugin's resident
+// block and why: the session's first request since Core started, a new
+// binding, new settings, the user's refresh, a compacted history, or the
+// automatic check for newer data. A block is computed once and kept, so its
+// bytes, and the prompt cache, hold from one request to the next. The caller
+// holds the sessions' mutex.
+func (run *Run) planResident(current *part, state *pluginState, compacted bool, now time.Time) {
+	trigger := ""
+	switch {
+	case state.pending != nil && state.pendingKey == current.residentKey:
+		// An earlier request's call still computes the block this one
+		// needs: the request waits for it as for its own.
+		current.sessionCall, current.trigger = state.pending, state.pendingTrigger
+		return
+	case !state.computed && state.residentKey == "":
+		trigger = contract.PluginTriggerStart
+	case state.residentKey != current.residentKey:
+		trigger = contract.PluginTriggerConfig
+		if state.metaKey != current.metaKey {
+			trigger = contract.PluginTriggerBound
+		}
+	case state.refresh != "":
+		trigger = state.refresh
+	case compacted && now.Sub(state.compactedAt) >= refreshInterval:
+		trigger = contract.PluginTriggerCompact
+	case current.plugin.Settings.AutoRefresh && current.settle && now.Sub(state.checkedAt) >= refreshInterval:
+		trigger = contract.PluginTriggerAuto
+	}
+	if trigger == "" {
+		return
+	}
+	state.checkedAt = now
+	switch trigger {
+	case contract.PluginTriggerCompact:
+		state.compactedAt = now
+	case contract.PluginTriggerManual:
+		state.refresh = ""
+	case contract.PluginTriggerAuto:
+		current.background = true
+	}
+	current.sessionCall, current.trigger = run.startSession(current, trigger), trigger
+	// A compacted history's block is kept only if it comes in time; any
+	// other is kept when it comes, and later requests wait for it.
+	if trigger != contract.PluginTriggerCompact {
+		state.pending, state.pendingKey, state.pendingTrigger = current.sessionCall, current.residentKey, trigger
+	}
+}
+
+// startSession calls prepareSession in the background. The block it computes
+// for a compacted history goes in only if Inject finds it in time; any other
+// serves the session from when it comes, and the automatic refresh's only
+// when it changed.
+func (run *Run) startSession(current *part, trigger string) *hookCall {
 	call := &hookCall{done: make(chan struct{})}
-	host, session, key := run.host, run.input.Session, current.residentKey
+	host, session := run.host, run.input.Session
+	view := current.view
+	view.Reason = trigger
+	key, meta := current.residentKey, current.metaKey
+	redacts := run.input.Redacts
 	go func() {
 		defer close(call.done)
 		ctx, cancel := context.WithTimeout(context.Background(), sessionHookTimeout)
 		defer cancel()
-		raw, info, err := current.plugin.Call(ctx, plugin.HookPrepareSession, current.view, plugin.CallOptions{
+		if redacts != nil && !current.plugin.Settings.Trusted {
+			view.Redacted = redacts(ctx)
+		}
+		raw, info, err := current.plugin.Call(ctx, plugin.HookPrepareSession, view, plugin.CallOptions{
 			Request: &current.info, NetworkBudget: sessionHookTimeout,
 		})
 		call.info, call.err = info, err
-		if err != nil {
-			return
+		if err == nil {
+			call.result = parseResult(raw, current.plugin, host.metadata)
+			if !call.result.invalid {
+				call.text, call.result.dropped = call.result.system.Render(injection.MaxBlockBytes)
+			}
 		}
-		call.result = parseResult(raw, current.plugin)
-		if call.result.invalid {
-			return
-		}
-		text, dropped := call.result.system.Render(injection.MaxBlockBytes)
-		call.result.dropped = dropped
 		host.sessions.mutex.Lock()
 		defer host.sessions.mutex.Unlock()
 		state := host.sessions.plugin(session, current.plugin.Key)
-		state.computed, state.residentKey, state.resident = true, key, text
-		state.residentTitle = call.result.record.Title
+		superseded := state.pending != nil && state.pending != call && state.pendingKey != key
+		if state.pending == call {
+			state.pending, state.pendingKey, state.pendingTrigger = nil, "", ""
+		}
+		// A block for what the session was before a newer call started, for
+		// another binding, would only be computed over again.
+		if err != nil || call.result.invalid || trigger == contract.PluginTriggerCompact || superseded {
+			return
+		}
+		if trigger == contract.PluginTriggerAuto && (state.residentKey != key || state.resident == call.text) {
+			return
+		}
+		state.keep(call, trigger, key, meta, view.Language, host.now())
 	}()
 	return call
+}
+
+// keep makes what call computed the session's resident block.
+func (state *pluginState) keep(call *hookCall, trigger, key, meta, language string, at time.Time) {
+	state.computed, state.residentKey, state.metaKey, state.resident = true, key, meta, call.text
+	state.record = residentRecord{
+		trigger: trigger, at: at, language: language,
+		given: call.result.record, hasGiven: call.result.hasRecord, dropped: call.result.dropped,
+		info: callSummary{elapsedMs: int(call.info.Elapsed.Milliseconds()), network: networkOf(call.info)},
+	}
+	state.fresh = true
 }
 
 // work checks the turn's text against the privacy policy, then starts the
@@ -360,7 +676,7 @@ func (run *Run) work() {
 	defer close(run.ready)
 	needsText := false
 	for _, current := range run.parts {
-		if current.settle && !run.userMarker && (run.prepares(current) || current.observe == "pending" || current.observe == observeAwaiting) {
+		if current.off == "" && current.settle && !run.bindsOnly && (run.prepares(current) || current.observe == "pending" || current.observe == observeAwaiting) {
 			needsText = true
 		}
 	}
@@ -372,7 +688,7 @@ func (run *Run) work() {
 	defer run.mutex.Unlock()
 	now := time.Now()
 	for _, current := range run.parts {
-		if !current.settle || run.userMarker {
+		if current.off != "" || !current.settle || run.bindsOnly {
 			continue
 		}
 		user := run.turn.user
@@ -453,7 +769,7 @@ func (run *Run) inspect() (UserText, string) {
 	}
 	trusted := true
 	for _, current := range run.parts {
-		trusted = trusted && current.plugin.Settings.Trusted
+		trusted = trusted && (current.off != "" || current.plugin.Settings.Trusted)
 	}
 	if trusted {
 		return user, ""
@@ -491,7 +807,7 @@ func (run *Run) startTurn(current *part, view TurnView) *hookCall {
 		})
 		call.info, call.err = info, err
 		if err == nil {
-			call.result = parseResult(raw, current.plugin)
+			call.result = parseResult(raw, current.plugin, run.host.metadata)
 		}
 	}()
 	return call
@@ -499,8 +815,9 @@ func (run *Run) startTurn(current *part, view TurnView) *hookCall {
 
 // Inject puts the plugins' blocks into body, the request's body in the
 // client's protocol, after waiting for the plugins until the turn's budget
-// runs out. It returns the body to send: body itself when nothing goes in or
-// the injection fails.
+// runs out. Together the blocks stay within the injection budget: past it,
+// the blocks of the plugins later in key order stay out. It returns the body
+// to send: body itself when nothing goes in or the injection fails.
 func (run *Run) Inject(body []byte) []byte {
 	if run == nil {
 		return body
@@ -511,26 +828,68 @@ func (run *Run) Inject(body []byte) []byte {
 	host := run.host
 	request := injection.Request{Protocol: run.input.Protocol, Session: run.input.Session, Body: body}
 	results := make([]injected, len(run.parts))
+	var entries []int
+	used := 0
+	now := host.now()
 	host.sessions.mutex.Lock()
 	for index, current := range run.parts {
+		if current.off != "" {
+			continue
+		}
 		state := host.sessions.plugin(run.input.Session, current.plugin.Key)
+		result := &results[index]
+		if current.trigger == contract.PluginTriggerCompact {
+			// The block of a compacted history goes in now or never: the
+			// next request finds the cache written with the kept one.
+			if called, ok := current.sessionCall.finished(); ok && !called.invalid {
+				state.keep(current.sessionCall, current.trigger, current.residentKey, current.metaKey, current.view.Language, now)
+			}
+		}
 		entry := injection.Plugin{Key: current.plugin.Key}
 		if current.plugin.Can(plugin.CapabilityInject) && state.computed {
 			entry.Resident = state.resident
-			results[index].residentTitle = state.residentTitle
+			result.record, result.kept = state.record, true
+			result.fresh, state.fresh = state.fresh, false
 		}
-		results[index].turnTitle = state.turnTitle
+		// The usage of the plugin's lookups follows its block, in a block
+		// of the gateway's own.
+		if current.usage != "" {
+			entry.Resident = strings.TrimPrefix(entry.Resident+"\n\n"+current.usage, "\n\n")
+		}
+		state.usage = current.usage
+		result.turnTitle = state.turnTitle
+		turnBytes := state.turnBytes
+		var choices map[string][]string
 		if current.settle {
 			entry.Settled = true
-			results[index].turnTitle = ""
-			if result, ok := current.turnCall.finished(); ok && !result.invalid {
-				entry.Turn, results[index].dropped = result.context.Render(injection.MaxBlockBytes)
-				results[index].turnTitle = result.record.Title
+			result.turnTitle, turnBytes = "", 0
+			if called, ok := current.turnCall.finished(); ok && !called.invalid {
+				block := called.context
+				block.Items = withCommands(block.Items, func(name string) (string, bool) {
+					line, ok := run.lookupCommand(current, name)
+					if ok && !slices.Contains(result.commands, name) {
+						result.commands = append(result.commands, name)
+					}
+					return line, ok
+				})
+				entry.Turn, result.dropped = block.Render(injection.MaxBlockBytes)
+				result.turnTitle, turnBytes, choices = called.record.Title, len(entry.Turn), called.choices
 			}
-			state.settled = run.turnKey
-			state.turnTitle = results[index].turnTitle
+		}
+		if size := len(entry.Resident) + turnBytes; size > 0 && used+size > run.settings.InjectionBudgetBytes {
+			entry.Resident, entry.Turn, turnBytes, choices = "", "", 0, nil
+			result.overBudget = true
+		} else {
+			used += size
+		}
+		if current.settle {
+			state.settled, state.turnTitle, state.turnBytes = run.turnKey, result.turnTitle, turnBytes
+			if entry.Turn != "" && len(choices) > 0 {
+				state.choices = choices
+			}
 		}
 		request.Plugins = append(request.Plugins, entry)
+		entries = append(entries, index)
 	}
 	host.sessions.mutex.Unlock()
 	applied, err := host.ledger.Apply(request)
@@ -539,14 +898,15 @@ func (run *Run) Inject(body []byte) []byte {
 		run.report(results, true)
 		return body
 	}
-	for index := range results {
-		results[index].outcome = applied.Outcomes[index]
+	for at, index := range entries {
+		results[index].outcome = applied.Outcomes[at]
 	}
 	run.report(results, false)
 	return applied.Body
 }
 
-// wait waits for each plugin until its wait runs out.
+// wait waits for each plugin until its wait runs out. The automatic refresh
+// runs on without the request.
 func (run *Run) wait() {
 	last := run.began
 	for _, current := range run.parts {
@@ -556,10 +916,14 @@ func (run *Run) wait() {
 		return
 	}
 	for _, current := range run.parts {
-		for _, call := range []*hookCall{current.sessionCall, current.turnCall} {
-			if call != nil {
-				waitUntil(call.done, current.deadline)
-			}
+		if current.off != "" {
+			continue
+		}
+		if current.sessionCall != nil && !current.background {
+			waitUntil(current.sessionCall.done, current.deadline)
+		}
+		if current.turnCall != nil {
+			waitUntil(current.turnCall.done, current.deadline)
 		}
 	}
 }
@@ -618,21 +982,35 @@ func (run *Run) Report() ([]contract.RequestPluginRecord, []contract.RequestEven
 	return records, events
 }
 
-// residentKey names what a resident block is computed from: the plugin's
-// version and configuration, and the request's metadata.
-func residentKey(candidate *plugin.Plugin, meta map[string]plugin.MetaValue) string {
+// metaKey names the metadata a resident block is computed from.
+func metaKey(meta map[string]plugin.MetaValue) string {
 	hash := sha256.New()
-	hash.Write([]byte(candidate.Meta.Version + "\x00"))
-	hash.Write(candidate.Settings.Config)
 	keys := make([]string, 0, len(meta))
 	for key := range meta {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		hash.Write([]byte("\x00" + key + "=" + meta[key].Value + "\x01" + meta[key].Source))
+		hash.Write([]byte(key + "=" + meta[key].Value + "\x01" + meta[key].Source + "\x00"))
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// residentKey names what a resident block is computed from: the plugin's
+// version and configuration, the session's language, and the request's
+// metadata.
+func residentKey(candidate *plugin.Plugin, language, meta string) string {
+	hash := sha256.New()
+	hash.Write([]byte(candidate.Meta.Version + "\x00" + language + "\x00" + meta + "\x00"))
+	hash.Write(candidate.Settings.Config)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func networkOf(info plugin.CallInfo) contract.PluginNetworkCount {
+	return contract.PluginNetworkCount{
+		Requests: info.Network.Requests, Denied: info.Network.Denied,
+		Errors: info.Network.Errors, WaitMs: int(info.Network.Wait.Milliseconds()),
+	}
 }
 
 func clampEvents(events []contract.MetadataEvent) []contract.MetadataEvent {
@@ -640,4 +1018,24 @@ func clampEvents(events []contract.MetadataEvent) []contract.MetadataEvent {
 		events = events[:contract.MaxRequestMetadataEvents]
 	}
 	return slices.Clip(events)
+}
+
+// lookupOpen reports whether the model may run the plugin's lookups in this
+// request: the user turned them on and granted them, and the client, on
+// this machine, offers the model a shell.
+func (run *Run) lookupOpen(current *part) bool {
+	candidate := current.plugin
+	return run.shell && current.off == "" && candidate.Can(plugin.CapabilityTools) &&
+		candidate.Settings.LookupEnabled && candidate.Has(plugin.HookCallTool) && len(candidate.Meta.Tools) > 0
+}
+
+// lookupCommand renders the command of one of the plugin's queries for its
+// blocks, false when the session cannot run it.
+func (run *Run) lookupCommand(current *part, name string) (string, bool) {
+	tool, declared := current.plugin.Meta.Tool(name)
+	if !declared || !run.lookupOpen(current) || (!tool.Unbound && !current.bound) {
+		return "", false
+	}
+	token := run.host.lookups.issue(lookupKey{run.input.Session, current.plugin.Key}, current.plugin, run.stamp)
+	return lookupCommand(run.input.LookupBase, token, current.plugin.Key, tool, current.view.Language), true
 }

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 type recordingServiceTester struct {
@@ -24,7 +23,7 @@ func (tester *recordingServiceTester) Test(_ context.Context, service contract.S
 }
 
 func TestServiceTestAPI(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
 	}

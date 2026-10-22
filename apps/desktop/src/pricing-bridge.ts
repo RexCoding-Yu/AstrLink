@@ -13,6 +13,31 @@ async function call(
     throw new Error("Native gateway unavailable");
   return invoke("pricing", { operation, serviceId, input });
 }
+/** The limits LLM Metadata lists for the official model a gateway model reaches. */
+export interface OfficialModelLimits {
+  contextTokens: number;
+  outputTokens: number;
+}
+
+/** `null` when LLM Metadata lists no official model for it. */
+export async function getOfficialModelLimits(
+  model: string,
+): Promise<OfficialModelLimits | null> {
+  const value = (await call("model", undefined, { model })) as {
+    context_tokens?: unknown;
+    output_tokens?: unknown;
+  } | null;
+  if (value === null) return null;
+  const tokens = (count: unknown) =>
+    Number.isSafeInteger(count) && (count as number) > 0
+      ? (count as number)
+      : 0;
+  return {
+    contextTokens: tokens(value.context_tokens),
+    outputTokens: tokens(value.output_tokens),
+  };
+}
+
 export async function getServiceBilling(id: string) {
   return parseServiceBilling(await call("report", id));
 }

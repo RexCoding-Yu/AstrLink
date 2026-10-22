@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 // Legacy installation migration and ordinary startup filesystem work can still
 // take longer on slow disks even though model weights are verified lazily.
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(180);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const STOP_POLL_DELAY: Duration = Duration::from_millis(25);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,10 +34,11 @@ const SERVICE_MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(65);
 // Policy changes may synchronously stop a worker for up to five seconds, and
 // model deletion also waits for download cancellation and filesystem cleanup.
 const PRIVACY_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
-// Core ends a classifier dry-run at the classifier timeout (at most five
-// seconds) plus five seconds and answers dry_run_timeout, so this deadline
-// only catches a Core that never answers.
-const CLASSIFIER_DRY_RUN_TIMEOUT: Duration = Duration::from_secs(12);
+// Core ends a classifier dry-run at the classifier timeout plus five seconds
+// and answers dry_run_timeout. The timeout is at most five seconds for the
+// cloud classifier and sixty for an existing model, so this deadline only
+// catches a Core that never answers.
+const CLASSIFIER_DRY_RUN_TIMEOUT: Duration = Duration::from_secs(70);
 // Probe and install may pin a large tokenizer/configuration set over a slow
 // connection. The installation call returns before model-weight downloading.
 const PRIVACY_MODEL_METADATA_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -2199,6 +2200,29 @@ impl CoreManager {
         let base = "/control/v1/pricing";
         let (method, path, body) = match operation {
             "status" | "catalog" => (Method::GET, format!("{base}/{operation}"), None),
+            // The official model behind a gateway model; null when unknown.
+            "model" => {
+                let model = input
+                    .as_ref()
+                    .and_then(|value| value.get("model"))
+                    .and_then(|value| value.as_str())
+                    .ok_or("model is required")?;
+                let path = format!(
+                    "/control/v1/model-metadata?model={}",
+                    percent_encode_query(model)
+                );
+                let (status, body) = self
+                    .authenticated_control_status(Method::GET, &path, None, None)
+                    .await?;
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    return Ok(serde_json::Value::Null);
+                }
+                if !status.is_success() {
+                    return Err(control_status_error(&Method::GET, &path, status, &body));
+                }
+                return serde_json::from_slice(&body)
+                    .map_err(|_| "model metadata returned invalid JSON".into());
+            }
             "sync" => (Method::POST, format!("{base}/sync"), None),
             "report" | "configure" | "backfill" => {
                 let id = service_id.ok_or("service ID is required")?;
@@ -2240,6 +2264,32 @@ impl CoreManager {
             .authenticated_control(method, &path, body, None)
             .await?;
         serde_json::from_slice(&body).map_err(|_| "pricing returned invalid JSON".into())
+    }
+
+    /// The reasoning levels of the official model a gateway model reaches,
+    /// or `None` when LLM Metadata does not list it as reasoning.
+    pub async fn official_reasoning(&self, model: &str) -> Result<Option<Vec<String>>, String> {
+        #[derive(Deserialize)]
+        struct ModelMetadata {
+            reasoning: bool,
+            reasoning_levels: Vec<String>,
+        }
+        let path = format!(
+            "/control/v1/model-metadata?model={}",
+            percent_encode_query(model)
+        );
+        let (status, body) = self
+            .authenticated_control_status(Method::GET, &path, None, None)
+            .await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(control_status_error(&Method::GET, &path, status, &body));
+        }
+        serde_json::from_slice::<ModelMetadata>(&body)
+            .map(|model| model.reasoning.then_some(model.reasoning_levels))
+            .map_err(|_| "model metadata returned invalid JSON".into())
     }
 
     /// Configuration sync. `configure` stores the settings, `passphrase` sets
@@ -2323,6 +2373,23 @@ impl CoreManager {
             .authenticated_control(method, &path, body, None)
             .await?;
         serde_json::from_slice(&body).map_err(|_| "session metadata returned invalid JSON".into())
+    }
+
+    /// The plugins' part in a session: read it, pause or resume a plugin
+    /// there, or make its next request load the plugin's block again.
+    pub async fn session_plugins(
+        &self,
+        session_id: &str,
+        key: Option<&str>,
+        input: Option<serde_json::Value>,
+        refresh: bool,
+    ) -> Result<serde_json::Value, String> {
+        validate_resource_id(session_id)?;
+        let (method, path, body) = session_plugins_request(session_id, key, input, refresh)?;
+        let (_, body) = self
+            .authenticated_control(method, &path, body, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "session plugins returned invalid JSON".into())
     }
 
     /// `fresh` asks Core to drop its 30s quota snapshot and query the
@@ -2771,19 +2838,19 @@ impl CoreManager {
     /// sibling resource instead — the same one `get_classifier_settings`
     /// already exposes, through the same authenticated control channel.
     ///
-    /// This lookup is deliberately best-effort, and that is the point. An
-    /// empty list means "no custom dimensions", which is exactly the
-    /// built-in-only table the validator applied before dimensions existed. A
-    /// classifier-settings read that fails, is malformed, or races Core's
-    /// readiness therefore degrades to the previous behaviour rather than
-    /// inventing a new way to reject a routing document. Being unable to
+    /// This lookup is deliberately best-effort, and that is the point. A
+    /// classifier-settings read that fails or races Core's readiness answers
+    /// `None`, and the validator then leaves every name outside the built-in
+    /// table to Core instead of refusing it: Core stored the document against
+    /// the dimensions it holds, and an empty list here would reject every rule
+    /// naming one and keep the routing page from loading. Being unable to
     /// resolve dimensions must never be able to reject a document Core would
     /// accept, so this function never returns an error.
-    async fn known_classifier_dimensions(&self) -> Vec<String> {
-        match self.get_classifier_settings().await {
-            Ok(settings) => classifier_dimension_names(&settings),
-            Err(_) => Vec::new(),
-        }
+    async fn known_classifier_dimensions(&self) -> Option<Vec<String>> {
+        self.get_classifier_settings()
+            .await
+            .ok()
+            .map(|settings| classifier_dimension_names(&settings))
     }
 
     pub async fn get_routing_settings(&self) -> Result<serde_json::Value, String> {
@@ -2792,7 +2859,11 @@ impl CoreManager {
             .await?;
         let value = serde_json::from_slice(&body)
             .map_err(|error| format!("invalid routing settings: {error}"))?;
-        validate_routing_settings(&value, false, &self.known_classifier_dimensions().await)?;
+        validate_routing_settings(
+            &value,
+            false,
+            self.known_classifier_dimensions().await.as_deref(),
+        )?;
         Ok(value)
     }
 
@@ -2802,9 +2873,15 @@ impl CoreManager {
     ) -> Result<serde_json::Value, String> {
         // Fetched once and reused: dimensions belong to the classifier
         // settings, so this PATCH cannot change them between the precheck and
-        // the response validation below.
-        let known_dimensions = self.known_classifier_dimensions().await;
-        validate_routing_settings(&patch, true, &known_dimensions)?;
+        // the response validation below. Only a patch carrying groups needs
+        // them; any other leaves the stored groups, which Core validated, to
+        // Core.
+        let known_dimensions = if patch.get("model_routing_groups").is_some() {
+            self.known_classifier_dimensions().await
+        } else {
+            None
+        };
+        validate_routing_settings(&patch, true, known_dimensions.as_deref())?;
         let (_, body) = self
             .authenticated_control(
                 Method::PATCH,
@@ -2815,7 +2892,7 @@ impl CoreManager {
             .await?;
         let value = serde_json::from_slice(&body)
             .map_err(|error| format!("invalid routing settings: {error}"))?;
-        validate_routing_settings(&value, false, &known_dimensions)?;
+        validate_routing_settings(&value, false, known_dimensions.as_deref())?;
         Ok(value)
     }
 
@@ -3373,13 +3450,6 @@ fn is_builtin_tool_test(method: &Method, path: &str) -> bool {
         )
 }
 
-/// A classifier dry-run makes one real classifier call, and Core runs one at a
-/// time. Sending it again after a wait timed out only meets the first run still
-/// holding that slot, which Core answers with `dry_run_busy`.
-fn is_classifier_dry_run(method: &Method, path: &str) -> bool {
-    *method == Method::POST && control_path(path) == CLASSIFIER_DRY_RUN_PATH
-}
-
 /// A lowercase letter, then up to 31 lowercase letters, digits or `extra`.
 fn valid_plugin_name(value: &str, extra: char) -> bool {
     let mut chars = value.chars();
@@ -3396,11 +3466,20 @@ fn plugin_request(
     input: Option<serde_json::Value>,
 ) -> Result<(Method, String, Option<serde_json::Value>), String> {
     let base = "/control/v1/plugins";
-    if action == "list" {
-        return Ok((Method::GET, base.into(), None));
-    }
-    if action == "reload" {
-        return Ok((Method::POST, format!("{base}/reload"), None));
+    match action {
+        "list" => return Ok((Method::GET, base.into(), None)),
+        "reload" => return Ok((Method::POST, format!("{base}/reload"), None)),
+        // The settings of every plugin at once: the pause, the injection
+        // budget and the interface language.
+        "host" => return Ok((Method::GET, "/control/v1/plugin-host".into(), None)),
+        "update_host" => {
+            return Ok((
+                Method::PATCH,
+                "/control/v1/plugin-host".into(),
+                Some(input.ok_or("plugin host settings are required")?),
+            ))
+        }
+        _ => {}
     }
     let key = key
         .filter(|key| valid_plugin_name(key, '-'))
@@ -3415,6 +3494,25 @@ fn plugin_request(
         ),
         "test" => (Method::POST, format!("{plugin}/test"), None),
         "status" => (Method::GET, format!("{plugin}/status"), None),
+        // The plugin's account over its last 1 to 30 days.
+        "stats" => {
+            let days = input
+                .as_ref()
+                .and_then(|input| input.get("days"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|days| (1..=30).contains(days))
+                .ok_or("the days of the statistics are 1 to 30")?;
+            (Method::GET, format!("{plugin}/stats?days={days}"), None)
+        }
+        "action" => (
+            Method::POST,
+            format!("{plugin}/actions"),
+            Some(input.ok_or("the action is required")?),
+        ),
+        "clear_workspaces" => (Method::DELETE, format!("{plugin}/workspaces"), None),
+        "clear_values" => (Method::DELETE, format!("{plugin}/values"), None),
+        // Voids the credentials the model runs the plugin's lookups with.
+        "revoke_lookups" => (Method::DELETE, format!("{plugin}/lookup-credentials"), None),
         "save_credential" | "delete_credential" => {
             let name = name
                 .filter(|name| valid_plugin_name(name, '_'))
@@ -3462,6 +3560,7 @@ fn metadata_request(
             Some(input.ok_or("the attribute is required")?),
         ),
         "delete" => (Method::DELETE, format!("{base}/{key}"), None),
+        "values" => (Method::GET, format!("{base}/{key}/values"), None),
         _ => return Err("unsupported metadata operation".into()),
     })
 }
@@ -3488,6 +3587,38 @@ fn session_metadata_request(
         format!("{base}/{key}"),
         Some(input.ok_or("the value is required")?),
     ))
+}
+
+/// Translates an operation on the plugins' part in a session into the control
+/// request it makes: read them all, pause or resume one, or refresh one.
+fn session_plugins_request(
+    session_id: &str,
+    key: Option<&str>,
+    input: Option<serde_json::Value>,
+    refresh: bool,
+) -> Result<(Method, String, Option<serde_json::Value>), String> {
+    let base = format!("/control/v1/request-sessions/{session_id}/plugins");
+    let Some(key) = key else {
+        return Ok((Method::GET, base, None));
+    };
+    if !valid_plugin_name(key, '-') {
+        return Err("invalid plugin".into());
+    }
+    if refresh {
+        return Ok((Method::POST, format!("{base}/{key}/refresh"), None));
+    }
+    Ok((
+        Method::PUT,
+        format!("{base}/{key}"),
+        Some(input.ok_or("the pause is required")?),
+    ))
+}
+
+/// A classifier dry-run makes one real classifier call, and Core runs one at a
+/// time. Sending it again after a wait timed out only meets the first run still
+/// holding that slot, which Core answers with `dry_run_busy`.
+fn is_classifier_dry_run(method: &Method, path: &str) -> bool {
+    *method == Method::POST && control_path(path) == CLASSIFIER_DRY_RUN_PATH
 }
 
 /// Translates a sync operation into the control request it makes. Kept apart
@@ -3555,7 +3686,10 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     // Core gives a plugin page hook 10 seconds, and a rescan compiles every
     // changed plugin.
     if path.starts_with("/control/v1/plugins/")
-        && ((method == Method::POST && (path.ends_with("/test") || path.ends_with("/reload")))
+        && ((method == Method::POST
+            && (path.ends_with("/test")
+                || path.ends_with("/reload")
+                || path.ends_with("/actions")))
             || (method == Method::GET && path.ends_with("/status")))
     {
         return Duration::from_secs(20);
@@ -4612,7 +4746,7 @@ fn validate_privacy_model_variants(value: &serde_json::Value) -> Result<(), Stri
         }
         let supported = variant["supported"].as_bool().expect("validated boolean");
         let reason = match variant["unsupported_reason"].as_str() {
-            Some("cpu_only") => Some("cpu_only"),
+            Some(reason @ ("cpu_only" | "requires_macos_26")) => Some(reason),
             None if variant["unsupported_reason"].is_null() => None,
             _ => return Err("privacy model variant unsupported_reason is invalid".to_string()),
         };
@@ -4650,6 +4784,7 @@ fn validate_privacy_model_installation(installation: &serde_json::Value) -> Resu
             "error",
             "label_mapping",
             "installed_at",
+            "preparation",
         ],
         "privacy model installation",
     )?;
@@ -4764,7 +4899,31 @@ fn validate_privacy_model_installation(installation: &serde_json::Value) -> Resu
             return Err("privacy model installation lifecycle fields are inconsistent".to_string())
         }
     }
+    if status != "ready" && !object["preparation"].is_null() {
+        return Err(
+            "privacy model installation preparation needs a ready installation".to_string(),
+        );
+    }
+    validate_privacy_model_preparation(&object["preparation"])?;
     validate_label_mapping(&object["label_mapping"])
+}
+
+/// Core prepares the policy's Core ML model ahead of requests; `fallback`
+/// names the previous detector that inspects requests until it is ready.
+fn validate_privacy_model_preparation(value: &serde_json::Value) -> Result<(), String> {
+    if value.is_null() {
+        return Ok(());
+    }
+    validate_exact_object_keys(value, &["state", "fallback"], "privacy model preparation")?;
+    let fallback = match value["fallback"].as_str() {
+        Some(kind @ ("local_model" | "regex")) => Some(kind),
+        None if value["fallback"].is_null() => None,
+        _ => return Err("privacy model preparation fallback is invalid".to_string()),
+    };
+    match (value["state"].as_str(), fallback) {
+        (Some("preparing" | "failed"), _) | (Some("ready"), None) => Ok(()),
+        _ => Err("privacy model preparation state is invalid".to_string()),
+    }
 }
 
 fn validate_label_mapping(value: &serde_json::Value) -> Result<(), String> {
@@ -5470,6 +5629,7 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
     let mut protocol: Option<&str> = None;
     let mut service_id: Option<&str> = None;
     let mut local_access_token_ids: Vec<&str> = Vec::new();
+    let mut models: Vec<&str> = Vec::new();
     let mut status: Option<&str> = None;
 
     for (key, value) in object {
@@ -5553,6 +5713,26 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
                     local_access_token_ids.push(text);
                 }
             }
+            "models" => {
+                let values = value.as_array().ok_or_else(|| {
+                    "request record query models must be an array of strings".to_string()
+                })?;
+                if values.len() > 100 {
+                    return Err("request record query models has too many entries".to_string());
+                }
+                for value in values {
+                    let text = value.as_str().ok_or_else(|| {
+                        "request record query models must be an array of strings".to_string()
+                    })?;
+                    if text.is_empty()
+                        || text.chars().count() > 256
+                        || text.chars().any(char::is_control)
+                    {
+                        return Err("request record query model is invalid".to_string());
+                    }
+                    models.push(text);
+                }
+            }
             "status" => {
                 let text = value
                     .as_str()
@@ -5594,6 +5774,9 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
             "local_access_token_id={}",
             percent_encode_query(value)
         ));
+    }
+    for value in models {
+        pairs.push(format!("model={}", percent_encode_query(value)));
     }
     if let Some(value) = status {
         pairs.push(format!("status={}", percent_encode_query(value)));
@@ -6732,7 +6915,65 @@ mod tests {
                 None
             )
         );
+        assert_eq!(
+            plugin_request(
+                "stats",
+                Some("powercontext"),
+                None,
+                Some(serde_json::json!({ "days": 7 }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/powercontext/stats?days=7".into(),
+                None
+            )
+        );
+        for days in [
+            serde_json::json!({ "days": 0 }),
+            serde_json::json!({ "days": 31 }),
+        ] {
+            assert!(plugin_request("stats", Some("powercontext"), None, Some(days)).is_err());
+        }
+        assert_eq!(
+            plugin_request("host", None, None, None).unwrap(),
+            (Method::GET, "/control/v1/plugin-host".into(), None)
+        );
+        let language = serde_json::json!({ "language": "ja" });
+        assert_eq!(
+            plugin_request("update_host", None, None, Some(language.clone())).unwrap(),
+            (
+                Method::PATCH,
+                "/control/v1/plugin-host".into(),
+                Some(language)
+            )
+        );
+        let click = serde_json::json!({ "action": "refresh", "session": "session_1" });
+        assert_eq!(
+            plugin_request("action", Some("powercontext"), None, Some(click.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/powercontext/actions".into(),
+                Some(click)
+            )
+        );
+        for (action, path) in [
+            ("clear_workspaces", "workspaces"),
+            ("clear_values", "values"),
+            ("revoke_lookups", "lookup-credentials"),
+        ] {
+            assert_eq!(
+                plugin_request(action, Some("powercontext"), None, None).unwrap(),
+                (
+                    Method::DELETE,
+                    format!("/control/v1/plugins/powercontext/{path}"),
+                    None
+                )
+            );
+        }
         for (action, key, name, input) in [
+            ("update_host", None, None, None),
+            ("action", Some("powercontext"), None, None),
             ("get", Some("../services"), None, None),
             ("get", Some("Team"), None, None),
             ("update", Some("team-rules"), None, None),
@@ -6773,6 +7014,14 @@ mod tests {
             (
                 Method::DELETE,
                 "/control/v1/metadata/attributes/env".into(),
+                None
+            )
+        );
+        assert_eq!(
+            metadata_request("values", Some("project"), None).unwrap(),
+            (
+                Method::GET,
+                "/control/v1/metadata/attributes/project/values".into(),
                 None
             )
         );
@@ -6827,6 +7076,36 @@ mod tests {
         );
         assert!(session_metadata_request("session_1", Some("project"), None, false).is_err());
         assert!(session_metadata_request("session_1", Some("../x"), None, true).is_err());
+    }
+
+    #[test]
+    fn session_plugin_actions_map_to_their_control_requests() {
+        let base = "/control/v1/request-sessions/session_1/plugins";
+        assert_eq!(
+            session_plugins_request("session_1", None, None, false).unwrap(),
+            (Method::GET, base.into(), None)
+        );
+        let pause = serde_json::json!({ "paused": true });
+        assert_eq!(
+            session_plugins_request(
+                "session_1",
+                Some("powercontext"),
+                Some(pause.clone()),
+                false
+            )
+            .unwrap(),
+            (Method::PUT, format!("{base}/powercontext"), Some(pause))
+        );
+        assert_eq!(
+            session_plugins_request("session_1", Some("powercontext"), None, true).unwrap(),
+            (Method::POST, format!("{base}/powercontext/refresh"), None)
+        );
+        assert!(session_plugins_request("session_1", Some("powercontext"), None, false).is_err());
+        assert!(session_plugins_request("session_1", Some("../x"), None, true).is_err());
+        assert_eq!(
+            control_request_timeout(&Method::POST, "/control/v1/plugins/powercontext/actions"),
+            Duration::from_secs(20)
+        );
     }
 
     #[test]
@@ -6999,6 +7278,24 @@ mod tests {
             .unwrap(),
             "?service_id=service_01&local_access_token_id=token_01&local_access_token_id=token_02&status=succeeded&kind=inference"
         );
+        assert_eq!(
+            build_request_session_query(&serde_json::json!({
+                "kind": "inference",
+                "models": ["claude-opus-5-5", "gpt-6.1/sol 模型"]
+            }))
+            .unwrap(),
+            "?model=claude-opus-5-5&model=gpt-6.1%2Fsol%20%E6%A8%A1%E5%9E%8B&kind=inference"
+        );
+        for models in [
+            serde_json::json!("claude-opus-5-5"),
+            serde_json::json!([""]),
+            serde_json::json!([1]),
+            serde_json::json!(["model\nname"]),
+            serde_json::json!(["m".repeat(257)]),
+            serde_json::json!(vec!["model"; 101]),
+        ] {
+            assert!(build_request_session_query(&serde_json::json!({"models": models})).is_err());
+        }
         assert_eq!(
             build_request_session_query(&serde_json::json!({})).unwrap(),
             ""
@@ -7766,6 +8063,39 @@ mod tests {
         assert!(parse_privacy_dry_run_result(&serde_json::to_vec(&legacy).unwrap()).is_ok());
     }
 
+    #[test]
+    fn privacy_model_variants_accept_only_known_unsupported_reasons() {
+        let unsupported = |reason: serde_json::Value| {
+            let mut variant = privacy_variant_value();
+            variant["id"] = serde_json::json!("coreml_fp16_gpu");
+            variant["recommended"] = serde_json::json!(false);
+            variant["supported"] = serde_json::json!(false);
+            variant["unsupported_reason"] = reason;
+            variant
+        };
+        for reason in ["cpu_only", "requires_macos_26"] {
+            let variants = serde_json::json!([
+                privacy_variant_value(),
+                unsupported(serde_json::json!(reason))
+            ]);
+            assert!(
+                validate_privacy_model_variants(&variants).is_ok(),
+                "{reason}"
+            );
+        }
+        for variant in [
+            unsupported(serde_json::json!("requires_macos_15")),
+            unsupported(serde_json::Value::Null),
+            {
+                let mut supported = unsupported(serde_json::json!("requires_macos_26"));
+                supported["supported"] = serde_json::json!(true);
+                supported
+            },
+        ] {
+            assert!(validate_privacy_model_variants(&serde_json::json!([variant])).is_err());
+        }
+    }
+
     fn privacy_variant_value() -> serde_json::Value {
         serde_json::json!({
             "id": "cpu_int8",
@@ -7800,8 +8130,44 @@ mod tests {
             "estimated_ram_bytes": 420_000_000,
             "error": null,
             "label_mapping": {"EMAIL": "email", "MISC": null},
-            "installed_at": null
+            "installed_at": null,
+            "preparation": null
         })
+    }
+
+    #[test]
+    fn validates_policy_model_preparation_state() {
+        let mut installation = privacy_installation_value();
+        installation["status"] = serde_json::json!("ready");
+        installation["bytes_downloaded"] = serde_json::json!(180_000_000);
+        installation["installed_at"] = serde_json::json!("2026-10-17T10:30:00Z");
+        assert!(validate_privacy_model_installation(&installation).is_ok());
+        for preparation in [
+            serde_json::json!({"state": "preparing", "fallback": "local_model"}),
+            serde_json::json!({"state": "preparing", "fallback": null}),
+            serde_json::json!({"state": "failed", "fallback": "regex"}),
+            serde_json::json!({"state": "ready", "fallback": null}),
+        ] {
+            installation["preparation"] = preparation;
+            assert!(validate_privacy_model_installation(&installation).is_ok());
+        }
+        for preparation in [
+            serde_json::json!({"state": "compiling", "fallback": null}),
+            serde_json::json!({"state": "ready", "fallback": "regex"}),
+            serde_json::json!({"state": "preparing", "fallback": "cloud"}),
+            serde_json::json!({"state": "preparing"}),
+            serde_json::json!({"state": "preparing", "fallback": null, "progress": 1}),
+            serde_json::json!("preparing"),
+        ] {
+            installation["preparation"] = preparation;
+            assert!(validate_privacy_model_installation(&installation).is_err());
+        }
+        let mut downloading = privacy_installation_value();
+        downloading["preparation"] = serde_json::json!({"state": "preparing", "fallback": null});
+        assert!(validate_privacy_model_installation(&downloading).is_err());
+        let mut missing = privacy_installation_value();
+        missing.as_object_mut().unwrap().remove("preparation");
+        assert!(validate_privacy_model_installation(&missing).is_err());
     }
 
     #[test]

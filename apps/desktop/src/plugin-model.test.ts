@@ -3,11 +3,19 @@ import { describe, expect, it } from "vitest";
 import {
   parseAccessTokenMetadata,
   parseMetadataAttributes,
+  parseMetadataValues,
+  parsePluginActionResult,
+  parsePluginClearResult,
   parsePluginDetail,
+  parsePluginHostSettings,
   parsePluginList,
   parsePluginStatus,
   parsePluginTestResult,
   parsePluginView,
+  parsePluginStats,
+  parseRequestPluginRecords,
+  parseSessionMetadata,
+  parseSessionPlugins,
 } from "./plugin-model";
 import {
   emptyTrajectoryFields,
@@ -128,6 +136,272 @@ describe("plugin model", () => {
         metadata: [],
       }),
     ).toThrow("$.config");
+  });
+
+  it("reads what the host keeps for a plugin and its host switches", () => {
+    const detail = parsePluginDetail({
+      ...summary,
+      hooks: ["prepareSession", "onAction"],
+      config: {},
+      network_origins: [],
+      privacy_trusted: false,
+      credentials: [],
+      metadata: [],
+      excluded_clients: ["cursor"],
+      workspace_binding: false,
+      auto_refresh: true,
+      lookup_enabled: false,
+      tools: [
+        { name: "search", description: "检索本项目的记忆。" },
+        { name: "projects", description: "列出项目。", unbound: true },
+      ],
+      storage: [{ label: "项目编号", content: false, retention: "一直保留" }],
+      host_storage: [
+        { kind: "workspace_bindings", count: 2 },
+        { kind: "resident_block" },
+        // A kind a newer Core keeps is left out, not refused.
+        { kind: "query_content" },
+      ],
+    });
+    expect(detail.excluded_clients).toEqual(["cursor"]);
+    expect(detail.workspace_binding).toBe(false);
+    expect(detail.auto_refresh).toBe(true);
+    expect(detail.lookup_enabled).toBe(false);
+    expect(detail.tools).toEqual([
+      { name: "search", description: "检索本项目的记忆。" },
+      { name: "projects", description: "列出项目。", unbound: true },
+    ]);
+    expect(detail.storage).toEqual([
+      { label: "项目编号", content: false, retention: "一直保留" },
+    ]);
+    expect(detail.host_storage).toEqual([
+      { kind: "workspace_bindings", count: 2 },
+      { kind: "resident_block" },
+    ]);
+    // An older Core sends none of them: the defaults of a new plugin.
+    const older = parsePluginDetail({
+      ...summary,
+      hooks: [],
+      config: {},
+      network_origins: [],
+      privacy_trusted: false,
+      credentials: [],
+      metadata: [],
+    });
+    expect(older.workspace_binding).toBe(true);
+    expect(older.auto_refresh).toBe(false);
+    expect(older.lookup_enabled).toBe(true);
+    expect(older.tools).toEqual([]);
+    expect(older.host_storage).toEqual([]);
+  });
+
+  it("reads the plugins' settings, their part in a session and a click", () => {
+    expect(
+      parsePluginHostSettings({
+        paused: true,
+        injection_budget_bytes: 16384,
+        language: "ja",
+      }),
+    ).toEqual({ paused: true, injection_budget_bytes: 16384, language: "ja" });
+    expect(() =>
+      parsePluginHostSettings({
+        paused: false,
+        injection_budget_bytes: 16384,
+        language: "fr",
+      }),
+    ).toThrow("$.language");
+    const [part] = parseSessionPlugins({
+      plugins: [
+        {
+          plugin: "powercontext",
+          name: "PowerContext 记忆",
+          paused: false,
+          first_turn: 1,
+          block: {
+            text: "<project-context>…</project-context>",
+            bytes: 38,
+            trigger: "bound",
+            language: "zh-CN",
+            computed_at: "2026-10-21T10:00:00Z",
+          },
+          refresh_pending: true,
+          lookup: '<lookup name="powercontext">…</lookup>',
+        },
+      ],
+    });
+    expect(part?.block?.trigger).toBe("bound");
+    expect(part?.refresh_pending).toBe(true);
+    expect(part?.lookup).toBe('<lookup name="powercontext">…</lookup>');
+    expect(
+      parsePluginActionResult({
+        status: "ok",
+        refresh: true,
+        message: "下一个请求会重新装载记忆。",
+      }),
+    ).toEqual({
+      status: "ok",
+      refresh: true,
+      message: "下一个请求会重新装载记忆。",
+    });
+    expect(parsePluginClearResult({ removed: 3 })).toBe(3);
+    expect(
+      parseMetadataValues({
+        values: [
+          {
+            value: "astrlink",
+            sessions: 3,
+            last_used_at: "2026-10-21T00:00:00Z",
+          },
+        ],
+      }),
+    ).toEqual([
+      { value: "astrlink", sessions: 3, last_used_at: "2026-10-21T00:00:00Z" },
+    ]);
+    const metadata = parseSessionMetadata({
+      values: {},
+      workspace: { name: "astrlink", values: { project: "astrlink" } },
+      choices: { project: ["astrlink", "paseo"] },
+    });
+    expect(metadata.workspace).toEqual({
+      name: "astrlink",
+      values: { project: "astrlink" },
+    });
+    expect(metadata.choices).toEqual({ project: ["astrlink", "paseo"] });
+    expect(parseSessionMetadata({ values: {} })).toEqual({ values: {} });
+  });
+
+  it("reads a plugin's account day by day", () => {
+    const day = {
+      date: "2026-10-21",
+      load: {
+        count: 2,
+        by_trigger: { start: 1, compact: 1 },
+        injected_bytes: 8192,
+        requests: 5,
+        wait_ms: { p50: 300, p95: 900 },
+      },
+      lookup: {
+        ran: 3,
+        refused: 1,
+        counted: 3,
+        with_hits: 2,
+        sessions: 2,
+        looking_up: 1,
+      },
+      binding: {
+        workspace: 1,
+        picked: 0,
+        created: 1,
+        declined: 0,
+        unanswered: 0,
+        changed: 0,
+      },
+      write: { ok: 4, failed: 0 },
+      problems: { failed: 0, timeouts: 1, privacy: 0, over_budget: 0 },
+      cache: {
+        with: { requests: 4, input_tokens: 4000, cache_read_tokens: 3000 },
+        without: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
+      },
+    };
+    const stats = parsePluginStats({
+      days: [day],
+      total: { ...day, date: undefined },
+    });
+    expect(stats.days[0]).toEqual(day);
+    expect(stats.total.date).toBeUndefined();
+    expect(stats.total.lookup.ms).toBeUndefined();
+    expect(() =>
+      parsePluginStats({
+        days: [],
+        total: { ...day, write: { ok: -1, failed: 0 } },
+      }),
+    ).toThrow("$.total.write.ok");
+  });
+
+  it("reads a lookup by its size and the lookups a block offered", () => {
+    const [lookup, ask] = parseRequestPluginRecords(
+      [
+        {
+          plugin: "powercontext",
+          plugin_version: "2.0.0",
+          hook: "callTool",
+          title: "记忆查询",
+          status: "ok",
+          summary: "检索 · 命中 2 条",
+          elapsed_ms: 300,
+          network: { requests: 2, denied: 0, errors: 0, wait_ms: 290 },
+          lookup: {
+            tool: "search",
+            input_runes: 6,
+            result_bytes: 512,
+            hits: 2,
+          },
+        },
+        {
+          plugin: "powercontext",
+          plugin_version: "2.0.0",
+          hook: "prepareTurn",
+          title: "询问项目",
+          status: "ok",
+          summary: "列出 20 个项目",
+          elapsed_ms: 100,
+          network: { requests: 1, denied: 0, errors: 0, wait_ms: 90 },
+          commands: ["projects"],
+        },
+      ],
+      "$.plugin_records",
+    );
+    expect(lookup?.lookup).toEqual({
+      tool: "search",
+      input_runes: 6,
+      result_bytes: 512,
+      hits: 2,
+    });
+    expect(ask?.commands).toEqual(["projects"]);
+    expect(() =>
+      parseRequestPluginRecords(
+        [
+          {
+            plugin: "powercontext",
+            plugin_version: "2.0.0",
+            hook: "callTool",
+            title: "记忆查询",
+            status: "ok",
+            summary: "",
+            elapsed_ms: 1,
+            network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+            lookup: { tool: "search", input_runes: -1, result_bytes: 0 },
+          },
+        ],
+        "$.plugin_records",
+      ),
+    ).toThrow("$.plugin_records[0].lookup.input_runes");
+  });
+
+  it("reads why a block was computed and the buttons a record offers", () => {
+    const [entry] = parseRequestPluginRecords(
+      [
+        {
+          plugin: "powercontext",
+          plugin_version: "2.0.0",
+          hook: "prepareSession",
+          title: "记忆装载",
+          status: "ok",
+          summary: "画像 · 主题 20 个 · 4.2 KB",
+          elapsed_ms: 310,
+          network: { requests: 2, denied: 0, errors: 0, wait_ms: 300 },
+          trigger: "compact",
+          actions: [
+            { id: "refresh", label: "刷新记忆", confirm: "会重写缓存" },
+          ],
+        },
+      ],
+      "$.plugin_records",
+    );
+    expect(entry?.trigger).toBe("compact");
+    expect(entry?.actions).toEqual([
+      { id: "refresh", label: "刷新记忆", confirm: "会重写缓存" },
+    ]);
   });
 
   it("reads the views Core cleaned and refuses anything else", () => {

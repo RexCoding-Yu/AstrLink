@@ -11,9 +11,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/modelmeta"
 )
-
-const SourceURL = "https://basellm.github.io/llm-metadata/api"
 
 // Plan/region catalogs are deliberately not fallback price sources. A service
 // selects one canonical first-party supplier; explicit model bindings can name
@@ -38,7 +37,10 @@ type Catalog struct {
 	ActivatedAt time.Time `json:"activated_at"`
 	ETag        string    `json:"etag"`
 	Prices      []Price   `json:"prices"`
-	Warnings    []string  `json:"warnings"`
+	// Models is what LLM Metadata says about each canonical supplier's
+	// models; nil in a catalog saved before they were kept.
+	Models   []modelmeta.Model `json:"models"`
+	Warnings []string          `json:"warnings"`
 }
 type Status struct {
 	Source    string     `json:"source"`
@@ -136,6 +138,21 @@ func (c Config) Resolve(model string, prices []Price) (Price, bool) {
 	}
 	return match, count == 1
 }
+
+// ResolveModel finds the metadata of a model's official counterpart,
+// matched as Resolve matches its price.
+func (c Config) ResolveModel(model string, models []modelmeta.Model) (modelmeta.Model, bool) {
+	b := c.ResolveBinding(model)
+	var match modelmeta.Model
+	count := 0
+	for _, r := range models {
+		if r.Model == b.Model && (b.Provider == r.Provider || b.Provider == "") {
+			match = r
+			count++
+		}
+	}
+	return match, count == 1
+}
 func AccountKey(service contract.Service) string {
 	id := string(service.ID)
 	if service.Subscription != nil {
@@ -165,12 +182,17 @@ type TokenGroup struct {
 	TokenID string `json:"token_id"`
 	Amounts
 }
+type ServiceGroup struct {
+	ServiceID string `json:"service_id"`
+	Amounts
+}
 type Summary struct {
 	From time.Time `json:"from"`
 	To   time.Time `json:"to"`
 	Amounts
-	ByModel []Group      `json:"by_model"`
-	ByToken []TokenGroup `json:"by_token"`
+	ByModel   []Group        `json:"by_model"`
+	ByToken   []TokenGroup   `json:"by_token"`
+	ByService []ServiceGroup `json:"by_service"`
 }
 type Period struct {
 	ID           string     `json:"id"`

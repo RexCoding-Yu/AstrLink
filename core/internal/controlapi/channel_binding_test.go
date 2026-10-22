@@ -9,12 +9,11 @@ import (
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 func TestSessionChannelBindingControlAuditAndRelease(t *testing.T) {
 	ctx := context.Background()
-	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "audit.db"))
+	store, err := openControlTestStore(t, ctx, filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

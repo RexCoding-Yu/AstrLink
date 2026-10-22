@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,8 +51,15 @@ type Request struct {
 	Conversation convo.RequestSummary
 	// lastUserText is classifier input only. Never persist, log, or cache it.
 	lastUserText string
-	// routingText is a bounded, request-local text view for literal keyword facts.
-	routingText string
+	// routingUserText is the latest real user message as model routing reads
+	// it, for keyword conditions, the input character count and the
+	// classifier, kept up to routingUserTextBytes; routingUserTextRunes counts
+	// the whole message. routingUserTextKnown is false when the protocol keeps
+	// no user turns this gateway reads, or when privacy withheld the text. Set
+	// only for a request naming a routing group; never persist, log, or cache it.
+	routingUserText      string
+	routingUserTextRunes int
+	routingUserTextKnown bool
 	// routingBody is the raw body a routing-group request was classified
 	// from, kept so routing can inspect it under the privacy policy before a
 	// classifier reads any of its text. Never persist, log, or forward it.
@@ -230,18 +238,45 @@ func attachRoutingBody(result *Request, raw []byte) {
 	if !namesModelRoutingGroup(result.Model) {
 		return
 	}
-	result.routingText = boundedRoutingText(raw)
 	result.routingBody = raw
+	result.routingUserText, result.routingUserTextRunes, result.routingUserTextKnown = routingUserText(result.Protocol, raw)
 }
 
-func boundedRoutingText(raw []byte) string {
-	if len(raw) == 0 {
-		return ""
+// routingUserTextBytes bounds the user text model routing keeps. Keyword
+// conditions and the classifier read a message, not a document, and the
+// character count is taken from the whole message first.
+const routingUserTextBytes = 64 << 10
+
+// routingConversationPolicy reads the latest user message whole: conversation
+// linking keeps only a prefix, which would cut the character count short.
+var routingConversationPolicy = func() convo.Policy {
+	policy := conversationPolicy
+	policy.MaxUserTextBytes = math.MaxInt
+	return policy
+}()
+
+// routingUserText reads the latest real user message the way conversation
+// linking does, so tool results and other items a client adds are not taken
+// for the user's words. known is false when the protocol keeps no user turns
+// this gateway reads or the body is not one it can parse.
+func routingUserText(protocol contract.ProtocolID, body []byte) (text string, runes int, known bool) {
+	convoProto, ok := convoProtocol(protocol)
+	if !ok {
+		return "", 0, false
 	}
-	if len(raw) > 64*1024 {
-		raw = raw[:64*1024]
+	summary, err := routingConversationPolicy.InspectBody(convoProto, body)
+	if err != nil {
+		return "", 0, false
 	}
-	return string(raw)
+	text = summary.LastUserText
+	runes = utf8.RuneCountInString(text)
+	if len(text) > routingUserTextBytes {
+		text = text[:routingUserTextBytes]
+		for !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
+	}
+	return text, runes, true
 }
 
 // classifiedWithSanitizedText rebuilds every text view the routing evaluator
@@ -249,15 +284,18 @@ func boundedRoutingText(raw []byte) string {
 // pre-redaction copy: the classifier and literal keyword matching read only
 // what the privacy policy lets leave this machine. A nil body leaves no text.
 func classifiedWithSanitizedText(classified Request, sanitized []byte) Request {
-	classified.routingText = boundedRoutingText(sanitized)
 	classified.routingBody = nil
 	// Unconditional reassignment: a pre-redaction copy must never survive the
 	// rebuild, even when the sanitized body yields no extractable user text —
 	// the empty extraction is the sanitized truth, not a reason to keep raw text.
-	extracted := autotext.ExtractLastUserText(classified.Protocol, sanitized)
-	classified.lastUserText = extracted
-	classified.Conversation.LastUserText = extracted
-	classified.InputPreview = sanitizePreview(extracted)
+	// A nil body withholds the text, so the facts read from it are unknown.
+	classified.routingUserText, classified.routingUserTextRunes, classified.routingUserTextKnown = "", 0, false
+	if sanitized != nil {
+		classified.routingUserText, classified.routingUserTextRunes, classified.routingUserTextKnown = routingUserText(classified.Protocol, sanitized)
+	}
+	classified.lastUserText = classified.routingUserText
+	classified.Conversation.LastUserText = classified.routingUserText
+	classified.InputPreview = sanitizePreview(classified.routingUserText)
 	return classified
 }
 
@@ -414,19 +452,10 @@ func inspectJSONMetadata(request *http.Request, protocol contract.ProtocolID, ma
 	if len(raw) == 0 {
 		return requestMetadata{}, nil
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
 	var fields map[string]json.RawMessage
-	decodeErr := decoder.Decode(&fields)
-	if decodeErr == nil {
-		var extra json.RawMessage
-		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-			decodeErr = errInvalidMetadata
-		}
-	}
-	if decodeErr != nil {
-		return requestMetadata{}, errInvalidMetadata
-	}
-	if fields == nil {
+	// The full body is already buffered. Unmarshal validates exactly one
+	// document without a Decoder allocating another full-size input buffer.
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return requestMetadata{}, errInvalidMetadata
 	}
 	var metadata requestMetadata
@@ -471,6 +500,12 @@ func inspectJSONMetadata(request *http.Request, protocol contract.ProtocolID, ma
 	}
 	if namesModelRoutingGroup(metadata.Model) {
 		metadata.shape = inspectRequestShape(protocol, raw)
+	}
+	// This validated JSON body is replayable already. Reuse classification's
+	// bytes instead of buffering them again when preparing retry attempts.
+	// Best-effort inspection of opaque protocols keeps its original semantics.
+	request.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(raw)), nil
 	}
 	metadata.raw = raw
 	return metadata, nil

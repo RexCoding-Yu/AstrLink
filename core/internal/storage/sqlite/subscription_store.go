@@ -62,6 +62,7 @@ func (store *Store) PutSubscriptionAccount(ctx context.Context, account contract
 		service.Proxy = existing.Service.Proxy
 		service.ResponsesWebSocketEnabled = existing.Service.ResponsesWebSocketEnabled
 		service.ModelRedirects = existing.Service.ModelRedirects
+		service.ModelProtocols = existing.Service.ModelProtocols
 		service.Enabled = existing.Service.Enabled
 		service.PrivacyTrusted = existing.Service.PrivacyTrusted
 		service.FailurePolicy = existing.Service.FailurePolicy

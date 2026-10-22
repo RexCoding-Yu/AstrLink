@@ -142,6 +142,7 @@ func (forwarder *Forwarder) RoundTrip(request *http.Request, target Target) (*ht
 	outbound.Close = false
 	outbound.TransferEncoding = nil
 	outbound.Trailer = nil
+	codexResponses := target.Service.Kind == contract.ServiceKindCodexSubscription && strings.HasSuffix(outbound.URL.Path, "/responses")
 	removeHopByHopHeaders(outbound.Header)
 	removeInboundCredentials(outbound.Header)
 	overlayHeaders(outbound.Header, target.RequestHeaders)
@@ -165,6 +166,11 @@ func (forwarder *Forwarder) RoundTrip(request *http.Request, target Target) (*ht
 	removeHopByHopHeaders(outbound.Header)
 	removeGatewayHeaders(outbound.Header)
 	removeForwardingHeaders(outbound.Header)
+	if codexResponses {
+		// MIME repair and the ingress stream readers need decoded bytes.
+		// Let net/http negotiate and transparently decode gzip itself.
+		outbound.Header.Del("Accept-Encoding")
+	}
 
 	if target.ObserveOutbound != nil {
 		target.ObserveOutbound(outbound)
@@ -180,11 +186,15 @@ func (forwarder *Forwarder) RoundTrip(request *http.Request, target Target) (*ht
 	if response.Body == nil {
 		return nil, &UpstreamError{err: errors.New("round trip returned a response with a nil body")}
 	}
-
 	responseHeaders := response.Header.Clone()
 	removeHopByHopHeaders(responseHeaders)
 	removeCORSHeaders(responseHeaders)
 	removeHeaderFold(responseHeaders, localPolicyWarningHeader)
+	response.Header = responseHeaders
+	if codexResponses {
+		providerapi.CodexResponse(response)
+		responseHeaders = response.Header
+	}
 	body := io.ReadCloser(response.Body)
 	if target.WrapResponseBody != nil {
 		body = target.WrapResponseBody(response.StatusCode, responseHeaders.Clone(), response.Body)
@@ -237,11 +247,20 @@ func removeInboundCredentials(header http.Header) {
 		"Authorization",
 		"Proxy-Authorization",
 		"Cookie",
+		"Origin",
+		"Referer",
 		"X-Api-Key",
 		"X-Goog-Api-Key",
 		localPolicyWarningHeader,
 	} {
 		header.Del(name)
+	}
+	// Browser context belongs to the gateway hop. Provider identity headers
+	// can still be supplied by the target overlay after this cleanup.
+	for name := range header {
+		if strings.HasPrefix(strings.ToLower(name), "sec-fetch-") {
+			delete(header, name)
+		}
 	}
 	// Codex shows its image and search tools only for a provider that sends
 	// this OpenAI header. Its value is a local switch, not a credential that
@@ -305,8 +324,7 @@ func removeForwardingHeaders(header http.Header) {
 	}
 }
 
-// The inference listener is not a browser API. Never let permissive upstream
-// CORS policy turn loopback into a cross-origin credentialed relay.
+// The inference boundary owns CORS. Upstream policy must not override it.
 func removeCORSHeaders(header http.Header) {
 	for name := range header {
 		canonical := http.CanonicalHeaderKey(name)

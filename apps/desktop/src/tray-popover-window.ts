@@ -7,8 +7,9 @@ export const TRAY_POPOVER_LABEL = "tray-popover";
 export const TRAY_STATE_EVENT = "tray:state";
 
 /**
- * Emitted to the main window with the `WorkspacePage.kind` to open, or a named
- * view of one such as {@link TRAY_FAILED_TODAY_PAGE}.
+ * Tells the main window the tray left a page for it to take with
+ * `takeTrayNavigation`: a `WorkspacePage.kind`, or a named view of one such as
+ * {@link TRAY_FAILED_TODAY_PAGE}.
  */
 export const TRAY_NAVIGATE_EVENT = "tray:navigate";
 

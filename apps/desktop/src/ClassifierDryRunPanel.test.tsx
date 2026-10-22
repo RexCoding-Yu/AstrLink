@@ -122,6 +122,7 @@ function classified(
     duration_ms: 42,
     timeout_ms: 1000,
     sanitized_preview: "write a parser for [EMAIL_1]",
+    instruction: null,
     decision: null,
     // 桥接层用 parseClassifierDryRunResult 解析响应，所以这些键在这里总是数组。
     fields: [],
@@ -461,6 +462,49 @@ describe("dry run tab", () => {
     expect(fallback?.textContent).toContain("选用");
   });
 
+  it("names a provider, rule and model that are gone without their IDs", async () => {
+    bridge.getRoutingSettings.mockResolvedValue(routingSettings([codingGroup]));
+    bridge.classifierDryRun.mockResolvedValue(
+      classified({
+        decision: {
+          member_id: "member-gone",
+          service_id: "svc-gone",
+          model: "deepseek-chat",
+          rule_id: "rule-gone",
+          used_default: false,
+        },
+        rules: [
+          {
+            rule_id: "rule-gone",
+            priority: 5,
+            target_member_id: "member-gone",
+            target_model: "",
+            state: "true",
+            selected: true,
+            target_missing: false,
+            fields: [],
+          },
+        ],
+      }),
+    );
+    await render({ group: "coding-auto" });
+    await runOnce();
+
+    const outcome = container.querySelector(
+      "[data-classifier-dry-run-outcome]",
+    );
+    expect(outcome?.textContent).toContain(
+      "会选用 deepseek-chat（已删除的 API 提供商），由一条规则选出",
+    );
+    const row = container.querySelector(
+      '[data-classifier-dry-run-rule="rule-gone"]',
+    );
+    expect(row?.textContent).toContain("已删除的规则");
+    expect(row?.textContent).toContain("已移出路由组的模型");
+    for (const id of ["svc-gone", "rule-gone", "member-gone"])
+      expect(container.textContent).not.toContain(id);
+  });
+
   it("warns when a matching rule points at a member the group lost", async () => {
     bridge.getRoutingSettings.mockResolvedValue(routingSettings([codingGroup]));
     const result = routedResult();
@@ -482,7 +526,7 @@ describe("dry run tab", () => {
     ).toContain("第 3 条规则满足，但它指向的模型已不在这个路由组里");
   });
 
-  it("explains a run that judged no rule", async () => {
+  it("judges the rules without a classifier and says none was called", async () => {
     bridge.getRoutingSettings.mockResolvedValue(routingSettings([codingGroup]));
     bridge.classifierDryRun.mockResolvedValue(
       classified({
@@ -490,6 +534,80 @@ describe("dry run tab", () => {
         category: "",
         confidence: null,
         fallback_reason: "classifier_unavailable",
+        duration_ms: 0,
+        timeout_ms: null,
+        decision: {
+          member_id: "fast",
+          service_id: "svc-deepseek",
+          model: "deepseek-chat",
+          rule_id: null,
+          used_default: true,
+        },
+        rules: [
+          {
+            rule_id: "coding",
+            priority: 30,
+            target_member_id: "strong",
+            target_model: "claude-sonnet-4-5",
+            state: "unknown",
+            selected: false,
+            target_missing: false,
+            fields: [field("task_type", false, "classifier_unavailable")],
+          },
+        ],
+      }),
+    );
+    await render({ group: "coding-auto" });
+    await runOnce();
+
+    expect(
+      container.querySelector("[data-classifier-dry-run-outcome]")?.textContent,
+    ).toContain(
+      "会选用 deepseek-chat（DeepSeek），没有规则满足，使用其他情况的模型",
+    );
+    expect(
+      container.querySelector("[data-classifier-dry-run-not-called]")
+        ?.textContent,
+    ).toBe(
+      "分类器未启用或没配置完整，这次没有调用分类器；依赖它的规则按未知处理。",
+    );
+    expect(
+      container.querySelector("[data-classifier-dry-run-fallback]"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-classifier-dry-run-rules]")?.textContent,
+    ).toContain("分类器没有给出可用的结果");
+    // Nothing was called: the header shows neither the call nor a duration.
+    expect(container.textContent).not.toContain("会调用一次分类器");
+    expect(container.textContent).not.toContain("0 ms");
+  });
+
+  it("shows the instruction the classifier received", async () => {
+    bridge.classifierDryRun.mockResolvedValue(
+      classified({
+        instruction:
+          "Classify the text.\n\ntopic: 编程任务主题\nOptions: 前端 | 后端",
+      }),
+    );
+    await render();
+    await runOnce();
+
+    expect(container.textContent).toContain("分类器收到的指令");
+    expect(
+      container.querySelector("[data-classifier-dry-run-instruction]")
+        ?.textContent,
+    ).toBe("Classify the text.\n\ntopic: 编程任务主题\nOptions: 前端 | 后端");
+  });
+
+  it("explains a run the privacy check stopped before any rule", async () => {
+    bridge.getRoutingSettings.mockResolvedValue(routingSettings([codingGroup]));
+    bridge.classifierDryRun.mockResolvedValue(
+      classified({
+        category: "",
+        confidence: null,
+        fallback_reason: "privacy_blocked",
+        duration_ms: 0,
+        timeout_ms: null,
         sanitized_preview: "",
       }),
     );
@@ -498,9 +616,7 @@ describe("dry run tab", () => {
 
     expect(
       container.querySelector("[data-classifier-dry-run-outcome]")?.textContent,
-    ).toContain("分类器还没配置好");
-    expect(container.textContent).toContain("classifier_unavailable");
-    expect(container.textContent).toContain("未知");
+    ).toContain("隐私检查没有通过");
     expect(
       container.querySelector("[data-classifier-dry-run-rules]"),
     ).toBeNull();

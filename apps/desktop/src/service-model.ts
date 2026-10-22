@@ -59,6 +59,41 @@ export interface ServiceCapability {
   convert_to?: string;
 }
 
+/** Formats a model's upstream format can name. Mirrors contract modelFormats. */
+export const modelFormats = [
+  "openai.responses",
+  "anthropic.messages",
+  "openai.chat",
+  "google.generate_content",
+] as const;
+
+export type ModelFormat = (typeof modelFormats)[number];
+
+/**
+ * One model's upstream format. Mirrors contract.ModelProtocol. A request
+ * entering on any of the four formats is converted to it, or passes through
+ * when it already uses it.
+ */
+export interface ModelProtocol {
+  model: string;
+  protocol: ModelFormat;
+}
+
+/** Product names of the formats, the same in every language. */
+export const modelFormatLabels: Readonly<Record<ModelFormat, string>> = {
+  "openai.responses": "Responses",
+  "anthropic.messages": "Messages",
+  "openai.chat": "Chat",
+  "google.generate_content": "Gemini",
+};
+
+export function isModelFormat(value: unknown): value is ModelFormat {
+  return (
+    typeof value === "string" &&
+    (modelFormats as readonly string[]).includes(value)
+  );
+}
+
 /** Prefer advertised, non-discouraged edges to an actual upstream protocol. */
 export function bestConversionTarget(
   from: string,
@@ -267,6 +302,8 @@ export interface Service {
   privacy_trusted?: boolean;
   /** This provider's own redirects; routing keeps the requested model. */
   model_redirects?: ModelRedirect[];
+  /** Models pinned to an upstream format, sorted by model. Omitted when empty. */
+  model_protocols?: ModelProtocol[];
   failure_policy?: FailurePolicy;
   id: string;
   name: string;
@@ -306,6 +343,7 @@ export type SubscriptionServiceCreateInput = {
   responses_websocket_enabled?: boolean;
   privacy_trusted?: boolean;
   model_redirects?: ModelRedirect[];
+  model_protocols?: ModelProtocol[];
   claude_model_aliases_enabled?: boolean;
   failure_policy?: FailurePolicy;
   name: string;
@@ -320,6 +358,7 @@ export type HTTPServiceCreateInput = {
   responses_websocket_enabled?: boolean;
   privacy_trusted?: boolean;
   model_redirects?: ModelRedirect[];
+  model_protocols?: ModelProtocol[];
   claude_model_aliases_enabled?: boolean;
   failure_policy?: FailurePolicy;
   name: string;
@@ -344,6 +383,8 @@ export type ServicePatchInput = {
   responses_websocket_enabled?: boolean;
   privacy_trusted?: boolean;
   model_redirects?: ModelRedirect[];
+  /** Replaces the whole table. `[]` clears it. */
+  model_protocols?: ModelProtocol[];
   failure_policy?: FailurePolicy | null;
   name?: string;
   enabled?: boolean;
@@ -361,6 +402,8 @@ export interface ServiceModelProbe {
   service_id?: string;
   protocol: ModelDiscoveryProtocol;
   model_ids: string[];
+  /** Formats the upstream list names for models that offer exactly one. */
+  model_protocols?: ModelProtocol[];
 }
 
 export interface DraftServiceModelProbeInput {
@@ -548,6 +591,29 @@ function parseModels(value: unknown, path: string, maximum = 2_000): string[] {
   );
   if (new Set(models).size !== models.length) invalid(path, "duplicate model");
   return models;
+}
+
+function parseModelProtocols(
+  value: unknown,
+  path: string,
+  maximum: number,
+): ModelProtocol[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    return invalid(path, `expected an array with at most ${maximum} items`);
+  }
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const entryPath = `${path}[${index}]`;
+    const entry = objectAt(item, entryPath);
+    keysAt(entry, ["model", "protocol"], [], entryPath);
+    const model = stringAt(entry.model, `${entryPath}.model`, 1, 256);
+    if (seen.has(model)) invalid(`${entryPath}.model`, "duplicate model");
+    seen.add(model);
+    if (!isModelFormat(entry.protocol)) {
+      invalid(`${entryPath}.protocol`, "unknown upstream format");
+    }
+    return { model, protocol: entry.protocol };
+  });
 }
 
 function parseHTTPConnection(
@@ -911,6 +977,7 @@ export function parseService(value: unknown, path = "$"): Service {
       "responses_websocket_enabled",
       "privacy_trusted",
       "model_redirects",
+      "model_protocols",
       "proxy",
     ],
     path,
@@ -955,6 +1022,15 @@ export function parseService(value: unknown, path = "$"): Service {
   }
   const redirectSettings =
     modelRedirects.length > 0 ? { model_redirects: modelRedirects } : {};
+  const modelProtocols = Object.hasOwn(service, "model_protocols")
+    ? parseModelProtocols(
+        service.model_protocols,
+        `${path}.model_protocols`,
+        2_000,
+      )
+    : [];
+  const protocolSettings =
+    modelProtocols.length > 0 ? { model_protocols: modelProtocols } : {};
   const models = parseModels(service.models, `${path}.models`);
   if (!Array.isArray(service.capabilities)) {
     invalid(`${path}.capabilities`, "expected an array");
@@ -993,6 +1069,7 @@ export function parseService(value: unknown, path = "$"): Service {
       ...websocketSetting,
       ...trustSetting,
       ...redirectSettings,
+      ...protocolSettings,
       ...(service.proxy !== undefined
         ? { proxy: parseServiceProxy(service.proxy, id) }
         : {}),
@@ -1025,6 +1102,7 @@ export function parseService(value: unknown, path = "$"): Service {
     ...websocketSetting,
     ...trustSetting,
     ...redirectSettings,
+    ...protocolSettings,
     ...(service.proxy !== undefined
       ? { proxy: parseServiceProxy(service.proxy, id) }
       : {}),
@@ -1046,7 +1124,12 @@ export function parseService(value: unknown, path = "$"): Service {
 
 export function parseServiceModelProbe(value: unknown): ServiceModelProbe {
   const probe = objectAt(value, "$");
-  keysAt(probe, ["protocol", "model_ids"], ["service_id"], "$");
+  keysAt(
+    probe,
+    ["protocol", "model_ids"],
+    ["service_id", "model_protocols"],
+    "$",
+  );
   if (
     probe.protocol !== "openai.models" &&
     probe.protocol !== "google.models"
@@ -1062,6 +1145,14 @@ export function parseServiceModelProbe(value: unknown): ServiceModelProbe {
     if (!resourceIDPattern.test(serviceID))
       invalid("$.service_id", "invalid service ID");
     result.service_id = serviceID;
+  }
+  if (Object.hasOwn(probe, "model_protocols")) {
+    const modelProtocols = parseModelProtocols(
+      probe.model_protocols,
+      "$.model_protocols",
+      10_000,
+    );
+    if (modelProtocols.length > 0) result.model_protocols = modelProtocols;
   }
   return result;
 }
@@ -1227,6 +1318,137 @@ export function withClaudeCodeRedirects(
     result.push({ from, to: model, enabled: true });
   }
   return result;
+}
+
+/**
+ * Formats a provider of this kind can pin a model to. A subscription speaks
+ * a fixed wire format, so its conversion targets bound the choice. Mirrors
+ * contract.ServiceKind.ModelFormats, in the order the editor lists them.
+ */
+export function serviceModelFormats(kind: ServiceKind): readonly ModelFormat[] {
+  if (!isSubscriptionKind(kind)) return modelFormats;
+  const targets = subscriptionConversionTargets[kind];
+  return modelFormats.filter((format) => targets.includes(format));
+}
+
+/**
+ * The format a provider of this kind calls a model in while the model has no
+ * entry of its own. OpenCode, Copilot and Droid serve each model in one
+ * format. Other kinds have none. Keep in step with
+ * contract.ServiceKind.BuiltinModelProtocol.
+ */
+export function serviceBuiltinModelProtocol(
+  kind: ServiceKind,
+  model: string,
+): ModelFormat | undefined {
+  const id = model.toLowerCase();
+  if (kind === "copilot_subscription") {
+    if (id.startsWith("claude-")) return "anthropic.messages";
+    if (
+      id.startsWith("gpt-5") ||
+      id.includes("codex") ||
+      id.startsWith("o1") ||
+      id.startsWith("o3") ||
+      id.startsWith("o4")
+    )
+      return "openai.responses";
+    return "openai.chat";
+  }
+  if (kind === "droid_subscription") {
+    if (id.startsWith("claude-") || id.startsWith("minimax-m2"))
+      return "anthropic.messages";
+    if (id.startsWith("gpt-") || id.startsWith("grok-"))
+      return "openai.responses";
+    return "openai.chat";
+  }
+  if (kind !== "opencode_go" && kind !== "opencode_zen") return undefined;
+  if (id.startsWith("gemini-")) return "google.generate_content";
+  if (
+    id.startsWith("gpt-") ||
+    id.startsWith("grok-") ||
+    id.startsWith("muse-spark-")
+  )
+    return "openai.responses";
+  if (
+    id.startsWith("claude-") ||
+    id.startsWith("qwen") ||
+    id === "union-alpha" ||
+    (kind === "opencode_go" && id.startsWith("minimax-"))
+  )
+    return "anthropic.messages";
+  return "openai.chat";
+}
+
+// Core sorts the table by model. Code-unit order gives the same order for
+// model IDs.
+function sortedByModel(entries: ModelProtocol[]): ModelProtocol[] {
+  return entries.sort((a, b) =>
+    a.model < b.model ? -1 : a.model > b.model ? 1 : 0,
+  );
+}
+
+/** Pins every model to protocol, or makes it automatic again with null. */
+export function withModelProtocols(
+  entries: readonly ModelProtocol[],
+  models: readonly string[],
+  protocol: ModelFormat | null,
+): ModelProtocol[] {
+  const changed = new Set(models);
+  const next = entries.filter((entry) => !changed.has(entry.model));
+  if (protocol !== null) {
+    for (const model of changed) next.push({ model, protocol });
+  }
+  return sortedByModel(next);
+}
+
+/** Drops the formats of models the provider no longer lists. */
+export function pruneModelProtocols(
+  entries: readonly ModelProtocol[],
+  models: readonly string[],
+): ModelProtocol[] {
+  const listed = new Set(models);
+  return entries.filter((entry) => listed.has(entry.model));
+}
+
+/**
+ * Adds the formats a fetched model list names for the models it newly adds.
+ * A model that already has a format keeps it. A format the kind cannot pin,
+ * or one equal to the kind's built-in choice, adds no entry.
+ */
+export function withDiscoveredModelProtocols(
+  kind: ServiceKind,
+  entries: readonly ModelProtocol[],
+  previousModels: readonly string[],
+  models: readonly string[],
+  discovered: readonly ModelProtocol[],
+): ModelProtocol[] {
+  const formats = serviceModelFormats(kind);
+  const previous = new Set(previousModels);
+  const listed = new Set(models);
+  const pinned = new Set(entries.map((entry) => entry.model));
+  const next = [...entries];
+  for (const { model, protocol } of discovered) {
+    if (!listed.has(model) || previous.has(model) || pinned.has(model))
+      continue;
+    if (
+      !formats.includes(protocol) ||
+      serviceBuiltinModelProtocol(kind, model) === protocol
+    )
+      continue;
+    pinned.add(model);
+    next.push({ model, protocol });
+  }
+  return sortedByModel(next);
+}
+
+/** Whether two tables pin the same models to the same formats. */
+export function sameModelProtocols(
+  a: readonly ModelProtocol[],
+  b: readonly ModelProtocol[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const formats = new Map(a.map((entry) => [entry.model, entry.protocol]));
+  return b.every((entry) => formats.get(entry.model) === entry.protocol);
 }
 
 export function responsesWebSocketEnabled(

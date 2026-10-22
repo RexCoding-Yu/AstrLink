@@ -1,11 +1,19 @@
 import type { ReactNode } from "react";
-import Markdown, { type Components } from "react-markdown";
+import Markdown, { type Components, type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { useHighlightedCode } from "@/hooks/use-highlighted-code";
 import { useT } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { openInSystemBrowser } from "./ExternalLink";
 import { Checkbox } from "./ui/checkbox";
+import {
+  CodeBlock,
+  CodeBlockActions,
+  CodeBlockContent,
+  CodeBlockCopyButton,
+  CodeBlockLine,
+} from "./ui/code-block";
 import {
   Table,
   TableBody,
@@ -107,6 +115,30 @@ function MarkdownAlert({
   );
 }
 
+type HastNode = NonNullable<ExtraProps["node"]>["children"][number];
+
+function hastText(node: HastNode): string {
+  if (node.type === "text") return node.value;
+  return "children" in node ? node.children.map(hastText).join("") : "";
+}
+
+/** A fenced block: highlighted by its language, plain when that is unknown. */
+function MarkdownCode({ code, language }: { code: string; language: string }) {
+  const lines = useHighlightedCode(code, language);
+  return (
+    <CodeBlock size="sm">
+      <CodeBlockActions>
+        <CodeBlockCopyButton value={code.replace(/\n$/, "")} />
+      </CodeBlockActions>
+      <CodeBlockContent>
+        {lines.map((line, index) => (
+          <CodeBlockLine key={index}>{line}</CodeBlockLine>
+        ))}
+      </CodeBlockContent>
+    </CodeBlock>
+  );
+}
+
 const components: Components = {
   h1: ({ children }) => <h3 className="text-base font-semibold">{children}</h3>,
   h2: ({ children }) => <h4 className="text-sm font-semibold">{children}</h4>,
@@ -134,11 +166,23 @@ const components: Components = {
       </blockquote>
     );
   },
-  pre: ({ children }) => (
-    <pre className="max-w-full overflow-x-auto rounded-md border bg-background p-3 text-xs [&>code]:bg-transparent [&>code]:p-0">
-      {children}
-    </pre>
-  ),
+  pre: ({ node }) => {
+    const code = node?.children[0];
+    const classes =
+      code?.type === "element" ? code.properties.className : undefined;
+    const language = Array.isArray(classes)
+      ? classes
+          .map(String)
+          .find((name) => name.startsWith("language-"))
+          ?.slice("language-".length)
+      : undefined;
+    return (
+      <MarkdownCode
+        code={node ? hastText(node) : ""}
+        language={language ?? ""}
+      />
+    );
+  },
   code: ({ children, className }) => (
     <code
       className={`rounded-sm bg-background px-1 font-mono text-xs ${className ?? ""}`}

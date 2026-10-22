@@ -97,12 +97,14 @@ func Evaluate(source string, u *contract.Usage, at time.Time) (Valuation, error)
 	if u == nil {
 		return Valuation{}, fmt.Errorf("missing_usage")
 	}
-	if u.BillingIncomplete {
-		return Valuation{}, fmt.Errorf("incomplete_usage")
-	}
 	if err = u.Validate(); err != nil {
 		return Valuation{}, fmt.Errorf("invalid_usage")
 	}
+	// Value what the provider reported, as new-api settles a request, instead
+	// of leaving the call unpriced: an interrupted stream bills its partial
+	// usage, cache writes without a TTL split bill at the 5-minute rate,
+	// unreported audio bills as text, cache hits count as text, and a part
+	// larger than its total is cut down to the total.
 	count := func(v *int) int64 {
 		if v == nil {
 			return 0
@@ -110,51 +112,24 @@ func Evaluate(source string, u *contract.Usage, at time.Time) (Valuation, error)
 		return int64(*v)
 	}
 	in, out := int64(u.InputTokens), int64(u.OutputTokens)
-	read, write, oneHour := count(u.CacheReadTokens), count(u.CacheWriteTokens), count(u.CacheWrite1hTokens)
-	if read+write > in || oneHour > write {
-		return Valuation{}, fmt.Errorf("invalid_cache_partition")
-	}
-	if write > 0 && e.vars["cc1h"] && u.CacheWrite1hTokens == nil {
-		return Valuation{}, fmt.Errorf("missing_cache_ttl")
-	}
+	read := min(count(u.CacheReadTokens), in)
+	write := min(count(u.CacheWriteTokens), in-read)
+	oneHour := min(count(u.CacheWrite1hTokens), write)
 	if e.vars["cr"] {
 		in -= read
 	}
 	if e.vars["cc"] || e.vars["cc1h"] {
 		in -= write
 	}
-	// Equal text/audio rates can be evaluated from totals alone. Prove that
-	// moving tokens between the two partitions cannot change any price/tier;
-	// never treat unknown audio as zero when the breakdown affects the bill.
-	inputSplit := e.vars["ai"] && u.InputTokens > 0 && !e.audioSplitIndependent("p", "ai")
-	outputSplit := e.vars["ao"] && u.OutputTokens > 0 && !e.audioSplitIndependent("c", "ao")
-	if inputSplit && u.InputAudioTokens == nil || outputSplit && u.OutputAudioTokens == nil {
-		return Valuation{}, fmt.Errorf("missing_audio_usage")
-	}
-	audioIn, audioOut := count(u.InputAudioTokens), count(u.OutputAudioTokens)
-	if audioIn > int64(u.InputTokens) || audioOut > int64(u.OutputTokens) {
-		return Valuation{}, fmt.Errorf("invalid_token_partition")
-	}
-	if e.vars["ai"] && !inputSplit {
-		audioIn = 0
-	}
-	if e.vars["ao"] && !outputSplit {
-		audioOut = 0
-	}
+	audioIn, audioOut := min(count(u.InputAudioTokens), in), min(count(u.OutputAudioTokens), out)
 	if e.vars["ai"] {
 		in -= audioIn
 	}
 	if e.vars["ao"] {
 		out -= audioOut
 	}
-	if in < 0 || out < 0 {
-		return Valuation{}, fmt.Errorf("invalid_token_partition")
-	}
 	if !e.vars["cc1h"] {
 		oneHour = 0
-	}
-	if read > 0 && audioIn > 0 && e.vars["cr"] && e.vars["ai"] {
-		return Valuation{}, fmt.Errorf("missing_audio_cache_partition")
 	}
 	values := map[string]int64{"p": in, "c": out, "cr": read, "cc": write - oneHour, "cc1h": oneHour, "ai": audioIn, "ao": audioOut, "len": int64(u.InputTokens)}
 	tier := ""
@@ -287,10 +262,12 @@ func Evaluate(source string, u *contract.Usage, at time.Time) (Valuation, error)
 				return eval(n.Arguments[1])
 			}
 			if name == "param" {
-				if s != "enable_thinking" || u.ThinkingEnabled == nil {
-					return nil, fmt.Errorf("missing_billing_parameter")
+				// As in new-api, a parameter the request did not set is nil,
+				// so `param("enable_thinking") == true` takes the other tier.
+				if s == "enable_thinking" && u.ThinkingEnabled != nil {
+					return *u.ThinkingEnabled, nil
 				}
-				return *u.ThinkingEnabled, nil
+				return nil, nil
 			}
 			zone, err := time.LoadLocation(s)
 			if err != nil {

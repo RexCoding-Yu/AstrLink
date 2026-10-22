@@ -14,8 +14,11 @@ type RelayKitInput struct {
 	Endpoint         contract.Endpoint // compatibility view for callers migrating to Service
 	InputProtocol    contract.ProtocolID
 	UpstreamProtocol contract.ProtocolID
-	Streaming        bool
-	Edges            []contract.ConversionEdge
+	// UpstreamModel is called in its format (Service.ModelProtocol) whether or
+	// not a capability row declares that protocol.
+	UpstreamModel string
+	Streaming     bool
+	Edges         []contract.ConversionEdge
 }
 
 // BuildRelayKit binds exactly one engine-advertised conversion edge to a
@@ -38,7 +41,8 @@ func BuildRelayKit(input RelayKitInput) (contract.ExecutionPlan, error) {
 	if !service.Enabled {
 		return contract.ExecutionPlan{}, ErrEndpointDisabled
 	}
-	if !supportsNative(service, input.UpstreamProtocol, input.Streaming) &&
+	modelFormat := input.UpstreamModel != "" && service.ModelProtocol(input.UpstreamModel) == input.UpstreamProtocol
+	if !modelFormat && !supportsNative(service, input.UpstreamProtocol, input.Streaming) &&
 		!hasDeclaredConversion(service, input.InputProtocol, input.UpstreamProtocol, input.Streaming) {
 		return contract.ExecutionPlan{}, &CapabilityUnavailableError{
 			Protocol: input.UpstreamProtocol, Mode: contract.CapabilityModeNative, Streaming: input.Streaming,

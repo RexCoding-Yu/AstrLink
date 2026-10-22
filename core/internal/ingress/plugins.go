@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/astrlink/convo"
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -40,12 +43,19 @@ func (handler *Handler) beginPlugins(request *http.Request, classified Request, 
 		turn = session.turn.Index
 	}
 	accessTokenID, _ := AccessTokenIDFromContext(ctx)
+	// Only a client on this machine can reach the lookup outlet.
+	lookupBase := ""
+	if loopbackCaller(request.RemoteAddr) && request.Host != "" {
+		lookupBase = "http://" + request.Host
+	}
 	run := handler.plugins.Begin(ctx, pluginhost.Input{
 		RequestID: session.id,
 		Protocol:  classified.Protocol, Model: classified.Model, Client: string(session.clientType),
 		Stream: classified.Streaming, Token: accessTokenID, Header: request.Header,
 		Session: string(session.sessionID), Turn: turn, Body: classified.body,
-		Inspect: handler.pluginInspector(session, classified, accessTokenID),
+		Inspect:    handler.pluginInspector(session, classified, accessTokenID),
+		Redacts:    handler.pluginRedacts(classified, accessTokenID),
+		LookupBase: lookupBase,
 	})
 	if run == nil {
 		return
@@ -64,41 +74,162 @@ func (handler *Handler) pluginInspector(session *recordSession, classified Reque
 	if filter == nil {
 		return nil
 	}
-	protocol, model, conversation := classified.Protocol, classified.Model, string(session.sessionID)
+	scope := privacy.Scope{Protocol: classified.Protocol, Model: classified.Model, AccessTokenID: accessTokenID}
+	conversation := string(session.sessionID)
 	return func(ctx context.Context, texts []string) ([]string, error) {
-		policy, err := filter.ResolvePolicy(ctx, privacy.Scope{Protocol: protocol, Model: model, AccessTokenID: accessTokenID})
-		if err != nil {
-			return nil, err
-		}
-		if !policy.Enabled {
-			return texts, nil
-		}
-		body, paths, err := pluginSampleBody(protocol, texts)
-		if err != nil {
-			return nil, err
-		}
-		result, err := filter.Inspect(privacy.WithConversation(ctx, conversation), policy, protocol, body)
-		if err != nil {
-			return nil, err
-		}
-		switch result.Decision {
-		case privacy.DecisionAllow, privacy.DecisionWarn:
-			return texts, nil
-		case privacy.DecisionRedact:
-			checked := make([]string, len(paths))
-			for index, path := range paths {
-				value := gjson.GetBytes(result.Body, path)
-				if value.Type != gjson.String {
-					return nil, errors.New("the redacted text lost its place")
-				}
-				checked[index] = value.Str
+		return inspectForPlugin(ctx, filter, scope, conversation, texts)
+	}
+}
+
+// lookupInspector checks what a lookup asks as the turn's text was checked
+// before it left for the plugin: under the policy of the session's requests
+// and with its conversation, so a value the plugin keeps a placeholder of
+// is asked by the same placeholder. nil when no policy can apply.
+func (handler *Handler) lookupInspector() func(context.Context, pluginhost.LookupScope, string, []string) ([]string, error) {
+	filter := handler.privacyFilter
+	if filter == nil {
+		return nil
+	}
+	return func(ctx context.Context, scope pluginhost.LookupScope, session string, texts []string) ([]string, error) {
+		return inspectForPlugin(ctx, filter, privacy.Scope{Protocol: scope.Protocol, Model: scope.Model, AccessTokenID: scope.Token}, session, texts)
+	}
+}
+
+// inspectForPlugin checks texts that leave for a plugin against the privacy
+// policy of scope, as for an upstream nobody trusts.
+func inspectForPlugin(ctx context.Context, filter privacy.Filter, scope privacy.Scope, conversation string, texts []string) ([]string, error) {
+	policy, err := filter.ResolvePolicy(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	if !policy.Enabled {
+		return texts, nil
+	}
+	protocol := scope.Protocol
+	if _, ok := convoProtocol(protocol); !ok {
+		protocol = contract.ProtocolOpenAIChat
+	}
+	body, paths, err := pluginSampleBody(protocol, texts)
+	if err != nil {
+		return nil, err
+	}
+	result, err := filter.Inspect(privacy.WithConversation(ctx, conversation), policy, protocol, body)
+	if err != nil {
+		return nil, err
+	}
+	switch result.Decision {
+	case privacy.DecisionAllow, privacy.DecisionWarn:
+		return texts, nil
+	case privacy.DecisionRedact:
+		checked := make([]string, len(paths))
+		for index, path := range paths {
+			value := gjson.GetBytes(result.Body, path)
+			if value.Type != gjson.String {
+				return nil, errors.New("the redacted text lost its place")
 			}
-			return checked, nil
-		case privacy.DecisionBlock:
-			return nil, pluginhost.ErrBlocked
-		default:
-			return nil, errors.New("unknown privacy decision")
+			checked[index] = value.Str
 		}
+		return checked, nil
+	case privacy.DecisionBlock:
+		return nil, pluginhost.ErrBlocked
+	default:
+		return nil, errors.New("unknown privacy decision")
+	}
+}
+
+// loopbackCaller reports whether a request came from this machine.
+func loopbackCaller(remote string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
+}
+
+// serveLookup serves the lookup outlet, GET or POST
+// /tools/{plugin}/{query}: the read-only queries plugins offer the model,
+// which it runs with its shell. Only a caller on this machine reaches it,
+// and no browser; the session's credential stands in for an access token.
+// Answers are plain text, for the model to read as a command's output.
+func (handler *Handler) serveLookup(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Cache-Control", "no-store")
+	reply := func(status int, text string) {
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(status)
+		_, _ = io.WriteString(writer, text+"\n")
+	}
+	if handler.plugins == nil {
+		reply(http.StatusNotFound, "no lookups")
+		return
+	}
+	if !handler.hostAllowed(request.Host) {
+		reply(http.StatusMisdirectedRequest, "request Host does not match the inference listener")
+		return
+	}
+	if request.Header.Get("Origin") != "" || !loopbackCaller(request.RemoteAddr) {
+		reply(http.StatusForbidden, "lookups answer this machine only")
+		return
+	}
+	pluginKey, tool, ok := strings.Cut(strings.TrimPrefix(request.URL.Path, pluginhost.LookupPath), "/")
+	if !ok || !contract.ValidPluginKey(pluginKey) || tool == "" || strings.Contains(tool, "/") {
+		reply(http.StatusNotFound, "no such lookup")
+		return
+	}
+	token, found := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
+	if !found || strings.TrimSpace(token) == "" {
+		writer.Header().Set("WWW-Authenticate", "Bearer")
+		reply(http.StatusUnauthorized, "a lookup needs the credential in the usage")
+		return
+	}
+	var input []byte
+	switch request.Method {
+	case http.MethodGet:
+		values := map[string]string{}
+		for key, given := range request.URL.Query() {
+			if len(given) > 0 {
+				values[key] = given[0]
+			}
+		}
+		if len(request.URL.RawQuery) > pluginhost.MaxLookupBody {
+			reply(http.StatusRequestEntityTooLarge, "the lookup is too large")
+			return
+		}
+		input, _ = json.Marshal(values)
+	case http.MethodPost:
+		body, err := io.ReadAll(io.LimitReader(request.Body, pluginhost.MaxLookupBody+1))
+		if err != nil {
+			reply(http.StatusBadRequest, "the lookup could not be read")
+			return
+		}
+		if len(body) > pluginhost.MaxLookupBody {
+			reply(http.StatusRequestEntityTooLarge, "the lookup is too large")
+			return
+		}
+		input = body
+	default:
+		writer.Header().Set("Allow", "GET, POST")
+		reply(http.StatusMethodNotAllowed, "use GET or POST")
+		return
+	}
+	result := handler.plugins.Lookup(request.Context(), pluginhost.LookupRequest{
+		Plugin: pluginKey, Tool: tool, Token: strings.TrimSpace(token), Input: input, Inspect: handler.lookupInspector(),
+	})
+	reply(result.Status, result.Text)
+}
+
+// pluginRedacts reports whether the privacy policy that applies to the
+// request replaces what it finds with placeholders. nil when no policy can
+// apply.
+func (handler *Handler) pluginRedacts(classified Request, accessTokenID contract.AccessTokenID) func(context.Context) bool {
+	filter := handler.privacyFilter
+	if filter == nil {
+		return nil
+	}
+	scope := privacy.Scope{Protocol: classified.Protocol, Model: classified.Model, AccessTokenID: accessTokenID}
+	return func(ctx context.Context) bool {
+		policy, err := filter.ResolvePolicy(ctx, scope)
+		return err == nil && policy.Enabled && policy.Action == privacy.ActionRedact
 	}
 }
 

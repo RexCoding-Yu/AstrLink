@@ -76,7 +76,7 @@ it("shows read-only cycle costs with no pricing setup workflow", async () => {
     root.render(<PricingWorkspace services={[service]} onClose={() => {}} />),
   );
   expect(document.body.textContent).toContain("$18.42");
-  expect(document.body.textContent).toContain("2 次待计价");
+  expect(document.body.textContent).toContain("2 次未计价");
   expect(document.body.textContent).toContain("仅含已记录调用");
   expect(document.body.textContent).toContain("Moonshot AI");
   expect(document.querySelectorAll('[role="combobox"]')).toHaveLength(1);
@@ -119,7 +119,7 @@ it("keeps the fee and billing period stable during navigation and usage refreshe
   await render(true);
   const text = container.textContent;
   expect(text).toContain("本月 $18.42");
-  expect(text).toContain("部分待计价");
+  expect(text).toContain("部分未计价");
   await render(false);
   const calls = mocks.getServiceBilling.mock.calls.length;
   await act(async () => vi.advanceTimersByTimeAsync(60_000));

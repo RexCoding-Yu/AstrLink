@@ -169,9 +169,11 @@ type Handler struct {
 	conversionEngine         relaykitbridge.ConversionEngine
 	classifier               Classifier
 	classifierSettings       ClassifierSettingsProvider
-	subscriptionRisk         SubscriptionRiskReporter
-	identities               *accountauth.IdentityRegistry
-	sessionFingerprints      sessionFingerprints
+	// clock is the time routing rules read; nil reads the system clock.
+	clock               func() time.Time
+	subscriptionRisk    SubscriptionRiskReporter
+	identities          *accountauth.IdentityRegistry
+	sessionFingerprints sessionFingerprints
 }
 
 const (
@@ -224,6 +226,26 @@ const ReachabilityPath = "/astrlink/reachability"
 // gateway rather than from an intercepting proxy.
 const ReachabilityHeader = "X-AstrLink-Reachable"
 
+// ServiceHeader names the one API provider a client wants, such as a terminal
+// the desktop opened for that provider. Routing then uses no other provider,
+// so the request fails rather than moves on. The forwarder strips it with
+// the rest of the X-AstrLink-* namespace.
+const ServiceHeader = "X-AstrLink-Service"
+
+// requestedService reads ServiceHeader. A blank value names no provider;
+// ok is false when the value is not a provider ID or the header repeats.
+func requestedService(request *http.Request) (contract.ServiceID, bool) {
+	values := request.Header.Values(ServiceHeader)
+	if len(values) > 1 {
+		return "", false
+	}
+	if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+		return "", true
+	}
+	id := contract.ServiceID(strings.TrimSpace(values[0]))
+	return id, id.Validate() == nil
+}
+
 type accessTokenIDContextKey struct{}
 
 // AccessTokenIDFromContext returns the stable identifier of the persistent
@@ -253,9 +275,9 @@ func NewProduction(dependencies Dependencies) (*Handler, error) {
 
 // NewNetworkProduction is the server edition's inference gate. Its listener
 // is reached from other machines by IP, hostname or container name, so any
-// Host is accepted; the access token stays mandatory and browser origins
-// stay refused. Requests rejected before their token is accepted are not
-// recorded, so whoever can reach the port cannot fill the request records.
+// Host is accepted; the access token stays mandatory for browser callers too.
+// Requests rejected before their token is accepted are not recorded, so
+// whoever can reach the port cannot fill the request records.
 func NewNetworkProduction(dependencies Dependencies) (*Handler, error) {
 	if err := validateProductionDependencies(dependencies); err != nil {
 		return nil, err
@@ -266,6 +288,15 @@ func NewNetworkProduction(dependencies Dependencies) (*Handler, error) {
 	handler := NewWithDependencies(dependencies)
 	handler.networkExposed = true
 	return handler, nil
+}
+
+// now is the instant routing rules read, from the system clock unless a test
+// pinned it.
+func (handler *Handler) now() time.Time {
+	if handler.clock != nil {
+		return handler.clock()
+	}
+	return time.Now()
 }
 
 func validateProductionDependencies(dependencies Dependencies) error {
@@ -318,6 +349,20 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	// The policy warning header is owned by this local response boundary.
 	// Strip any client-supplied value so it cannot be spoofed upstream.
 	request.Header.Del(PolicyWarningHeader)
+	// The lookup outlet answers neither browsers nor other machines, so it
+	// comes before the cross-origin headers every other route sends.
+	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && strings.HasPrefix(request.URL.Path, pluginhost.LookupPath) {
+		handler.serveLookup(writer, request)
+		return
+	}
+	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil {
+		writer.Header().Set("Access-Control-Allow-Origin", "*")
+		writer.Header().Set("Access-Control-Expose-Headers", "*")
+		if request.Method == http.MethodOptions {
+			handler.servePreflight(writer, request)
+			return
+		}
+	}
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && request.URL.Path == ReachabilityPath {
 		handler.serveReachability(writer, request)
 		return
@@ -358,16 +403,13 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 
 	var session *recordSession
-	if mode := classifierInternalFrom(request.Context()); mode != nil {
-		// A classification sub-call folds into the caller's record when one is
-		// in context; a standalone call (control-plane dry-run) gets an
-		// in-memory session that is never persisted. The parent's classified
-		// request stays authoritative either way.
-		if mode.SharedSession != nil {
-			session = mode.SharedSession
-		} else {
-			session = handler.startRecordSession(request, classified)
-		}
+	if classifierInternalFrom(request.Context()) != nil {
+		// A classification sub-call, a live request's or a control-plane
+		// dry-run's, gets an in-memory session that is never persisted. Sharing
+		// the parent's would make the classifier's response the parent's
+		// status, HTTP status, first attempt, output id and affinity.
+		session = handler.startRecordSession(request, classified)
+		session.keepInMemory()
 	} else if mode := builtinInternalFrom(request.Context()); mode != nil && mode.SharedSession != nil {
 		session = mode.SharedSession
 		session.classified = classified
@@ -379,7 +421,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		session = handler.startRecordSession(request, classified)
 		handler.beginPlugins(request, classified, session)
 	}
-	if classifierInternalFrom(request.Context()) == nil || classifierInternalFrom(request.Context()).SharedSession != nil {
+	if classifierInternalFrom(request.Context()) == nil {
 		session.persistPending(request.Context(), handler.requestRecords, handler.recordLogger)
 	}
 	outWriter := session.wrap(writer)
@@ -389,11 +431,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			mode.Target = *session.endpointID
 		}
 		if classifierInternalFrom(request.Context()) != nil {
-			// The classification sub-call never finishes its own record: the
-			// shared session belongs to the parent request, and a standalone
-			// session is in-memory only. Its own context may have timed out
-			// without cancelling the parent request, so cancellation is left
-			// to the parent's defer as well.
+			// The classification sub-call keeps no record of its own: its
+			// session is in-memory only, and its context may have timed out
+			// without cancelling the parent request.
 			return
 		}
 		if request.Context().Err() != nil {
@@ -469,13 +509,26 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if handler.tryBuiltinTools(outWriter, request, classified, routingSettings) {
 		return
 	}
-	session.channelBinding = handler.prepareChannelBinding(session, routingSettings, routingSettingsLoaded)
+	pinned, ok := requestedService(request)
+	if !ok {
+		session.captureUnreadRequestBody(request)
+		message := ServiceHeader + " must hold one API provider ID"
+		writeInferenceError(outWriter, http.StatusBadRequest, "invalid_request", message, false, nil)
+		session.noteFailed(errorSummaryFromInference("invalid_request", message, false))
+		return
+	}
+	// A named provider serves every turn of the session, so a binding has
+	// nothing to choose.
+	if pinned == "" {
+		session.channelBinding = handler.prepareChannelBinding(session, routingSettings, routingSettingsLoaded)
+	}
 	resolveRequest := endpoint.ResolveRequest{
 		Protocol:      classified.Protocol,
 		Model:         classified.routingModel(),
 		Streaming:     classified.Streaming,
 		Continuation:  classified.PreviousResponseID != "",
 		AllCandidates: session.channelBinding != nil || responsesWSTurnFromContext(request.Context()) != nil || builtinInternalFrom(request.Context()) != nil || classifierInternalFrom(request.Context()) != nil,
+		Service:       pinned,
 	}
 	var candidates []endpoint.Resolved
 	if classified.ModelRoutingMember != nil {
@@ -490,7 +543,13 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			code, status := "model_routing_member_unavailable", http.StatusServiceUnavailable
 			message := fmt.Sprintf("selected model routing member %q is unavailable", classified.ModelRoutingMember.ID)
 			var capabilityErr *endpoint.CapabilityUnavailableError
-			if errors.As(err, &capabilityErr) {
+			switch {
+			case pinned != "" && pinned != classified.ModelRoutingMember.ServiceID:
+				// The client named one provider and the group chose a model on
+				// another; sending the request again cannot change either.
+				status = http.StatusUnprocessableEntity
+				message = fmt.Sprintf("model routing group chose model %q on another API provider than %s names", classified.ModelRoutingMember.Model, ServiceHeader)
+			case errors.As(err, &capabilityErr):
 				code, status = "model_routing_member_unsupported", http.StatusUnprocessableEntity
 				message = handler.modelRoutingUnsupportedMessage(request.Context(), classified, *classified.ModelRoutingMember, capabilityErr.Reason)
 			}
@@ -540,6 +599,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		session.noteFailed(errorSummaryFromInference("response_affinity_unavailable", err.Error(), false))
 		return
 	}
+	// The client's choice explains the provider better than a connection or
+	// response it implies.
+	session.noteRoutingPin(contract.RoutingSelectionClientPin, pinned)
 	if classified.Protocol.IsModelDiscovery() {
 		handler.aggregateModelDiscovery(outWriter, request, classified, candidates, routingSettings.ModelRedirects)
 		return
@@ -571,8 +633,7 @@ func (handler *Handler) applyPrivacy(
 ) (func(), privacyOutcome, error) {
 	if classifierInternalFrom(request.Context()) != nil {
 		// A classification sub-call carries text model routing already passed
-		// through the policy, and it shares the parent's record: inspecting it
-		// here would report the classifier's call as the parent's attempt.
+		// through the parent request's policy.
 		return func() {}, privacyOutcome{}, nil
 	}
 	session := recordSessionFromContext(request.Context())
@@ -964,10 +1025,6 @@ func (handler *Handler) hostAllowed(host string) bool {
 }
 
 func (handler *Handler) allowLocalCaller(writer http.ResponseWriter, request *http.Request) bool {
-	if hasBrowserOrigin(request.Header) {
-		handler.writeBoundaryError(writer, request, http.StatusForbidden, "origin_forbidden", "browser origins cannot call the inference plane")
-		return false
-	}
 	if !handler.hostAllowed(request.Host) {
 		handler.writeBoundaryError(writer, request, http.StatusMisdirectedRequest, "host_forbidden", "request Host does not match the inference listener")
 		return false
@@ -1101,15 +1158,6 @@ func (handler *Handler) writeRecordedInferenceError(
 	session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 }
 
-func hasBrowserOrigin(header http.Header) bool {
-	for _, value := range header.Values("Origin") {
-		if value != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func localClientCredential(header http.Header) (string, bool) {
 	credentials := make([]string, 0, 3)
 	if values := header.Values("Authorization"); len(values) > 0 {
@@ -1213,7 +1261,12 @@ func (handler *Handler) writeResolveError(writer http.ResponseWriter, request *h
 	}
 	session := recordSessionFromContext(request.Context())
 	var capabilityErr *endpoint.CapabilityUnavailableError
+	var pinnedErr *endpoint.PinnedServiceError
 	switch {
+	case errors.As(err, &pinnedErr):
+		message := pinnedServiceMessage(pinnedErr, classified)
+		writeInferenceError(writer, http.StatusUnprocessableEntity, "api_provider_unavailable", message, false, nil)
+		session.noteFailed(errorSummaryFromInference("api_provider_unavailable", message, false))
 	case errors.As(err, &capabilityErr):
 		message := writeMissingCapability(
 			writer,
@@ -1250,6 +1303,30 @@ func (handler *Handler) writeResolveError(writer http.ResponseWriter, request *h
 			Protocol: string(classified.Protocol), RequiredPlanTypes: []string{string(contract.PlanTypeNative), string(contract.PlanTypeDelegated)},
 		}})
 		session.noteFailed(errorSummaryFromInference("endpoint_resolver_unavailable", "upstream endpoint resolution failed", true))
+	}
+}
+
+// pinnedServiceMessage tells the client why the provider it named in
+// ServiceHeader cannot serve the request, since no other provider will.
+func pinnedServiceMessage(err *endpoint.PinnedServiceError, classified Request) string {
+	if err.Name == "" {
+		return fmt.Sprintf("API provider %q named in %s does not exist", err.Service, ServiceHeader)
+	}
+	switch err.Reason {
+	case contract.RoutingSkipDisabled:
+		return fmt.Sprintf("API provider %q is turned off", err.Name)
+	case contract.RoutingSkipNotConnected:
+		return fmt.Sprintf("API provider %q is not signed in", err.Name)
+	case contract.RoutingSkipRiskPaused:
+		return fmt.Sprintf("API provider %q is paused after its upstream reported a risk", err.Name)
+	case contract.RoutingSkipModelNotListed:
+		return fmt.Sprintf("API provider %q does not serve model %q", err.Name, classified.Model)
+	case contract.RoutingSkipStreamingUnsupported:
+		return fmt.Sprintf("API provider %q cannot stream model %q", err.Name, classified.Model)
+	case contract.RoutingSkipConversionUnavailable:
+		return fmt.Sprintf("API provider %q serves model %q in a format this request cannot be converted to", err.Name, classified.Model)
+	default:
+		return fmt.Sprintf("API provider %q does not accept %s requests", err.Name, classified.Protocol)
 	}
 }
 
@@ -1357,9 +1434,9 @@ type errorDetail struct {
 	RetryAfterSeconds int      `json:"retry_after_seconds,omitempty"`
 }
 
-// writeRateLimited reports that every route is waiting out the delay its
-// upstream asked for with HTTP 429, so nothing was sent upstream. The record
-// keeps the same text the client received.
+// writeRateLimited reports that every route is cooling after an upstream
+// rate limit or overload, so nothing was sent upstream. The record keeps
+// the same text the client received.
 func writeRateLimited(
 	writer http.ResponseWriter,
 	classified Request,
@@ -1379,7 +1456,7 @@ func writeRateLimited(
 			details = append(details, errorDetail{
 				Protocol:          string(classified.Protocol),
 				ServiceID:         string(limit.Service),
-				Reason:            fmt.Sprintf("upstream answered HTTP 429 for model %q", limit.Model),
+				Reason:            fmt.Sprintf("upstream reported a rate limit or overload for model %q", limit.Model),
 				RetryAfterSeconds: seconds,
 			})
 			routes = append(routes, fmt.Sprintf("%s (model %q, %ds left)", name, limit.Model, seconds))
@@ -1393,7 +1470,7 @@ func writeRateLimited(
 		subject = fmt.Sprintf("model %q", classified.Model)
 	}
 	message := fmt.Sprintf(
-		"every provider for %s answered HTTP 429 and is waiting out the retry delay it asked for; nothing was sent upstream",
+		"every provider for %s is waiting out an upstream rate limit or overload cooldown; nothing was sent upstream",
 		subject,
 	)
 	if len(routes) > 0 {

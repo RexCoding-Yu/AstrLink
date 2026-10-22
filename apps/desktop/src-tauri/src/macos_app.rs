@@ -125,6 +125,11 @@ pub fn enter_dev_bundle() -> Result<(), Box<dyn std::error::Error>> {
         .into())
 }
 
+/// Why AstrLink asks to control Terminal or iTerm2, as macOS shows it.
+#[cfg(any(dev, test))]
+const APPLE_EVENTS_USAGE: &str =
+    "AstrLink opens a Terminal or iTerm2 window for the API provider you choose.";
+
 #[cfg(any(dev, test))]
 fn stage_dev_bundle(
     executable: &Path,
@@ -161,11 +166,14 @@ fn stage_dev_bundle(
 </dict></array>
 <key>LSMinimumSystemVersion</key><string>13.4</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAppleEventsUsageDescription</key><string>{apple_events}</string>
 </dict></plist>
 "#,
         identifier = target.identifier,
         name = target.name,
         link_scheme = target.link_scheme,
+        // Release builds take it from src-tauri/Info.plist.
+        apple_events = APPLE_EVENTS_USAGE,
     );
     fs::write(contents.join("Info.plist"), plist)?;
     fs::write(
@@ -268,6 +276,7 @@ mod tests {
             ("CFBundleIdentifier", DEV_BUNDLE.identifier),
             ("CFBundleDisplayName", "AstrLink"),
             ("CFBundleIconFile", "icon.icns"),
+            ("NSAppleEventsUsageDescription", APPLE_EVENTS_USAGE),
         ] {
             let value = info.get(CFString::new(key)).downcast::<CFString>().unwrap();
             assert_eq!(value.to_string(), expected);

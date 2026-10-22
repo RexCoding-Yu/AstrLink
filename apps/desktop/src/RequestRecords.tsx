@@ -1,5 +1,6 @@
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { SessionChannelBindings } from "./SessionChannelBindings";
+import { SessionMemory } from "./SessionMemory";
 import { SessionMetadataChips } from "./SessionMetadata";
 import { RecoveryChain, RecoveryDetails } from "./components/RecoveryDetails";
 import {
@@ -18,7 +19,7 @@ import {
   ChevronUp,
   Copy,
   SlidersHorizontal as ListFilter,
-  Menu as Ellipsis,
+  Ellipsis,
   MessageSquare,
   RefreshCw,
   SlidersHorizontal as Settings2,
@@ -35,6 +36,7 @@ import { FilterSelect } from "@/components/FilterSelect";
 import { ServiceSelect } from "@/components/ServiceSelect";
 import { FormMessage } from "@/components/FormMessage";
 import { MultiFilterSelect } from "@/components/MultiFilterSelect";
+import { UsageRangePicker } from "@/components/UsageRangePicker";
 import { HelpPopover } from "@/components/HelpPopover";
 import { IconButton } from "@/components/IconButton";
 import { ModelLabel } from "@/components/ModelLabel";
@@ -82,6 +84,7 @@ import {
   getRawSealingStatus,
   getRequestAuditContent,
   getRequestSession,
+  getSessionPlugins,
   listenRawSealingChanged,
   listRequestRecordChildren,
   listRequestSessions,
@@ -122,6 +125,7 @@ import {
   liveDurationMs,
   sessionRuntimeMs,
   type RecordFilters,
+  type RecordsTarget,
 } from "./request-live-model";
 import {
   CLIENT_TYPES,
@@ -136,6 +140,8 @@ import {
   type RequestSession,
   type RequestSessionDetail,
   type RequestSessionKind,
+  type RequestSessionListQuery,
+  type RequestStatus,
   type SessionStatus,
 } from "./request-record-model";
 import { RequestConversation } from "./RequestConversation";
@@ -145,6 +151,7 @@ import { RequestTrajectory } from "./RequestTrajectory";
 import {
   applyQueuedSessions,
   groupSessionsByDate,
+  listOnlyFiltersActive,
   mergeLiveSessions,
   removeSessions,
   replaceSession,
@@ -154,7 +161,12 @@ import {
   sessionSummary,
 } from "./session-live-model";
 import { protocolEntryPath } from "./service-presets";
-import type { UsageWindow } from "./usage-range";
+import {
+  resolveUsageWindow,
+  usageRangeKey,
+  USAGE_RANGE_PRESETS,
+  type UsageRange,
+} from "./usage-range";
 
 const PAGE_LIMIT = 50;
 const POLL_INTERVAL_MS = 1000;
@@ -178,6 +190,28 @@ const EMPTY_FILTERS: RecordFilters = {
   localAccessTokenIds: [],
 };
 
+/** The list filters a target sets; the rest start cleared. */
+function targetFilters(target: RecordsTarget | undefined): RecordFilters {
+  return {
+    ...EMPTY_FILTERS,
+    serviceId: target?.serviceId ?? "",
+    localAccessTokenIds: target?.tokenId ? [target.tokenId] : [],
+  };
+}
+
+function sameFilters(left: RecordFilters, right: RecordFilters): boolean {
+  return (
+    left.status === right.status &&
+    left.serviceId === right.serviceId &&
+    left.protocol === right.protocol &&
+    left.clientType === right.clientType &&
+    left.localAccessTokenIds.length === right.localAccessTokenIds.length &&
+    left.localAccessTokenIds.every(
+      (id, index) => id === right.localAccessTokenIds[index],
+    )
+  );
+}
+
 type RecordsView = "monitor" | "detail";
 type RecordsKind = RequestSessionKind | "all";
 type DetailTab =
@@ -186,6 +220,7 @@ type DetailTab =
   | "content"
   | "audit"
   | "binding"
+  | "memory"
   | "modelRouting";
 // Copies started from a menu lose their button when it closes, so their
 // outcome is announced beside the actions instead.
@@ -200,6 +235,7 @@ const DETAIL_TABS: readonly DetailTab[] = [
   "content",
   "audit",
   "binding",
+  "memory",
   "modelRouting",
 ];
 type PendingConfirm =
@@ -312,23 +348,19 @@ export function RequestRecords({
   accessTokensReady,
   coreSessionKey,
   initialDetailTab = "conversation",
-  initialFailedWithin,
-  initialLocalAccessTokenId,
   isReady,
   services,
   conversionEngine,
   onEditRoutingGroup,
   onOpenService,
   onServicesChanged,
+  target,
 }: {
   accessTokens: AccessTokenSummary[];
   accessTokensReady: boolean;
   coreSessionKey: string | null;
   /** The reading tab a session opens on until the operator picks one. */
   initialDetailTab?: "conversation" | "trajectory";
-  /** Lists the conversations with a call that failed in this window. */
-  initialFailedWithin?: Pick<UsageWindow, "from" | "to">;
-  initialLocalAccessTokenId?: string;
   isReady: boolean;
   services: (RoutableService & RequestService)[];
   /** Decides whether a provider can open a missing entry by converting. */
@@ -338,6 +370,11 @@ export function RequestRecords({
   onOpenService?: (serviceID: string) => void;
   /** A provider changed from here; reload the list. */
   onServicesChanged?: () => void;
+  /**
+   * The narrowing another page opened the list on. Each navigation is a new
+   * object, so opening the same target again restores what was cleared.
+   */
+  target?: RecordsTarget;
 }) {
   const t = i18n.t.bind(i18n);
   const servicesById = useMemo(
@@ -350,34 +387,48 @@ export function RequestRecords({
   );
   const [view, setView] = useState<RecordsView>("monitor");
   const [kind, setKind] = useState<RecordsKind>("inference");
-  const [filters, setFilters] = useState<RecordFilters>(() => ({
-    ...EMPTY_FILTERS,
-    localAccessTokenIds: initialLocalAccessTokenId
-      ? [initialLocalAccessTokenId]
-      : [],
-  }));
-  const tokenFilter = () =>
-    filters.localAccessTokenIds.length
-      ? filters.localAccessTokenIds
-      : undefined;
-  const localAccessTokenFilterKey = filters.localAccessTokenIds.join("\u0000");
-  const [failedWithin, setFailedWithin] = useState(initialFailedWithin ?? null);
-  // Core matches the status of each call in the window, not a conversation's
-  // outcome, so a conversation that failed and then recovered still lists.
-  // That keeps every failure the tray counted for today on screen.
-  const failedQuery = failedWithin
-    ? {
-        status: "failed" as const,
-        from: failedWithin.from,
-        to: failedWithin.to,
-      }
-    : {};
-  const failedWithinKey = failedWithin
-    ? `:failed:${failedWithin.from}/${failedWithin.to}`
+  const [filters, setFilters] = useState<RecordFilters>(() =>
+    targetFilters(target),
+  );
+  const [models, setModels] = useState<string[]>(() => target?.models ?? []);
+  const [dateRange, setDateRange] = useState<UsageRange | null>(
+    () => target?.range ?? null,
+  );
+  // Core matches the status of each call, not a conversation's outcome, so a
+  // conversation that failed and then recovered still lists. That keeps every
+  // call the tray or the overview counted on screen.
+  const [callStatus, setCallStatus] = useState<RequestStatus | null>(
+    () => target?.status ?? null,
+  );
+  const callStatusLabel = callStatus
+    ? t("records.callStatus", { status: statusLabel(callStatus) })
     : "";
-  // Core applies the token filter, so each selection retains its own list.
+  // Core applies the token, model, time and call status filters, so each
+  // combination retains its own list.
+  const serverFilterKey = [
+    filters.localAccessTokenIds.join("\u0000"),
+    models.join("\u0000"),
+    dateRange === null ? "" : usageRangeKey(dateRange),
+    callStatus ?? "",
+  ].join("\u0001");
+  // A preset range moves with the clock, so every read resolves it again.
+  const sessionQuery = (cursor?: string): RequestSessionListQuery => {
+    const window =
+      dateRange === null ? null : resolveUsageWindow(dateRange, new Date());
+    return {
+      limit: PAGE_LIMIT,
+      kind: kind === "all" ? undefined : kind,
+      local_access_token_ids: filters.localAccessTokenIds.length
+        ? filters.localAccessTokenIds
+        : undefined,
+      ...(models.length ? { models } : {}),
+      ...(window ? { from: window.from, to: window.to } : {}),
+      ...(callStatus ? { status: callStatus } : {}),
+      ...(cursor === undefined ? {} : { cursor }),
+    };
+  };
   const [live, setLive] = useWorkspaceSnapshot<LiveState>(
-    `request-list:${coreSessionKey}:${kind}:${localAccessTokenFilterKey}${failedWithinKey}`,
+    `request-list:${coreSessionKey}:${kind}:${serverFilterKey}`,
     {
       items: [],
       queued: [],
@@ -387,7 +438,7 @@ export function RequestRecords({
   const [listStatus, setListStatus] = useWorkspaceSnapshot<
     "blocked" | "loading" | "ready" | "error"
   >(
-    `request-list-status:${coreSessionKey}:${kind}:${localAccessTokenFilterKey}${failedWithinKey}`,
+    `request-list-status:${coreSessionKey}:${kind}:${serverFilterKey}`,
     "blocked",
   );
   const [listError, setListError] = useState<string | null>(null);
@@ -476,6 +527,34 @@ export function RequestRecords({
         .length,
     [filters, live.queued],
   );
+  // Core pages ignore the list-only filters, so a narrowed list keeps reading
+  // earlier pages until it shows `target` matches or reaches the oldest one.
+  // Otherwise a rare status matched nothing among the loaded pages and read as
+  // no match at all. `asked` is the cursor last read: a page that failed is
+  // read again only from load earlier. A new filter or list starts over.
+  const narrowed = listOnlyFiltersActive(filters);
+  const fillKey = [
+    coreSessionKey,
+    kind,
+    serverFilterKey,
+    filters.status,
+    filters.serviceId,
+    filters.protocol,
+    filters.clientType,
+  ].join("\u0000");
+  const [fill, setFill] = useState<{
+    key: string;
+    target: number;
+    asked: string | null;
+  }>({ key: fillKey, target: PAGE_LIMIT, asked: null });
+  const fillTarget = fill.key === fillKey ? fill.target : PAGE_LIMIT;
+  const fillAsked = fill.key === fillKey ? fill.asked : null;
+  const filling =
+    narrowed &&
+    listStatus === "ready" &&
+    live.nextCursor !== null &&
+    live.nextCursor !== fillAsked &&
+    visibleItems.length < fillTarget;
   // Only rows on screen count, so a filter change never deletes sessions the
   // operator can no longer see.
   const selectableItems = useMemo(
@@ -529,7 +608,10 @@ export function RequestRecords({
   useEffect(() => {
     if (!selectedId) return;
     let cancelled = false;
+    let running = false;
     const load = async () => {
+      if (cancelled || running) return;
+      running = true;
       try {
         const detail = await getRequestSession(selectedId);
         if (cancelled) return;
@@ -551,6 +633,8 @@ export function RequestRecords({
         });
       } catch {
         /* detail view shows missing via selectedSession === null */
+      } finally {
+        running = false;
       }
     };
     const fresh = freshDetailRef.current === selectedId;
@@ -561,7 +645,9 @@ export function RequestRecords({
         cancelled = true;
       };
     }
-    const timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void load();
+    }, POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -597,6 +683,33 @@ export function RequestRecords({
       ...(seen.has("unknown") ? (["unknown"] as const) : []),
     ];
   }, [allRecords, filters.clientType]);
+  // Every model a loaded call named. Core narrows the list to the chosen
+  // models, so names an earlier list showed stay: choosing one model must not
+  // drop the others from the menu or move the rows below them.
+  const [calledModels, setCalledModels] = useWorkspaceSnapshot<
+    readonly string[]
+  >(`request-models:${coreSessionKey}`, []);
+  useEffect(() => {
+    setCalledModels((current) => {
+      const names = new Set(current);
+      allRecords.forEach((session) => {
+        if (session.requested_model) names.add(session.requested_model);
+        if (session.model_redirect?.to) names.add(session.model_redirect.to);
+      });
+      return names.size === current.length ? current : [...names];
+    });
+  }, [allRecords, setCalledModels]);
+  // The models providers list, plus any a loaded call named and the ones
+  // chosen, so a choice never drops out of its own list.
+  const modelOptions = useMemo(() => {
+    const names = new Set([...models, ...calledModels]);
+    services.forEach((service) =>
+      service.models.forEach((model) => names.add(model)),
+    );
+    return [...names]
+      .sort((left, right) => left.localeCompare(right))
+      .map((model) => ({ value: model, label: model }));
+  }, [calledModels, models, services]);
 
   useEffect(() => {
     const generation = generationRef.current + 1;
@@ -618,30 +731,20 @@ export function RequestRecords({
     setAuditContent(null);
     setAuditLoading(false);
     setAuditError(null);
-    const initialTokenIds = initialLocalAccessTokenId
-      ? [initialLocalAccessTokenId]
-      : [];
-    setFilters((current) => {
-      const sameTokenSelection =
-        current.localAccessTokenIds.length === initialTokenIds.length &&
-        current.localAccessTokenIds.every(
-          (id, index) => id === initialTokenIds[index],
-        );
-      if (
-        sameTokenSelection &&
-        current.status === EMPTY_FILTERS.status &&
-        current.serviceId === EMPTY_FILTERS.serviceId &&
-        current.protocol === EMPTY_FILTERS.protocol &&
-        current.clientType === EMPTY_FILTERS.clientType
-      ) {
-        return current;
-      }
-      return { ...EMPTY_FILTERS, localAccessTokenIds: initialTokenIds };
-    });
-    // Every tray click is a new target object, so clicking again restores the
-    // narrowing after the operator cleared it. The count covers model calls.
-    setFailedWithin(initialFailedWithin ?? null);
-    if (initialFailedWithin) setKind("inference");
+    const initialFilters = targetFilters(target);
+    setFilters((current) =>
+      sameFilters(current, initialFilters) ? current : initialFilters,
+    );
+    const initialModels = target?.models ?? [];
+    setModels((current) =>
+      current.join("\u0000") === initialModels.join("\u0000")
+        ? current
+        : initialModels,
+    );
+    setDateRange(target?.range ?? null);
+    setCallStatus(target?.status ?? null);
+    // The counts a target comes from cover model calls only.
+    if (target?.status || target?.models?.length) setKind("inference");
     setSettingsOpen(false);
     setSettings(null);
     setSettingsDraft(null);
@@ -677,7 +780,7 @@ export function RequestRecords({
         if (generationRef.current !== generation) return;
         setRawSealingError(rawSealingErrorMessage(requestError));
       });
-  }, [coreSessionKey, initialFailedWithin, initialLocalAccessTokenId, isReady]);
+  }, [coreSessionKey, isReady, target]);
 
   useEffect(() => {
     if (!accessTokensReady) return;
@@ -705,12 +808,7 @@ export function RequestRecords({
     );
     if (!isReady) return;
     pollInFlightRef.current = true;
-    void listRequestSessions({
-      limit: PAGE_LIMIT,
-      kind: kind === "all" ? undefined : kind,
-      local_access_token_ids: tokenFilter(),
-      ...failedQuery,
-    })
+    void listRequestSessions(sessionQuery())
       .then((page) => {
         if (listGenerationRef.current !== generation) return;
         // Coming back to the page usually finds the list it left. Keeping
@@ -741,13 +839,7 @@ export function RequestRecords({
     return () => {
       listGenerationRef.current += 1;
     };
-  }, [
-    coreSessionKey,
-    failedWithinKey,
-    isReady,
-    kind,
-    localAccessTokenFilterKey,
-  ]);
+  }, [coreSessionKey, isReady, kind, serverFilterKey]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -761,12 +853,7 @@ export function RequestRecords({
       }
       pollInFlightRef.current = true;
       try {
-        const page = await listRequestSessions({
-          limit: PAGE_LIMIT,
-          kind: kind === "all" ? undefined : kind,
-          local_access_token_ids: tokenFilter(),
-          ...failedQuery,
-        });
+        const page = await listRequestSessions(sessionQuery());
         if (listGenerationRef.current !== generation) return;
         setLive((current) => {
           // Rows must not shift under a pointer about to check one.
@@ -836,13 +923,7 @@ export function RequestRecords({
       document.removeEventListener("visibilitychange", onVisibilityChange);
       manualPollRef.current = null;
     };
-  }, [
-    coreSessionKey,
-    failedWithinKey,
-    isReady,
-    kind,
-    localAccessTokenFilterKey,
-  ]);
+  }, [coreSessionKey, isReady, kind, serverFilterKey]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1129,17 +1210,13 @@ export function RequestRecords({
     const generation = listGenerationRef.current;
     const cursor = live.nextCursor;
     setLoadingMore(true);
-    setError(null);
     try {
-      const page = await listRequestSessions({
-        limit: PAGE_LIMIT,
-        kind: kind === "all" ? undefined : kind,
-        local_access_token_ids: tokenFilter(),
-        ...failedQuery,
-        cursor,
-      });
+      const page = await listRequestSessions(sessionQuery(cursor));
       if (listGenerationRef.current !== generation) return;
       setLive((current) => {
+        // A first page that landed meanwhile restarted the list from a newer
+        // cursor; this page would leave a gap behind it.
+        if (current.nextCursor !== cursor) return current;
         const known = new Set(
           [...current.items, ...current.queued].map((session) => session.id),
         );
@@ -1159,6 +1236,26 @@ export function RequestRecords({
       if (listGenerationRef.current === generation) setLoadingMore(false);
     }
   };
+
+  // Reads the next page now; a narrowed list then reads on until it shows a
+  // page more of matches.
+  const loadEarlier = () => {
+    setError(null);
+    setFill({
+      key: fillKey,
+      target: visibleItems.length + PAGE_LIMIT,
+      asked: live.nextCursor,
+    });
+    void loadMore();
+  };
+
+  // Reading back on its own leaves the error banner alone, so it never hides
+  // a failure the operator has not seen yet.
+  useEffect(() => {
+    if (!filling || loadingMore) return;
+    setFill({ key: fillKey, target: fillTarget, asked: live.nextCursor });
+    void loadMore();
+  }, [filling, loadingMore, live.nextCursor]);
 
   /** Drops deleted conversations from the list without reloading its pages. */
   const dropFromList = (gone: ReadonlySet<string>) => {
@@ -1343,12 +1440,7 @@ export function RequestRecords({
           blobs: result.deleted_audit_blobs,
         }),
       );
-      const page = await listRequestSessions({
-        limit: PAGE_LIMIT,
-        kind: kind === "all" ? undefined : kind,
-        local_access_token_ids: tokenFilter(),
-        ...failedQuery,
-      });
+      const page = await listRequestSessions(sessionQuery());
       if (listGenerationRef.current !== generation) return;
       setLive({
         items: page.items,
@@ -1606,9 +1698,11 @@ export function RequestRecords({
           onValueChange={(value) => {
             setKind(value as RecordsKind);
             setFilters((current) => ({ ...current, protocol: "" }));
-            // The tray counts model calls only. Kept on another list, the
-            // narrowing would add failed model discovery it never counted.
-            if (value !== "inference") setFailedWithin(null);
+            // The counts cover model calls only. Kept on another list, the
+            // narrowing would add model discovery they never counted.
+            if (value !== "inference") setCallStatus(null);
+            // Model discovery names no model, so a model filter empties it.
+            if (value === "discovery") setModels([]);
             setCheckedIds(new Set());
             setError(null);
           }}
@@ -1783,23 +1877,52 @@ export function RequestRecords({
                     }
                   />
                 ) : null}
-                <TabsList
-                  aria-label={t("records.kind")}
-                  className="w-full shrink-0 justify-start border-b"
-                  variant="line"
-                >
-                  <TabsTrigger className="flex-none" value="inference">
-                    <MessageSquare aria-hidden="true" />
-                    {t("records.inference")}
-                  </TabsTrigger>
-                  <TabsTrigger className="flex-none" value="discovery">
-                    <ListFilter aria-hidden="true" />
-                    {t("records.discovery")}
-                  </TabsTrigger>
-                  <TabsTrigger className="flex-none" value="all">
-                    {t("common.all")}
-                  </TabsTrigger>
-                </TabsList>
+                {/* The list's own actions share the tab line, so the filters
+                    below keep a full row of equal columns. */}
+                <div className="flex min-w-0 shrink-0 items-center gap-2 border-b">
+                  <TabsList
+                    aria-label={t("records.kind")}
+                    className="min-w-0 flex-1 justify-start"
+                    variant="line"
+                  >
+                    <TabsTrigger className="flex-none" value="inference">
+                      <MessageSquare aria-hidden="true" />
+                      {t("records.inference")}
+                    </TabsTrigger>
+                    <TabsTrigger className="flex-none" value="discovery">
+                      <ListFilter aria-hidden="true" />
+                      {t("records.discovery")}
+                    </TabsTrigger>
+                    <TabsTrigger className="flex-none" value="all">
+                      {t("common.all")}
+                    </TabsTrigger>
+                  </TabsList>
+                  {callStatus ? (
+                    // Set from a count elsewhere, so it reads as a filter in
+                    // force rather than one more control to pick from.
+                    <Button
+                      aria-label={t("records.clearFilterNamed", {
+                        label: callStatusLabel,
+                      })}
+                      onClick={() => setCallStatus(null)}
+                      size="sm"
+                      type="button"
+                      variant="secondary"
+                    >
+                      {callStatusLabel}
+                      <X aria-hidden="true" />
+                    </Button>
+                  ) : null}
+                  <IconButton
+                    variant="outline"
+                    disabled={!isReady || listStatus === "loading"}
+                    label={t("common.refresh")}
+                    onClick={() => manualPollRef.current?.()}
+                    type="button"
+                  >
+                    <RefreshCw aria-hidden="true" />
+                  </IconButton>
+                </div>
                 {error ? (
                   <FormMessage className="mt-2.5 shrink-0" tone="error">
                     {error}
@@ -1814,8 +1937,10 @@ export function RequestRecords({
                     {syncWarning}
                   </FormMessage>
                 ) : null}
-                <div className="flex w-full min-w-0 flex-wrap items-center gap-2 border-b bg-background py-2">
-                  <div className="grid min-w-0 flex-1 basis-72 grid-cols-3 gap-2 @[680px]:max-w-4xl @[680px]:grid-cols-[minmax(0,1.2fr)_auto_repeat(4,minmax(0,1fr))]">
+                <div className="w-full min-w-0 border-b bg-background py-2">
+                  {/* One grid for every filter: a single line where the list is
+                      wide enough, else rows of four that keep their columns. */}
+                  <div className="grid min-w-0 grid-cols-2 gap-2 @[560px]:grid-cols-4 @[900px]:grid-cols-[minmax(0,1.2fr)_auto_repeat(6,minmax(0,1fr))]">
                     {/* The client scopes the list, so it leads and stands apart from the attribute filters. */}
                     <FilterSelect
                       ariaLabel={t("records.filter", {
@@ -1852,8 +1977,20 @@ export function RequestRecords({
                       variant="filled"
                     />
                     <Separator
-                      className="mx-1 hidden self-center data-[orientation=vertical]:h-5 @[680px]:block"
+                      className="mx-1 hidden self-center data-[orientation=vertical]:h-5 @[900px]:block"
                       orientation="vertical"
+                    />
+                    <UsageRangePicker
+                      align="start"
+                      ariaLabel={t("records.filter", {
+                        label: t("records.time"),
+                      })}
+                      allLabel={t("common.all")}
+                      className="w-full"
+                      label={t("records.time")}
+                      onChange={(next) => setDateRange(next)}
+                      presets={USAGE_RANGE_PRESETS}
+                      value={dateRange}
                     />
                     <FilterSelect
                       ariaLabel={t("records.filter", {
@@ -1888,6 +2025,24 @@ export function RequestRecords({
                       allLabel={t("common.all")}
                       services={services}
                       value={filters.serviceId}
+                    />
+                    <MultiFilterSelect
+                      allLabel={t("common.all")}
+                      ariaLabel={t("records.filter", {
+                        label: t("records.model"),
+                      })}
+                      className="w-full"
+                      clearLabel={t("records.clearModelFilter")}
+                      disabled={!isReady || kind === "discovery"}
+                      emptyMessage={t("records.noModelResults")}
+                      label={t("records.model")}
+                      onChange={setModels}
+                      options={modelOptions}
+                      searchPlaceholder={t("records.searchModels")}
+                      selectedCountLabel={(count) =>
+                        t("records.selectedModels", { count })
+                      }
+                      value={models}
                     />
                     <FilterSelect
                       ariaLabel={t("records.filter", {
@@ -1932,30 +2087,6 @@ export function RequestRecords({
                       value={filters.localAccessTokenIds}
                     />
                   </div>
-                  {failedWithin ? (
-                    <Button
-                      aria-label={t("records.clearFilterNamed", {
-                        label: t("records.failedToday"),
-                      })}
-                      onClick={() => setFailedWithin(null)}
-                      size="xs"
-                      type="button"
-                      variant="outline"
-                    >
-                      {t("records.failedToday")}
-                      <X aria-hidden="true" />
-                    </Button>
-                  ) : null}
-                  <IconButton
-                    className="ml-auto"
-                    variant="outline"
-                    disabled={!isReady || listStatus === "loading"}
-                    label={t("common.refresh")}
-                    onClick={() => manualPollRef.current?.()}
-                    type="button"
-                  >
-                    <RefreshCw aria-hidden="true" />
-                  </IconButton>
                 </div>
               </>
             }
@@ -1997,7 +2128,9 @@ export function RequestRecords({
                   title={t("records.readFailedTitle")}
                   description={listError}
                 />
-              ) : listStatus === "loading" && live.items.length === 0 ? (
+              ) : (listStatus === "loading" && live.items.length === 0) ||
+                // A narrowed list is not empty until earlier pages are read.
+                (visibleItems.length === 0 && (filling || loadingMore)) ? (
                 <RecordSkeleton />
               ) : visibleItems.length === 0 ? (
                 <EmptyState
@@ -2010,7 +2143,9 @@ export function RequestRecords({
                         : "records.empty",
                   )}
                   action={
-                    failedWithin ||
+                    callStatus ||
+                    dateRange !== null ||
+                    models.length ||
                     filters.status ||
                     filters.serviceId ||
                     filters.protocol ||
@@ -2021,7 +2156,9 @@ export function RequestRecords({
                         size="sm"
                         onClick={() => {
                           setFilters(EMPTY_FILTERS);
-                          setFailedWithin(null);
+                          setModels([]);
+                          setDateRange(null);
+                          setCallStatus(null);
                         }}
                       >
                         {" "}
@@ -2045,7 +2182,7 @@ export function RequestRecords({
                   className="mx-auto my-3 flex"
                   variant="outline"
                   disabled={loadingMore}
-                  onClick={() => void loadMore()}
+                  onClick={loadEarlier}
                   type="button"
                 >
                   {loadingMore ? t("common.loading") : t("records.loadEarlier")}
@@ -2585,8 +2722,9 @@ const SessionRow = memo(function SessionRow({
             {formatTime(session.last_started_at)}
           </time>
         </span>
+        {/* Capped by the list width, not a fixed size: a redirect shows two names. */}
         <ModelLabel
-          className="col-span-2 col-start-3 row-start-2 text-xs text-text-secondary @[560px]/request-list:col-span-1 @[560px]/request-list:col-start-4 @[560px]/request-list:row-start-1 @[560px]/request-list:max-w-60 @[560px]/request-list:justify-end"
+          className="col-span-2 col-start-3 row-start-2 text-xs text-text-secondary @[560px]/request-list:col-span-1 @[560px]/request-list:col-start-4 @[560px]/request-list:row-start-1 @[560px]/request-list:max-w-[50cqw] @[560px]/request-list:justify-end"
           fallback={t("records.unspecifiedModel")}
           model={session.requested_model}
           reasoningEffort={session.reasoning_effort}
@@ -2686,6 +2824,26 @@ function RecordDetail({
     true,
     "desktop",
   );
+  // The memory tab shows once a plugin that loads blocks takes part in the
+  // session.
+  const [memoryAvailable, setMemoryAvailable] = useState(false);
+  useEffect(() => {
+    if (discovery) {
+      setMemoryAvailable(false);
+      return;
+    }
+    let current = true;
+    getSessionPlugins(session.id)
+      .then((plugins) => {
+        if (current) setMemoryAvailable(plugins.length > 0);
+      })
+      .catch(() => {
+        if (current) setMemoryAvailable(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [discovery, session.id]);
   const [childrenByRoot, setChildrenByRoot] = useState<
     Record<string, RequestRecord[]>
   >({});
@@ -3035,7 +3193,10 @@ function RecordDetail({
             setDetailTab(value as DetailTab);
           }
         }}
-        value={detailTab}
+        // A session no plugin loads for has no memory tab to stay on.
+        value={
+          detailTab === "memory" && !memoryAvailable ? "trajectory" : detailTab
+        }
       >
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b py-1.5">
           <TabsList aria-label={t("records.sections")} className="h-8">
@@ -3059,6 +3220,14 @@ function RecordDetail({
             >
               {t("records.tabContent")}
             </TabsTrigger>
+            {!discovery && memoryAvailable ? (
+              <TabsTrigger
+                value="memory"
+                onClick={() => setDetailTab("memory")}
+              >
+                {t("sessionMemory.tab")}
+              </TabsTrigger>
+            ) : null}
             {!discovery && (
               <TabsTrigger
                 value="binding"
@@ -3229,6 +3398,24 @@ function RecordDetail({
             }}
           />
         </TabsContent>
+
+        {!discovery && memoryAvailable ? (
+          <TabsContent
+            className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+            value="memory"
+          >
+            <SessionMemory
+              key={session.id}
+              onSelectRequest={(id) => {
+                onSelectTurn(id);
+                setDetailTab("trajectory");
+              }}
+              records={turns}
+              refreshKey={`${session.call_count}:${session.status}`}
+              sessionId={session.id}
+            />
+          </TabsContent>
+        ) : null}
 
         {!discovery && (
           <TabsContent

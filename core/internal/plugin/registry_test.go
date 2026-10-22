@@ -506,6 +506,42 @@ export function prepareTurn() {
 	}
 }
 
+// valueStats answers astrlink.meta.values with two values and keeps the
+// limits it was asked for.
+type valueStats struct{ limits []int }
+
+func (stats *valueStats) ValueStats(_ context.Context, key string, limit int) ([]ValueStat, error) {
+	stats.limits = append(stats.limits, limit)
+	return []ValueStat{{Value: key + "-a", Sessions: 3, LastUsedAt: 1760000000000}, {Value: key + "-b", Sessions: 1}}, nil
+}
+
+func TestMetaValuesReadOnlyThePluginsOwnAttributes(t *testing.T) {
+	stats := &valueStats{}
+	source := `export const meta = { apiVersion: 1, key: "demo", name: "Test", version: "1.0.0", capabilities: ["request.read"],
+  metadata: [{ key: "project", label: "Project", pattern: "^[a-z-]+$" }] };
+export function prepareTurn() {
+  const errors = [];
+  for (const misuse of [() => astrlink.meta.values("env"), () => astrlink.meta.values("project", 0), () => astrlink.meta.values("project", 201), () => astrlink.meta.values()]) {
+    try { misuse(); errors.push("allowed"); } catch (error) { errors.push(error.name); }
+  }
+  return { all: astrlink.meta.values("project"), few: astrlink.meta.values("project", 5).length, errors };
+}
+`
+	manager := newTestManager(t, map[string]string{"demo": source}, settingsMap{"demo": enabled(CapabilityRequest)}, Services{Metadata: stats}, Limits{})
+	outcome := callWithin(t, context.Background(), loadedPlugin(t, manager, "demo"), HookPrepareTurn, nil, CallOptions{})
+	want := `{"all":[{"value":"project-a","sessions":3,"lastUsedAt":1760000000000},{"value":"project-b","sessions":1,"lastUsedAt":0}],"few":2,"errors":["RangeError","RangeError","RangeError","TypeError"]}`
+	if outcome.err != nil || string(outcome.result) != want {
+		t.Fatalf("Call = %s, %v\nwant %s", outcome.result, outcome.err, want)
+	}
+	if len(stats.limits) != 2 || stats.limits[0] != defaultMetaValues || stats.limits[1] != 5 {
+		t.Fatalf("limits = %v", stats.limits)
+	}
+	// Without request.read the values stay out of reach.
+	manager = newTestManager(t, map[string]string{"demo": source}, settingsMap{"demo": enabled()}, Services{Metadata: stats}, Limits{})
+	outcome = callWithin(t, context.Background(), loadedPlugin(t, manager, "demo"), HookPrepareTurn, nil, CallOptions{})
+	callError(t, outcome, ReasonPluginError, "needs the request.read capability")
+}
+
 func TestConfigIsAReadOnlyCopy(t *testing.T) {
 	settings := enabled()
 	settings.Config = json.RawMessage(`{"serverUrl":"http://127.0.0.1:9090","quotas":{"skill":2}}`)

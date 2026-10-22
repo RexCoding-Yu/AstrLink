@@ -74,8 +74,8 @@ func TestDroidModelsUseTheWireDroidSendsThemOn(t *testing.T) {
 		"minimax-m3":                contract.ProtocolOpenAIChat,
 		"nemotron-3-ultra":          contract.ProtocolOpenAIChat,
 	} {
-		if got := contract.ServiceKindDroidSubscription.ModelNativeProtocol(model); got != want {
-			t.Errorf("ModelNativeProtocol(%q) = %q, want %q", model, got, want)
+		if got := contract.ServiceKindDroidSubscription.BuiltinModelProtocol(model); got != want {
+			t.Errorf("BuiltinModelProtocol(%q) = %q, want %q", model, got, want)
 		}
 	}
 }

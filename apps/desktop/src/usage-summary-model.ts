@@ -1,4 +1,5 @@
 import {
+  emptyUsageStatusCounts,
   emptyUsageSummary,
   emptyUsageTotals,
   type ServicePerformance,
@@ -9,6 +10,7 @@ import {
 } from "./usage-range";
 
 const totalKeys = Object.keys(emptyUsageTotals());
+const statusKeys = Object.keys(emptyUsageStatusCounts());
 
 function objectAt(value: unknown, keys: string[]): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -117,6 +119,7 @@ export function parseUsageSummary(
 ): UsageSummary {
   const object = objectAt(value, [
     "totals",
+    "status_counts",
     "by_day",
     "by_hour",
     "by_service",
@@ -127,9 +130,17 @@ export function parseUsageSummary(
   const summary = emptyUsageSummary(window);
   summary.totals = totalsAt(objectAt(object.totals, totalKeys));
   summary.scanned_records = count(object.scanned_records);
+  const statuses = objectAt(object.status_counts, statusKeys);
+  for (const key of statusKeys) {
+    summary.status_counts[key as keyof typeof summary.status_counts] = count(
+      statuses[key],
+    );
+  }
   if (
     summary.scanned_records !==
-    summary.totals.requests + summary.totals.failed_requests
+      summary.totals.requests + summary.totals.failed_requests ||
+    summary.status_counts.succeeded !== summary.totals.requests ||
+    summary.status_counts.failed !== summary.totals.failed_requests
   ) {
     throw new Error("Inconsistent usage summary counts");
   }

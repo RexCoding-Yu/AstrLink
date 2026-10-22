@@ -31,7 +31,23 @@ type Meta struct {
 	Settings []Setting `json:"settings,omitempty"`
 	// Credits are the open-source projects the plugin page credits.
 	Credits []Credit `json:"credits,omitempty"`
+	// Storage says what the plugin keeps in astrlink.store, for the plugin
+	// page to show beside what the host keeps for it.
+	Storage []StorageItem `json:"storage,omitempty"`
+	// Tools are the read-only queries the plugin offers the model.
+	Tools []Tool `json:"tools,omitempty"`
 }
+
+// StorageItem is one kind of thing a plugin keeps: what it is, whether it
+// holds conversation text, and how long it stays.
+type StorageItem struct {
+	Label     string `json:"label"`
+	Content   bool   `json:"content,omitempty"`
+	Retention string `json:"retention"`
+}
+
+// maxStorageItems bounds what a manifest declares it keeps.
+const maxStorageItems = 8
 
 // NetworkUse explains a plugin's use of the network.
 type NetworkUse struct {
@@ -162,6 +178,20 @@ func validateMeta(meta Meta, key string) error {
 		return invalid("%v", err)
 	}
 	if err := validateCredits(meta.Credits); err != nil {
+		return invalid("%v", err)
+	}
+	if len(meta.Storage) > maxStorageItems {
+		return invalid("meta.storage has more than %d entries", maxStorageItems)
+	}
+	if len(meta.Storage) > 0 && !slices.Contains(meta.Capabilities, CapabilityStorage) {
+		return invalid("meta.storage needs the storage capability")
+	}
+	for index, item := range meta.Storage {
+		if !displayText(item.Label, 100, "") || !displayText(item.Retention, 64, "") {
+			return invalid("meta.storage[%d] needs a label of 1 to 100 and a retention of 1 to 64 characters", index)
+		}
+	}
+	if err := validateTools(meta); err != nil {
 		return invalid("%v", err)
 	}
 	return nil

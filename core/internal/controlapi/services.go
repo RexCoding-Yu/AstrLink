@@ -26,14 +26,15 @@ import (
 )
 
 type ServiceModelProber interface {
-	ProbeService(context.Context, contract.Service, contract.ProtocolID) ([]string, error)
-	ProbeHTTP(context.Context, contract.ServiceID, contract.ServiceKind, contract.HTTPConnection, []byte, contract.ProtocolID) ([]string, error)
+	ProbeService(context.Context, contract.Service, contract.ProtocolID) (servicemodel.Discovery, error)
+	ProbeHTTP(context.Context, contract.ServiceID, contract.ServiceKind, contract.HTTPConnection, []byte, contract.ProtocolID) (servicemodel.Discovery, error)
 }
 
 type serviceCreateRequest struct {
 	Proxy                     json.RawMessage         `json:"proxy,omitempty"`
 	ResponsesWebSocketEnabled json.RawMessage         `json:"responses_websocket_enabled,omitempty"`
 	ModelRedirects            json.RawMessage         `json:"model_redirects,omitempty"`
+	ModelProtocols            json.RawMessage         `json:"model_protocols,omitempty"`
 	FailurePolicy             *contract.FailurePolicy `json:"failure_policy,omitempty"`
 	Name                      string                  `json:"name"`
 	Kind                      *contract.ServiceKind   `json:"kind"`
@@ -323,6 +324,14 @@ func (handler *Handler) createService(writer http.ResponseWriter, request *http.
 			return
 		}
 		service.ModelRedirects = redirects
+	}
+	if input.ModelProtocols != nil {
+		protocols, err := decodeServiceModelProtocols(*input.Kind, input.ModelProtocols)
+		if err != nil {
+			writeError(writer, http.StatusUnprocessableEntity, "invalid_service", err.Error())
+			return
+		}
+		service.ModelProtocols = protocols
 	}
 	models, err := decodeServiceModels(input.Models)
 	if err != nil {
@@ -666,6 +675,9 @@ type serviceModelProbeResponse struct {
 	ServiceID contract.ServiceID  `json:"service_id,omitempty"`
 	Protocol  contract.ProtocolID `json:"protocol"`
 	ModelIDs  []string            `json:"model_ids"`
+	// ModelProtocols are the formats the upstream list names for models it
+	// serves in exactly one.
+	ModelProtocols []contract.ModelProtocol `json:"model_protocols,omitempty"`
 }
 
 type serviceModelProbeRequest struct {
@@ -709,12 +721,14 @@ func (handler *Handler) probeServiceModels(writer http.ResponseWriter, request *
 		handler.writeStoreError(writer, err)
 		return
 	}
-	ids, err := handler.serviceModels.ProbeService(request.Context(), record.Service, protocol)
+	discovery, err := handler.serviceModels.ProbeService(request.Context(), record.Service, protocol)
 	if err != nil {
 		writeServiceModelProbeError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, serviceModelProbeResponse{ServiceID: id, Protocol: protocol, ModelIDs: ids})
+	writeJSON(writer, http.StatusOK, serviceModelProbeResponse{
+		ServiceID: id, Protocol: protocol, ModelIDs: discovery.Models, ModelProtocols: discovery.Protocols,
+	})
 }
 
 func (handler *Handler) probeDraftServiceModels(writer http.ResponseWriter, request *http.Request) {
@@ -799,14 +813,14 @@ func (handler *Handler) probeDraftServiceModels(writer http.ResponseWriter, requ
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_service_proxy", err.Error())
 		return
 	}
-	ids, err := handler.serviceModels.ProbeHTTP(
+	discovery, err := handler.serviceModels.ProbeHTTP(
 		probeContext, serviceID, *input.Kind, connection, secret, *input.Protocol,
 	)
 	if err != nil {
 		writeServiceModelProbeError(writer, err)
 		return
 	}
-	response := serviceModelProbeResponse{Protocol: *input.Protocol, ModelIDs: ids}
+	response := serviceModelProbeResponse{Protocol: *input.Protocol, ModelIDs: discovery.Models, ModelProtocols: discovery.Protocols}
 	if input.ServiceID != nil {
 		response.ServiceID = *input.ServiceID
 	}
@@ -1141,7 +1155,7 @@ func applyServicePatch(
 	allowed := map[string]bool{
 		"proxy": true, "name": true, "enabled": true, "models": true, "failure_policy": true,
 		"responses_websocket_enabled": true, "capabilities": true,
-		"model_redirects": true, "privacy_trusted": true,
+		"model_redirects": true, "model_protocols": true, "privacy_trusted": true,
 	}
 	if service.Kind.IsHTTP() {
 		allowed["http"] = true
@@ -1197,6 +1211,13 @@ func applyServicePatch(
 			return service, credential, err
 		}
 		service.ModelRedirects = redirects
+	}
+	if raw, ok := patch["model_protocols"]; ok {
+		protocols, err := decodeServiceModelProtocols(service.Kind, raw)
+		if err != nil {
+			return service, credential, err
+		}
+		service.ModelProtocols = protocols
 	}
 	if raw, ok := patch["capabilities"]; ok {
 		capabilities, err := decodeServiceCapabilities(raw)

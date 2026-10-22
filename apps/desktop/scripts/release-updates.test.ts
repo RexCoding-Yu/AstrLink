@@ -14,9 +14,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  attachRelease,
   collectRelease,
   extendRelease,
   newestStable,
+  publishRelease,
   releaseTargets,
   releaseVersion,
   signingEnvironment,
@@ -80,6 +82,41 @@ function stagePlatform(
     }),
   );
 }
+/** Answers the gh calls of a Release publish and keeps what it uploads. */
+function fakeGitHub(release?: object) {
+  const calls: string[][] = [];
+  const uploaded = new Map<string, number>();
+  const gh = (args: string[]) => {
+    calls.push(args);
+    const [command, action] = args;
+    if (command === "api")
+      return JSON.stringify(
+        action.endsWith("/generate-notes")
+          ? { body: "Generated notes" }
+          : [release ? [release] : []],
+      );
+    if (action === "upload")
+      for (const file of args.slice(6))
+        uploaded.set(path.basename(file), readFileSync(file).length);
+    if (action === "view")
+      return JSON.stringify({
+        assets: [...uploaded].map(([name, size]) => ({ name, size })),
+      });
+    return "";
+  };
+  const uploads = () =>
+    calls
+      .filter(([, action]) => action === "upload")
+      .map((args) => args.slice(6).map((file) => path.basename(file)));
+  return { gh, calls, uploads };
+}
+const releaseEnv = (publicKey: string) => ({
+  GITHUB_REPOSITORY: "Calcium-Ion/AstrLink",
+  GITHUB_SHA: "0123456789abcdef",
+  TAURI_UPDATER_PUBLIC_KEY: publicKey,
+});
+const manifestNotes = (output: string) =>
+  JSON.parse(readFileSync(path.join(output, "latest.json"), "utf8")).notes;
 const temporary: string[] = [];
 const directory = () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "astrlink-update-test-"));
@@ -387,5 +424,99 @@ describe("release updates", () => {
       "different darwin-x86_64.exe",
     );
     expect(existsSync(refused)).toBe(false);
+  });
+  it("adds the packages to a release written ahead of CI and keeps its notes", () => {
+    const bytes = Buffer.from("signed installer"),
+      keys = signingFixture(bytes),
+      input = directory();
+    for (const target of releaseTargets)
+      stagePlatform(input, target, bytes, keys.signature);
+    // Saved as a draft, or already published as a pre-release.
+    for (const draft of [true, false]) {
+      const output = path.join(directory(), "release");
+      const github = fakeGitHub({
+        tag_name: "v1.0.0",
+        draft,
+        prerelease: !draft,
+        body: "Written notes",
+        assets: [],
+      });
+      publishRelease(
+        input,
+        output,
+        "v1.0.0",
+        releaseEnv(keys.publicKey),
+        github.gh,
+      );
+      // No new release and no generated notes; latest.json goes up last.
+      expect(github.calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+        "api repos/Calcium-Ion/AstrLink/releases",
+        "release upload",
+        "release view",
+        "release upload",
+        "release view",
+        "release edit",
+      ]);
+      expect(github.uploads()[1]).toEqual(["latest.json"]);
+      expect(github.uploads().flat().sort()).toEqual(
+        readdirSync(output)
+          .filter((name) => name !== "release-notes.txt")
+          .sort(),
+      );
+      const edit = github.calls.at(-1)!;
+      expect(edit).toEqual(
+        expect.arrayContaining([
+          "--draft=false",
+          "--prerelease=false",
+          "--latest=true",
+        ]),
+      );
+      expect(edit).not.toContain("--notes-file");
+      expect(manifestNotes(output)).toBe("Written notes");
+    }
+  });
+  it("drafts a new release with generated notes and never replaces a complete one", () => {
+    const bytes = Buffer.from("signed installer"),
+      keys = signingFixture(bytes),
+      input = directory(),
+      env = releaseEnv(keys.publicKey);
+    for (const target of releaseTargets)
+      stagePlatform(input, target, bytes, keys.signature);
+
+    const fresh = fakeGitHub(),
+      output = path.join(directory(), "release");
+    publishRelease(input, output, "v1.0.0", env, fresh.gh);
+    const create = fresh.calls.find(([, action]) => action === "create")!;
+    expect(create).toContain("--draft");
+    expect(
+      readFileSync(create[create.indexOf("--notes-file") + 1], "utf8"),
+    ).toBe("Generated notes");
+    expect(fresh.calls.at(-1)).toContain("--notes-file");
+    expect(manifestNotes(output)).toBe("Generated notes");
+
+    const published = fakeGitHub({
+      tag_name: "v1.0.0",
+      draft: false,
+      prerelease: false,
+      body: "Written notes",
+      assets: [{ name: "latest.json" }],
+    });
+    const refused = path.join(directory(), "refused");
+    expect(() =>
+      publishRelease(input, refused, "v1.0.0", env, published.gh),
+    ).toThrow("Refusing to overwrite");
+    expect(published.uploads()).toEqual([]);
+    expect(existsSync(refused)).toBe(false);
+
+    // The Intel macOS package waits for the same point.
+    for (const release of [
+      { isDraft: true, assets: [{ name: "latest.json" }] },
+      { isDraft: false, assets: [] },
+    ])
+      expect(() =>
+        attachRelease(input, directory(), "v1.0.0", "darwin-x86_64", env, () =>
+          JSON.stringify(release),
+        ),
+      ).toThrow("not published yet");
   });
 });

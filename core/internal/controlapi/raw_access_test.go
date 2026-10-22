@@ -147,7 +147,7 @@ func newRawAccessFixture(t *testing.T, vault RawVault) rawAccessFixture {
 
 func newRawAccessFixtureAt(t *testing.T, path string, vault RawVault) rawAccessFixture {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), path)
+	store, err := openControlTestStore(t, context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1038,7 +1038,7 @@ func TestAuditReadReportsAMissingKeyOnlyAfterTheLocalKeyChanged(t *testing.T) {
 
 	// The local key file is lost: every body sealed before now reports the
 	// key as missing, and the metadata stays readable.
-	store, err := sqlite.Open(context.Background(), path,
+	store, err := openControlTestStore(t, context.Background(), path,
 		sqlite.WithLocalKey([]byte(strings.Repeat("\x5c", 32))), sqlite.WithLogger(func(string, ...any) {}))
 	if err != nil {
 		t.Fatal(err)

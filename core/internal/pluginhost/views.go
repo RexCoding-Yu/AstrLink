@@ -25,6 +25,23 @@ type SessionView struct {
 	Client   string                      `json:"client"`
 	Meta     map[string]plugin.MetaValue `json:"meta"`
 	Session  plugin.SessionRef           `json:"session"`
+	// Language is the interface language the session started with: what
+	// the plugin injects is written in it.
+	Language string `json:"language"`
+	// Reason is why prepareSession runs: start, bound, config, compact,
+	// manual or auto. Turn hooks have none.
+	Reason string `json:"reason,omitempty"`
+	// Workspace is the last element of the working directory the client
+	// named, never the whole path.
+	Workspace *WorkspaceView `json:"workspace,omitempty"`
+	// Redacted tells prepareSession that the privacy policy replaces what
+	// it finds with placeholders, so the plugin's data holds them too.
+	Redacted bool `json:"redacted,omitempty"`
+}
+
+// WorkspaceView names the client's working directory by its last element.
+type WorkspaceView struct {
+	Name string `json:"name"`
 }
 
 // TurnView is what prepareTurn and observeTurn read: the turn as the client
@@ -65,7 +82,18 @@ type turn struct {
 	own string
 	// history is the conversation in order, for working out a lost binding.
 	history []metadata.HistoryEntry
+	// first is what the history opens with: its first user message, and
+	// the newest compaction a client left in it. A compacted history opens
+	// with something else.
+	first string
+	// messages are the first user messages as sent, where clients name
+	// their working directory.
+	messages []string
 }
+
+// compactionItems are the Responses items a client leaves where it
+// compacted its history.
+var compactionItems = map[string]bool{"compaction": true, "compaction_summary": true}
 
 // readTurn reads the conversation of a request body in the client's
 // protocol.
@@ -86,13 +114,23 @@ func readTurn(protocol contract.ProtocolID, body []byte) turn {
 			items = append(items, json.RawMessage(element.Raw))
 		}
 	}
-	previous := ""
+	previous, opening, compaction := "", "", ""
 	for _, item := range items {
+		if protocol == contract.ProtocolOpenAIResponses && compactionItems[gjson.GetBytes(item, "type").Str] {
+			compaction = string(item)
+			continue
+		}
 		if adapter.IsUserTurn(item) {
 			if result.opened {
 				previous = result.user.Typed
 			}
 			text := rawText(protocol, item)
+			if !result.opened {
+				opening = text
+			}
+			if len(result.messages) < workspaceMessages {
+				result.messages = append(result.messages, text)
+			}
 			result.opened = true
 			result.user = UserText{Text: text, Typed: adapter.UserText(item)}
 			result.own = withoutReminders(text)
@@ -106,6 +144,9 @@ func readTurn(protocol contract.ProtocolID, body []byte) turn {
 	result.user.Text = clampRunes(result.user.Text, maxTurnTextRunes)
 	result.user.Typed = clampRunes(result.user.Typed, maxTurnTextRunes)
 	result.user.Previous = clampBytes(previous, maxPreviousTypedSize)
+	if opening != "" || compaction != "" {
+		result.first = opening + "\x00" + compaction
+	}
 	return result
 }
 

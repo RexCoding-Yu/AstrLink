@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 type fakeLocalData struct {
@@ -24,7 +23,7 @@ func (fake fakeLocalData) LocalDataStatus(context.Context) (contract.LocalDataSt
 }
 
 func TestLocalDataStatusReportsCountsOnly(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "astrlink.db"))
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}

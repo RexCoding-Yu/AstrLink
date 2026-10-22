@@ -41,6 +41,22 @@ type Settings struct {
 	// TurnWait is how long a request waits for the plugin's prepare hooks;
 	// zero is the default.
 	TurnWait time.Duration
+	// ExcludedClients are the client types the plugin is off for.
+	ExcludedClients []string
+	// WorkspaceBinding binds a new session to the value of the plugin's
+	// attributes its workspace had.
+	WorkspaceBinding bool
+	// AutoRefresh lets the host check a session's resident block for newer
+	// data now and then.
+	AutoRefresh bool
+	// LookupEnabled lets the model run the plugin's queries, when the user
+	// granted model.tools.
+	LookupEnabled bool
+}
+
+// Excludes reports whether the plugin is off for requests of client.
+func (settings Settings) Excludes(client string) bool {
+	return slices.Contains(settings.ExcludedClients, client)
 }
 
 // Wait returns how long a request waits for the plugin's prepare hooks,

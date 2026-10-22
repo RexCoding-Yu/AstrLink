@@ -10,9 +10,7 @@ maximum-db-staleness = "P30D"
 # from upstream stacks such as Tauri and are tracked there.
 unmaintained = "workspace"
 # Every ignore must name the affected crate and a reason.
-ignore = [
-    { id = "RUSTSEC-2026-0285", reason = "rustls 0.23.42 in apps/desktop/src-tauri/Cargo.lock only (reqwest/tauri-plugin-updater); the handshake transcript stays authenticated. Remove after `cargo update -p rustls` there; the workers already use 0.23.45." },
-]
+ignore = []
 
 [bans]
 multiple-versions = "allow"

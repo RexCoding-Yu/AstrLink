@@ -6,8 +6,12 @@
 //! the agent locator stay in the user's home, shared with the other
 //! AstrLink.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
+pub const IDENTIFIER: &str = "com.astrlink.desktop";
 pub const ISOLATED_IDENTIFIER: &str = "com.astrlink.desktop.isolated";
 pub const ISOLATED_NAME: &str = "AstrLink Dev";
 pub const ISOLATED_LINK_SCHEME: &str = "astrlink-isolated";
@@ -69,6 +73,24 @@ pub fn link_scheme() -> &'static str {
     }
 }
 
+/// Tauri names an instance's data and config directories after its
+/// identifier, so the other instance's sit beside this one's. Lists that
+/// directory for every instance, in the same order whichever one asks; a
+/// directory named otherwise stands alone.
+pub fn every_instance_directory(directory: &Path) -> Vec<PathBuf> {
+    let identifiers = [IDENTIFIER, ISOLATED_IDENTIFIER];
+    match (
+        directory.parent(),
+        directory.file_name().and_then(|name| name.to_str()),
+    ) {
+        (Some(parent), Some(name)) if identifiers.contains(&name) => identifiers
+            .iter()
+            .map(|identifier| parent.join(identifier))
+            .collect(),
+        _ => vec![directory.to_path_buf()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +107,25 @@ mod tests {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(config["productName"], product_name());
+        assert_eq!(config["identifier"], IDENTIFIER);
+    }
+
+    #[test]
+    fn both_instances_list_the_same_directories() {
+        let support = Path::new("/home/a/.local/share");
+        let every = [support.join(IDENTIFIER), support.join(ISOLATED_IDENTIFIER)];
+        for own in &every {
+            assert_eq!(every_instance_directory(own), every);
+        }
+        let other = support.join("com.astrlink.desktop.dev");
+        assert_eq!(
+            every_instance_directory(&other),
+            std::slice::from_ref(&other)
+        );
+        assert_eq!(
+            every_instance_directory(Path::new("/")),
+            [PathBuf::from("/")]
+        );
     }
 
     #[test]

@@ -3,10 +3,12 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type ReactNode,
 } from "react";
 
@@ -27,6 +29,25 @@ import { ModelLabel } from "@/components/ModelLabel";
 import { StatusDot, type StatusTone } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  CodeBlock,
+  CodeBlockActions,
+  CodeBlockContent,
+  CodeBlockCopyButton,
+  CodeBlockHeader,
+  CodeBlockLine,
+  CodeBlockTitle,
+} from "@/components/ui/code-block";
+import {
+  Trace,
+  TraceCollapsible,
+  TraceCollapsibleContent,
+  TraceCollapsibleTrigger,
+  TraceDescription,
+  TraceLine,
+  TraceTitle,
+} from "@/components/ui/trace";
+import { useHighlightedCode } from "@/hooks/use-highlighted-code";
 import { cn } from "@/lib/utils";
 
 import { copyButtonLabel, type CopyFeedback } from "./copy-feedback";
@@ -666,7 +687,7 @@ const TurnView = memo(function TurnView({
   const shownSegments = open ? segments : [];
   return (
     <li
-      className="max-w-[92ch] border-b py-5 last:border-b-0"
+      className="min-w-0 border-b py-5 last:border-b-0"
       data-testid="conversation-turn"
       data-turn-id={turn.id}
       ref={refFor}
@@ -872,35 +893,25 @@ function ReasoningRow({
   durationMs: number | null;
 }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
   return (
-    <div className="ml-[18px]" data-testid="conversation-reasoning">
-      <Button
-        aria-expanded={open}
-        className="h-7 gap-1.5 px-0 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
-        onClick={() => setOpen((current) => !current)}
-        size="sm"
-        type="button"
-        variant="ghost"
-      >
-        <ChevronRight
-          aria-hidden="true"
-          className={cn("size-3 transition-transform", open && "rotate-90")}
-        />
-        {durationMs === null
-          ? t("conversation.reasoning")
-          : t("conversation.reasoningTimed", {
-              duration: formatDuration(durationMs),
-            })}
-      </Button>
-      {open ? (
-        <div className="mb-2 max-w-[76ch] space-y-2 border-l-2 border-border pl-3 text-xs leading-relaxed text-muted-foreground italic whitespace-pre-wrap [overflow-wrap:anywhere]">
-          {texts.map((text, index) => (
-            <p key={index}>{text}</p>
-          ))}
-        </div>
-      ) : null}
-    </div>
+    <TraceCollapsible data-testid="conversation-reasoning">
+      <TraceCollapsibleTrigger className="h-7">
+        <TraceLine className="text-xs">
+          <TraceTitle>
+            {durationMs === null
+              ? t("conversation.reasoning")
+              : t("conversation.reasoningTimed", {
+                  duration: formatDuration(durationMs),
+                })}
+          </TraceTitle>
+        </TraceLine>
+      </TraceCollapsibleTrigger>
+      <TraceCollapsibleContent className="mt-0.5 mb-2 max-w-[76ch] space-y-2 pl-3 text-xs italic whitespace-pre-wrap">
+        {texts.map((text, index) => (
+          <p key={index}>{text}</p>
+        ))}
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
   );
 }
 
@@ -1162,7 +1173,13 @@ const CallRow = memo(function CallRow({
         >
           <StatusDot className="size-2" tone={dotTone(call.tone)} />
           <span className="flex min-w-0 items-baseline gap-2 whitespace-nowrap">
-            <span className="font-medium">
+            {/* A call still in flight shimmers like a running trace step. */}
+            <span
+              className={cn(
+                "font-medium",
+                call.tone === "pending" && "shimmer motion-reduce:shimmer-none",
+              )}
+            >
               {t("conversation.callNumber", { index: call.index })}
             </span>
             <span className="text-muted-foreground">{service.name}</span>
@@ -1223,15 +1240,19 @@ const CallRow = memo(function CallRow({
           {call.narration.map((text, index) => (
             <Narration key={index} text={text} />
           ))}
-          {call.reasoning.length > 0 ? (
-            <ReasoningRow
-              durationMs={call.reasoningMs}
-              texts={call.reasoning}
-            />
+          {call.reasoning.length > 0 || call.toolCalls.length > 0 ? (
+            <Trace className="ml-[18px] w-auto gap-0">
+              {call.reasoning.length > 0 ? (
+                <ReasoningRow
+                  durationMs={call.reasoningMs}
+                  texts={call.reasoning}
+                />
+              ) : null}
+              {call.toolCalls.map((tool, index) => (
+                <ToolRow key={`${tool.id ?? index}`} tool={tool} />
+              ))}
+            </Trace>
           ) : null}
-          {call.toolCalls.map((tool, index) => (
-            <ToolRow key={`${tool.id ?? index}`} tool={tool} />
-          ))}
           {call.gapMs !== null && call.gapMs >= 500 ? (
             <p className="mb-1.5 ml-[18px] text-micro text-muted-foreground">
               {t("conversation.gap", { duration: formatDuration(call.gapMs) })}
@@ -1296,92 +1317,129 @@ function prettyJson(text: string): string {
   }
 }
 
+/** How tool text is highlighted: JSON, terminal colors, or plain text. */
+function toolLanguage(text: string): string {
+  try {
+    JSON.parse(text);
+    return "json";
+  } catch {
+    return text.includes("\u001b[") ? "ansi" : "";
+  }
+}
+
+/**
+ * A tool's arguments or output, numbered and copyable. Its own actions share
+ * the header with the copy button, so a block is no taller than the text.
+ */
+function ToolCode({
+  label,
+  text,
+  failed = false,
+  actions,
+  ...props
+}: ComponentProps<typeof CodeBlockContent> & {
+  label: string;
+  text: string;
+  failed?: boolean;
+  actions?: ReactNode;
+}) {
+  const language = useMemo(() => toolLanguage(text), [text]);
+  const lines = useHighlightedCode(text, language);
+  return (
+    <CodeBlock
+      className="data-[size=sm]:text-micro"
+      size="sm"
+      variant={failed ? "destructive" : "default"}
+    >
+      <CodeBlockHeader>
+        <CodeBlockTitle>{label}</CodeBlockTitle>
+        <CodeBlockActions>
+          {actions}
+          <CodeBlockCopyButton value={text} />
+        </CodeBlockActions>
+      </CodeBlockHeader>
+      <CodeBlockContent lineNumbers wrap {...props}>
+        {lines.map((line, index) => (
+          <CodeBlockLine key={index}>{line}</CodeBlockLine>
+        ))}
+      </CodeBlockContent>
+    </CodeBlock>
+  );
+}
+
 function ToolRow({ tool }: { tool: ConversationToolCall }) {
   const t = useT();
-  const [open, setOpen] = useState(tool.isError);
   const [fullResult, setFullResult] = useState(false);
-  const status =
-    tool.result === null
-      ? t("conversation.toolNoResult")
-      : tool.isError
-        ? t("conversation.toolFailed")
-        : t("conversation.toolDone");
+  const resultId = useId();
+  const args = useMemo(() => prettyJson(tool.args), [tool.args]);
   const clipped =
     tool.args.length >= TOOL_TEXT_LIMIT ||
     (tool.result?.length ?? 0) >= TOOL_TEXT_LIMIT;
   return (
-    <div className="ml-[18px]" data-testid="conversation-tool">
-      <Button
-        aria-expanded={open}
-        className="grid h-7 w-full grid-cols-[auto_minmax(0,1fr)_auto] items-baseline gap-x-2 rounded-sm px-0 text-left text-xs font-normal hover:bg-transparent hover:text-foreground"
-        onClick={() => setOpen((current) => !current)}
-        size="sm"
-        type="button"
-        variant="ghost"
-      >
-        <code className="font-mono text-micro font-semibold">{tool.name}</code>
-        <span className="truncate font-mono text-micro text-muted-foreground">
-          {tool.args.replace(/\s+/g, " ")}
-        </span>
-        <span
-          className={cn(
-            "text-micro text-muted-foreground",
-            tool.isError && "font-medium text-danger-foreground",
-          )}
+    <TraceCollapsible
+      data-testid="conversation-tool"
+      defaultOpen={tool.isError}
+    >
+      <TraceCollapsibleTrigger className="h-7">
+        <TraceLine
+          className="text-micro text-foreground"
+          status={tool.isError ? "error" : undefined}
         >
-          {status}
-        </span>
-      </Button>
-      {open ? (
-        <div className="mb-2 space-y-1.5">
-          {tool.args ? (
-            <>
-              <p className="text-micro text-muted-foreground">
-                {t("conversation.toolArgs")}
-              </p>
-              <pre className="max-h-48 overflow-auto rounded-md bg-muted px-2.5 py-2 font-mono text-micro leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
-                {prettyJson(tool.args)}
-              </pre>
-            </>
+          <TraceTitle className="shrink-0 font-mono font-semibold">
+            {tool.name}
+          </TraceTitle>
+          <span className="min-w-0 truncate font-mono text-muted-foreground">
+            {tool.args.replace(/\s+/g, " ")}
+          </span>
+          {/* A missing result is often just a body that was not captured or
+              is locked, so only a failure earns a label. */}
+          {tool.isError ? (
+            <TraceDescription className="font-medium text-danger-foreground">
+              {t("conversation.toolFailed")}
+            </TraceDescription>
           ) : null}
-          {tool.result !== null ? (
-            <>
-              <p className="text-micro text-muted-foreground">
-                {t("conversation.toolOutput")}
-              </p>
-              <pre
-                className={cn(
-                  "overflow-auto rounded-md bg-muted px-2.5 py-2 font-mono text-micro leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]",
-                  tool.isError && "text-danger-foreground",
-                  !fullResult && "max-h-28",
-                )}
-              >
-                {tool.result}
-              </pre>
-              {tool.result.split("\n").length > 6 ||
-              tool.result.length > 400 ? (
+        </TraceLine>
+      </TraceCollapsibleTrigger>
+      <TraceCollapsibleContent className="mt-0.5 mb-2 space-y-1.5 pl-3">
+        {tool.args ? (
+          <ToolCode
+            className="max-h-48"
+            label={t("conversation.toolArgs")}
+            text={args}
+          />
+        ) : null}
+        {tool.result !== null ? (
+          <ToolCode
+            actions={
+              tool.result.split("\n").length > 6 || tool.result.length > 400 ? (
                 <Button
-                  className="h-auto px-0 text-micro"
+                  aria-controls={resultId}
+                  aria-expanded={fullResult}
                   onClick={() => setFullResult((current) => !current)}
                   size="xs"
                   type="button"
-                  variant="link"
+                  variant="ghost"
                 >
                   {fullResult
                     ? t("conversation.collapse")
                     : t("conversation.expand")}
                 </Button>
-              ) : null}
-            </>
-          ) : null}
-          {clipped ? (
-            <p className="text-micro text-muted-foreground">
-              {t("conversation.toolTextClipped", { limit: "16 KiB" })}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+              ) : null
+            }
+            className={cn(!fullResult && "max-h-28")}
+            failed={tool.isError}
+            id={resultId}
+            label={t("conversation.toolOutput")}
+            text={tool.result}
+          />
+        ) : null}
+        {clipped ? (
+          <p className="text-micro text-muted-foreground">
+            {t("conversation.toolTextClipped", { limit: "16 KiB" })}
+          </p>
+        ) : null}
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
   );
 }
 

@@ -23,6 +23,8 @@ const (
 	RequestSessionsPath = "/control/v1/request-sessions"
 
 	maxLocalAccessTokenFilters = 100
+	maxModelFilters            = 100
+	maxModelFilterRunes        = 256
 	maxRequestSearchRunes      = 200
 )
 
@@ -42,9 +44,10 @@ func (handler *Handler) registerRequestRecordRoutes() {
 	handler.mux.HandleFunc(RequestsPath+"/", handler.authenticatedBy(handler.requestRecordItem, requestRecordItemRole))
 }
 
-// requestSessionItemRole leaves changing a session's metadata to operators.
+// requestSessionItemRole leaves changing a session's metadata and its
+// plugins to operators.
 func requestSessionItemRole(request *http.Request) Role {
-	if !isSafeMethod(request.Method) && strings.Contains(request.URL.Path, "/metadata") {
+	if !isSafeMethod(request.Method) && (strings.Contains(request.URL.Path, "/metadata") || strings.Contains(request.URL.Path, "/plugins")) {
 		return RoleOperator
 	}
 	return RoleObserver
@@ -102,6 +105,10 @@ func (handler *Handler) requestSessionItem(writer http.ResponseWriter, request *
 		handler.sessionMetadata(writer, request)
 		return
 	}
+	if _, rest, found := strings.Cut(strings.TrimPrefix(request.URL.Path, RequestSessionsPath+"/"), "/"); found && (rest == "plugins" || strings.HasPrefix(rest, "plugins/")) {
+		handler.sessionPlugins(writer, request)
+		return
+	}
 	if request.Method != http.MethodGet {
 		writer.Header().Set("Allow", http.MethodGet)
 		writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "only GET is allowed")
@@ -151,6 +158,7 @@ func parseRequestSessionListOptions(request *http.Request) (storage.RequestSessi
 		Protocol:            recordOptions.Protocol,
 		ServiceID:           recordOptions.ServiceID,
 		LocalAccessTokenIDs: recordOptions.LocalAccessTokenIDs,
+		Models:              recordOptions.Models,
 		Status:              recordOptions.Status,
 	}, nil
 }
@@ -733,6 +741,10 @@ func parseRequestRecordQuery(query url.Values) (storage.RequestRecordListOptions
 			if len(values) > maxLocalAccessTokenFilters {
 				return storage.RequestRecordListOptions{}, fmt.Errorf("too many local_access_token_id filters")
 			}
+		case "model":
+			if len(values) > maxModelFilters {
+				return storage.RequestRecordListOptions{}, fmt.Errorf("too many model filters")
+			}
 		default:
 			return storage.RequestRecordListOptions{}, fmt.Errorf("unknown query parameter")
 		}
@@ -797,6 +809,20 @@ func parseRequestRecordQuery(query url.Values) (storage.RequestRecordListOptions
 			}
 			seen[tokenID] = struct{}{}
 			options.LocalAccessTokenIDs = append(options.LocalAccessTokenIDs, tokenID)
+		}
+	}
+	if values, ok := query["model"]; ok {
+		options.Models = make([]string, 0, len(values))
+		seen := make(map[string]struct{}, len(values))
+		for _, value := range values {
+			if value == "" || utf8.RuneCountInString(value) > maxModelFilterRunes || strings.ContainsFunc(value, unicode.IsControl) {
+				return options, fmt.Errorf("invalid model filter")
+			}
+			if _, exists := seen[value]; exists {
+				return options, fmt.Errorf("duplicate model filter")
+			}
+			seen[value] = struct{}{}
+			options.Models = append(options.Models, value)
 		}
 	}
 	if value := query.Get("status"); value != "" {

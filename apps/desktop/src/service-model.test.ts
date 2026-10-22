@@ -4,16 +4,23 @@ import {
   activeServiceRisk,
   bestConversionTarget,
   hasPlanUsage,
+  modelFormatLabels,
   parseService,
   parseServicePage,
   parseServiceRecord,
   parseServiceModelProbe,
   parseSubscriptionRiskEvents,
+  pruneModelProtocols,
+  sameModelProtocols,
+  serviceBuiltinModelProtocol,
+  serviceModelFormats,
   serviceStatusLabel,
   subscriptionRiskLabel,
   serviceBuiltinRedirects,
   supportsResponsesWebSocket,
   withClaudeCodeRedirects,
+  withDiscoveredModelProtocols,
+  withModelProtocols,
 } from "./service-model";
 
 const createdAt = "2026-07-28T12:00:00Z";
@@ -465,6 +472,229 @@ describe("service model", () => {
         model_ids: [],
       }),
     ).toThrow(/unknown model discovery protocol/);
+  });
+});
+
+describe("model upstream formats", () => {
+  const service = (extra: Record<string, unknown>) => ({
+    id: "service_gateway",
+    name: "new-api",
+    kind: "newapi",
+    enabled: true,
+    models: ["claude-opus-5-5", "gpt-5.5"],
+    capabilities: [],
+    http: {
+      base_url: "https://gateway.example/v1",
+      auth: { scheme: "bearer" },
+    },
+    created_at: createdAt,
+    updated_at: createdAt,
+    ...extra,
+  });
+
+  it("parses a provider's formats and omits an empty table", () => {
+    expect(
+      parseService(
+        service({
+          model_protocols: [
+            { model: "claude-opus-5-5", protocol: "anthropic.messages" },
+          ],
+        }),
+      ).model_protocols,
+    ).toEqual([{ model: "claude-opus-5-5", protocol: "anthropic.messages" }]);
+    for (const extra of [{ model_protocols: [] }, {}]) {
+      expect(
+        Object.hasOwn(parseService(service(extra)), "model_protocols"),
+      ).toBe(false);
+    }
+  });
+
+  it("rejects malformed formats", () => {
+    for (const [modelProtocols, message] of [
+      ["anthropic.messages", /model_protocols: expected an array/],
+      [
+        [{ model: "a", protocol: "openai.chat", enabled: true }],
+        /model_protocols\[0\]\.enabled: unexpected field/,
+      ],
+      [[{ model: "a" }], /model_protocols\[0\]\.protocol: missing field/],
+      [
+        [{ model: "a", protocol: "openai.embeddings" }],
+        /model_protocols\[0\]\.protocol: unknown upstream format/,
+      ],
+      [[{ model: "", protocol: "openai.chat" }], /model_protocols\[0\]\.model/],
+      [[{ model: 7, protocol: "openai.chat" }], /model_protocols\[0\]\.model/],
+      [
+        [
+          { model: "a", protocol: "openai.chat" },
+          { model: "a", protocol: "openai.responses" },
+        ],
+        /model_protocols\[1\]\.model: duplicate model/,
+      ],
+      [
+        Array.from({ length: 2_001 }, (_, index) => ({
+          model: `model-${index}`,
+          protocol: "openai.chat",
+        })),
+        /at most 2000 items/,
+      ],
+    ] as const) {
+      expect(() =>
+        parseService(service({ model_protocols: modelProtocols })),
+      ).toThrow(message);
+    }
+  });
+
+  it("parses the formats a fetched model list names", () => {
+    expect(
+      parseServiceModelProbe({
+        protocol: "openai.models",
+        model_ids: ["claude-opus-5-5", "gpt-5.5"],
+        model_protocols: [
+          { model: "claude-opus-5-5", protocol: "anthropic.messages" },
+        ],
+      }),
+    ).toEqual({
+      protocol: "openai.models",
+      model_ids: ["claude-opus-5-5", "gpt-5.5"],
+      model_protocols: [
+        { model: "claude-opus-5-5", protocol: "anthropic.messages" },
+      ],
+    });
+    expect(
+      parseServiceModelProbe({
+        protocol: "openai.models",
+        model_ids: [],
+        model_protocols: [],
+      }),
+    ).toEqual({ protocol: "openai.models", model_ids: [] });
+    expect(() =>
+      parseServiceModelProbe({
+        protocol: "openai.models",
+        model_ids: ["a"],
+        model_protocols: [{ model: "a", protocol: "rerank" }],
+      }),
+    ).toThrow(/model_protocols\[0\]\.protocol: unknown upstream format/);
+  });
+
+  it("lists the formats each kind can pin", () => {
+    expect(Object.values(modelFormatLabels)).toEqual([
+      "Responses",
+      "Messages",
+      "Chat",
+      "Gemini",
+    ]);
+    expect(serviceModelFormats("newapi")).toEqual([
+      "openai.responses",
+      "anthropic.messages",
+      "openai.chat",
+      "google.generate_content",
+    ]);
+    expect(serviceModelFormats("copilot_subscription")).toEqual([
+      "openai.responses",
+      "anthropic.messages",
+      "openai.chat",
+    ]);
+    expect(serviceModelFormats("grok_subscription")).toEqual([
+      "openai.responses",
+      "openai.chat",
+    ]);
+    expect(serviceModelFormats("codex_subscription")).toEqual([
+      "openai.responses",
+    ]);
+    expect(serviceModelFormats("antigravity_subscription")).toEqual([
+      "google.generate_content",
+    ]);
+  });
+
+  it("mirrors Core's built-in format table", () => {
+    for (const [kind, model, format] of [
+      ["opencode_go", "gemini-4-argon-contributor", "google.generate_content"],
+      ["opencode_go", "GPT-5.5", "openai.responses"],
+      ["opencode_go", "muse-spark-1", "openai.responses"],
+      ["opencode_go", "minimax-m3", "anthropic.messages"],
+      ["opencode_go", "glm-5.3", "openai.chat"],
+      ["opencode_zen", "minimax-m3", "openai.chat"],
+      ["opencode_zen", "qwen3-coder", "anthropic.messages"],
+      ["opencode_zen", "union-alpha", "anthropic.messages"],
+      ["opencode_zen", "grok-5", "openai.responses"],
+      ["copilot_subscription", "claude-sonnet-5.5", "anthropic.messages"],
+      ["copilot_subscription", "gpt-5.5", "openai.responses"],
+      ["copilot_subscription", "gpt-4.1-codex", "openai.responses"],
+      ["copilot_subscription", "o4-mini", "openai.responses"],
+      ["copilot_subscription", "gpt-4.1", "openai.chat"],
+      ["droid_subscription", "claude-opus-5-5", "anthropic.messages"],
+      ["droid_subscription", "minimax-m2.5", "anthropic.messages"],
+      ["droid_subscription", "gpt-5.5", "openai.responses"],
+      ["droid_subscription", "glm-5.3", "openai.chat"],
+      ["newapi", "gemini-3.1-pro", undefined],
+      ["codex_subscription", "gpt-5.5", undefined],
+    ] as const) {
+      expect(serviceBuiltinModelProtocol(kind, model), `${kind} ${model}`).toBe(
+        format,
+      );
+    }
+  });
+
+  it("sets, clears and prunes entries sorted by model", () => {
+    const entries = withModelProtocols([], ["b", "a"], "openai.chat");
+    expect(entries).toEqual([
+      { model: "a", protocol: "openai.chat" },
+      { model: "b", protocol: "openai.chat" },
+    ]);
+    expect(
+      withModelProtocols(entries, ["b"], "google.generate_content"),
+    ).toEqual([
+      { model: "a", protocol: "openai.chat" },
+      { model: "b", protocol: "google.generate_content" },
+    ]);
+    expect(withModelProtocols(entries, ["a"], null)).toEqual([
+      { model: "b", protocol: "openai.chat" },
+    ]);
+    expect(pruneModelProtocols(entries, ["b", "c"])).toEqual([
+      { model: "b", protocol: "openai.chat" },
+    ]);
+    expect(sameModelProtocols(entries, [...entries].reverse())).toBe(true);
+    expect(
+      sameModelProtocols(
+        entries,
+        withModelProtocols(entries, ["a"], "openai.responses"),
+      ),
+    ).toBe(false);
+    expect(sameModelProtocols(entries, entries.slice(1))).toBe(false);
+  });
+
+  it("fills fetched formats for newly listed models only", () => {
+    expect(
+      withDiscoveredModelProtocols(
+        "newapi",
+        [{ model: "pinned", protocol: "openai.responses" }],
+        ["listed"],
+        ["fresh", "listed", "pinned"],
+        [
+          { model: "listed", protocol: "openai.chat" },
+          { model: "pinned", protocol: "openai.chat" },
+          { model: "fresh", protocol: "anthropic.messages" },
+          { model: "unlisted", protocol: "openai.chat" },
+        ],
+      ),
+    ).toEqual([
+      { model: "fresh", protocol: "anthropic.messages" },
+      { model: "pinned", protocol: "openai.responses" },
+    ]);
+    // Copilot has no Gemini format, and its Claude models already use Messages.
+    expect(
+      withDiscoveredModelProtocols(
+        "copilot_subscription",
+        [],
+        [],
+        ["claude-sonnet-5.5", "gemini-3.1-pro", "gpt-4.1"],
+        [
+          { model: "gemini-3.1-pro", protocol: "google.generate_content" },
+          { model: "claude-sonnet-5.5", protocol: "anthropic.messages" },
+          { model: "gpt-4.1", protocol: "openai.responses" },
+        ],
+      ),
+    ).toEqual([{ model: "gpt-4.1", protocol: "openai.responses" }]);
   });
 });
 

@@ -76,11 +76,12 @@ pub trait PinStore: Send + Sync {
     fn load(&self, account: &str) -> Result<Option<String>, String>;
     /// Creates or replaces the pin of `account`.
     fn save(&self, account: &str, pin: &str) -> Result<(), String>;
-    /// The file holding the pins, which agent guards keep agents out of;
-    /// `None` for the keychain.
-    fn file(&self) -> Option<&Path> {
-        None
-    }
+}
+
+/// The pin file of an instance with `config_directory` that keeps its pins
+/// in a file.
+pub fn pin_file(config_directory: &Path) -> PathBuf {
+    config_directory.join(PIN_FILE_NAME)
 }
 
 /// What the desktop does with the status a password action returns.
@@ -128,14 +129,7 @@ impl RawKeyPins {
                 KEYCHAIN_SERVICE,
             ))));
         }
-        Self::new(Box::new(FilePins::new(
-            config_directory.join(PIN_FILE_NAME),
-        )))
-    }
-
-    /// The pin file where the pins live in one; see [`PinStore::file`].
-    pub fn file(&self) -> Option<&Path> {
-        self.store.file()
+        Self::new(Box::new(FilePins::new(pin_file(config_directory))))
     }
 
     pub async fn guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -292,10 +286,6 @@ impl PinStore for FilePins {
         let mut pins = self.read()?;
         pins.insert(account.to_string(), pin.to_string());
         self.write(&pins)
-    }
-
-    fn file(&self) -> Option<&Path> {
-        Some(&self.path)
     }
 }
 
@@ -482,7 +472,7 @@ mod tests {
     #[test]
     fn the_pin_file_is_owner_only_and_keeps_other_accounts() {
         let root = TempDir::new();
-        let path = root.0.join("config").join(PIN_FILE_NAME);
+        let path = pin_file(&root.0.join("config"));
         let store = FilePins::new(path.clone());
         assert_eq!(store.load(ACCOUNT).unwrap(), None);
         store.save(ACCOUNT, KEY_A).unwrap();
@@ -506,7 +496,6 @@ mod tests {
         assert_eq!(leftovers, vec![std::ffi::OsString::from(PIN_FILE_NAME)]);
 
         let pins = RawKeyPins::new(Box::new(FilePins::new(path.clone())));
-        assert_eq!(pins.file(), Some(path.as_path()));
         assert!(!check(&pins, &keyed(KEY_B)));
         assert!(check(&pins, &keyed(KEY_A)));
     }

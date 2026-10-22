@@ -172,7 +172,7 @@ func DefaultXAIGrokCapabilities() []Capability {
 
 // DefaultGitHubCopilotCapabilities is the fixed native capability set of the
 // Copilot API: each model is served on Messages, Responses or Chat
-// Completions (see ServiceKind.ModelNativeProtocol), plus the model list.
+// Completions (see ServiceKind.BuiltinModelProtocol), plus the model list.
 func DefaultGitHubCopilotCapabilities() []Capability {
 	return []Capability{
 		{Protocol: ProtocolAnthropicMessages, Mode: CapabilityModeNative, Streaming: true},
@@ -184,7 +184,7 @@ func DefaultGitHubCopilotCapabilities() []Capability {
 
 // DefaultFactoryDroidCapabilities is the fixed native capability set of
 // Factory's LLM gateway: Claude on Messages, GPT and Grok on Responses, the
-// open models on Chat Completions (see ServiceKind.ModelNativeProtocol), plus
+// open models on Chat Completions (see ServiceKind.BuiltinModelProtocol), plus
 // the model list, which AstrLink serves from the configured models because
 // Factory publishes no model endpoint.
 func DefaultFactoryDroidCapabilities() []Capability {

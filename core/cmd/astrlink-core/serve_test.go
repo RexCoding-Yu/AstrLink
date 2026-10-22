@@ -341,7 +341,7 @@ func TestServeRunsTheServerEditionOnOnePort(t *testing.T) {
 	if code := infer("my-nas.lan", map[string]string{"Authorization": "Bearer astr_wrong_token_0123456789abcdefghijklmnop"}); code != http.StatusUnauthorized {
 		t.Fatalf("wrong-token inference = %d", code)
 	}
-	if code := infer("my-nas.lan", map[string]string{"Authorization": "Bearer " + secret.AccessToken, "Origin": "http://evil.example"}); code != http.StatusForbidden {
+	if code := infer("my-nas.lan", map[string]string{"Authorization": "Bearer " + secret.AccessToken, "Origin": "http://browser.example"}); code != http.StatusUnprocessableEntity {
 		t.Fatalf("browser-origin inference = %d", code)
 	}
 	// Any Host reaches the gateway; with no provider configured it fails
@@ -354,17 +354,23 @@ func TestServeRunsTheServerEditionOnOnePort(t *testing.T) {
 		Items []contract.RequestRecord `json:"items"`
 	}
 	decodeBody(t, send(clientRequest{method: http.MethodGet, path: controlapi.RequestsPath, cookie: session}), &records)
-	if len(records.Items) != 1 || records.Items[0].LocalAccessTokenID == nil {
-		t.Fatalf("records = %+v; only the authenticated request may be recorded", records.Items)
+	if len(records.Items) != 2 || records.Items[0].LocalAccessTokenID == nil || records.Items[1].LocalAccessTokenID == nil {
+		t.Fatalf("records = %+v; only the authenticated requests may be recorded", records.Items)
 	}
 
-	// No preflight is approved, on console or inference paths.
+	// API preflights are public; the cookie-authenticated console keeps its gate.
 	for _, path := range []string{controlapi.AccessTokensPath, console.LoginPath, "/v1/chat/completions", "/"} {
 		response := send(clientRequest{method: http.MethodOptions, path: path, header: map[string]string{
 			"Origin":                         "https://attacker.example",
 			"Access-Control-Request-Method":  http.MethodPost,
 			"Access-Control-Request-Headers": "content-type, authorization, x-astrlink-console",
 		}})
+		if path == "/v1/chat/completions" {
+			if response.StatusCode != http.StatusNoContent || response.Header.Get("Access-Control-Allow-Origin") != "*" || response.Header.Get("Access-Control-Allow-Headers") != "content-type, authorization, x-astrlink-console" {
+				t.Fatalf("inference preflight = %d %v", response.StatusCode, response.Header)
+			}
+			continue
+		}
 		if response.StatusCode < 400 {
 			t.Fatalf("preflight %s = %d", path, response.StatusCode)
 		}

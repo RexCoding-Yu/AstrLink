@@ -12,14 +12,15 @@ core-check:
 
 # -race turns on checkptr everywhere. modernc.org/sqlite is SQLite translated to
 # Go, so checkptr nearly doubles the cost of every migration; our code keeps it.
+# Execute every race test even when CI restores the Go build and test cache.
 core-race:
-	cd core && ASTRLINK_CI_NO_REMOTE_MODELS=1 go test -race -gcflags='modernc.org/...=-d=checkptr=0' ./...
+	cd core && ASTRLINK_CI_NO_REMOTE_MODELS=1 go test -race -count=1 -gcflags='modernc.org/...=-d=checkptr=0' ./...
 
 convo-check:
 	cd convo && go vet ./... && go test ./...
 
 convo-race:
-	cd convo && go test -race ./...
+	cd convo && go test -race -count=1 ./...
 
 contracts-check:
 	ruby contracts/validate.rb
@@ -27,7 +28,7 @@ contracts-check:
 	cd core && go test ./contract -run TestDefaultCapabilitiesMatchesFrozenFixture
 
 contracts-race:
-	cd contracts && go test -race ./...
+	cd contracts && go test -race -count=1 ./...
 
 desktop-install:
 	cd apps/desktop && $(BUN) install --frozen-lockfile

@@ -22,6 +22,19 @@ export function sessionMatchesFilters(
   );
 }
 
+/**
+ * Whether a filter only the list applies is set. Core pages ignore these
+ * filters, so the loaded pages can hold no match while earlier ones still do.
+ */
+export function listOnlyFiltersActive(filters: RecordFilters): boolean {
+  return Boolean(
+    filters.status ||
+      filters.serviceId ||
+      filters.protocol ||
+      filters.clientType,
+  );
+}
+
 export interface SessionMergeResult {
   items: RequestSession[];
   queued: RequestSession[];

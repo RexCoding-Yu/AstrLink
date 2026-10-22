@@ -136,7 +136,10 @@ function DropdownMenuRadioItem({
     >
       <span className="pointer-events-none absolute left-2 flex size-3.5 items-center justify-center">
         <DropdownMenuPrimitive.ItemIndicator>
-          <span aria-hidden="true" className="size-2 rounded-full bg-current" />
+          <span
+            aria-hidden="true"
+            className="block size-2 rounded-full bg-current"
+          />
         </DropdownMenuPrimitive.ItemIndicator>
       </span>
       {children}

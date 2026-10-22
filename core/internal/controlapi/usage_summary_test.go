@@ -10,11 +10,10 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 )
 
 func TestUsageSummaryAPI(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "usage.db"))
+	store, err := openControlTestStore(t, context.Background(), filepath.Join(t.TempDir(), "usage.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

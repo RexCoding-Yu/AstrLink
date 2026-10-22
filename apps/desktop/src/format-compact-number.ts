@@ -58,3 +58,9 @@ export function formatCompactNumber(value: number): string {
   }
   return formatExactNumber(value);
 }
+
+/** A share too small to round up still reads as present. */
+export function formatShare(percent: number): string {
+  if (percent > 0 && percent < 1) return "<1%";
+  return `${Math.round(percent)}%`;
+}

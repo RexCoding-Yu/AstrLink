@@ -16,6 +16,7 @@ const PricingPath = "/control/v1/pricing"
 
 type PricingStore interface {
 	pricing.CatalogStore
+	PricingConfig(context.Context, contract.ServiceID) (pricing.Config, error)
 	SavePricingConfig(context.Context, contract.ServiceID, pricing.Config) error
 	ServiceBilling(context.Context, contract.ServiceID) (pricing.ServiceReport, error)
 	BackfillPricing(context.Context, contract.ServiceID) (int, error)

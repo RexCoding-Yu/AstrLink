@@ -1,6 +1,7 @@
 import { i18n } from "./i18n";
 import { PRIVACY_KINDS } from "./privacy-policy-model";
 import {
+  hourlyUsageWindow,
   usageWindowDayKeys,
   usageWindowHourSlots,
   type UsageWindow,
@@ -321,12 +322,12 @@ export interface PrivacyTrendPoint {
   blocked: number;
 }
 
-/** Hourly points for a `1d` window, daily points otherwise. */
+/** Hourly points for an hourly window, daily points otherwise. */
 export function privacyTrendPoints(
   summary: PrivacySummary,
 ): PrivacyTrendPoint[] {
   const buckets: Array<PrivacyDayBucket & { hour?: number }> =
-    summary.window.preset === "1d" ? summary.by_hour : summary.by_day;
+    hourlyUsageWindow(summary.window) ? summary.by_hour : summary.by_day;
   return buckets.map((bucket) => ({
     slot:
       bucket.hour == null

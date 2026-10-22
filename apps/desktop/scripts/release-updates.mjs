@@ -366,13 +366,13 @@ export function extendRelease(
   return manifest;
 }
 
-function gh(args) {
+function runGh(args) {
   return execFileSync("gh", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
-function uploadAssets(tag, assets) {
+function uploadAssets(tag, assets, gh) {
   gh(["release", "upload", tag, "--repo", repository, "--clobber", ...assets]);
   const remote = JSON.parse(
     gh(["release", "view", tag, "--repo", repository, "--json", "assets"]),
@@ -387,22 +387,49 @@ function uploadAssets(tag, assets) {
       `Release upload incomplete: ${path.basename(asset)}`,
     );
 }
-export function publishRelease(input, output, tag, env = process.env) {
+/**
+ * Release uploads latest.json after every package it lists, so a public
+ * release that lists latest.json is complete, even one published before
+ * Release ran.
+ */
+function releaseComplete(draft, assets) {
+  return !draft && assets.some((asset) => asset.name === "latest.json");
+}
+export function publishRelease(
+  input,
+  output,
+  tag,
+  env = process.env,
+  gh = runGh,
+) {
   requireValue(
     env.GITHUB_REPOSITORY === repository,
     "Release publishing is restricted to the project repository",
   );
   const { prerelease } = releaseVersion(tag);
-  const notes = JSON.parse(
-    gh([
-      "api",
-      `repos/${repository}/releases/generate-notes`,
-      "-f",
-      `tag_name=${tag}`,
-      "-f",
-      `target_commitish=${env.GITHUB_SHA}`,
-    ]),
-  ).body;
+  const releases = JSON.parse(
+    gh(["api", `repos/${repository}/releases`, "--paginate", "--slurp"]),
+  ).flat();
+  // A release written ahead of CI, as a draft or published, keeps its title
+  // and notes and gets the packages. One listing latest.json is never replaced.
+  const existing = releases.find((release) => release.tag_name === tag);
+  requireValue(
+    !existing || !releaseComplete(existing.draft, existing.assets),
+    "Refusing to overwrite an already published release",
+  );
+  const written = existing?.body?.trim() ? existing.body : undefined;
+  const notes =
+    written ??
+    JSON.parse(
+      gh([
+        "api",
+        `repos/${repository}/releases/generate-notes`,
+        "-f",
+        `tag_name=${tag}`,
+        "-f",
+        `target_commitish=${env.GITHUB_SHA}`,
+      ]),
+    ).body;
   collectRelease(
     input,
     output,
@@ -412,14 +439,6 @@ export function publishRelease(input, output, tag, env = process.env) {
   );
   const notesFile = path.join(output, "release-notes.txt");
   writeFileSync(notesFile, notes);
-  const releases = JSON.parse(
-    gh(["api", `repos/${repository}/releases`, "--paginate", "--slurp"]),
-  ).flat();
-  const existing = releases.find((release) => release.tag_name === tag);
-  requireValue(
-    !existing || existing.draft,
-    "Refusing to overwrite an already published release",
-  );
   if (!existing)
     gh([
       "release",
@@ -435,12 +454,16 @@ export function publishRelease(input, output, tag, env = process.env) {
       notesFile,
     ]);
   // A temporary draft keeps incomplete uploads invisible. No human approval is required.
+  // A release published ahead of CI is public already, so latest.json goes
+  // up after the packages it lists.
   uploadAssets(
     tag,
     readdirSync(output)
-      .filter((name) => name !== "release-notes.txt")
+      .filter((name) => !["latest.json", "release-notes.txt"].includes(name))
       .map((name) => path.join(output, name)),
+    gh,
   );
+  uploadAssets(tag, [path.join(output, "latest.json")], gh);
   gh([
     "release",
     "edit",
@@ -450,21 +473,37 @@ export function publishRelease(input, output, tag, env = process.env) {
     "--draft=false",
     `--prerelease=${prerelease}`,
     `--latest=${newestStable(tag, releases)}`,
-    "--notes-file",
-    notesFile,
+    ...(written ? [] : ["--notes-file", notesFile]),
   ]);
 }
 
-export function attachRelease(input, output, tag, target, env = process.env) {
+export function attachRelease(
+  input,
+  output,
+  tag,
+  target,
+  env = process.env,
+  gh = runGh,
+) {
   requireValue(
     env.GITHUB_REPOSITORY === repository,
     "Release publishing is restricted to the project repository",
   );
-  // Only Release itself writes to a draft; it may still be uploading.
+  // Release may still be uploading, to its draft or to a release published
+  // ahead of CI.
+  const { isDraft, assets } = JSON.parse(
+    gh([
+      "release",
+      "view",
+      tag,
+      "--repo",
+      repository,
+      "--json",
+      "isDraft,assets",
+    ]),
+  );
   requireValue(
-    !JSON.parse(
-      gh(["release", "view", tag, "--repo", repository, "--json", "isDraft"]),
-    ).isDraft,
+    releaseComplete(isDraft, assets),
     "Release is not published yet",
   );
   const published = mkdtempSync(path.join(os.tmpdir(), "astrlink-release-"));
@@ -496,10 +535,12 @@ export function attachRelease(input, output, tag, target, env = process.env) {
     readdirSync(output)
       .filter((name) => !manifests.includes(name))
       .map((name) => path.join(output, name)),
+    gh,
   );
   uploadAssets(
     tag,
     manifests.map((name) => path.join(output, name)),
+    gh,
   );
 }
 

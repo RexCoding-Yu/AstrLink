@@ -17,6 +17,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getRequestSession: vi.fn(),
   getRoutingSettings: vi.fn(),
   getSessionMetadata: vi.fn(async () => ({ values: {} })),
+  getSessionPlugins: vi.fn(async () => []),
   listMetadataAttributes: vi.fn(async () => []),
   listPrivacyModelInstallations: vi.fn(),
   listRequestRecordChildren: vi.fn(),
@@ -59,12 +60,16 @@ vi.mock("./response-preview-model", async (importOriginal) => {
 import type { AuditSettings } from "./audit-settings-model";
 import type { RawSealingState } from "./raw-sealing-model";
 import { RequestRecords } from "./RequestRecords";
+import type { RecordsTarget } from "./request-live-model";
+import { resolveUsageWindow } from "./usage-range";
 import { WorkspaceSnapshotProvider } from "./workspace-snapshots";
 import {
   displayRequestStatus,
   emptyTrajectoryFields,
   type RequestRecord,
   type RequestSession,
+  type RequestSessionPage,
+  type SessionStatus,
 } from "./request-record-model";
 import type { RoutableService } from "./service-model";
 import type { RequestService } from "./request-service-model";
@@ -1319,6 +1324,42 @@ describe("RequestRecords", () => {
     expect(bridgeMocks.listRequestSessions).toHaveBeenCalled();
     expect(bridgeMocks.getRequestSession).not.toHaveBeenCalled();
     expect(bridgeMocks.listRequestRecordChildren).not.toHaveBeenCalled();
+  });
+
+  it("waits for a slow live detail before polling it again", async () => {
+    const pending: RequestRecord = {
+      ...firstRecord,
+      status: "pending",
+      completed_at: null,
+      http_status: null,
+      latency_ms: null,
+      usage: null,
+      audit: { ...emptyAudit },
+    };
+    bridgeMocks.listRequestSessions.mockResolvedValue({
+      items: [sessionFromRecord(pending)],
+      next_cursor: null,
+    });
+    bridgeMocks.getRequestSession.mockResolvedValueOnce(sessionDetail(pending));
+    const slow = deferred<ReturnType<typeof sessionDetail>>();
+    bridgeMocks.getRequestSession.mockReturnValue(slow.promise);
+    await renderRecords();
+    await act(async () => {
+      sessionRow(pending.id).click();
+    });
+    await flush();
+    bridgeMocks.getRequestSession.mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(bridgeMocks.getRequestSession).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      slow.resolve(sessionDetail(pending));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(bridgeMocks.getRequestSession).toHaveBeenCalledTimes(2);
   });
 
   // Opening a session hid the list at once and drew the detail only when it
@@ -3376,13 +3417,214 @@ describe("RequestRecords", () => {
 
     await chooseOption("状态筛选", "失败");
 
-    expect(bridgeMocks.listRequestSessions).not.toHaveBeenCalled();
+    expect(bridgeMocks.listRequestSessions).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: expect.anything() }),
+    );
     expect(
       container.querySelector(`[data-session-id="${secondRecord.id}"]`),
     ).not.toBeNull();
     expect(
       container.querySelector(`[data-session-id="${firstRecord.id}"]`),
     ).toBeNull();
+  });
+
+  it("reads earlier pages until a status filter finds its matches", async () => {
+    const stopped = sessionFromRecord(
+      {
+        ...firstRecord,
+        id: "req_cccccccccccccccccccccccccccccccc",
+        started_at: "2026-07-20T10:00:00Z",
+        completed_at: "2026-07-20T10:00:01Z",
+      },
+      { status: "interrupted" },
+    );
+    const pages: Record<string, RequestSessionPage> = {
+      first: {
+        items: [
+          sessionFromRecord(secondRecord),
+          sessionFromRecord(firstRecord),
+        ],
+        next_cursor: "cursor-1",
+      },
+      "cursor-1": {
+        items: [
+          sessionFromRecord({
+            ...firstRecord,
+            id: "req_dddddddddddddddddddddddddddddddd",
+            started_at: "2026-07-22T10:00:00Z",
+          }),
+        ],
+        next_cursor: "cursor-2",
+      },
+      "cursor-2": { items: [stopped], next_cursor: null },
+    };
+    bridgeMocks.listRequestSessions.mockImplementation(
+      async (query?: { cursor?: string }) => pages[query?.cursor ?? "first"],
+    );
+    await renderRecords();
+
+    await chooseOption("状态筛选", "已中断");
+    await act(async () => await Promise.resolve());
+
+    expect(bridgeMocks.listRequestSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ cursor: "cursor-1" }),
+    );
+    expect(bridgeMocks.listRequestSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ cursor: "cursor-2" }),
+    );
+    expect(
+      container.querySelector(`[data-session-id="${stopped.id}"]`)?.textContent,
+    ).toContain("已中断");
+    expect(container.textContent).not.toContain("没有匹配的模型调用");
+    expect(container.textContent).not.toContain("加载更早记录");
+  });
+
+  it("stops reading back after a failed page until load earlier is clicked", async () => {
+    const stopped = sessionFromRecord(
+      {
+        ...firstRecord,
+        id: "req_cccccccccccccccccccccccccccccccc",
+        started_at: "2026-07-20T10:00:00Z",
+        completed_at: "2026-07-20T10:00:01Z",
+      },
+      { status: "interrupted" },
+    );
+    let earlierFails = true;
+    bridgeMocks.listRequestSessions.mockImplementation(
+      async (query?: { cursor?: string }) => {
+        if (!query?.cursor) {
+          return {
+            items: [
+              sessionFromRecord(secondRecord),
+              sessionFromRecord(firstRecord),
+            ],
+            next_cursor: "cursor-1",
+          };
+        }
+        if (earlierFails) throw new Error("core unavailable");
+        return { items: [stopped], next_cursor: null };
+      },
+    );
+    await renderRecords();
+
+    await chooseOption("状态筛选", "已中断");
+    await act(async () => await Promise.resolve());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    const earlierReads = () =>
+      bridgeMocks.listRequestSessions.mock.calls.filter(
+        ([query]) => (query as { cursor?: string } | undefined)?.cursor,
+      ).length;
+    expect(earlierReads()).toBe(1);
+    expect(container.textContent).toContain("core unavailable");
+    expect(container.textContent).toContain("没有匹配的模型调用");
+
+    earlierFails = false;
+    await act(async () => exactButton("加载更早记录").click());
+    await act(async () => await Promise.resolve());
+
+    expect(earlierReads()).toBe(2);
+    expect(container.textContent).not.toContain("core unavailable");
+    expect(
+      container.querySelector(`[data-session-id="${stopped.id}"]`),
+    ).not.toBeNull();
+  });
+
+  it("drops an earlier page read against a list that has since restarted", async () => {
+    const at = (id: string, startedAt: string, status: SessionStatus) =>
+      sessionFromRecord(
+        { ...firstRecord, id, started_at: startedAt, completed_at: startedAt },
+        { status },
+      );
+    const cancelled = at(
+      "req_cccccccccccccccccccccccccccccccc",
+      "2026-07-22T10:00:00Z",
+      "cancelled",
+    );
+    const stopped = at(
+      "req_dddddddddddddddddddddddddddddddd",
+      "2026-07-20T10:00:00Z",
+      "interrupted",
+    );
+    const restarted = deferred<RequestSessionPage>();
+    const stale = deferred<RequestSessionPage>();
+    let firstPages = 0;
+    let oldestReads = 0;
+    bridgeMocks.listRequestSessions.mockImplementation(
+      async (query?: { kind?: string; cursor?: string }) => {
+        if (query?.kind !== "inference")
+          return { items: [], next_cursor: null };
+        if (query.cursor === "cursor-1") {
+          return { items: [cancelled], next_cursor: "cursor-2" };
+        }
+        if (query.cursor === "cursor-2") {
+          oldestReads += 1;
+          if (oldestReads === 1) throw new Error("core unavailable");
+          if (oldestReads === 2) return stale.promise;
+          return { items: [stopped], next_cursor: null };
+        }
+        firstPages += 1;
+        if (firstPages === 2) return restarted.promise;
+        return {
+          items: [
+            sessionFromRecord(secondRecord),
+            sessionFromRecord(firstRecord),
+          ],
+          next_cursor: "cursor-1",
+        };
+      },
+    );
+    await act(async () => {
+      reactRoot.render(
+        <WorkspaceSnapshotProvider sessionKey="session-1">
+          <RequestRecords
+            accessTokens={[]}
+            accessTokensReady
+            coreSessionKey="session-1"
+            services={[service]}
+            isReady
+          />
+        </WorkspaceSnapshotProvider>,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    // The oldest page fails, so the list keeps cursor-2 when it is left.
+    await chooseOption("状态筛选", "已中断");
+    await flush();
+    expect(oldestReads).toBe(1);
+    await act(async () => exactButton("全部").focus());
+    await flush();
+    // Back on the call list, its saved pages show while the first page reloads.
+    await act(async () => exactButton("模型调用").focus());
+    await flush();
+    expect(firstPages).toBe(2);
+    await chooseOption("状态筛选", "已取消");
+    await flush();
+    expect(oldestReads).toBe(2);
+
+    await act(async () =>
+      restarted.resolve({
+        items: [
+          sessionFromRecord(secondRecord),
+          sessionFromRecord(firstRecord),
+        ],
+        next_cursor: "cursor-1",
+      }),
+    );
+    await flush();
+    await act(async () =>
+      stale.resolve({ items: [stopped], next_cursor: null }),
+    );
+    await flush(6);
+
+    // Appending cursor-2 behind the new first page would skip cursor-1.
+    expect(oldestReads).toBe(3);
+    expect(
+      container.querySelector(`[data-session-id="${cancelled.id}"]`),
+    ).not.toBeNull();
   });
 
   it("offers the clients that sent traffic and filters by them locally", async () => {
@@ -3456,30 +3698,34 @@ describe("RequestRecords", () => {
     });
   });
 
-  it("lists the conversations behind the tray's failure count until cleared", async () => {
+  it("lists the conversations behind a failure count until cleared", async () => {
     const today = {
-      from: "2026-07-24T15:00:00.000Z",
-      to: "2026-07-25T15:00:00.000Z",
+      from: new Date(2026, 6, 25).toISOString(),
+      to: new Date(2026, 6, 26).toISOString(),
     };
     const scoped = { status: "failed", ...today };
-    const renderScoped = async (failedWithin?: typeof today) => {
+    const renderScoped = async (target?: RecordsTarget) => {
       await act(async () => {
         reactRoot.render(
           <RequestRecords
             accessTokens={[]}
             accessTokensReady
             coreSessionKey="session-1"
-            initialFailedWithin={failedWithin}
             services={[service]}
             isReady
+            target={target}
           />,
         );
         await Promise.resolve();
       });
       await act(async () => await Promise.resolve());
     };
+    const failedToday = (): RecordsTarget => ({
+      status: "failed",
+      range: { from: "2026-07-25", to: "2026-07-25" },
+    });
 
-    await renderScoped(today);
+    await renderScoped(failedToday());
     expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
       limit: 50,
       kind: "inference",
@@ -3505,22 +3751,24 @@ describe("RequestRecords", () => {
       ...scoped,
     });
 
+    // Clearing the status keeps the day it was counted over.
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          'button[aria-label="清除筛选：今天有失败的会话"]',
+          'button[aria-label="清除筛选：失败的调用"]',
         )!
         .click(),
     );
-    expect(container.textContent).not.toContain("今天有失败的会话");
+    expect(container.textContent).not.toContain("失败的调用");
     expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
       limit: 50,
       kind: "inference",
+      ...today,
     });
 
     // Another tray click is a new target and brings the narrowing back.
-    await renderScoped({ ...today });
-    expect(container.textContent).toContain("今天有失败的会话");
+    await renderScoped(failedToday());
+    expect(container.textContent).toContain("失败的调用");
     expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
       limit: 50,
       kind: "inference",
@@ -3530,10 +3778,192 @@ describe("RequestRecords", () => {
     // The count covers model calls only, so model discovery drops the
     // narrowing rather than listing failures the tray never counted.
     await act(async () => exactButton("模型获取").focus());
-    expect(container.textContent).not.toContain("今天有失败的会话");
+    expect(container.textContent).not.toContain("失败的调用");
     expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
       limit: 50,
       kind: "discovery",
+      ...today,
+    });
+  });
+
+  it("names an overview status count on the chip and its range in the time filter", async () => {
+    await act(async () => {
+      reactRoot.render(
+        <RequestRecords
+          accessTokens={[]}
+          accessTokensReady
+          coreSessionKey="session-1"
+          services={[service]}
+          isReady
+          target={{ status: "blocked", range: "7d" }}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+
+    const week = resolveUsageWindow("7d", new Date());
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+      status: "blocked",
+      from: week.from,
+      to: week.to,
+    });
+    expect(
+      container.querySelector('button[aria-label="清除筛选：已拦截的调用"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="时间筛选"]')?.textContent,
+    ).toBe("时间近 7 天");
+  });
+
+  it("opens on a target's provider, token, model and days and narrows by each", async () => {
+    const token = {
+      id: "token_01",
+      name: "VS Code",
+      hint: "astr_…K8Q2",
+      created_at: "2026-07-24T10:30:00Z",
+    };
+    await act(async () => {
+      reactRoot.render(
+        <RequestRecords
+          accessTokens={[token]}
+          accessTokensReady
+          coreSessionKey="session-1"
+          services={[service]}
+          isReady
+          target={{
+            tokenId: "token_01",
+            serviceId: "service_01",
+            models: ["gpt-4.1"],
+            range: "7d",
+          }}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => await Promise.resolve());
+
+    const week = resolveUsageWindow("7d", new Date());
+    expect(bridgeMocks.listRequestSessions).toHaveBeenCalledWith({
+      limit: 50,
+      kind: "inference",
+      local_access_token_ids: ["token_01"],
+      models: ["gpt-4.1"],
+      from: week.from,
+      to: week.to,
+    });
+    const trigger = (label: string) =>
+      document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!;
+    expect(trigger("时间筛选").textContent).toBe("时间近 7 天");
+    expect(trigger("模型筛选").textContent).toContain("gpt-4.1");
+    expect(trigger("提供商筛选").textContent).toContain("Primary gateway");
+    expect(trigger("令牌筛选").textContent).toContain("VS Code");
+
+    // Every time range, from all of history down to a day.
+    await act(async () => trigger("时间筛选").click());
+    const picker = document.querySelector<HTMLElement>(
+      '[data-slot="usage-range-picker"]',
+    )!;
+    expect(
+      [...picker.querySelectorAll("button[aria-pressed]")].map(
+        (option) => option.textContent,
+      ),
+    ).toEqual([
+      "全部",
+      "近 24 小时",
+      "近 7 天",
+      "近 30 天",
+      "近 90 天",
+      "近一年",
+    ]);
+    await act(async () => exactButton("全部", picker).click());
+    expect(bridgeMocks.listRequestSessions).toHaveBeenCalledWith({
+      limit: 50,
+      kind: "inference",
+      local_access_token_ids: ["token_01"],
+      models: ["gpt-4.1"],
+    });
+
+    // Models only clear: selecting every listed name would read no differently.
+    await act(async () => trigger("模型筛选").click());
+    expect(() => exactButton("全选")).toThrow();
+    const modelOption = () =>
+      document.querySelector<HTMLButtonElement>(
+        '[role="listbox"] [role="checkbox"][aria-label="gpt-4.1"]',
+      )!;
+    await act(async () => modelOption().click());
+    expect(bridgeMocks.listRequestSessions).toHaveBeenCalledWith({
+      limit: 50,
+      kind: "inference",
+      local_access_token_ids: ["token_01"],
+    });
+    await act(async () => modelOption().click());
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+
+    // Model discovery names no model, so its tab drops the model filter.
+    await act(async () => exactButton("模型获取").focus());
+    expect(trigger("模型筛选").disabled).toBe(true);
+    expect(bridgeMocks.listRequestSessions).toHaveBeenCalledWith({
+      limit: 50,
+      kind: "discovery",
+      local_access_token_ids: ["token_01"],
+    });
+  });
+
+  it("keeps the model menu in place while a chosen model narrows the list", async () => {
+    bridgeMocks.listRequestSessions.mockImplementation(
+      async (query: { models?: string[] }) => ({
+        items: [secondRecord, firstRecord]
+          .filter(
+            (record) =>
+              !query.models ||
+              query.models.includes(record.requested_model ?? ""),
+          )
+          .map((record) => sessionFromRecord(record)),
+        next_cursor: null,
+      }),
+    );
+    await renderRecords();
+
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>('[aria-label="模型筛选"]')!
+        .click(),
+    );
+    const modelOption = (name: string) =>
+      document.querySelector<HTMLButtonElement>(
+        `[role="listbox"] [role="checkbox"][aria-label="${name}"]`,
+      )!;
+    const modelNames = () =>
+      [...document.querySelectorAll('[role="listbox"] [role="checkbox"]')].map(
+        (option) => option.getAttribute("aria-label"),
+      );
+    // No provider lists gpt-4.1-mini; only a loaded call names it.
+    expect(modelNames()).toEqual(["gpt-4.1", "gpt-4.1-mini"]);
+
+    await act(async () => modelOption("gpt-4.1").click());
+    await flush();
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+      models: ["gpt-4.1"],
+    });
+    expect(
+      container.querySelector(`[data-session-id="${secondRecord.id}"]`),
+    ).toBeNull();
+    expect(modelNames()).toEqual(["gpt-4.1", "gpt-4.1-mini"]);
+
+    await act(async () => modelOption("gpt-4.1-mini").click());
+    expect(bridgeMocks.listRequestSessions).toHaveBeenLastCalledWith({
+      limit: 50,
+      kind: "inference",
+      models: ["gpt-4.1", "gpt-4.1-mini"],
     });
   });
 
@@ -3930,10 +4360,9 @@ describe("RequestRecords", () => {
     expect(
       panel?.querySelector("[data-request-routing-summary]")?.textContent,
     ).toContain(
-      i18n.t("routingProcess.chosenByRuleId", {
+      i18n.t("routingProcess.chosenByUnlistedRule", {
         model: "gpt-4.1",
         provider: "Primary gateway",
-        rule: "coding",
       }),
     );
     // Names, never IDs or the configuration hash.

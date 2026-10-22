@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/QuantumNous/astrlink/core/internal/transport"
+	"github.com/QuantumNous/astrlink/core/internal/modelmeta"
 )
 
 type CatalogStore interface {
@@ -18,8 +18,7 @@ type CatalogStore interface {
 }
 type Manager struct {
 	store     CatalogStore
-	client    *http.Client
-	base      string
+	source    *modelmeta.Source
 	mu        sync.Mutex
 	syncMu    sync.Mutex
 	checked   *time.Time
@@ -27,10 +26,7 @@ type Manager struct {
 }
 
 func NewManager(store CatalogStore, client *http.Client) *Manager {
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	return &Manager{store: store, client: client, base: SourceURL}
+	return &Manager{store: store, source: modelmeta.NewSource(client)}
 }
 func (m *Manager) Status(ctx context.Context) (Status, error) {
 	m.mu.Lock()
@@ -42,7 +38,7 @@ func (m *Manager) status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	s := Status{Source: SourceURL, Version: c.Version, CheckedAt: m.checked, Error: m.lastError, Models: len(c.Prices), Warnings: c.Warnings}
+	s := Status{Source: modelmeta.SourceURL, Version: c.Version, CheckedAt: m.checked, Error: m.lastError, Models: len(c.Prices), Warnings: c.Warnings}
 	if s.Warnings == nil {
 		s.Warnings = []string{}
 	}
@@ -50,33 +46,6 @@ func (m *Manager) status(ctx context.Context) (Status, error) {
 		s.UpdatedAt = &c.ActivatedAt
 	}
 	return s, nil
-}
-func (m *Manager) get(ctx context.Context, path, etag string) ([]byte, string, bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/"+path, nil)
-	if err != nil {
-		return nil, "", false, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Encoding", transport.SupportedResponseEncodings)
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
-	}
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return nil, "", false, fmt.Errorf("price source unavailable")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 304 {
-		return nil, etag, true, nil
-	}
-	if resp.StatusCode != 200 {
-		return nil, "", false, fmt.Errorf("price source HTTP %d", resp.StatusCode)
-	}
-	body, err := transport.ReadResponseBody(resp, 8<<20)
-	if err != nil {
-		return nil, "", false, fmt.Errorf("invalid price source response")
-	}
-	return body, resp.Header.Get("ETag"), false, nil
 }
 func (m *Manager) Sync(ctx context.Context) (status Status, err error) {
 	if !m.syncMu.TryLock() {
@@ -101,7 +70,12 @@ func (m *Manager) Sync(ctx context.Context) (status Status, err error) {
 	if err != nil {
 		return status, err
 	}
-	manifest, etag, unchanged, err := m.get(ctx, "manifest.json", old.ETag)
+	// A catalog saved before model metadata was kept is fetched again.
+	etag := old.ETag
+	if old.Models == nil {
+		etag = ""
+	}
+	manifest, etag, unchanged, err := m.source.Get(ctx, "manifest.json", etag)
 	if err != nil || unchanged {
 		return status, err
 	}
@@ -113,21 +87,18 @@ func (m *Manager) Sync(ctx context.Context) (status Status, err error) {
 	if json.Unmarshal(manifest, &meta) != nil || meta.Version != 1 || meta.GeneratedAt.IsZero() {
 		return status, fmt.Errorf("unsupported pricing manifest")
 	}
-	all, _, _, err := m.get(ctx, "all.json", "")
+	all, _, _, err := m.source.Get(ctx, "all.json", "")
 	if err != nil {
 		return status, err
 	}
-	var providers map[string]struct {
-		Models map[string]struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if json.Unmarshal(all, &providers) != nil {
-		return status, fmt.Errorf("invalid pricing catalog")
+	providers, err := modelmeta.Parse(all)
+	if err != nil {
+		return status, err
 	}
 	prices := []Price{}
+	models := []modelmeta.Model{}
 	warnings := append([]string{}, meta.Warnings...)
-	parts := []string{string(manifest)}
+	parts := []string{string(manifest), string(all)}
 	ids := []string{}
 	for id := range providers {
 		if Providers[id] != "" {
@@ -136,7 +107,7 @@ func (m *Manager) Sync(ctx context.Context) (status Status, err error) {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		body, _, _, e := m.get(ctx, "newapi/providers/"+id+"/ratio_config-v1-base.json", "")
+		body, _, _, e := m.source.Get(ctx, "newapi/providers/"+id+"/ratio_config-v1-base.json", "")
 		if e != nil {
 			return status, e
 		}
@@ -151,12 +122,16 @@ func (m *Manager) Sync(ctx context.Context) (status Status, err error) {
 			return status, fmt.Errorf("invalid provider prices: %s", id)
 		}
 		parts = append(parts, string(body))
-		models := []string{}
-		for model := range rules.Data.Expressions {
-			models = append(models, model)
+		names := map[string]string{}
+		for _, model := range providers[id] {
+			names[model.Model] = model.Name
 		}
-		sort.Strings(models)
-		for _, model := range models {
+		priced := []string{}
+		for model := range rules.Data.Expressions {
+			priced = append(priced, model)
+		}
+		sort.Strings(priced)
+		for _, model := range priced {
 			expr := rules.Data.Expressions[model]
 			if len(model) > 256 || rules.Data.Modes[model] != "tiered_expr" {
 				return status, fmt.Errorf("unsupported provider price: %s", id)
@@ -165,21 +140,22 @@ func (m *Manager) Sync(ctx context.Context) (status Status, err error) {
 				warnings = append(warnings, id+"/"+model+": unsupported billing expression")
 				continue
 			}
-			prices = append(prices, Price{Provider: id, Model: model, Name: providers[id].Models[model].Name, Expression: expr})
+			prices = append(prices, Price{Provider: id, Model: model, Name: names[model], Expression: expr})
 		}
+		models = append(models, providers[id]...)
 	}
 	if len(prices) == 0 {
 		return status, fmt.Errorf("no official API prices found")
 	}
 	// Reject a deployment that changed during the multi-file download.
-	after, _, _, err := m.get(ctx, "manifest.json", "")
+	after, _, _, err := m.source.Get(ctx, "manifest.json", "")
 	if err != nil {
 		return status, err
 	}
 	if string(after) != string(manifest) {
 		return status, fmt.Errorf("price publication changed; retry sync")
 	}
-	c := Catalog{Version: Digest(parts...), GeneratedAt: meta.GeneratedAt, ActivatedAt: time.Now().UTC(), ETag: etag, Prices: prices, Warnings: warnings}
+	c := Catalog{Version: Digest(parts...), GeneratedAt: meta.GeneratedAt, ActivatedAt: time.Now().UTC(), ETag: etag, Prices: prices, Models: models, Warnings: warnings}
 	err = m.store.SavePricingCatalog(ctx, c)
 	return status, err
 }
@@ -193,7 +169,7 @@ func (m *Manager) Run(ctx context.Context, logf func(string, ...any)) {
 		if m.checked != nil && m.checked.After(checked) {
 			checked = *m.checked
 		}
-		due := err != nil || m.lastError != "" || checked.IsZero() || time.Since(checked) >= 24*time.Hour
+		due := err != nil || m.lastError != "" || checked.IsZero() || time.Since(checked) >= 24*time.Hour || c.Models == nil
 		m.mu.Unlock()
 		if due {
 			syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -203,7 +179,7 @@ func (m *Manager) Run(ctx context.Context, logf func(string, ...any)) {
 				logf("price sync: %v", err)
 			}
 		}
-		// Fill missing prices and retry audio breakdowns after evaluator fixes,
+		// Fill missing prices and value entries earlier releases left unpriced,
 		// even when the catalog has not changed. Already valued entries stay fixed.
 		if pending, ok := m.store.(interface {
 			PriceUnpriced(context.Context) (int, error)

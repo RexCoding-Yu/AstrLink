@@ -4,7 +4,28 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ActivityHeatmap, type ActivityCell } from "./ActivityHeatmap";
+import {
+  ActivityHeatmap,
+  heatmapCellLayout,
+  type ActivityCell,
+} from "./ActivityHeatmap";
+
+describe("heatmapCellLayout", () => {
+  it("fits a year of weeks to the panel before it ever scrolls", () => {
+    // The default 950 px window leaves the panel about 800 px: roomy cells.
+    expect(heatmapCellLayout(800, 53)).toEqual({
+      cell: (800 - 28 - 53 * 3) / 53,
+      gap: 3,
+    });
+    // Narrower panels tighten the gaps before they shrink cells under ten.
+    const narrow = heatmapCellLayout(620, 53);
+    expect(narrow.gap).toBe(2);
+    expect(narrow.cell).toBeCloseTo((620 - 28 - 53 * 2) / 53);
+    expect(28 + 53 * narrow.cell + 53 * narrow.gap).toBeCloseTo(620);
+    // Below pointable cells the calendar keeps its size and scrolls.
+    expect(heatmapCellLayout(320, 53)).toEqual({ cell: 8, gap: 2 });
+  });
+});
 
 describe("ActivityHeatmap tooltip lifecycle", () => {
   let container: HTMLDivElement;

@@ -17,6 +17,31 @@ import (
 
 func intPtr(value int) *int { return &value }
 
+func TestUsageScannerCompactsBatchesWithoutLosingSplitLines(t *testing.T) {
+	stream := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\"}}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_split\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"total_tokens\":8}}}\n\ndata: [DONE]\n\n")
+	for _, size := range []int{1, 7, 64, len(stream)} {
+		scanner := newUsageScanner(contract.ProtocolOpenAIResponses, true)
+		for start := 0; start < len(stream); start += size {
+			scanner.observe(stream[start:min(start+size, len(stream))])
+		}
+		if usage := scanner.Usage(); usage == nil || usage.TotalTokens != 8 || scanner.OutputID() != "resp_split" || !scanner.complete {
+			t.Fatalf("chunk size=%d usage=%+v id=%s complete=%v", size, usage, scanner.OutputID(), scanner.complete)
+		}
+	}
+}
+
+func BenchmarkUsageScannerStreamingBatch(b *testing.B) {
+	frame := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"some generated text\"}\n\n")
+	chunk := bytes.Repeat(frame, 32768/len(frame))
+	b.SetBytes(int64(len(chunk)))
+	b.ReportAllocs()
+	for b.Loop() {
+		newUsageScanner(contract.ProtocolOpenAIResponses, true).observe(chunk)
+	}
+}
+
 func TestUsageScannerProtocols(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -62,6 +87,15 @@ func TestUsageScannerProtocols(t *testing.T) {
 				"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n",
 			},
 			want: &contract.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+		},
+		{
+			name:      "openai responses sse incomplete event",
+			protocol:  contract.ProtocolOpenAIResponses,
+			streaming: true,
+			chunks: []string{
+				"data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":7,\"output_tokens\":64,\"total_tokens\":71}}}\n",
+			},
+			want: &contract.Usage{InputTokens: 7, OutputTokens: 64, TotalTokens: 71},
 		},
 		{
 			name:      "chat sse last usage-bearing chunk wins",
@@ -214,6 +248,29 @@ func TestUsageScannerProtocols(t *testing.T) {
 			}
 			if recorder.Body.String() != strings.Join(test.chunks, "") {
 				t.Fatalf("scanner altered response bytes")
+			}
+		})
+	}
+}
+
+func TestUsageScannerResponsesTerminalEvents(t *testing.T) {
+	for _, test := range []struct {
+		event    string
+		complete bool
+	}{
+		{"response.completed", true},
+		{"response.incomplete", true},
+		{"response.failed", false},
+	} {
+		t.Run(test.event, func(t *testing.T) {
+			scanner := newUsageScanner(contract.ProtocolOpenAIResponses, true)
+			writer := scanner.wrap(httptest.NewRecorder())
+			if _, err := fmt.Fprintf(writer, "data: {\"type\":%q,\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"total_tokens\":7}}}\n", test.event); err != nil {
+				t.Fatal(err)
+			}
+			usage := scanner.Usage()
+			if usage == nil || usage.InputTokens != 5 || usage.OutputTokens != 2 || scanner.complete != test.complete {
+				t.Fatalf("usage=%#v complete=%t, want 5/2 complete=%t", usage, scanner.complete, test.complete)
 			}
 		})
 	}

@@ -66,15 +66,18 @@ export async function consoleRequest(
   return { value, etag: response.headers.get("ETag") };
 }
 
+/** Core repeats one singular parameter per item of these lists. */
+const QUERY_LIST_NAMES: Record<string, string> = {
+  local_access_token_ids: "local_access_token_id",
+  models: "model",
+};
+
 function query(values: Args = {}): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
     if (value === undefined || value === null) continue;
     for (const item of Array.isArray(value) ? value : [value]) {
-      params.append(
-        key === "local_access_token_ids" ? "local_access_token_id" : key,
-        String(item),
-      );
+      params.append(QUERY_LIST_NAMES[key] ?? key, String(item));
     }
   }
   const result = params.toString();
@@ -287,6 +290,14 @@ const commands: Record<string, Command> = {
     if (a.unbind === true) return route(path, "DELETE")(a);
     return route(path, "PUT", input)(a);
   },
+  session_plugins: (a) => {
+    if (a.key === undefined) return route((b) => `${session(b)}/plugins`)(a);
+    const path = (b: Args) =>
+      `${session(b)}/plugins/${segment(b.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
+    if (a.refresh === true)
+      return route((b) => `${path(b)}/refresh`, "POST")(a);
+    return route(path, "PUT", input)(a);
+  },
   get_request_record: route(request),
   list_request_record_children: route((a) => `${request(a)}/children`),
   delete_request_record: route(request, "DELETE"),
@@ -408,6 +419,9 @@ const commands: Record<string, Command> = {
   plugin_action: (a) => {
     if (a.action === "list") return route("/plugins")(a);
     if (a.action === "reload") return route("/plugins/reload", "POST")(a);
+    if (a.action === "host") return route("/plugin-host")(a);
+    if (a.action === "update_host")
+      return route("/plugin-host", "PATCH", input)(a);
     const plugin = `/plugins/${segment(a.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
     switch (a.action) {
       case "get":
@@ -418,6 +432,16 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/test`, "POST")(a);
       case "status":
         return route(`${plugin}/status`)(a);
+      case "stats":
+        return route(`${plugin}/stats${query(a.input as Args)}`)(a);
+      case "action":
+        return route(`${plugin}/actions`, "POST", input)(a);
+      case "clear_workspaces":
+        return route(`${plugin}/workspaces`, "DELETE")(a);
+      case "clear_values":
+        return route(`${plugin}/values`, "DELETE")(a);
+      case "revoke_lookups":
+        return route(`${plugin}/lookup-credentials`, "DELETE")(a);
       case "save_credential":
         return route(
           `${plugin}/credentials/${segment(a.name, /^[a-z][a-z0-9_]{0,31}$/)}`,
@@ -450,6 +474,10 @@ const commands: Record<string, Command> = {
         return route(
           `${base}/${segment(a.key, /^[a-z][a-z0-9_]{0,31}$/)}`,
           "DELETE",
+        )(a);
+      case "values":
+        return route(
+          `${base}/${segment(a.key, /^[a-z][a-z0-9_]{0,31}$/)}/values`,
         )(a);
       default:
         throw new Error("Unsupported metadata operation");

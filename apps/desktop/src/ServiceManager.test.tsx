@@ -30,6 +30,10 @@ const bridgeMocks = vi.hoisted(() => ({
   probeServiceProxy: vi.fn(),
   testService: vi.fn(),
   updateService: vi.fn(),
+  listTerminalApps: vi.fn(),
+  getClientConfigStatus: vi.fn(),
+  openServiceTerminal: vi.fn(),
+  pickTerminalDirectory: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -46,6 +50,7 @@ import {
   finishExitAnimations,
   installDialogAnimations,
 } from "./lib/test-dialog-animations";
+import { settleClosedLayer } from "./lib/test-layer-settle";
 import { ServiceManager } from "./ServiceManager";
 import { PROTOCOL_MODE_GUIDE_KEY } from "./ProtocolModeHelp";
 import { SERVICE_EDITOR_TOUR_KEY } from "./ServiceEditorTour";
@@ -193,6 +198,23 @@ async function chooseMenuItem(label: string): Promise<void> {
   });
 }
 
+async function openModelActions(): Promise<void> {
+  const trigger = document.querySelector<HTMLButtonElement>(
+    'button[aria-label="更多模型操作"]',
+  );
+  if (!trigger) throw new Error("Missing model actions menu");
+  await act(async () => {
+    trigger.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        pointerType: "mouse",
+      }),
+    );
+    await Promise.resolve();
+  });
+}
+
 function previewModelCheckbox(model: string): HTMLButtonElement {
   const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
   if (!dialog) throw new Error("Missing model preview dialog");
@@ -283,6 +305,59 @@ describe("ServiceManager", () => {
     container.remove();
   });
 
+  it("opens a terminal for one provider from its menu once the gateway runs", async () => {
+    bridgeMocks.listTerminalApps.mockResolvedValue([
+      { id: "terminal", name: "Terminal" },
+    ]);
+    bridgeMocks.getClientConfigStatus.mockResolvedValue({
+      clients: [],
+      wsl_unchecked: [],
+      wsl_localhost: false,
+      cc_switch_wsl: { claude: null, codex: null },
+    });
+    const render = (inferenceURL: string) =>
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          inferenceURL={inferenceURL}
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[gatewayService]}
+          view={{ kind: "list" }}
+        />,
+      );
+    // Without a gateway address the terminal would have nothing to reach.
+    await act(async () => render(""));
+    await openServiceOverflow(gatewayService.name);
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find(
+      (candidate) => candidate.textContent === "在终端打开…",
+    );
+    expect(item?.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await settleClosedLayer();
+
+    await act(async () => render("http://127.0.0.1:18317"));
+    await openServiceOverflow(gatewayService.name);
+    await chooseMenuItem("在终端打开…");
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      `在终端打开「${gatewayService.name}」`,
+    );
+    expect(bridgeMocks.listTerminalApps).toHaveBeenCalledOnce();
+  });
+
   it("shows per-provider cache and TPS, changes period and refreshes unavailable statistics", async () => {
     bridgeMocks.getUsageSummary.mockResolvedValueOnce({
       by_service: [
@@ -325,7 +400,7 @@ describe("ServiceManager", () => {
           )!,
       );
     expect(meters()).toHaveLength(2);
-    expect(meters()[0].textContent).toContain("26.0%");
+    expect(meters()[0].textContent).toContain("缓存命中率26.0%");
     expect(meters()[0].textContent).toContain("49.0 tok/s");
     expect(meters()[1].textContent).toContain("—");
     // Missing values keep their units only as invisible spacers.
@@ -3890,10 +3965,10 @@ describe("ServiceManager", () => {
       container.querySelectorAll('[data-testid="service-model-row"]'),
     ).toHaveLength(1);
 
-    const clear = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "清空",
-    );
-    await act(async () => clear?.click());
+    // Clearing the list sits in the menu beside the select button.
+    await openModelActions();
+    await chooseMenuItem("清空");
+    await settleClosedLayer();
     expect(document.body.textContent).toContain("清空支持模型？");
     const confirm = [...document.querySelectorAll("button")].find(
       (button) => button.textContent === "确认删除",
@@ -4113,6 +4188,347 @@ describe("ServiceManager", () => {
     expect(
       container.querySelector('[data-testid="service-models-filter-disabled"]'),
     ).toBeNull();
+  });
+
+  async function typeInto(
+    input: HTMLInputElement,
+    value: string,
+  ): Promise<void> {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  async function addModelsByHand(models: string[]): Promise<void> {
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="添加模型"]')!
+        .click(),
+    );
+    for (const model of models) {
+      await typeInto(
+        container.querySelector<HTMLInputElement>(
+          'input[aria-label="待添加模型 ID"]',
+        )!,
+        model,
+      );
+      await clickButton("添加");
+    }
+  }
+
+  async function submitServiceForm(): Promise<void> {
+    await act(async () => {
+      container
+        .querySelector("form")!
+        .dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+      await Promise.resolve();
+    });
+  }
+
+  async function chooseFormat(model: string, option: string): Promise<void> {
+    const trigger = container.querySelector<HTMLButtonElement>(
+      `button[aria-label="指定 ${model} 发给上游的格式"]`,
+    );
+    if (!trigger) throw new Error(`Missing format menu: ${model}`);
+    await act(async () => {
+      trigger.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          pointerType: "mouse",
+        }),
+      );
+      await Promise.resolve();
+    });
+    const item = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((candidate) => candidate.textContent?.trim() === option);
+    if (!item) throw new Error(`Missing format option: ${option}`);
+    await act(async () => {
+      item.click();
+      await Promise.resolve();
+    });
+    await settleClosedLayer();
+  }
+
+  /** The tag a model with a format of its own shows beside its name. */
+  function formatShown(model: string): string | undefined {
+    const row = [
+      ...container.querySelectorAll('[data-testid="service-model-row"]'),
+    ].find(
+      (candidate) => candidate.querySelector("code")?.textContent === model,
+    );
+    return row
+      ?.querySelector('[data-testid="service-model-format"]')
+      ?.textContent?.trim();
+  }
+
+  it("saves a new provider's upstream formats for the models it keeps", async () => {
+    const preset = httpServicePreset("opencode_go");
+    const created = parseService({
+      ...gatewayService,
+      name: preset.defaultName,
+      kind: "opencode_go",
+      models: ["gemini-4-argon-contributor", "glm-5.3"],
+      http: {
+        base_url: preset.baseURL,
+        auth: { scheme: "bearer" },
+        credential_ref: "local://service/service_gateway",
+      },
+      capabilities: preset.capabilities,
+    });
+    bridgeMocks.createService.mockResolvedValue({ service: created, etag });
+    await act(async () =>
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[]}
+          view={{ kind: "create", serviceKind: "opencode_go" }}
+        />,
+      ),
+    );
+    await openEditorTab("models");
+    await addModelsByHand(["gemini-4-argon-contributor", "glm-5.3", "kimi-k3"]);
+    expect(formatShown("gemini-4-argon-contributor")).toBeUndefined();
+    await chooseFormat("glm-5.3", "Messages");
+    await chooseFormat("kimi-k3", "Responses");
+    // A deleted model takes its format with it.
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="删除 kimi-k3"]')!
+        .click(),
+    );
+    await openEditorTab("connection");
+    await typeInto(
+      container.querySelector<HTMLInputElement>('input[type="password"]')!,
+      "test-api-key",
+    );
+    await submitServiceForm();
+
+    expect(bridgeMocks.createService).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "opencode_go",
+        models: ["gemini-4-argon-contributor", "glm-5.3"],
+        model_protocols: [{ model: "glm-5.3", protocol: "anthropic.messages" }],
+        http: {
+          base_url: "https://opencode.ai/inference/go/v1",
+          auth: { scheme: "bearer" },
+          credential: { secret: "test-api-key" },
+        },
+      }),
+    );
+  });
+
+  it.each([
+    ["leaves unchanged formats out of the patch", null, undefined],
+    [
+      "sends the whole table after a change",
+      ["gpt-5.5", "Responses"],
+      [
+        { model: "claude-opus-5-5", protocol: "anthropic.messages" },
+        { model: "gpt-5.5", protocol: "openai.responses" },
+      ],
+    ],
+    [
+      "clears the table with an empty list",
+      ["claude-opus-5-5", "按入口协议设置"],
+      [],
+    ],
+  ] as const)("%s when editing", async (_name, change, expected) => {
+    const saved: Service = {
+      ...gatewayService,
+      models: ["claude-opus-5-5", "gpt-5.5"],
+      model_protocols: [
+        { model: "claude-opus-5-5", protocol: "anthropic.messages" },
+      ],
+    };
+    bridgeMocks.getService.mockResolvedValue({ service: saved, etag });
+    bridgeMocks.updateService.mockResolvedValue({ service: saved, etag });
+    await act(async () => {
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[saved]}
+          view={{ kind: "edit", serviceId: saved.id }}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await openEditorTab("models");
+    expect(formatShown("claude-opus-5-5")).toBe("Messages 格式");
+    expect(formatShown("gpt-5.5")).toBeUndefined();
+    if (change) await chooseFormat(change[0], change[1]);
+    await submitServiceForm();
+
+    const patch = bridgeMocks.updateService.mock.calls[0]?.[2];
+    if (expected === undefined) {
+      expect(patch).not.toHaveProperty("model_protocols");
+    } else {
+      expect(patch?.model_protocols).toEqual(expected);
+    }
+  });
+
+  it("fills formats from a fetched list for new models and keeps chosen ones", async () => {
+    const saved: Service = {
+      ...gatewayService,
+      models: ["gpt-5.5"],
+      model_protocols: [{ model: "gpt-5.5", protocol: "openai.chat" }],
+    };
+    bridgeMocks.getService.mockResolvedValue({ service: saved, etag });
+    bridgeMocks.updateService.mockResolvedValue({ service: saved, etag });
+    bridgeMocks.probeDraftServiceModels.mockResolvedValue({
+      service_id: saved.id,
+      protocol: "openai.models",
+      model_ids: ["claude-opus-5-5", "gemini-3.1-pro", "gpt-5.5"],
+      model_protocols: [
+        { model: "claude-opus-5-5", protocol: "anthropic.messages" },
+        { model: "gpt-5.5", protocol: "openai.responses" },
+      ],
+    });
+    await act(async () => {
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[saved]}
+          view={{ kind: "edit", serviceId: saved.id }}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await openEditorTab("models");
+    await clickButton("获取模型列表");
+    await clickButton("全选");
+    await act(async () => applySelectedButton().click());
+
+    expect(formatShown("claude-opus-5-5")).toBe("Messages 格式");
+    expect(formatShown("gpt-5.5")).toBe("Chat 格式");
+    expect(formatShown("gemini-3.1-pro")).toBeUndefined();
+    await submitServiceForm();
+    expect(bridgeMocks.updateService.mock.calls[0]?.[2]).toMatchObject({
+      models: ["claude-opus-5-5", "gemini-3.1-pro", "gpt-5.5"],
+      model_protocols: [
+        { model: "claude-opus-5-5", protocol: "anthropic.messages" },
+        { model: "gpt-5.5", protocol: "openai.chat" },
+      ],
+    });
+  });
+
+  it("lets OpenCode's chat entry rows follow each model's format", async () => {
+    const saved: Service = {
+      ...gatewayService,
+      id: "service_opencode_go",
+      name: "OpenCode Go",
+      kind: "opencode_go",
+      models: ["gemini-4-argon-contributor", "glm-5.3"],
+      capabilities: [
+        { protocol: "openai.responses", mode: "native", streaming: true },
+        { protocol: "openai.chat", mode: "native", streaming: true },
+        { protocol: "anthropic.messages", mode: "native", streaming: true },
+        { protocol: "openai.models", mode: "native", streaming: false },
+      ],
+      http: {
+        base_url: "https://opencode.ai/zen/go/v1",
+        auth: { scheme: "bearer" },
+        credential_ref: "local://service/service_opencode_go",
+      },
+    };
+    bridgeMocks.getService.mockResolvedValue({ service: saved, etag });
+    bridgeMocks.updateService.mockResolvedValue({ service: saved, etag });
+    await act(async () => {
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          conversionEngine={{
+            name: "relaykit",
+            version: null,
+            available: true,
+            edges: [
+              {
+                from: "google.generate_content",
+                to: "openai.responses",
+                quality: "fair",
+                streaming: true,
+              },
+              {
+                from: "anthropic.messages",
+                to: "openai.chat",
+                quality: "fair",
+                streaming: true,
+              },
+            ],
+          }}
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[saved]}
+          view={{ kind: "edit", serviceId: saved.id }}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await openEditorTab("protocols");
+    expect(container.textContent).toContain(
+      "请求会按各模型的上游格式发给 OpenCode。",
+    );
+    const row = (label: string) =>
+      [
+        ...container.querySelectorAll<HTMLElement>(
+          '[data-testid="service-capability-row"]',
+        ),
+      ].find(
+        (item) => item.querySelector("span.font-medium")?.textContent === label,
+      )!;
+    const messages = row("Anthropic Messages");
+    expect(messages.textContent).toContain("按模型格式转发");
+    expect(messages.querySelector('button[role="combobox"]')).toBeNull();
+
+    const gemini = row("Gemini Generate Content");
+    const toggle = gemini.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await act(async () => toggle.click());
+    expect(gemini.textContent).toContain("按模型格式转发");
+    expect(gemini.querySelector('button[role="combobox"]')).toBeNull();
+    await submitServiceForm();
+
+    expect(bridgeMocks.updateService.mock.calls[0]?.[2].capabilities).toEqual([
+      ...saved.capabilities,
+      { protocol: "google.generate_content", mode: "native", streaming: true },
+    ]);
   });
 
   it("collapses large allow-lists until a group or search expands them", async () => {

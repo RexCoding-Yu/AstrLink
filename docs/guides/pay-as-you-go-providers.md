@@ -69,20 +69,24 @@ Key 仅供 AstrLink 连接 API 提供商使用。
 | MiniMax          | `https://api.minimax.cn/v1`                         | `https://api.minimax.io/v1`                              | 拉取或手动添加                                 |
 | 豆包（火山方舟） | `https://ark.cn-beijing.volces.com/api/v3`          | —                                                        | 手动添加模型 ID 或以 `ep-` 开头的推理接入点 ID |
 | xAI（Grok）      | `https://api.x.ai/v1`                               | —                                                        | 拉取或手动添加                                 |
-| OpenCode Zen     | `https://opencode.ai/zen/v1`                        | —                                                        | 拉取或手动添加                                 |
+| OpenCode Zen     | `https://opencode.ai/inference/v1`                  | —                                                        | 拉取或手动添加                                 |
 
 “拉取”是否成功取决于提供商是否支持模型发现接口，以及账号是否有权限。无法拉取时，请按控制台中的实际模型 ID 手动添加。
+
+OpenCode Zen 和 Go 的每个模型只接受一种格式：Responses、Anthropic
+Messages、Chat 或 Gemini。AstrLink 按模型选择格式。已保存的 `…/zen/v1` 和
+`…/zen/go/v1` 地址照常可用，请求会发往 `/inference` 下对应的路径。
 
 百炼的国内站为北京地域，国际站为新加坡地域，密钥需与地域或业务空间匹配。
 
 ## Coding Plan
 
-| API 提供商          | 国内站 / 官方地址                             | 国际站                                | 原生入口协议                                     |
-| ------------------- | --------------------------------------------- | ------------------------------------- | ------------------------------------------------ |
-| OpenCode Go         | `https://opencode.ai/zen/go/v1`               | —                                     | 按模型选择 Responses、Anthropic Messages 或 Chat |
-| Kimi Coding         | `https://api.kimi.ai/coding`                  | —                                     | Responses、Anthropic Messages、Chat、Models      |
-| GLM Coding Plan     | `https://open.bigmodel.cn/api/coding/paas/v4` | `https://api.z.ai/api/coding/paas/v4` | Responses、Anthropic Messages、Chat              |
-| MiniMax Coding Plan | `https://api.minimax.cn/v1`                   | `https://api.minimax.io/v1`           | Responses、Anthropic Messages、Chat、Models      |
+| API 提供商          | 国内站 / 官方地址                             | 国际站                                | 原生入口协议                                             |
+| ------------------- | --------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
+| OpenCode Go         | `https://opencode.ai/inference/go/v1`         | —                                     | 按模型选择 Responses、Anthropic Messages、Chat 或 Gemini |
+| Kimi Coding         | `https://api.kimi.ai/coding`                  | —                                     | Responses、Anthropic Messages、Chat、Models              |
+| GLM Coding Plan     | `https://open.bigmodel.cn/api/coding/paas/v4` | `https://api.z.ai/api/coding/paas/v4` | Responses、Anthropic Messages、Chat                      |
+| MiniMax Coding Plan | `https://api.minimax.cn/v1`                   | `https://api.minimax.io/v1`           | Responses、Anthropic Messages、Chat、Models              |
 
 选择站点后即可使用该订阅的全部原生协议，AstrLink 会按请求协议切换到厂商对应的路径。已保存的厂商 Claude
 Code 地址（如 `…/anthropic`）同样有效。GLM Coding Plan 的 Chat 请求固定发往
@@ -110,6 +114,18 @@ API 限制了额度查询频率，因此：
 
 例如，Gemini API 预设允许通过 OpenAI Chat
 Completions 接口调用，由 AstrLink 转换为 Gemini 请求。协议转换可能无法保留所有厂商专有参数；遇到工具调用或推理参数不兼容时，先尝试该提供商的原生接口。
+
+同一个提供商的模型格式不一致时，可以在 **支持模型**
+里给单个模型设置上游格式。鼠标移到模型上点「指定格式」；要一次设置多个模型，点「多选」，勾选后再点「指定格式」：
+
+- 默认是「按入口协议设置」，按入口协议的设置转发。
+- 设为 Responses、Messages、Chat 或 Gemini 后，模型名旁边会显示「Gemini 格式」这样的标签。这个模型的请求从任一入口进来，都会转换成该格式发出。格式相同时原样转发。
+- 这时入口协议只决定哪些客户端能接入。Gemini 模型设为 Gemini 后，不开 Gemini 入口，Codex 也能通过 Responses 使用它。
+- OpenCode、GitHub
+  Copilot 和 Droid 已内置每个模型的格式，菜单里显示为「默认（Gemini）」这样的形式。手动设置会替代内置值。
+- New
+  API 拉取模型时，网关标明某个模型只用 Responses、Messages 或 Gemini 中的一种，新加入的这个模型会自动填上该格式。
+- New API 只标 Chat 的模型保持「按入口协议设置」。已有的设置保持不变。
 
 切换提供商类型后，请重新检查模型和协议设置。已有提供商不会因为预设更新而自动覆盖保存的配置。
 

@@ -9,16 +9,25 @@ const bridgeMocks = vi.hoisted(() => ({
   reloadPlugins: vi.fn(),
   getPlugin: vi.fn(),
   getPluginStatus: vi.fn(),
+  getPluginStats: vi.fn(),
   updatePlugin: vi.fn(),
   testPlugin: vi.fn(),
   savePluginCredential: vi.fn(),
   deletePluginCredential: vi.fn(),
+  getPluginHostSettings: vi.fn(),
+  updatePluginHostSettings: vi.fn(),
+  clearPluginData: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
 
 import { PluginManager } from "./PluginManager";
-import type { PluginDetail, PluginList } from "./plugin-model";
+import type {
+  PluginDayStats,
+  PluginDetail,
+  PluginList,
+  PluginStats,
+} from "./plugin-model";
 import {
   finishExitAnimations,
   installDialogAnimations,
@@ -144,6 +153,26 @@ const memory: PluginDetail = {
       note: "本插件不是 PowerContext 官方插件。",
     },
   ],
+  excluded_clients: [],
+  workspace_binding: true,
+  auto_refresh: false,
+  lookup_enabled: true,
+  tools: [],
+  storage: [
+    {
+      label: "项目在服务器上的编号",
+      content: false,
+      retention: "一直保留，可在插件页清除",
+    },
+  ],
+  host_storage: [
+    { kind: "session_bindings" },
+    { kind: "workspace_bindings", count: 2 },
+    { kind: "plugin_sessions", count: 5 },
+    { kind: "request_records" },
+    { kind: "resident_block" },
+    { kind: "plugin_values", count: 3 },
+  ],
 };
 
 const status = {
@@ -185,6 +214,68 @@ const status = {
       ],
     },
   ],
+};
+
+function day(date: string, change: Partial<PluginDayStats> = {}) {
+  const empty: PluginDayStats = {
+    date,
+    load: { count: 0, by_trigger: {}, injected_bytes: 0, requests: 0 },
+    lookup: {
+      ran: 0,
+      refused: 0,
+      counted: 0,
+      with_hits: 0,
+      sessions: 0,
+      looking_up: 0,
+    },
+    binding: {
+      workspace: 0,
+      picked: 0,
+      created: 0,
+      declined: 0,
+      unanswered: 0,
+      changed: 0,
+    },
+    write: { ok: 0, failed: 0 },
+    problems: { failed: 0, timeouts: 0, privacy: 0, over_budget: 0 },
+    cache: {
+      with: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
+      without: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
+    },
+  };
+  return { ...empty, ...change };
+}
+
+const busyDay = day("2026-10-21", {
+  load: {
+    count: 4,
+    by_trigger: { start: 2, bound: 1, compact: 1 },
+    injected_bytes: 61440,
+    requests: 12,
+    wait_ms: { p50: 310, p95: 1200 },
+  },
+  binding: {
+    workspace: 2,
+    picked: 1,
+    created: 1,
+    declined: 0,
+    unanswered: 1,
+    changed: 1,
+  },
+  write: { ok: 9, failed: 1 },
+  problems: { failed: 1, timeouts: 2, privacy: 0, over_budget: 0 },
+  cache: {
+    with: { requests: 10, input_tokens: 100000, cache_read_tokens: 82000 },
+    without: { requests: 5, input_tokens: 50000, cache_read_tokens: 30000 },
+  },
+});
+
+const stats: PluginStats = {
+  days: [
+    ...[15, 16, 17, 18, 19, 20].map((date) => day(`2026-10-${date}`)),
+    busyDay,
+  ],
+  total: { ...busyDay, date: undefined },
 };
 
 const list: PluginList = {
@@ -314,9 +405,22 @@ describe("PluginManager", () => {
             metadata: [],
             settings: [],
             credits: [],
+            excluded_clients: [],
+            workspace_binding: true,
+            auto_refresh: false,
+            lookup_enabled: true,
+            tools: [],
+            storage: [],
+            host_storage: [],
           },
     );
     bridgeMocks.getPluginStatus.mockResolvedValue(status);
+    bridgeMocks.getPluginStats.mockResolvedValue(stats);
+    bridgeMocks.getPluginHostSettings.mockResolvedValue({
+      paused: false,
+      injection_budget_bytes: 16384,
+      language: "zh-CN",
+    });
     container = document.createElement("div");
     document.body.append(container);
     reactRoot = createRoot(container);
@@ -398,6 +502,23 @@ describe("PluginManager", () => {
     expect(
       document.querySelector('[data-testid="plugin-own-status"]')?.textContent,
     ).toContain("已整理成记忆");
+    // The last 7 days in numbers, with what the plugin has: no lookups
+    // here, so no line for them.
+    const effects = document.querySelector('[data-testid="plugin-effects"]');
+    expect(effects?.textContent).toContain(
+      "装载4 次 · 多带 60.0 KB（约 20,480 token） · 其中刷新 1 次 · 等待中位 310 ms，最慢 5% 1200 ms",
+    );
+    expect(effects?.textContent).toContain(
+      "工作区自动 2 · 选已有 1 · 新建 1 · 不纳入 0 · 没回答 1 · 自动绑定后改掉 1",
+    );
+    expect(effects?.textContent).toContain("写入9 条 · 失败 1");
+    expect(effects?.textContent).toContain(
+      "问题失败 1 · 超时 2 · 隐私拦截 0 · 超出预算 0",
+    );
+    expect(effects?.textContent).toContain(
+      "缓存命中开了记忆 82% · 其他会话 60%",
+    );
+    expect(effects?.textContent).not.toContain("查询");
     const credits = document.querySelector('[data-testid="plugin-credits"]');
     expect(credits?.textContent).toContain("OceanBase · Apache License 2.0");
     expect(credits?.textContent).toContain(
@@ -420,6 +541,59 @@ describe("PluginManager", () => {
       "启用后，新会话的前几轮会请模型询问项目。",
     );
     expect(about?.textContent).toContain("界面视图");
+  });
+
+  it("says when the last 7 days have no records, and shows lookups where there are", async () => {
+    bridgeMocks.getPluginStats.mockResolvedValueOnce({
+      days: [day("2026-10-21")],
+      total: day(""),
+    });
+    await render();
+    expect(
+      document.querySelector('[data-testid="plugin-effects"]')?.textContent,
+    ).toContain("最近 7 天还没有记录。");
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      tools: [{ name: "search", description: "检索本项目的记忆。" }],
+    });
+    bridgeMocks.getPluginStats.mockResolvedValueOnce({
+      ...stats,
+      total: {
+        ...stats.total,
+        lookup: {
+          ran: 8,
+          refused: 1,
+          counted: 8,
+          with_hits: 6,
+          ms: { p50: 640, p95: 2100 },
+          sessions: 5,
+          looking_up: 2,
+        },
+      },
+    });
+    bridgeMocks.reloadPlugins.mockResolvedValue(list);
+    await click(button("重新扫描"));
+    expect(
+      document.querySelector('[data-testid="plugin-effects"]')?.textContent,
+    ).toContain(
+      "查询8 次 · 有结果 75% · 5 个会话里 2 个查过 · 耗时中位 640 ms · 拒绝 1 次",
+    );
+  });
+
+  it("lists the account day by day on the status page, today first", async () => {
+    await render();
+    await openTab("运行状态");
+    const daily = document.querySelector(
+      '[data-testid="plugin-daily-effects"]',
+    );
+    const rows = daily?.querySelectorAll("tbody tr") ?? [];
+    expect(rows).toHaveLength(7);
+    expect(rows[0]?.textContent).toContain("2026-10-21");
+    expect(rows[0]?.textContent).toContain("60.0 KB");
+    expect(rows[0]?.textContent).toContain("9（失败 1）");
+    expect(rows[0]?.textContent).toContain("82% / 60%");
+    expect(rows[6]?.textContent).toContain("2026-10-15");
+    expect(daily?.querySelector("thead")?.textContent).not.toContain("查询");
   });
 
   it("grants only the capabilities left ticked when enabling", async () => {
@@ -605,6 +779,201 @@ describe("PluginManager", () => {
         extra: true,
       },
       plaintext_consent: ["http://192.0.2.1:9090"],
+    });
+  });
+
+  it("pauses every plugin and sets their injection budget from the header", async () => {
+    bridgeMocks.updatePluginHostSettings.mockImplementation(
+      async (update: Record<string, unknown>) => ({
+        paused: false,
+        injection_budget_bytes: 16384,
+        language: "zh-CN",
+        ...update,
+      }),
+    );
+    await render();
+    const controls = document.querySelector(
+      '[data-testid="plugin-host-controls"]',
+    );
+    expect(controls?.textContent).toContain("16 KB");
+    expect(document.body.textContent).not.toContain("所有插件已暂停");
+    await click(
+      document.querySelector(
+        'button[aria-label="暂停所有插件"]',
+      ) as HTMLElement,
+    );
+    expect(bridgeMocks.updatePluginHostSettings).toHaveBeenCalledWith({
+      paused: true,
+    });
+    expect(document.body.textContent).toContain(
+      "所有插件已暂停，请求原样发出。",
+    );
+    await chooseOption("#plugin-host-budget", "32 KB");
+    await settleClosedLayer();
+    expect(bridgeMocks.updatePluginHostSettings).toHaveBeenLastCalledWith({
+      injection_budget_bytes: 32768,
+    });
+  });
+
+  it("voids the lookup credentials it lists only after asking", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      host_storage: [
+        ...memory.host_storage,
+        { kind: "lookup_credentials", count: 2 },
+      ],
+    });
+    bridgeMocks.clearPluginData.mockResolvedValue(2);
+    await render();
+    const item = [
+      ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
+    ].find((entry) => entry.textContent?.includes("查询凭证")) as HTMLElement;
+    expect(item.textContent).toContain("只在内存里，存的是哈希");
+    expect(item.textContent).toContain("2 条");
+    await click(button("作废", item));
+    expect(bridgeMocks.clearPluginData).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("作废查询凭证？");
+    expect(document.body.textContent).toContain("提示词缓存要重写一次");
+    await click(
+      button(
+        "作废",
+        document.querySelector('[role="alertdialog"]') as HTMLElement,
+      ),
+    );
+    await finishExitAnimations();
+    expect(bridgeMocks.clearPluginData).toHaveBeenCalledWith(
+      "powercontext",
+      "lookups",
+    );
+  });
+
+  it("lists the plugin's lookups behind the switch that turns them off", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      tools: [
+        { name: "search", description: "按一句话检索本项目的记忆。" },
+        {
+          name: "projects",
+          description: "按关键词列出项目。",
+          unbound: true,
+        },
+      ],
+      settings: [...memory.settings, { key: "$lookup", group: "查询" }],
+    });
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    const lookup = control<HTMLButtonElement>("供模型查询");
+    expect(lookup.getAttribute("aria-checked")).toBe("true");
+    const help = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="关于供模型查询"]',
+    );
+    if (!help) throw new Error("Missing the lookup help");
+    await click(help);
+    expect(document.body.textContent).toContain(
+      "search：按一句话检索本项目的记忆。",
+    );
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+    await settleClosedLayer();
+    await click(lookup);
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      lookup_enabled: false,
+    });
+  });
+
+  it("offers no lookup switch for a plugin without lookups", async () => {
+    await render();
+    await openTab("设置");
+    expect(document.body.textContent).not.toContain("供模型查询");
+  });
+
+  it("lists what is kept for the plugin and clears it after asking", async () => {
+    bridgeMocks.clearPluginData.mockResolvedValue(2);
+    await render();
+    const stored = document.querySelector('[data-testid="plugin-stored"]');
+    expect(stored?.textContent).toContain("工作区和值的对应");
+    expect(stored?.textContent).toContain("2 条");
+    expect(stored?.textContent).toContain("当前装载块");
+    expect(stored?.textContent).toContain(
+      "插件声明：项目在服务器上的编号 · 不含对话内容 · 一直保留，可在插件页清除",
+    );
+    const items = [
+      ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
+    ];
+    const workspaces = items.find((item) =>
+      item.textContent?.includes("工作区和值的对应"),
+    ) as HTMLElement;
+    await click(button("清除", workspaces));
+    expect(bridgeMocks.clearPluginData).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("清除工作区记录？");
+    await click(
+      button(
+        "清除",
+        document.querySelector('[role="alertdialog"]') as HTMLElement,
+      ),
+    );
+    await finishExitAnimations();
+    expect(bridgeMocks.clearPluginData).toHaveBeenCalledWith(
+      "powercontext",
+      "workspaces",
+    );
+    // The counts come back from Core afresh.
+    expect(bridgeMocks.getPlugin).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks before automatic refresh and saves the host's switches", async () => {
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
+    await openTab("设置");
+    expect(
+      control<HTMLButtonElement>("按工作区自动绑定").getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("true");
+    await click(control<HTMLButtonElement>("自动刷新"));
+    expect(document.body.textContent).toContain("打开自动刷新？");
+    await click(
+      button(
+        "打开",
+        document.querySelector('[role="alertdialog"]') as HTMLElement,
+      ),
+    );
+    await finishExitAnimations();
+    expect(
+      control<HTMLButtonElement>("自动刷新").getAttribute("aria-checked"),
+    ).toBe("true");
+    await click(control<HTMLButtonElement>("按工作区自动绑定"));
+    const clients = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="对哪些客户端生效"]',
+    );
+    expect(clients?.textContent).toContain("全部客户端");
+    await act(async () => {
+      clients?.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, button: 0 }),
+      );
+      clients?.click();
+    });
+    const cursor = document.querySelector<HTMLButtonElement>(
+      'button[role="checkbox"][aria-label="Cursor"]',
+    );
+    if (!cursor) throw new Error("Missing the Cursor option");
+    await click(cursor);
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+      );
+    });
+    await settleClosedLayer();
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      excluded_clients: ["cursor"],
+      workspace_binding: false,
+      auto_refresh: true,
     });
   });
 

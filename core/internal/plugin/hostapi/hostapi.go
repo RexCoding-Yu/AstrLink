@@ -163,13 +163,39 @@ func (settings Settings) PluginSettings(ctx context.Context) (map[string]plugin.
 			origins = append(origins, plugin.NetworkOrigin{Origin: origin.Origin, AllowPlaintext: origin.AllowPlaintext})
 		}
 		all[record.Key] = plugin.Settings{
-			Enabled:      record.Enabled,
-			Capabilities: record.Capabilities,
-			Config:       record.Config,
-			Origins:      origins,
-			Trusted:      record.Trusted,
-			TurnWait:     time.Duration(record.TurnWaitMs) * time.Millisecond,
+			Enabled:          record.Enabled,
+			Capabilities:     record.Capabilities,
+			Config:           record.Config,
+			Origins:          origins,
+			Trusted:          record.Trusted,
+			TurnWait:         time.Duration(record.TurnWaitMs) * time.Millisecond,
+			ExcludedClients:  record.ExcludedClients,
+			WorkspaceBinding: record.WorkspaceBinding,
+			AutoRefresh:      record.AutoRefresh,
+			LookupEnabled:    record.LookupEnabled,
 		}
 	}
 	return all, nil
+}
+
+// Metadata reads how sessions use attribute values from the gateway
+// settings.
+type Metadata struct {
+	Store storage.MetadataStore
+}
+
+func (metadata Metadata) ValueStats(ctx context.Context, key string, limit int) ([]plugin.ValueStat, error) {
+	stats, err := metadata.Store.MetadataValueStats(ctx, key, limit)
+	if err != nil {
+		return nil, err
+	}
+	values := make([]plugin.ValueStat, 0, len(stats))
+	for _, stat := range stats {
+		value := plugin.ValueStat{Value: stat.Value, Sessions: stat.Sessions}
+		if stat.LastUsedAt != nil {
+			value.LastUsedAt = stat.LastUsedAt.UnixMilli()
+		}
+		values = append(values, value)
+	}
+	return values, nil
 }

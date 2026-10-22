@@ -126,3 +126,26 @@ func TestParseRecord(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRecordKeepsValidActions(t *testing.T) {
+	record, ok := ParseRecord(json.RawMessage(`{"title":"记忆装载","status":"ok","summary":"","actions":[
+		{"id":"refresh","label":"刷新记忆","confirm":"会让这个会话的缓存重写一次。"},
+		{"id":"refresh","label":"又一个"},
+		{"id":"Bad Id","label":"坏的"},
+		{"id":"pause","label":""},
+		{"id":"open","label":"打开\u001b"},
+		{"id":"more","label":"更多"},
+		{"id":"most","label":"最多"}]}`))
+	if !ok || !record.Truncated || len(record.Actions) != 3 {
+		t.Fatalf("ParseRecord = %+v, %v", record, ok)
+	}
+	if first := record.Actions[0]; first.ID != "refresh" || first.Label != "刷新记忆" || first.Confirm != "会让这个会话的缓存重写一次。" {
+		t.Fatalf("first action = %+v", first)
+	}
+	if record.Actions[1].ID != "open" || record.Actions[1].Label != "打开" || record.Actions[2].ID != "more" {
+		t.Fatalf("actions = %+v", record.Actions)
+	}
+	if record, ok := ParseRecord(json.RawMessage(`{"title":"记忆","status":"ok","summary":"","actions":"refresh"}`)); !ok || record.Actions != nil || !record.Truncated {
+		t.Fatalf("actions that are no list = %+v, %v", record, ok)
+	}
+}

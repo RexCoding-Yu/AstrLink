@@ -24,12 +24,15 @@ const (
 	// RoutingSelectionFailover follows an earlier provider of the same
 	// request that was rejected or failed.
 	RoutingSelectionFailover RoutingSelection = "failover"
+	// RoutingSelectionClientPin is the provider the request named in
+	// X-AstrLink-Service; no other provider could serve it.
+	RoutingSelectionClientPin RoutingSelection = "client_pin"
 )
 
 func (selection RoutingSelection) Valid() bool {
 	switch selection {
 	case RoutingSelectionPriority, RoutingSelectionSessionBinding, RoutingSelectionResponseAffinity,
-		RoutingSelectionWebSocketConnection, RoutingSelectionFailover:
+		RoutingSelectionWebSocketConnection, RoutingSelectionFailover, RoutingSelectionClientPin:
 		return true
 	default:
 		return false

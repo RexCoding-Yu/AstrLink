@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Waits until the Release workflow run for tag $TAG at commit $SHA in $REPO
 # has published the GitHub release, and exits 1 if that run ends without
-# publishing it.
+# publishing it. A release written ahead of CI is public before Release runs,
+# so it counts once it lists latest.json, which Release uploads last.
 set -euo pipefail
 
 : "${REPO:?set REPO to owner/name}"
@@ -15,8 +16,9 @@ while true; do
   run=$(gh api -X GET "repos/$REPO/actions/workflows/release.yml/runs" \
     -f event=push -f branch="$TAG" -f head_sha="$SHA" -f per_page=1 \
     --jq '.workflow_runs[0] | if . == null then "" else "\(.status) \(.conclusion // "none") \(.html_url)" end')
-  draft=$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null || true)
-  if [ "$draft" = "false" ]; then
+  published=$(gh release view "$TAG" --repo "$REPO" --json isDraft,assets \
+    --jq '(.isDraft | not) and any(.assets[]; .name == "latest.json")' 2>/dev/null || true)
+  if [ "$published" = "true" ]; then
     echo "Release $TAG is published."
     exit 0
   fi

@@ -5,6 +5,7 @@ package providerapi
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -76,6 +77,18 @@ func BaseURL(kind contract.ServiceKind, protocol contract.ProtocolID, base *url.
 		default:
 			return base
 		}
+	case contract.ServiceKindOpenCodeGo, contract.ServiceKindOpenCodeZen:
+		// OpenCode serves every format under /inference and reads a Bearer key
+		// there; its older /zen roots take Messages keys only as x-api-key, and
+		// /zen/go has no Gemini route. A base with neither root stays as saved.
+		roots, target = []string{"/zen/go/v1", "/inference/go/v1"}, "/inference/go/v1"
+		if kind == contract.ServiceKindOpenCodeZen {
+			roots, target = []string{"/zen/v1", "/inference/v1"}, "/inference/v1"
+		}
+		prefix := strings.TrimRight(base.EscapedPath(), "/")
+		if !slices.ContainsFunc(roots, func(root string) bool { return strings.HasSuffix(prefix, root) }) {
+			return base
+		}
 	case contract.ServiceKindDoubao:
 		roots = []string{"/api/compatible/v1", "/api/compatible", "/api/v3"}
 		switch protocol {
@@ -109,6 +122,16 @@ func BaseURL(kind contract.ServiceKind, protocol contract.ProtocolID, base *url.
 // RequestURL strips AstrLink's local version only where the provider uses a
 // different version/root. Anthropic's /v1/messages must retain its version.
 func RequestURL(kind contract.ServiceKind, protocol contract.ProtocolID, incoming *url.URL) *url.URL {
+	if (kind == contract.ServiceKindOpenCodeGo || kind == contract.ServiceKindOpenCodeZen) &&
+		protocol == contract.ProtocolGoogleGenerateContent && strings.HasPrefix(incoming.Path, "/v1beta/") {
+		// OpenCode serves Gemini models at /v1/models/{model}:generateContent.
+		updated := *incoming
+		updated.Path = "/v1" + strings.TrimPrefix(updated.Path, "/v1beta")
+		if updated.RawPath != "" {
+			updated.RawPath = "/v1" + strings.TrimPrefix(updated.RawPath, "/v1beta")
+		}
+		return &updated
+	}
 	stripVersion := (kind == contract.ServiceKindDeepSeek && protocol == contract.ProtocolOpenAIResponses) ||
 		((kind == contract.ServiceKindGLM || kind == contract.ServiceKindGLMCoding || kind == contract.ServiceKindDoubao) &&
 			protocol != contract.ProtocolAnthropicMessages)

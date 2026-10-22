@@ -1027,7 +1027,72 @@ END`,
     PRIMARY KEY (session_id, stand_in)
 )`,
 		}},
-		{Version: 53, Name: "model_routing", Statements: []string{
+		{Version: 53, Name: "session_cursor_lookup_order", Statements: []string{
+			// Keep the ordering and principal beside each cursor so a repeated
+			// conversation id can seek its newest matching root without sorting
+			// every request ever sent in that conversation.
+			`ALTER TABLE request_record_cursors ADD COLUMN started_at TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE request_record_cursors ADD COLUMN local_access_token_id TEXT`,
+			`UPDATE request_record_cursors SET (started_at, local_access_token_id) = (
+    SELECT started_at, local_access_token_id FROM request_records WHERE id = request_id
+)`,
+			`CREATE INDEX request_record_cursors_latest_idx ON request_record_cursors
+    (value, kind, direction, started_at DESC, request_id DESC)`,
+			`CREATE INDEX request_record_cursors_principal_latest_idx ON request_record_cursors
+    (value, kind, direction, local_access_token_id, started_at DESC, request_id DESC)`,
+			`DROP INDEX request_record_cursors_value_idx`,
+			`CREATE INDEX request_records_output_latest_idx ON request_records
+    (output_response_id, started_at DESC, id DESC)
+    WHERE parent_request_id IS NULL AND session_id IS NOT NULL`,
+			`CREATE INDEX request_records_previous_latest_idx ON request_records
+    (previous_response_id, started_at DESC, id DESC)
+    WHERE parent_request_id IS NULL AND session_id IS NOT NULL`,
+			`CREATE INDEX request_records_output_principal_latest_idx ON request_records
+    (output_response_id, local_access_token_id, started_at DESC, id DESC)
+    WHERE parent_request_id IS NULL AND session_id IS NOT NULL`,
+			`CREATE INDEX request_records_previous_principal_latest_idx ON request_records
+    (previous_response_id, local_access_token_id, started_at DESC, id DESC)
+    WHERE parent_request_id IS NULL AND session_id IS NOT NULL`,
+			`DROP INDEX request_records_output_response_id_idx`,
+			`DROP INDEX request_records_previous_response_idx`,
+			// Store writes provide these fields directly; old SQL writers that
+			// omit them still get valid ordering. Changes to the parent record
+			// cannot leave the derived fields stale.
+			`CREATE TRIGGER request_cursor_fill_order AFTER INSERT ON request_record_cursors
+WHEN NEW.started_at = '' BEGIN
+    UPDATE request_record_cursors SET (started_at, local_access_token_id) = (
+        SELECT started_at, local_access_token_id FROM request_records WHERE id = NEW.request_id
+    ) WHERE request_id = NEW.request_id AND kind = NEW.kind AND direction = NEW.direction AND value = NEW.value;
+END`,
+			`CREATE TRIGGER request_cursor_update_order AFTER UPDATE OF started_at, local_access_token_id ON request_records
+WHEN OLD.started_at IS NOT NEW.started_at OR OLD.local_access_token_id IS NOT NEW.local_access_token_id BEGIN
+    UPDATE request_record_cursors SET started_at = NEW.started_at, local_access_token_id = NEW.local_access_token_id
+    WHERE request_id = NEW.id;
+END`,
+		}},
+		{Version: 54, Name: "access_token_sync", Statements: []string{
+			// A completed run may consume only the force push it started with.
+			`ALTER TABLE sync_state ADD COLUMN force_push_generation INTEGER NOT NULL DEFAULT 0`,
+			// An access token is configuration a package carries, so issuing,
+			// changing, or removing one has to reach the change log the sync
+			// schedule reads. Its value lives in its own table, which is written
+			// with the row that names it and therefore needs no trigger of its
+			// own.
+			//
+			// The bootstrap token is a token like any other here: it is stored
+			// as one the user holds, and a device that has just been installed
+			// therefore has one change waiting — the token it issued itself.
+			`CREATE TRIGGER config_change_access_tokens AFTER INSERT ON local_access_tokens BEGIN
+    INSERT INTO config_change_log (entity_kind, entity_id, changed_at) VALUES ('access_token', NEW.id, strftime('%Y-%m-%dT%H:%M:%f000000Z', 'now'));
+END`,
+			`CREATE TRIGGER config_change_access_tokens_update AFTER UPDATE ON local_access_tokens BEGIN
+    INSERT INTO config_change_log (entity_kind, entity_id, changed_at) VALUES ('access_token', NEW.id, strftime('%Y-%m-%dT%H:%M:%f000000Z', 'now'));
+END`,
+			`CREATE TRIGGER config_change_access_tokens_delete AFTER DELETE ON local_access_tokens BEGIN
+    INSERT INTO config_change_log (entity_kind, entity_id, changed_at) VALUES ('access_token', OLD.id, strftime('%Y-%m-%dT%H:%M:%f000000Z', 'now'));
+END`,
+		}},
+		{Version: 55, Name: "model_routing", Statements: []string{
 			`ALTER TABLE request_records ADD COLUMN model_routing_json TEXT`,
 			`CREATE TABLE model_routing_bindings (
     principal TEXT NOT NULL,
@@ -1068,10 +1133,16 @@ END`,
     sealed INTEGER NOT NULL DEFAULT 1
 )`,
 		}},
-		{Version: 54, Name: "plugins_and_request_metadata", Statements: []string{
+		{Version: 56, Name: "plugins_and_request_metadata", Statements: []string{
 			// The user's choices for each plugin. Plugins come from the
 			// builtin set and the plugin directory; a row exists once the
 			// user changed something, and a plugin without one is disabled.
+			// excluded_clients_json lists the client types the plugin is off
+			// for; workspace_binding binds a new session to the value its
+			// workspace had; auto_refresh lets the host swap a session's
+			// resident block when the plugin's data changed; lookup_enabled
+			// lets the model run the plugin's queries through the lookup
+			// outlet.
 			`CREATE TABLE plugin_settings (
     plugin_key TEXT PRIMARY KEY CHECK(length(plugin_key) BETWEEN 1 AND 32),
     enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
@@ -1080,8 +1151,33 @@ END`,
     privacy_trusted INTEGER NOT NULL DEFAULT 0 CHECK(privacy_trusted IN (0, 1)),
     turn_wait_ms INTEGER NOT NULL DEFAULT 2500 CHECK(turn_wait_ms BETWEEN 1000 AND 5000),
     config_json TEXT NOT NULL DEFAULT '{}' CHECK(length(config_json) <= 65536),
+    excluded_clients_json TEXT NOT NULL DEFAULT '[]' CHECK(length(excluded_clients_json) <= 4096),
+    workspace_binding INTEGER NOT NULL DEFAULT 1 CHECK(workspace_binding IN (0, 1)),
+    auto_refresh INTEGER NOT NULL DEFAULT 0 CHECK(auto_refresh IN (0, 1)),
+    lookup_enabled INTEGER NOT NULL DEFAULT 1 CHECK(lookup_enabled IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+)`,
+			// The settings of every plugin at once: the pause of them all,
+			// the budget of what they inject into one request, and the
+			// interface language what they inject follows. One row, absent
+			// until the first change.
+			`CREATE TABLE plugin_host_settings (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    document_json TEXT NOT NULL CHECK(length(document_json) <= 4096),
+    updated_at TEXT NOT NULL
+)`,
+			// A plugin's part in one session: the turn it first took part in,
+			// which is where it may ask what the session lacks, and whether
+			// the user paused it there. Only numbers, never conversation text.
+			`CREATE TABLE plugin_sessions (
+    plugin_key TEXT NOT NULL REFERENCES plugin_settings(plugin_key) ON DELETE CASCADE,
+    session_id TEXT NOT NULL CHECK(length(session_id) BETWEEN 1 AND 256),
+    first_turn INTEGER NOT NULL CHECK(first_turn >= 0),
+    paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_key, session_id)
 )`,
 			// Credential slots a plugin declares, sealed under dek_secrets like
 			// builtin_tool_credentials. id is <plugin_key>/<name>, the key the
@@ -1126,11 +1222,23 @@ END`,
     target_id TEXT NOT NULL,
     key TEXT NOT NULL REFERENCES metadata_attributes(key) ON DELETE CASCADE,
     value TEXT NOT NULL,
-    source TEXT NOT NULL CHECK(source IN ('token_default', 'model_marker', 'user_marker', 'manual')),
+    source TEXT NOT NULL CHECK(source IN ('token_default', 'model_marker', 'user_marker', 'user_answer', 'workspace', 'manual')),
     turn INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (target_kind, target_id, key)
+)`,
+			// The value a workspace was bound to, for a new session there to
+			// start with. workspace is a keyed fingerprint of the directory's
+			// path and name its last element; the path itself is not kept.
+			`CREATE TABLE metadata_workspace_values (
+    key TEXT NOT NULL REFERENCES metadata_attributes(key) ON DELETE CASCADE,
+    workspace TEXT NOT NULL CHECK(length(workspace) = 64),
+    name TEXT NOT NULL CHECK(length(name) <= 256),
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (key, workspace)
 )`,
 			`ALTER TABLE request_records ADD COLUMN metadata_json TEXT`,
 			`ALTER TABLE request_records ADD COLUMN plugin_records_json TEXT`,

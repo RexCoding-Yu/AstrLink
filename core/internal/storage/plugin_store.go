@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/QuantumNous/astrlink/core/contract"
 )
 
 // Limits of a plugin's own values (astrlink.store).
@@ -26,8 +28,46 @@ type PluginSettingsRecord struct {
 	// hooks; 0 stores the default.
 	TurnWaitMs int
 	Config     json.RawMessage
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// ExcludedClients are the client types the plugin is off for.
+	ExcludedClients []string
+	// WorkspaceBinding binds a new session to the value its workspace had.
+	WorkspaceBinding bool
+	// AutoRefresh swaps a session's resident block when newer data
+	// changes it.
+	AutoRefresh bool
+	// LookupEnabled lets the model run the plugin's queries.
+	LookupEnabled bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// NewPluginSettingsRecord returns the settings of a plugin the user changed
+// nothing for yet.
+func NewPluginSettingsRecord(key string) PluginSettingsRecord {
+	return PluginSettingsRecord{Key: key, WorkspaceBinding: true, LookupEnabled: true}
+}
+
+// PluginActivity is what the plugins' statistics read of a request record:
+// when it started, its session, its token usage, its metadata and the
+// plugins' records. A part the record lacks or holds in a shape it cannot
+// read is nil.
+type PluginActivity struct {
+	StartedAt time.Time
+	SessionID string
+	Usage     *contract.Usage
+	Metadata  *contract.RequestMetadata
+	Records   []contract.RequestPluginRecord
+}
+
+// PluginSessionRecord is a plugin's part in one session: the turn it first
+// took part in and whether the user paused it there.
+type PluginSessionRecord struct {
+	Plugin    string
+	Session   string
+	FirstTurn int
+	Paused    bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // PluginOrigin is an address a plugin may reach: scheme, host and port.
@@ -71,6 +111,26 @@ type PluginStore interface {
 	// none is stored. The caller clears the secret after use.
 	PluginCredential(ctx context.Context, plugin, name string) (secret []byte, origin string, err error)
 
+	// PluginHostSettings returns the settings of every plugin at once, the
+	// defaults when nobody changed them.
+	PluginHostSettings(context.Context) (contract.PluginHostSettings, error)
+	PutPluginHostSettings(context.Context, contract.PluginHostSettings) error
+
+	// PluginSession returns found false for a session the plugin has not
+	// taken part in.
+	PluginSession(ctx context.Context, plugin, session string) (record PluginSessionRecord, found bool, err error)
+	// StartPluginSession records that the plugin took part in the session
+	// from turn on, and returns the record as kept: one kept before stays.
+	StartPluginSession(ctx context.Context, plugin, session string, turn int) (PluginSessionRecord, error)
+	// PausePluginSession pauses or resumes the plugin in the session. A
+	// session the plugin has not taken part in starts at turn.
+	PausePluginSession(ctx context.Context, plugin, session string, paused bool, turn int) (PluginSessionRecord, error)
+	// CountPluginSessions counts the sessions the plugin took part in.
+	CountPluginSessions(ctx context.Context, plugin string) (int, error)
+	// ScanPluginActivity visits the root request records started since,
+	// oldest first, with what the plugins' statistics read of them.
+	ScanPluginActivity(ctx context.Context, since time.Time, visit func(PluginActivity) error) error
+
 	// GetPluginValue returns found false for a key without a value.
 	GetPluginValue(ctx context.Context, plugin, key string) (value json.RawMessage, found bool, err error)
 	// PutPluginValue returns ErrLimitReached when the value or the plugin's
@@ -78,4 +138,7 @@ type PluginStore interface {
 	PutPluginValue(ctx context.Context, plugin, key string, value json.RawMessage) error
 	DeletePluginValue(ctx context.Context, plugin, key string) error
 	PluginValueKeys(ctx context.Context, plugin, prefix string) ([]string, error)
+	// DeletePluginValues removes every value of the plugin and returns how
+	// many it removed.
+	DeletePluginValues(ctx context.Context, plugin string) (int, error)
 }

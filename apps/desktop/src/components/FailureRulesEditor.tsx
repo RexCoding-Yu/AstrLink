@@ -25,6 +25,7 @@ export function FailureRulesEditor({
   headingLevel = 3,
   onReset,
   className,
+  responseTimeoutSeconds,
 }: {
   value: FailurePolicy;
   onChange: (value: FailurePolicy) => void;
@@ -33,6 +34,8 @@ export function FailureRulesEditor({
   headingLevel?: 2 | 3 | 4;
   onReset?: () => void;
   className?: string;
+  /** Effective response-start timeout; 0 means the timeout rule never fires. */
+  responseTimeoutSeconds?: number | null;
 }) {
   const t = useT();
   const id = useId();
@@ -48,6 +51,7 @@ export function FailureRulesEditor({
     label: string;
     action: FailureAction;
     code?: string;
+    note?: string;
   }[] = [
     {
       key: "network_error",
@@ -58,6 +62,10 @@ export function FailureRulesEditor({
       key: "response_timeout",
       label: t("failure.responseTimeout"),
       action: value.response_timeout,
+      note:
+        responseTimeoutSeconds === 0 && value.response_timeout !== "stop"
+          ? t("failure.responseTimeoutInactive")
+          : undefined,
     },
     ...Object.entries(value.http_status)
       .sort(([a], [b]) => Number(a) - Number(b))
@@ -118,7 +126,7 @@ export function FailureRulesEditor({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rules.map(({ key, label, action, code }) => {
+          {rules.map(({ key, label, action, code, note }) => {
             const errorLabel = code
               ? `${t("failure.httpCode", { code })}${label ? ` · ${label}` : ""}`
               : label;
@@ -133,6 +141,11 @@ export function FailureRulesEditor({
                       {label ? (
                         <span className="text-muted-foreground">{label}</span>
                       ) : null}
+                    </div>
+                  ) : note ? (
+                    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                      <span>{label}</span>
+                      <span className="text-warning-foreground">{note}</span>
                     </div>
                   ) : (
                     label

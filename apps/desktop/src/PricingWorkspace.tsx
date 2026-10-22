@@ -47,6 +47,25 @@ function periodLabel(p: BillingPeriod, t: ReturnType<typeof useT>) {
   return `${kind} · ${stamp(p.start)} – ${stamp(p.end)}`;
 }
 
+/** The calls an amount leaves out, joined for one line; empty when none. */
+export function billingNoteText(
+  t: ReturnType<typeof useT>,
+  amounts: BillingAmounts,
+  partial = false,
+): string {
+  return [
+    amounts.unpriced > 0
+      ? t("pricing.unpricedCount", { count: amounts.unpriced })
+      : "",
+    amounts.pending > 0
+      ? t("pricing.pendingCount", { count: amounts.pending })
+      : "",
+    partial ? t("pricing.partial") : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 export function BillingNote({
   amounts,
   partial = false,
@@ -55,17 +74,9 @@ export function BillingNote({
   partial?: boolean;
 }) {
   const t = useT();
-  const notes = [
-    amounts.unpriced > 0
-      ? t("pricing.unpricedCount", { count: amounts.unpriced })
-      : "",
-    amounts.pending > 0
-      ? t("pricing.pendingCount", { count: amounts.pending })
-      : "",
-    partial ? t("pricing.partial") : "",
-  ].filter(Boolean);
-  return notes.length ? (
-    <span className="text-xs text-muted-foreground">{notes.join(" · ")}</span>
+  const note = billingNoteText(t, amounts, partial);
+  return note ? (
+    <span className="text-xs text-muted-foreground">{note}</span>
   ) : null;
 }
 

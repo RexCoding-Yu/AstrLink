@@ -24,6 +24,10 @@ const droppedConnection = [
   'error is Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."',
   "The staple and validate action failed! Error 68.",
 ].join("\n");
+const timedOut = [
+  "xcrun failed (1):",
+  'Error: HTTPError(statusCode: nil, error: Error Domain=NSURLErrorDomain Code=-1001 "The request timed out.")',
+].join("\n");
 
 function fixture(status = "Accepted") {
   const bundleDirectory = mkdtempSync(
@@ -97,6 +101,45 @@ describe("macOS release signing gates", () => {
     ).toBe(false);
   });
 
+  it("checks every bundled runtime, including one only Apple silicon adds", () => {
+    const options = fixture();
+    const frameworks = path.join(
+      options.bundleDirectory,
+      "macos/AstrLink.app/Contents/Frameworks",
+    );
+    mkdirSync(frameworks, { recursive: true });
+    for (const name of [
+      "libonnxruntime.1.23.2.dylib",
+      "libonnxruntime.1.24.4.dylib",
+    ])
+      writeFileSync(path.join(frameworks, name), "synthetic runtime");
+    const normal = options.runCommand.getMockImplementation()!;
+    options.runCommand.mockImplementation((command, args) => {
+      if (
+        command === "codesign" &&
+        args[0] === "--verify" &&
+        args.at(-1)?.endsWith("libonnxruntime.1.24.4.dylib")
+      ) {
+        throw new Error("unsigned Core ML runtime");
+      }
+      return normal(command, args);
+    });
+    expect(() => notarizeMacOS(options)).toThrow("unsigned Core ML runtime");
+    const verified = options.runCommand.mock.calls
+      .filter(
+        ([command, args]) => command === "codesign" && args[0] === "--verify",
+      )
+      .map(([, args]) => path.basename(args.at(-1) ?? ""));
+    expect(
+      verified.filter((name) => name === "libonnxruntime.1.23.2.dylib"),
+    ).toHaveLength(1);
+    expect(
+      options.runCommand.mock.calls.some(
+        ([, args]) => args[0] === "notarytool",
+      ),
+    ).toBe(false);
+  });
+
   it.each(["Invalid", "Rejected", "In Progress"])(
     "never staples or passes Gatekeeper on Apple status %s",
     (status) => {
@@ -152,6 +195,37 @@ describe("macOS release signing gates", () => {
       "DMG has changed",
     );
   });
+
+  it.each(["submit", "wait", "log"])(
+    "retries notarytool %s when a request to Apple times out",
+    (subcommand) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const options = fixture();
+      const normal = options.runCommand.getMockImplementation()!;
+      let dropped = false;
+      options.runCommand.mockImplementation((command, args) => {
+        if (args[0] === "notarytool" && args[1] === subcommand && !dropped) {
+          dropped = true;
+          throw new Error(timedOut);
+        }
+        return normal(command, args);
+      });
+      notarizeMacOS({ ...options, retryDelaysMs: [0, 0] });
+      const calls = (name: string) =>
+        options.runCommand.mock.calls.filter(
+          ([, args]) => args[0] === "notarytool" && args[1] === name,
+        ).length;
+      expect(calls(subcommand)).toBe(2);
+      // Waiting again or fetching the log again must not upload again.
+      expect(calls("submit")).toBe(subcommand === "submit" ? 2 : 1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(
+        options.runCommand.mock.calls.filter(
+          ([command]) => command === "spctl",
+        ),
+      ).toHaveLength(2);
+    },
+  );
 
   it("retries stapler when Apple's ticket service drops the connection", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

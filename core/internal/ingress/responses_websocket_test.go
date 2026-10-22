@@ -245,7 +245,7 @@ func TestResponsesWebSocketBoundaryBeforeUpgrade(t *testing.T) {
 			conn.Close()
 			t.Fatal("boundary accepted upgrade")
 		}
-		if err == nil || response == nil || (response.StatusCode != 401 && response.StatusCode != 403) {
+		if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("response=%v err=%v", response, err)
 		}
 		response.Body.Close()

@@ -80,7 +80,7 @@ func (store *Store) GetService(ctx context.Context, id contract.ServiceID) (stor
 		}
 		return storagecontract.ServiceRecord{}, fmt.Errorf("read service: %w", err)
 	}
-	return decodeServiceRecord(string(id), []byte(document))
+	return store.serviceDocuments.decode(string(id), document)
 }
 
 func (store *Store) ListServices(ctx context.Context, options storagecontract.ServiceListOptions) (storagecontract.ServicePage, error) {
@@ -106,7 +106,7 @@ func (store *Store) ListServices(ctx context.Context, options storagecontract.Se
 		if err := rows.Scan(&id, &document); err != nil {
 			return storagecontract.ServicePage{}, fmt.Errorf("scan service: %w", err)
 		}
-		record, err := decodeServiceRecord(id, []byte(document))
+		record, err := store.serviceDocuments.decode(id, document)
 		if err != nil {
 			return storagecontract.ServicePage{}, err
 		}
@@ -186,7 +186,7 @@ func (store *Store) UpdateService(
 		return record, fmt.Errorf("update service: %w", err)
 	}
 	if err = validateStoredRoutingReferencesTx(ctx, transaction); err != nil {
-		return record, fmt.Errorf("model routing references block service update: %w", err)
+		return record, fmt.Errorf("service update: %w", err)
 	}
 	if service.Kind.IsHTTP() && credential.Present {
 		if len(credential.Secret) == 0 {
@@ -235,7 +235,7 @@ func (store *Store) DeleteService(ctx context.Context, id contract.ServiceID, ex
 		return fmt.Errorf("delete service: %w", err)
 	}
 	if err = validateStoredRoutingReferencesTx(ctx, transaction); err != nil {
-		return fmt.Errorf("model routing references block service delete: %w", err)
+		return fmt.Errorf("service delete: %w", err)
 	}
 	if err = transaction.Commit(); err != nil {
 		return fmt.Errorf("commit service delete: %w", err)

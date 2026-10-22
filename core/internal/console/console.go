@@ -32,7 +32,7 @@ const (
 
 	// RequestHeader must carry RequestHeaderValue on every state-changing
 	// request, setup, sign-in and sign-out included. A page on another
-	// origin can only add it after a CORS preflight, and Core approves none,
+	// origin can only add it after a CORS preflight, and the console approves none,
 	// so the header shows the request came from the console's own page. It
 	// is local to the console and never forwarded upstream.
 	RequestHeader      = "X-AstrLink-Console"

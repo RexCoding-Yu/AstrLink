@@ -14,7 +14,6 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
 	"github.com/QuantumNous/astrlink/core/internal/servicemodel"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
-	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	"github.com/QuantumNous/astrlink/core/internal/subscription"
 )
 
@@ -25,7 +24,7 @@ func (function controlRoundTripFunc) RoundTrip(request *http.Request) (*http.Res
 }
 
 func TestServiceModelProbesUsePersistedAndDraftHTTPConfiguration(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,10 +125,52 @@ func TestServiceModelProbesUsePersistedAndDraftHTTPConfiguration(t *testing.T) {
 	if strings.Contains(persisted.Body.String()+draft.Body.String()+explicit.Body.String(), "secret") {
 		t.Fatal("model probe response leaked credential material")
 	}
+	if strings.Contains(persisted.Body.String(), "model_protocols") {
+		t.Fatalf("a list without endpoint types reported formats: %s", persisted.Body.String())
+	}
+}
+
+// A New API list names each model's endpoint types; the probe reports the
+// format of a model served in exactly one.
+func TestDraftModelProbeReportsListedFormats(t *testing.T) {
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	client := &http.Client{Transport: controlRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-x","supported_endpoint_types":["openai"]},` +
+				`{"id":"gemini-x","supported_endpoint_types":["gemini"]}]}`)),
+		}, nil
+	})}
+	handler, err := NewWithDependencies(
+		contract.DefaultVersionResponse("0.1.0-test", "abc1234"),
+		Dependencies{ServiceStore: store, ServiceModels: servicemodel.New(store, nil, client), ControlToken: testControlToken},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := controlRequest(t, handler, http.MethodPost, ServiceModelProbesPath, "application/json", `{
+        "kind":"newapi",
+        "http":{"base_url":"https://newapi.example","auth":{"scheme":"bearer"},"credential":{"secret":"draft-secret"}},
+        "protocol":"openai.models"
+      }`, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("probe status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result serviceModelProbeResponse
+	decode(t, response, &result)
+	if strings.Join(result.ModelIDs, ",") != "gemini-x,gpt-x" || len(result.ModelProtocols) != 1 ||
+		result.ModelProtocols[0] != (contract.ModelProtocol{Model: "gemini-x", Protocol: contract.ProtocolGoogleGenerateContent}) {
+		t.Fatalf("probe result = %#v", result)
+	}
 }
 
 func TestDraftServiceModelProbeRejectsUnsupportedProtocol(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +197,7 @@ func TestDraftServiceModelProbeRejectsUnsupportedProtocol(t *testing.T) {
 }
 
 func TestSavedCodexModelProbeRequiresConnectedSubscription(t *testing.T) {
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	store, err := openControlTestStore(t, context.Background(), t.TempDir()+"/astrlink.db")
 	if err != nil {
 		t.Fatal(err)
 	}

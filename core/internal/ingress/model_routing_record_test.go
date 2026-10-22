@@ -56,7 +56,7 @@ func recordedRoutingSettings(groups ...contract.ModelRoutingGroup) contract.Rout
 // keyword row says how many keywords matched and never what the text was.
 func TestModelRoutingRecordsEveryRuleVerdict(t *testing.T) {
 	settings := recordedRoutingSettings(recordedRoutingGroup())
-	request := Request{Protocol: contract.ProtocolOpenAIResponses, Model: "astrlink/program", routingText: "please translate this"}
+	request := Request{Protocol: contract.ProtocolOpenAIResponses, Model: "astrlink/program", routingUserText: "please translate this", routingUserTextRunes: 21, routingUserTextKnown: true}
 	session := newRecordSession(request, "", contract.AuditSettings{})
 	if _, err := New().applyModelRouting(context.Background(), session, request, settings); err != nil {
 		t.Fatal(err)

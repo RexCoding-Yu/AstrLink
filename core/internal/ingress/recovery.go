@@ -228,8 +228,9 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 }
 
 type retryHTTPError struct {
-	status int
-	reason string
+	status  int
+	reason  string
+	summary contract.ErrorSummary
 }
 
 func (failure *retryHTTPError) Error() string { return "upstream HTTP " + strconv.Itoa(failure.status) }

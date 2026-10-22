@@ -60,8 +60,8 @@ pub struct PrivacyModelUpdates {
 
 #[derive(Default)]
 struct Inner {
-    /// Catalog entries with a release newer than the pinned one, from the last
-    /// successful check.
+    /// The newest release of each catalog model, from the last successful
+    /// check.
     releases: Option<Vec<CatalogModel>>,
     next_check: Option<Instant>,
     update: Option<PrivacyModelUpdate>,
@@ -136,7 +136,7 @@ impl PrivacyModelUpdates {
                 manager.get_privacy_model_releases(false),
             )
             .and_then(|(catalog, releases)| {
-                Ok(newer_releases(
+                Ok(latest_releases(
                     serde_json::from_value(catalog).map_err(|e| e.to_string())?,
                     serde_json::from_value(releases).map_err(|e| e.to_string())?,
                 ))
@@ -226,27 +226,30 @@ fn notify_unattended(app: &AppHandle, update: &PrivacyModelUpdate) {
     );
 }
 
-/// Keeps releases that supersede their pinned catalog entry, matching the
-/// privacy page's own update hint.
-fn newer_releases(catalog: Catalog, releases: Catalog) -> Vec<CatalogModel> {
+/// Picks the newest release of each catalog model, matching the privacy page's
+/// own update hint: a release that supersedes the pinned entry, otherwise the
+/// pinned entry itself, which installs of an earlier pin still move to.
+fn latest_releases(catalog: Catalog, releases: Catalog) -> Vec<CatalogModel> {
     let version = |model: &CatalogModel| {
         model
             .version
             .as_deref()
             .and_then(|version| Version::parse(version).ok())
     };
-    releases
+    catalog
         .items
         .into_iter()
-        .filter(|release| {
-            catalog.items.iter().any(|pinned| {
-                pinned.id == release.id
-                    && pinned.repo_id == release.repo_id
-                    && pinned.revision != release.revision
-                    && version(release)
-                        .zip(version(pinned))
-                        .is_some_and(|(release, pinned)| release > pinned)
-            })
+        .filter_map(|pinned| {
+            let release = releases
+                .items
+                .iter()
+                .find(|release| release.id == pinned.id)?;
+            let newer = release.repo_id == pinned.repo_id
+                && release.revision != pinned.revision
+                && version(release)
+                    .zip(version(&pinned))
+                    .is_some_and(|(release, pinned)| release > pinned);
+            Some(if newer { release.clone() } else { pinned })
         })
         .collect()
 }
@@ -332,6 +335,7 @@ mod tests {
 
     const PINNED: &str = "49e8b7b83d34fd75a86cf07698bd80972d444ff3";
     const RELEASE: &str = "11697fb46757a275ada41873c5e0e8f59bfd421d";
+    const EARLIER_PIN: &str = "1111111111111111111111111111111111111111";
 
     fn model(revision: &str, version: &str) -> serde_json::Value {
         json!({
@@ -348,7 +352,7 @@ mod tests {
     }
 
     fn releases(release: serde_json::Value) -> Vec<CatalogModel> {
-        newer_releases(
+        latest_releases(
             serde_json::from_value(json!({ "items": [model(PINNED, "0.1.0")] })).unwrap(),
             serde_json::from_value(json!({ "items": [release] })).unwrap(),
         )
@@ -397,10 +401,40 @@ mod tests {
     }
 
     #[test]
-    fn ignores_the_pinned_release_and_older_versions() {
-        assert!(releases(model(PINNED, "0.1.0")).is_empty());
-        assert!(releases(model(RELEASE, "0.0.9")).is_empty());
-        assert!(releases(model(RELEASE, "not-semver")).is_empty());
+    fn falls_back_to_the_pinned_entry_without_a_newer_release() {
+        for release in [
+            model(PINNED, "0.1.0"),
+            model(RELEASE, "0.0.9"),
+            model(RELEASE, "not-semver"),
+        ] {
+            let latest = releases(release);
+            assert_eq!(latest.len(), 1);
+            assert_eq!(latest[0].revision, PINNED);
+            assert_eq!(
+                pending_update(
+                    &latest,
+                    &[installation("model_a", PINNED, "cpu-int8")],
+                    &policy(Some("model_a")),
+                ),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn moves_installs_of_an_earlier_pin_to_the_pinned_release() {
+        let installations = [installation("model_a", EARLIER_PIN, "cpu-int8")];
+        assert_eq!(
+            pending_update(
+                &releases(model(PINNED, "0.1.0")),
+                &installations,
+                &policy(Some("model_a")),
+            ),
+            Some(PrivacyModelUpdate {
+                version: "0.1.0".to_string(),
+                ..guard(UpdatePhase::Available).unwrap()
+            }),
+        );
     }
 
     #[test]

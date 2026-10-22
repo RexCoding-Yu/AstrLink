@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 const (
@@ -239,6 +241,73 @@ func TestAstrLinkGuardBuiltinManifestSurvivesPersistence(t *testing.T) {
 		if kind == nil || string(*kind) != label {
 			t.Fatalf("label %q maps to %v", label, kind)
 		}
+	}
+}
+
+// v0.1.0 installed its pinned Guard release through the built-in plan. Once
+// the pin moves on, that record must still load offline as a Guard release;
+// a rejected provenance stops the whole registry from starting.
+func TestAstrLinkGuardInstallOfAnEarlierPinStaysReady(t *testing.T) {
+	const revision = "49e8b7b83d34fd75a86cf07698bd80972d444ff3"
+	if revision == astrLinkGuardRevision {
+		t.Fatal("the fixture must predate the pinned release")
+	}
+	id := InstallationID(astrLinkGuardRepoID, revision, "cpu_int8")
+	catalogID := CatalogAstrLinkGuard
+	catalogSource := contract.PrivacyModelCatalogSourceOfficial
+	license, installedAt := "Apache-2.0", "2026-10-01T00:00:00Z"
+	installation := contract.PrivacyModelInstallation{
+		ID: id, Source: contract.PrivacyModelSourceCatalog,
+		CatalogID: &catalogID, CatalogSource: &catalogSource,
+		Name: "AstrLink Guard", License: &license, Languages: []string{"zh", "en"},
+		RepoID: astrLinkGuardRepoID, Revision: revision,
+		VariantID: "cpu_int8", VariantName: "CPU INT8", Quantization: "int8",
+		Adapter:         contract.PrivacyModelAdapterHFToken,
+		Status:          contract.PrivacyModelStatusReady,
+		BytesDownloaded: 38_886_573, BytesTotal: 38_886_573,
+		EstimatedRAMBytes: 268_435_456,
+		LabelMapping:      defaultAstrLinkGuardLabelMapping(), InstalledAt: &installedAt,
+	}
+	manifest := buildNormalizedManifest(installation, astrLinkGuardRuntime("cpu_int8"), []Asset{
+		{Path: "int8/model_int8.onnx", Size: 324_054, SHA256: "6cacc676cf1eea9fccc9654c0587484c181102b5835600ffaf1362e53c2641a9"},
+		{Path: "int8/model_int8.onnx_data", Size: 37_046_272, SHA256: "fe5918effd2a04684d071aa4e6bf880963318c4ed6edd6189a1ae439f225c83b"},
+		{Path: "int8/config.json", Size: 1_804, SHA256: "2c20003590d642e273c03c4c7c82d9849fa75f64bf29a71ec0a0c9a20ba4a150"},
+		{Path: "int8/tokenizer.json", Size: 1_502_881, SHA256: "0cf3b235ef125658015a6c8026a5fe6f28088bf825101a990ec18a10200feef4"},
+		{Path: "int8/tokenizer_config.json", Size: 205, SHA256: "3a7cf4d70bb7c0376f18cc6ad23c143853de5b4478084c414d5dbbd35ea5c589"},
+		{Path: "LICENSE", Size: 11_357, SHA256: "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"},
+	})
+	root := filepath.Join(t.TempDir(), "models")
+	directory := filepath.Join(root, "installations", string(id))
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNormalizedManifest(directory, manifest); err != nil {
+		t.Fatal(err)
+	}
+	document, err := os.ReadFile(filepath.Join(directory, InstallationManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := manifestBinding(manifest.Identity, document)
+	store := openRegistryStore(t)
+	if err := store.PutPrivacyModelInstallation(context.Background(), storage.PrivacyModelInstallationRecord{
+		Installation: installation, Manifest: &binding,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hub := newFakeGuardHub(t)
+	registry, err := NewRegistry(context.Background(), RegistryConfig{
+		RootDirectory:        root,
+		MetadataBaseURL:      hub.server.URL,
+		HTTPClient:           hub.server.Client(),
+		Store:                store,
+		TestOnlyLoopbackMode: true,
+	})
+	if err != nil {
+		t.Fatalf("restart rejected the earlier pin: %v", err)
+	}
+	if _, ready := registry.ReadyInstallation(id); !ready || hub.requests.Load() != 0 {
+		t.Fatalf("earlier pin ready=%t requests=%d", ready, hub.requests.Load())
 	}
 }
 

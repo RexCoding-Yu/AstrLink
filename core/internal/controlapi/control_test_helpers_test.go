@@ -9,9 +9,18 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
+	"github.com/QuantumNous/astrlink/core/internal/testutil/sqliteschema"
 )
 
 const testControlToken = "test-control-token-0123456789"
+
+// API tests exercise store behavior on the current schema. Key/token bootstrap
+// still runs per store; existing files stay intact for restart and unlock tests.
+func openControlTestStore(t *testing.T, ctx context.Context, path string, options ...sqlite.Option) (*sqlite.Store, error) {
+	t.Helper()
+	sqliteschema.Seed(t, path)
+	return sqlite.Open(ctx, path, options...)
+}
 
 func controlRequest(
 	t *testing.T,
@@ -41,7 +50,8 @@ func controlRequest(
 
 func newRouteHandler(t *testing.T) (*sqlite.Store, *Handler) {
 	t.Helper()
-	store, err := sqlite.Open(context.Background(), t.TempDir()+"/astrlink.db")
+	path := t.TempDir() + "/store.sqlite"
+	store, err := openControlTestStore(t, context.Background(), path)
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)
 	}

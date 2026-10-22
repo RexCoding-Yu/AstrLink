@@ -6,6 +6,7 @@ import type {
 import { imageCompressionModes } from "@/failure-policy-model";
 import { useT } from "@/i18n";
 import { HelpPopover } from "./HelpPopover";
+import { ImageCompressionDemo } from "./ImageCompressionDemo";
 import {
   FoldHorizontal,
   ImageDown,
@@ -68,12 +69,8 @@ export function ImageCompressionEditor({
           <h2 className="text-sm font-semibold">
             {t("imageCompression.title")}
           </h2>
-          <HelpPopover label={t("imageCompression.help")}>
-            <div className="grid gap-2">
-              <p>{t("imageCompression.description")}</p>
-              <p>{t("imageCompression.keptHelp")}</p>
-              <p>{t("imageCompression.recordHelp")}</p>
-            </div>
+          <HelpPopover label={t("imageCompression.help")} size="wide">
+            <ImageCompressionDemo mode={value.mode} />
           </HelpPopover>
         </div>
         <p className="mt-1 text-xs text-muted-foreground">

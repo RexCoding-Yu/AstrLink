@@ -3,6 +3,7 @@ import {
   displayRequestStatus,
   isModelDiscoveryProtocol,
   type RequestRecord,
+  type RequestStatus,
 } from "./request-record-model";
 
 export function unattributedServiceLabel(): string {
@@ -28,6 +29,77 @@ export function isUsageRangePreset(value: unknown): value is UsageRangePreset {
   return USAGE_RANGE_PRESETS.includes(value as UsageRangePreset);
 }
 
+/**
+ * Whole local days from `from` through `to`, both inclusive, as `YYYY-MM-DD`.
+ * Unlike a preset it stays put as time passes.
+ */
+export interface CustomUsageRange {
+  from: string;
+  to: string;
+}
+
+export type UsageRange = UsageRangePreset | CustomUsageRange;
+
+/** Core sums at most 366 days; a year of local days stays under it across DST. */
+export const MAX_CUSTOM_RANGE_DAYS = 365;
+
+export function isCustomUsageRange(
+  range: UsageRange,
+): range is CustomUsageRange {
+  return typeof range === "object";
+}
+
+/** Equal ranges share a key, so a list or a cache can be kept per range. */
+export function usageRangeKey(range: UsageRange): string {
+  return isCustomUsageRange(range) ? `${range.from}~${range.to}` : range;
+}
+
+const DAY_KEY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** Local midnight of a `YYYY-MM-DD` day; null unless it names a real day. */
+export function parseDayKey(day: string): Date | null {
+  const match = DAY_KEY_PATTERN.exec(day);
+  if (!match) return null;
+  const [year, month, date] = match.slice(1).map(Number);
+  const parsed = new Date(year, month - 1, date);
+  return parsed.getFullYear() === year &&
+    parsed.getMonth() === month - 1 &&
+    parsed.getDate() === date
+    ? parsed
+    : null;
+}
+
+/** Local days a custom range spans; 0 when it does not name a valid span. */
+export function customRangeDays(range: CustomUsageRange): number {
+  const from = parseDayKey(range.from);
+  const to = parseDayKey(range.to);
+  if (!from || !to || to < from) return 0;
+  // Calendar arithmetic, so a DST day still counts once.
+  return (
+    Math.round(
+      (Date.UTC(to.getFullYear(), to.getMonth(), to.getDate()) -
+        Date.UTC(from.getFullYear(), from.getMonth(), from.getDate())) /
+        86_400_000,
+    ) + 1
+  );
+}
+
+export type CustomRangeProblem = "invalid" | "order" | "future" | "too_long";
+
+/** Why a custom range cannot be read, or null when it can. */
+export function customRangeProblem(
+  range: CustomUsageRange,
+  now: Date,
+): CustomRangeProblem | null {
+  const from = parseDayKey(range.from);
+  const to = parseDayKey(range.to);
+  if (!from || !to) return "invalid";
+  if (to < from) return "order";
+  if (from > startOfLocalDay(now)) return "future";
+  if (customRangeDays(range) > MAX_CUSTOM_RANGE_DAYS) return "too_long";
+  return null;
+}
+
 export function usageRangeDays(preset: UsageRangePreset): number {
   switch (preset) {
     case "1d":
@@ -49,7 +121,7 @@ export function usageRangeDays(preset: UsageRangePreset): number {
  * so the pair can be handed to the control API verbatim.
  */
 export interface UsageWindow {
-  preset: UsageRangePreset;
+  preset: UsageRangePreset | "custom";
   from: string;
   to: string;
   time_zone: string;
@@ -63,6 +135,26 @@ export interface UsageTotals {
   total_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+/**
+ * Root model calls in the window by outcome. `succeeded` and `failed` equal
+ * the totals' `requests` and `failed_requests`; the rest never count as
+ * requests.
+ */
+export type UsageStatusCounts = Record<RequestStatus, number>;
+
+/** The order outcomes are charted and listed in. */
+export const USAGE_STATUSES = [
+  "succeeded",
+  "failed",
+  "blocked",
+  "cancelled",
+  "pending",
+] as const satisfies readonly RequestStatus[];
+
+export function emptyUsageStatusCounts(): UsageStatusCounts {
+  return { succeeded: 0, failed: 0, blocked: 0, cancelled: 0, pending: 0 };
 }
 
 export interface UsageGroup extends UsageTotals {
@@ -92,10 +184,11 @@ export interface UsageHourBucket extends UsageTotals {
 export interface UsageSummary {
   window: UsageWindow;
   totals: UsageTotals;
+  status_counts: UsageStatusCounts;
   /** One bucket per local day in the window, empty days included. */
   by_day: UsageDayBucket[];
   /**
-   * 24 local-hour buckets for a `1d` window, empty hours included.
+   * Local-hour buckets for an hourly window, empty hours included.
    * Multi-day ranges leave this empty so the chart stays on `by_day`.
    */
   by_hour: UsageHourBucket[];
@@ -273,15 +366,29 @@ export function localDayWindow(now: Date): Pick<UsageWindow, "from" | "to"> {
 }
 
 /**
- * The window for a preset ending now. `1d` is the rolling last 24 local
- * hours (current hour included). `7d` / `30d` are calendar days ending
- * tomorrow's midnight.
+ * The window for a range. `1d` is the rolling last 24 local hours (current
+ * hour included). The other presets are calendar days ending tomorrow's
+ * midnight; a custom range runs from its first local midnight to the one
+ * after its last day.
  */
 export function resolveUsageWindow(
-  preset: UsageRangePreset,
+  range: UsageRange,
   now: Date,
   timeZone: string = localTimeZone(),
 ): UsageWindow {
+  if (isCustomUsageRange(range)) {
+    const from = parseDayKey(range.from) ?? startOfLocalDay(now);
+    const last = parseDayKey(range.to) ?? from;
+    const to = new Date(last);
+    to.setDate(to.getDate() + 1);
+    return {
+      preset: "custom",
+      from: from.toISOString(),
+      to: to.toISOString(),
+      time_zone: timeZone,
+    };
+  }
+  const preset = range;
   if (preset === "1d") {
     const zone = timeZone || undefined;
     const currentHour = startOfZonedHour(now, zone);
@@ -307,7 +414,9 @@ export function resolveUsageWindow(
 }
 
 /** Every local day key overlapping the window, oldest first. */
-export function usageWindowDayKeys(window: UsageWindow): string[] {
+export function usageWindowDayKeys(
+  window: Pick<UsageWindow, "from" | "to">,
+): string[] {
   const start = startOfLocalDay(new Date(window.from));
   const to = new Date(window.to);
   let end = startOfLocalDay(to);
@@ -322,11 +431,22 @@ export function usageWindowDayKeys(window: UsageWindow): string[] {
   return keys;
 }
 
-/** 24 local-hour slots for a `1d` window, oldest first. */
+/**
+ * Whether the window is read in local hours: the rolling day, or a custom
+ * range of one day, which a single daily bar would say little about.
+ */
+export function hourlyUsageWindow(
+  window: Pick<UsageWindow, "preset" | "from" | "to">,
+): boolean {
+  if (window.preset === "1d") return true;
+  return window.preset === "custom" && usageWindowDayKeys(window).length === 1;
+}
+
+/** Local-hour slots for an hourly window, oldest first. */
 export function usageWindowHourSlots(
   window: UsageWindow,
 ): Array<{ date: string; hour: number }> {
-  if (window.preset !== "1d") return [];
+  if (!hourlyUsageWindow(window)) return [];
   const zone = window.time_zone || undefined;
   const end = new Date(window.to);
   const slots: Array<{ date: string; hour: number }> = [];
@@ -355,6 +475,7 @@ export function emptyUsageSummary(
   return {
     window,
     totals: emptyUsageTotals(),
+    status_counts: emptyUsageStatusCounts(),
     by_day: days.map((date) => ({
       date,
       ...emptyUsageTotals(),
@@ -377,6 +498,7 @@ function emptyHourSeries(window: UsageWindow): UsageHourBucket[] {
 
 export interface UsageAggregate {
   totals: UsageTotals;
+  status_counts: UsageStatusCounts;
   by_service: UsageGroup[];
   by_model: UsageGroup[];
   by_token: UsageGroup[];
@@ -393,6 +515,7 @@ export function aggregateUsageRecords(
   records: RequestRecord[],
 ): UsageAggregate {
   const totals = emptyUsageTotals();
+  const status_counts = emptyUsageStatusCounts();
   const serviceMap = new Map<string, UsageGroup>();
   const modelMap = new Map<string, UsageGroup>();
   // The client only sees records, so it cannot apply Core's current-token
@@ -402,8 +525,10 @@ export function aggregateUsageRecords(
   let scanned_records = 0;
 
   for (const record of records) {
-    const status = usageRecordStatus(record);
+    const status = rootCallStatus(record);
     if (status == null) continue;
+    status_counts[status] += 1;
+    if (status !== "failed" && status !== "succeeded") continue;
     scanned_records += 1;
     const day = dayBucket(dayMap, record.started_at);
 
@@ -446,6 +571,7 @@ export function aggregateUsageRecords(
 
   return {
     totals,
+    status_counts,
     by_service: sortUsageGroups([...serviceMap.values()]),
     by_model: sortUsageGroups([...modelMap.values()]),
     by_token: sortUsageGroups([...tokenMap.values()]),
@@ -470,6 +596,7 @@ export function aggregateUsage(
   return {
     window,
     totals: aggregate.totals,
+    status_counts: aggregate.status_counts,
     by_day: days.map(
       (date) => observed.get(date) ?? { date, ...emptyUsageTotals() },
     ),
@@ -482,13 +609,18 @@ export function aggregateUsage(
   };
 }
 
+/** The outcome of a model call; discovery and retry attempts are not calls. */
+function rootCallStatus(record: RequestRecord): RequestStatus | null {
+  if (record.parent_request_id !== null) return null;
+  if (isModelDiscoveryProtocol(record.input_protocol)) return null;
+  return displayRequestStatus(record.status, record.http_status);
+}
+
 /** Failed and succeeded inference roots only; discovery and retries never count. */
 function usageRecordStatus(
   record: RequestRecord,
 ): "failed" | "succeeded" | null {
-  if (record.parent_request_id !== null) return null;
-  if (isModelDiscoveryProtocol(record.input_protocol)) return null;
-  const status = displayRequestStatus(record.status, record.http_status);
+  const status = rootCallStatus(record);
   if (status !== "failed" && status !== "succeeded") return null;
   return status;
 }
@@ -584,18 +716,6 @@ export function dayTokenStack(
 export function modelUsageLabel(id: string | null): string {
   const name = id?.trim() ?? "";
   return name || unknownModelLabel();
-}
-
-export function usageBarPercent(
-  value: number,
-  groups: Array<Pick<UsageGroup, "total_tokens">>,
-): number {
-  const max = groups.reduce(
-    (highest, group) => Math.max(highest, group.total_tokens),
-    0,
-  );
-  if (max <= 0 || value <= 0) return 0;
-  return Math.round((value / max) * 100);
 }
 
 export function mergeCatalogServiceUsage(

@@ -267,6 +267,33 @@ describe("HTTP service product presets", () => {
     }
   });
 
+  it("sends OpenCode requests under /inference and takes Gemini clients natively", () => {
+    for (const [kind, baseURL] of [
+      ["opencode_go", "https://opencode.ai/inference/go/v1"],
+      ["opencode_zen", "https://opencode.ai/inference/v1"],
+    ] as const) {
+      const preset = httpServicePreset(kind);
+      expect(preset).toMatchObject({
+        baseURL,
+        baseURLPlaceholder: baseURL,
+        authScheme: "bearer",
+        sites: [{ id: "official", baseURL }],
+      });
+      expect(preset.capabilities).toContainEqual({
+        protocol: "google.generate_content",
+        mode: "native",
+        streaming: true,
+      });
+      expect(
+        preset.capabilities.every(({ convert_to }) => convert_to === undefined),
+      ).toBe(true);
+      // An address saved under the old /zen path still reads as OpenCode's site.
+      expect(serviceSiteForBaseURL(preset, "https://opencode.ai/zen/v1")).toBe(
+        "official",
+      );
+    }
+  });
+
   it("offers vendor sites so users pick a region instead of typing an address", () => {
     for (const [kind, global] of [
       ["glm_coding", "https://api.z.ai/api/coding/paas/v4"],
@@ -515,12 +542,14 @@ describe("default protocol conversions", () => {
           "openai.responses:native:true",
           "openai.chat:native:true",
           "anthropic.messages:native:true",
+          "google.generate_content:native:true",
           "openai.models:native:false",
         ],
         "opencode_zen": [
           "openai.responses:native:true",
           "openai.chat:native:true",
           "anthropic.messages:native:true",
+          "google.generate_content:native:true",
           "openai.models:native:false",
         ],
         "qwen": [

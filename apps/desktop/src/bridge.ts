@@ -11,6 +11,11 @@ import {
   type ModelRoutingGroupVersion,
 } from "./model-routing-version-model";
 import {
+  parseTerminalChoices,
+  type ServiceTerminalRequest,
+  type TerminalChoice,
+} from "./service-terminal-model";
+import {
   parseClientIdentities,
   parseRoutingSettings,
   type ClientIdentities,
@@ -34,7 +39,11 @@ import {
   parsePrivacySummary,
   type PrivacySummary,
 } from "./privacy-summary-model";
-import type { UsageSummary, UsageWindow } from "./usage-range";
+import {
+  hourlyUsageWindow,
+  type UsageSummary,
+  type UsageWindow,
+} from "./usage-range";
 
 import {
   browserSnapshot,
@@ -170,19 +179,32 @@ import {
   parseAccessTokenMetadata,
   parseMetadataAttribute,
   parseMetadataAttributes,
+  parseMetadataValues,
+  parsePluginActionResult,
+  parsePluginClearResult,
   parsePluginDetail,
+  parsePluginHostSettings,
   parsePluginList,
+  parsePluginStats,
   parsePluginStatus,
   parsePluginTestResult,
   parseSessionMetadata,
+  parseSessionPlugins,
   type MetadataAttribute,
   type MetadataAttributeInput,
+  type MetadataValueUsage,
+  type PluginActionResult,
+  type PluginClearTarget,
   type PluginDetail,
+  type PluginHostSettings,
+  type PluginHostSettingsUpdate,
   type PluginList,
   type PluginSettingsUpdate,
+  type PluginStats,
   type PluginStatus,
   type PluginTestResult,
   type SessionMetadata,
+  type SessionPlugin,
 } from "./plugin-model";
 import {
   parseClientConfigApplyOutcome,
@@ -241,6 +263,25 @@ async function invoke<T>(
   }
 }
 
+const pendingHistoryReads = new Map<string, Promise<unknown>>();
+
+// Several panels can ask for the same history snapshot at once. Share only
+// in-flight reads; settled results and failures must never delay a refresh.
+function invokeHistoryRead(
+  command: "get_usage_summary" | "get_request_session",
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const key = JSON.stringify([command, args]);
+  const existing = pendingHistoryReads.get(key);
+  if (existing) return existing;
+  const pending = invoke<unknown>(command, args).finally(() => {
+    if (pendingHistoryReads.get(key) === pending)
+      pendingHistoryReads.delete(key);
+  });
+  pendingHistoryReads.set(key, pending);
+  return pending;
+}
+
 // These local reads should finish promptly. A stuck native event loop must not
 // leave settings loading forever or keep displaying an old ready snapshot.
 async function invokeDesktopRead(
@@ -275,16 +316,19 @@ export async function restartCore(): Promise<AppSnapshot> {
     throw new Error(i18n.t("bridge.restartDesktopOnly"));
   }
 
+  pendingHistoryReads.clear();
   return parseAppSnapshot(await invoke<unknown>("restart_core"));
 }
 
 export async function startCore(): Promise<AppSnapshot> {
   requireNativeBridge();
+  pendingHistoryReads.clear();
   return parseAppSnapshot(await invoke<unknown>("start_core"));
 }
 
 export async function stopCore(): Promise<AppSnapshot> {
   requireNativeBridge();
+  pendingHistoryReads.clear();
   return parseAppSnapshot(await invoke<unknown>("stop_core"));
 }
 
@@ -329,6 +373,21 @@ export async function trayPopoverResize(
 export async function trayPopoverHide(): Promise<void> {
   requireNativeBridge();
   await invoke<void>("tray_popover_hide");
+}
+
+/** The page the tray left for the main window, handed over once. */
+export async function takeTrayNavigation(): Promise<string | null> {
+  if (!hasNativeBridge()) return null;
+  return invoke<string | null>("take_tray_navigation");
+}
+
+/**
+ * Unsaved edits keep the hidden main window alive; otherwise the host
+ * releases it after a while in the tray and builds a fresh one on return.
+ */
+export async function setMainWindowUnsaved(unsaved: boolean): Promise<void> {
+  if (!hasNativeBridge()) return;
+  await invoke<void>("set_main_window_unsaved", { unsaved });
 }
 
 function requireNativeBridge(): void {
@@ -621,6 +680,9 @@ function compactQuery(
   ) {
     compact.local_access_token_ids = query.local_access_token_ids;
   }
+  if (query.models !== undefined && query.models.length > 0) {
+    compact.models = query.models;
+  }
   if (query.status !== undefined) compact.status = query.status;
   return compact;
 }
@@ -644,7 +706,7 @@ export async function getRequestSession(
 ): Promise<RequestSessionDetail> {
   requireNativeBridge();
   return parseRequestSessionDetail(
-    await invoke<unknown>("get_request_session", { sessionId }),
+    await invokeHistoryRead("get_request_session", { sessionId }),
   );
 }
 
@@ -867,11 +929,11 @@ export async function getUsageSummary(
 ): Promise<UsageSummary> {
   requireNativeBridge();
   return parseUsageSummary(
-    await invoke<unknown>("get_usage_summary", {
+    await invokeHistoryRead("get_usage_summary", {
       from: window.from,
       to: window.to,
       timeZone: window.time_zone || "UTC",
-      bucket: window.preset === "1d" ? "hour" : "day",
+      bucket: hourlyUsageWindow(window) ? "hour" : "day",
     }),
     window,
   );
@@ -887,7 +949,7 @@ export async function getPrivacySummary(
       from: window.from,
       to: window.to,
       timeZone: window.time_zone || "UTC",
-      bucket: window.preset === "1d" ? "hour" : "day",
+      bucket: hourlyUsageWindow(window) ? "hour" : "day",
     }),
     window,
   );
@@ -999,6 +1061,29 @@ export async function copyClientConfigSnippet(
   return parseClientConfigCopied(
     await invoke<unknown>("copy_client_config_snippet", { ...input }),
   );
+}
+
+/** Terminal apps installed here, the platform's own first. */
+export async function listTerminalApps(): Promise<TerminalChoice[]> {
+  if (!hasNativeBridge()) return [];
+  return parseTerminalChoices(await invoke<unknown>("list_terminal_apps"));
+}
+
+/** The folder the user picked, or null when they closed the picker. */
+export async function pickTerminalDirectory(
+  start: string | null,
+): Promise<string | null> {
+  requireNativeBridge();
+  const picked = await invoke<unknown>("pick_terminal_directory", { start });
+  return typeof picked === "string" ? picked : null;
+}
+
+/** Opens a terminal whose client reaches the gateway through one provider. */
+export async function openServiceTerminal(
+  request: ServiceTerminalRequest,
+): Promise<void> {
+  requireNativeBridge();
+  await invoke("open_service_terminal", { request });
 }
 
 /** Whether the OS has an app registered for CC Switch's import links. */
@@ -1243,17 +1328,18 @@ export async function saveTextFile(
 // the field check and the whole routing tab refuses to load, even though Core
 // accepted and stored it.
 //
-// Best-effort by design. A classifier read that fails leaves the list empty,
-// which is the strict reading (built-in fields only) and never admits an
-// unvalidated rule.
-async function knownRoutingDimensions(): Promise<ClassifierDimension[]> {
+// Best-effort by design. A classifier read that fails answers null, and a name
+// that is not a built-in field is then left to Core, which validated the
+// document against its own dimensions before storing it: an empty list would
+// refuse every rule naming a dimension and keep the tab from loading.
+async function knownRoutingDimensions(): Promise<ClassifierDimension[] | null> {
   try {
     const settings = parseClassifierSettings(
       await invoke<unknown>("get_classifier_settings"),
     );
     return settings.dimensions ?? [];
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -1357,6 +1443,21 @@ export async function getPluginStatus(key: string): Promise<PluginStatus> {
   );
 }
 
+/** A plugin's account over its last days, from this computer's request records. */
+export async function getPluginStats(
+  key: string,
+  days = 7,
+): Promise<PluginStats> {
+  requireNativeBridge();
+  return parsePluginStats(
+    await invoke<unknown>("plugin_action", {
+      action: "stats",
+      key,
+      input: { days },
+    }),
+  );
+}
+
 /** Stores a credential for the one origin Core injects it for. */
 export async function savePluginCredential(
   key: string,
@@ -1384,6 +1485,104 @@ export async function deletePluginCredential(
       action: "delete_credential",
       key,
       name,
+    }),
+  );
+}
+
+/** The settings of every plugin at once: the pause, the budget, the language. */
+export async function getPluginHostSettings(): Promise<PluginHostSettings> {
+  requireNativeBridge();
+  return parsePluginHostSettings(
+    await invoke<unknown>("plugin_action", { action: "host" }),
+  );
+}
+
+export async function updatePluginHostSettings(
+  update: PluginHostSettingsUpdate,
+): Promise<PluginHostSettings> {
+  requireNativeBridge();
+  return parsePluginHostSettings(
+    await invoke<unknown>("plugin_action", {
+      action: "update_host",
+      input: update,
+    }),
+  );
+}
+
+/** A click on a button of one of the plugin's records, for its session. */
+export async function runPluginAction(
+  key: string,
+  action: string,
+  session: string,
+): Promise<PluginActionResult> {
+  requireNativeBridge();
+  return parsePluginActionResult(
+    await invoke<unknown>("plugin_action", {
+      action: "action",
+      key,
+      input: { action, session },
+    }),
+  );
+}
+
+const clearActions: Record<PluginClearTarget, string> = {
+  workspaces: "clear_workspaces",
+  values: "clear_values",
+  lookups: "revoke_lookups",
+};
+
+/**
+ * Clears what the host keeps for a plugin: the workspaces bound to its
+ * attributes' values, its own stored values, or the credentials of its
+ * lookups, which each session's next request issues anew. Returns how many
+ * it removed.
+ */
+export async function clearPluginData(
+  key: string,
+  what: PluginClearTarget,
+): Promise<number> {
+  requireNativeBridge();
+  return parsePluginClearResult(
+    await invoke<unknown>("plugin_action", { action: clearActions[what], key }),
+  );
+}
+
+/** The plugins' part in a session: the block each keeps, and its pause. */
+export async function getSessionPlugins(
+  sessionId: string,
+): Promise<SessionPlugin[]> {
+  requireNativeBridge();
+  return parseSessionPlugins(
+    await invoke<unknown>("session_plugins", { sessionId }),
+  );
+}
+
+export async function pauseSessionPlugin(
+  sessionId: string,
+  key: string,
+  paused: boolean,
+): Promise<SessionPlugin[]> {
+  requireNativeBridge();
+  return parseSessionPlugins(
+    await invoke<unknown>("session_plugins", {
+      sessionId,
+      key,
+      input: { paused },
+    }),
+  );
+}
+
+/** Makes the session's next request load the plugin's block again. */
+export async function refreshSessionPlugin(
+  sessionId: string,
+  key: string,
+): Promise<SessionPlugin[]> {
+  requireNativeBridge();
+  return parseSessionPlugins(
+    await invoke<unknown>("session_plugins", {
+      sessionId,
+      key,
+      refresh: true,
     }),
   );
 }
@@ -1420,6 +1619,16 @@ export async function deleteMetadataAttribute(key: string): Promise<void> {
   await invoke<unknown>("metadata_action", { action: "delete", key });
 }
 
+/** The values of an attribute sessions are bound to, the most recent first. */
+export async function listMetadataValues(
+  key: string,
+): Promise<MetadataValueUsage[]> {
+  requireNativeBridge();
+  return parseMetadataValues(
+    await invoke<unknown>("metadata_action", { action: "values", key }),
+  );
+}
+
 /** An access token's default metadata by attribute key. */
 export async function getAccessTokenMetadata(
   tokenId: string,
@@ -1453,18 +1662,23 @@ export async function getSessionMetadata(
   );
 }
 
-/** Binds a session by hand; the value none leaves it out. */
+/**
+ * Binds a session by hand; the value none leaves it out. With workspace, the
+ * session's working directory takes the value too, for the sessions that
+ * start there later.
+ */
 export async function setSessionMetadata(
   sessionId: string,
   key: string,
   value: string,
+  workspace = false,
 ): Promise<SessionMetadata> {
   requireNativeBridge();
   return parseSessionMetadata(
     await invoke<unknown>("session_metadata", {
       sessionId,
       key,
-      input: { value },
+      input: workspace ? { value, workspace } : { value },
     }),
   );
 }
