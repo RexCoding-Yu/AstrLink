@@ -42,6 +42,9 @@ type fakePowerContext struct {
 	failing map[string]bool
 	// nextScopes is the cursor the list of scopes ends with.
 	nextScopes string
+	// gone are scope ids the server no longer knows, as after it started
+	// over with a new database.
+	gone map[string]bool
 }
 
 func newFakePowerContext() *fakePowerContext {
@@ -70,6 +73,15 @@ func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTP
 	}
 	target, _ := url.Parse(request.URL)
 	query := target.Query()
+	var written struct {
+		ScopeID string `json:"scope_id"`
+	}
+	_ = json.Unmarshal(request.JSON, &written)
+	for scope := range server.gone {
+		if strings.Contains(target.Path, "/v1/scopes/"+scope+"/") || written.ScopeID == scope {
+			return reply(404, `{"error":{"code":"scope_not_found","message":"The requested Scope was not found.","details":null}}`)
+		}
+	}
 	switch {
 	case request.Method == "GET" && target.Path == "/v1/server-info":
 		version := server.version
@@ -795,5 +807,51 @@ func TestThePowerContextPluginSearchesAsTheServersVersionDoes(t *testing.T) {
 	h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": words}))
 	if got := queries(h)["topic-memory"]["query"].(string); len(strings.Fields(got)) > 60 {
 		t.Fatalf("a query of %d words went out", len(strings.Fields(got)))
+	}
+}
+
+func TestThePowerContextPluginFindsAgainAScopeTheServerNoLongerKnows(t *testing.T) {
+	keep := func(h *powerContextHarness, project, scope string) {
+		h.t.Helper()
+		if err := h.store.Set(context.Background(), "powercontext", "scope:"+project, json.RawMessage(`"`+scope+`"`)); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	kept := func(h *powerContextHarness, project string) string {
+		value, _, _ := h.store.Get(context.Background(), "powercontext", "scope:"+project)
+		return string(value)
+	}
+	// The server started over: the scope kept for datav is gone, and the
+	// load finds the project's scope again by its title.
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	h.server.gone = map[string]bool{"scp_old": true}
+	keep(h, "datav", "scp_old")
+	result := decodeResult[sessionResult](t, h.call(HookPrepareSession, powerContextView("datav", "zh-CN", nil)))
+	if result.System == nil || result.Record.Status != "ok" || kept(h, "datav") != `"scp_datav"` {
+		t.Fatalf("a load with a gone scope = %+v, kept %s", result.Record, kept(h, "datav"))
+	}
+	// A write goes to the project's scope as the server knows it now, made
+	// when it has none.
+	keep(h, "brand-new", "scp_old")
+	write := decodeResult[struct {
+		Record struct{ Status, Summary string } `json:"record"`
+	}](t, h.call(HookObserveTurn, powerContextView("brand-new", "zh-CN", nil)))
+	sources := h.server.requests("POST", "/v1/sources/content")
+	if write.Record.Status != "ok" || len(sources) != 2 || !strings.Contains(string(sources[1].JSON), `"scope_id":"scp_brand-new"`) {
+		t.Fatalf("a write with a gone scope = %+v, sent %d", write.Record, len(sources))
+	}
+	// A lookup finds the scope again; it never makes one.
+	keep(h, "datav", "scp_old")
+	found := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": "分页"})))
+	if *found.Hits == 0 || kept(h, "datav") != `"scp_datav"` {
+		t.Fatalf("a lookup with a gone scope = %+v", found)
+	}
+	keep(h, "nowhere", "scp_old")
+	missing := decodeResult[toolResult](t, h.call(HookCallTool, toolView("read", "nowhere", "zh-CN", map[string]any{"topic": "分页"})))
+	if missing.Text != "这个项目在记忆服务器上还没有记忆。" || kept(h, "nowhere") != "" {
+		t.Fatalf("a lookup of a project the server lost = %+v", missing)
+	}
+	if created := h.server.requests("POST", "/v1/scopes"); len(created) != 1 {
+		t.Fatalf("scopes made = %d, want only the write's", len(created))
 	}
 }
