@@ -97,12 +97,14 @@ export interface PluginDetail extends PluginSummary {
   host_storage: PluginHostStorage[];
 }
 
-/** A read-only query a plugin offers the model. */
+/** A query a plugin offers the model, or a report it takes from it. */
 export interface PluginTool {
   name: string;
   description: string;
   /** It runs before the session has the plugin's values, such as listing projects. */
   unbound?: boolean;
+  /** A report: the model hands the plugin something to keep. */
+  writes?: boolean;
 }
 
 /** Something a plugin keeps, as its manifest declares it. */
@@ -208,7 +210,8 @@ export interface PluginDayStats {
     unanswered: number;
     changed: number;
   };
-  write: { ok: number; failed: number };
+  /** Turns and reports written; reported counts the reports among ok. */
+  write: { ok: number; failed: number; reported: number };
   problems: {
     failed: number;
     timeouts: number;
@@ -384,13 +387,15 @@ export interface PluginInjection {
   dropped_items: number;
 }
 
-/** A query the model ran: its size only, never what it asked or got. */
+/** A query the model ran, or a report it made: its size only, never what it sent or got. */
 export interface PluginLookup {
   tool: string;
   input_runes: number;
   result_bytes: number;
   /** How many things the result held, when the plugin counts them. */
   hits?: number;
+  /** A report: the model handed the plugin something to keep. */
+  writes?: boolean;
 }
 
 /** A plugin's part in a request: what it reported and what the host did. */
@@ -740,6 +745,7 @@ export function parsePluginDetail(value: unknown): PluginDetail {
         name: plugin.string(tool.name, `${path}.name`),
         description: plugin.string(tool.description, `${path}.description`),
         unbound: plugin.optionalBoolean(tool.unbound, `${path}.unbound`),
+        writes: plugin.optionalBoolean(tool.writes, `${path}.writes`),
       });
     }),
     storage: (detail.storage === undefined
@@ -906,7 +912,11 @@ function parseDayStats(value: unknown, path: string): PluginDayStats {
       "unanswered",
       "changed",
     ] as const),
-    write: counts(day.write, `${path}.write`, ["ok", "failed"] as const),
+    write: counts(day.write, `${path}.write`, [
+      "ok",
+      "failed",
+      "reported",
+    ] as const),
     problems: counts(day.problems, `${path}.problems`, [
       "failed",
       "timeouts",
@@ -1169,6 +1179,7 @@ export function parseRequestPluginRecords(
           `${lookupPath}.result_bytes`,
         ),
         hits: plugin.optionalInteger(raw.hits, `${lookupPath}.hits`),
+        writes: plugin.optionalBoolean(raw.writes, `${lookupPath}.writes`),
       });
     }
     let injection: PluginInjection | undefined;

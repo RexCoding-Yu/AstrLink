@@ -1108,6 +1108,7 @@ function HostRow({
                 {detail.tools.map((tool) => (
                   <li key={tool.name}>
                     <span className="font-mono">{tool.name}</span>
+                    {tool.writes ? t("plugins.lookup.reportMark") : ""}
                     {t("plugins.lookup.toolSeparator")}
                     {tool.description}
                   </li>

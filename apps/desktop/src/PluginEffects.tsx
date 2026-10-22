@@ -45,9 +45,11 @@ function partsOf(detail: PluginDetail) {
   );
   return {
     load: injects,
-    lookup: detail.tools.length > 0,
+    lookup: detail.tools.some((tool) => !tool.writes),
     binding: detail.metadata.length > 0,
-    write: detail.hooks.includes("observeTurn"),
+    write:
+      detail.hooks.includes("observeTurn") ||
+      detail.tools.some((tool) => tool.writes),
     cache: injects,
   };
 }
@@ -157,7 +159,14 @@ export function EffectCard({
   if (parts.write)
     rows.push([
       t("plugins.effects.write"),
-      t("plugins.effects.writeValue", total.write),
+      [
+        t("plugins.effects.writeValue", total.write),
+        total.write.reported > 0
+          ? t("plugins.effects.reported", { count: total.write.reported })
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
     ]);
   rows.push([
     t("plugins.effects.problems"),

@@ -173,6 +173,31 @@ describe("PluginRecordDetails", () => {
     );
     expect(turn?.textContent).toContain("有检索失败，没有命中");
     expect(turn?.textContent).toContain("写入等回复确定项目");
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            plugin_records: [
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.0",
+                hook: "prepareTurn",
+                title: "询问项目",
+                status: "ok",
+                summary: "列出 2 个项目",
+                elapsed_ms: 90,
+                network: { requests: 1, denied: 0, errors: 0, wait_ms: 80 },
+                observe: "held_unbound",
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="plugin-record"]')?.textContent,
+    ).toContain("写入留着：会话定下项目后补写");
     expect(write?.textContent).toContain("记忆写入");
     expect(write?.textContent).toContain("已写入 · 已整理成记忆");
   });
@@ -223,12 +248,45 @@ describe("PluginRecordDetails", () => {
                 network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
                 lookup: { tool: "read", input_runes: 4, result_bytes: 0 },
               },
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.0",
+                hook: "callTool",
+                title: "记忆上报",
+                status: "ok",
+                summary: "上报 15 字",
+                elapsed_ms: 140,
+                network: { requests: 1, denied: 0, errors: 0, wait_ms: 130 },
+                lookup: {
+                  tool: "note",
+                  input_runes: 15,
+                  result_bytes: 72,
+                  writes: true,
+                },
+              },
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.0",
+                hook: "callTool",
+                title: "PowerContext 记忆",
+                status: "skipped",
+                summary: "",
+                skipped_reason: "turn_limit",
+                elapsed_ms: 0,
+                network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+                lookup: {
+                  tool: "note",
+                  input_runes: 3,
+                  result_bytes: 0,
+                  writes: true,
+                },
+              },
             ],
           }}
         />,
       );
     });
-    const [ask, search, refused] = document.querySelectorAll(
+    const [ask, search, refused, report, tooMany] = document.querySelectorAll(
       '[data-testid="plugin-record"]',
     );
     expect(ask?.textContent).toContain("附上查询projects");
@@ -240,6 +298,10 @@ describe("PluginRecordDetails", () => {
       refused?.querySelector('[data-testid="plugin-record-lookup"]')
         ?.textContent,
     ).toBe("read · 参数 4 字");
+    // A report says so, and its limits are its own.
+    expect(report?.textContent).toContain("上报note · 参数 15 字 · 结果 72 B");
+    expect(tooMany?.textContent).toContain("这一轮已经上报满 2 次");
+    expect(tooMany?.textContent).not.toContain("查满");
   });
 
   it("says so when no plugin ran", async () => {

@@ -236,7 +236,7 @@ function day(date: string, change: Partial<PluginDayStats> = {}) {
       unanswered: 0,
       changed: 0,
     },
-    write: { ok: 0, failed: 0 },
+    write: { ok: 0, failed: 0, reported: 0 },
     problems: { failed: 0, timeouts: 0, privacy: 0, over_budget: 0 },
     cache: {
       with: { requests: 0, input_tokens: 0, cache_read_tokens: 0 },
@@ -262,7 +262,7 @@ const busyDay = day("2026-10-21", {
     unanswered: 1,
     changed: 1,
   },
-  write: { ok: 9, failed: 1 },
+  write: { ok: 9, failed: 1, reported: 2 },
   problems: { failed: 1, timeouts: 2, privacy: 0, over_budget: 0 },
   cache: {
     with: { requests: 10, input_tokens: 100000, cache_read_tokens: 82000 },
@@ -511,7 +511,9 @@ describe("PluginManager", () => {
     expect(effects?.textContent).toContain(
       "工作区自动 2 · 选已有 1 · 新建 1 · 不纳入 0 · 没回答 1 · 自动绑定后改掉 1",
     );
-    expect(effects?.textContent).toContain("写入9 条 · 失败 1");
+    expect(effects?.textContent).toContain(
+      "写入9 条 · 失败 1 · 其中模型上报 2 条",
+    );
     expect(effects?.textContent).toContain(
       "问题失败 1 · 超时 2 · 隐私拦截 0 · 超出预算 0",
     );
@@ -857,6 +859,11 @@ describe("PluginManager", () => {
           description: "按关键词列出项目。",
           unbound: true,
         },
+        {
+          name: "note",
+          description: "把值得记住的项目信息记进记忆。",
+          writes: true,
+        },
       ],
       settings: [...memory.settings, { key: "$lookup", group: "查询" }],
     });
@@ -872,6 +879,9 @@ describe("PluginManager", () => {
     await click(help);
     expect(document.body.textContent).toContain(
       "search：按一句话检索本项目的记忆。",
+    );
+    expect(document.body.textContent).toContain(
+      "note（上报）：把值得记住的项目信息记进记忆。",
     );
     await act(async () => {
       document.dispatchEvent(

@@ -57,9 +57,13 @@ const knownTriggers = new Set([
   "auto",
 ]);
 
+/** The limits a report has apart from the queries'. */
+const reportLimits = new Set(["rate_limited", "turn_limit"]);
+
 const knownObserve = new Set([
   "queued",
   "awaiting_reply",
+  "held_unbound",
   "skipped_unbound",
   "skipped_privacy",
   "skipped_binding_turn",
@@ -164,9 +168,14 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
                   {t("pluginRecords.skipped")}
                 </dt>
                 <dd>
-                  {knownSkipReasons.has(entry.skipped_reason)
-                    ? t(`pluginRecords.skipReasons.${entry.skipped_reason}`)
-                    : entry.skipped_reason}
+                  {!knownSkipReasons.has(entry.skipped_reason)
+                    ? entry.skipped_reason
+                    : entry.lookup?.writes &&
+                        reportLimits.has(entry.skipped_reason)
+                      ? t(
+                          `pluginRecords.reportSkipReasons.${entry.skipped_reason}`,
+                        )
+                      : t(`pluginRecords.skipReasons.${entry.skipped_reason}`)}
                 </dd>
               </>
             ) : null}
@@ -191,7 +200,9 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
             {entry.lookup ? (
               <>
                 <dt className="text-muted-foreground">
-                  {t("pluginRecords.lookup")}
+                  {entry.lookup.writes
+                    ? t("pluginRecords.report")
+                    : t("pluginRecords.lookup")}
                 </dt>
                 <dd className="tabular-nums" data-testid="plugin-record-lookup">
                   <span className="font-mono">{entry.lookup.tool}</span>

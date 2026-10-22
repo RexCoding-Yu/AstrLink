@@ -4924,8 +4924,9 @@
     "lookup": {
       "label": "Model lookups",
       "helpLabel": "About model lookups",
-      "help": "When the model needs details, it can run the plugin's read-only queries with its own shell, in the session's project, at most 3 a turn. The system prompt carries how to run them and the session's credential only when the client runs on the same computer as the gateway and its request offers the model a shell. The plugin needs “Model lookups” granted when it is enabled. Its queries:",
-      "toolSeparator": ": "
+      "help": "When the model needs details, it can run the plugin's read-only queries with its own shell, at most 3 a turn; when the plugin takes reports, the model can also hand it what is worth keeping, at most 2 a turn, and the plugin's settings can turn reports off on their own. Both work in the session's project. The system prompt carries how to run them and the session's credential only when the client runs on the same computer as the gateway and its request offers the model a shell. The plugin needs “Model lookups” granted when it is enabled. Its queries and reports:",
+      "toolSeparator": ": ",
+      "reportMark": " (report)"
     },
     "effects": {
       "title": "Effect",
@@ -4953,6 +4954,8 @@
       "changed_other": "{{count}} changed after automatic binding",
       "write": "Writes",
       "writeValue": "{{ok}} written · {{failed}} failed",
+      "reported_one": "{{count}} reported by the model",
+      "reported_other": "{{count}} reported by the model",
       "problems": "Problems",
       "problemsValue": "failed {{failed}} · timed out {{timeouts}} · privacy {{privacy}} · over budget {{overBudget}}",
       "cache": "Cache hits",
@@ -5007,6 +5010,10 @@
       "unbound": "The session has no project yet",
       "invalid_input": "Wrong input"
     },
+    "reportSkipReasons": {
+      "rate_limited": "Too many reports",
+      "turn_limit": "The turn's 2 reports were used"
+    },
     "injection": "Injected",
     "placement": {
       "system_append": "System prompt",
@@ -5027,6 +5034,7 @@
       "queue_full": "Dropped: the queue was full",
       "disabled": "Off",
       "awaiting_reply": "Waiting for the reply to set the project",
+      "held_unbound": "Held: written once the session has a project",
       "skipped_unbound": "Skipped: the session has no project"
     },
     "truncated": "Cut to its limits",
@@ -5072,6 +5080,7 @@
     "metadataNormalized": "written as {{value}}",
     "actionFailedPlain": "Couldn't do it.",
     "lookup": "Lookup",
+    "report": "Report",
     "lookupInput_one": "input of {{count}} character",
     "lookupInput_other": "input of {{count}} characters",
     "lookupResult": "result {{size}}",
