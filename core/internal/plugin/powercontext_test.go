@@ -45,6 +45,10 @@ type fakePowerContext struct {
 	// gone are scope ids the server no longer knows, as after it started
 	// over with a new database.
 	gone map[string]bool
+	// racing makes the first read of each path a 409, as 1.4 answers the
+	// losers of concurrent first reads of a new scope.
+	racing bool
+	raced  map[string]bool
 }
 
 func newFakePowerContext() *fakePowerContext {
@@ -77,6 +81,15 @@ func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTP
 		ScopeID string `json:"scope_id"`
 	}
 	_ = json.Unmarshal(request.JSON, &written)
+	if server.racing && request.Method != "PUT" && !strings.HasSuffix(target.Path, "/v1/scopes") && !strings.HasSuffix(target.Path, "/server-info") {
+		if server.raced == nil {
+			server.raced = map[string]bool{}
+		}
+		if key := request.Method + " " + target.Path + string(request.JSON); !server.raced[key] {
+			server.raced[key] = true
+			return reply(409, `{"error":{"code":"idempotency-key","message":"The Access Binding conflicts with current state.","details":null}}`)
+		}
+	}
 	for scope := range server.gone {
 		if strings.Contains(target.Path, "/v1/scopes/"+scope+"/") || written.ScopeID == scope {
 			return reply(404, `{"error":{"code":"scope_not_found","message":"The requested Scope was not found.","details":null}}`)
@@ -569,7 +582,11 @@ func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 		t.Fatalf("describeStatus = %s", status)
 	}
 	h.server.version = "1.4.0"
-	if newer := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(newer, "PowerContext 1.4.0 · 3 ms · this version has not been verified") {
+	if checked := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(checked, `"summary":"PowerContext 1.4.0 · 3 ms"`) {
+		t.Fatalf("a 1.4 server = %s", checked)
+	}
+	h.server.version = "1.5.0"
+	if newer := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(newer, "PowerContext 1.5.0 · 3 ms · this version has not been verified") {
 		t.Fatalf("a newer server = %s", newer)
 	}
 	h.server.version = "1.2.0"
@@ -853,5 +870,18 @@ func TestThePowerContextPluginFindsAgainAScopeTheServerNoLongerKnows(t *testing.
 	}
 	if created := h.server.requests("POST", "/v1/scopes"); len(created) != 1 {
 		t.Fatalf("scopes made = %d, want only the write's", len(created))
+	}
+}
+
+func TestThePowerContextPluginReadsAgainWhatANewScopesFirstReadsLost(t *testing.T) {
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	h.server.racing = true
+	result := decodeResult[sessionResult](t, h.call(HookPrepareSession, powerContextView("datav", "zh-CN", nil)))
+	if result.System == nil || result.Record.Status != "ok" || !strings.HasPrefix(result.Record.Summary, "画像 · 主题 20/30 个") {
+		t.Fatalf("a load whose first reads lost the race = %+v", result.Record)
+	}
+	found := decodeResult[toolResult](t, h.call(HookCallTool, toolView("search", "datav", "zh-CN", map[string]any{"query": "分页"})))
+	if found.Record.Summary != "检索 · 命中 5 条" {
+		t.Fatalf("a search whose first reads lost the race = %+v", found)
 	}
 }

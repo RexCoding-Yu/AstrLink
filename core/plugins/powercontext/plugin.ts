@@ -956,10 +956,10 @@ function modern(): boolean {
   return atLeast(knownVersion() ?? "", 1, 4);
 }
 
-// The plugin was written against 1.3; later versions work as far as their
-// API stays the same, which nobody has checked yet.
+// The versions the plugin was run against end to end: 1.3, and 1.4 on a
+// database it started. Later ones work as far as their API stays the same.
 function verified(version: string): boolean {
-  return version.startsWith("1.3.");
+  return version.startsWith("1.3.") || version.startsWith("1.4.");
 }
 
 // The version the server reported in the last 10 minutes, if any.
@@ -1014,6 +1014,19 @@ function failure(text: Texts, response: AstrLinkPlugin.HttpResponse): string {
   )?.error;
   const detail = error?.details?.errors?.[0]?.msg ?? error?.message ?? "";
   return "HTTP " + response.status + (detail ? " " + detail.slice(0, 80) : "");
+}
+
+// fetchAll sends requests at once. PowerContext 1.4 makes a new scope's
+// access bindings on first use, and concurrent first reads race there: the
+// losers answer 409 idempotency-key. Those are sent again, one at a time.
+function fetchAll(
+  requests: AstrLinkPlugin.HttpRequest[],
+): AstrLinkPlugin.HttpResponse[] {
+  return astrlink.http
+    .fetch(requests)
+    .map((response, index) =>
+      response.status === 409 ? astrlink.http.fetch(requests[index]) : response,
+    );
 }
 
 // gone reports whether the server no longer knows a scope the plugin kept,
@@ -1143,7 +1156,7 @@ export function prepareSession(
     // The profile is one artifact, read whole: its list item carries no
     // text. A project without one answers 503 artifact_owner_pending on
     // 1.3, as an artifact nobody owns yet; no profile is no profile.
-    responses = astrlink.http.fetch([
+    responses = fetchAll([
       request(cfg, "GET", base + "profile/profile"),
       request(cfg, "GET", base + "topic-memory?limit=100"),
       ...policy,
@@ -1717,7 +1730,7 @@ function searchMemory(
       : -1;
     return { family, at, wordsAt };
   });
-  const responses = astrlink.http.fetch(batch);
+  const responses = fetchAll(batch);
   if (responses.some(gone)) return null;
   const found: Array<{ family: string; items: SearchItem[] }> = [];
   let failed = 0;
