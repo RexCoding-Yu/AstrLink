@@ -833,9 +833,14 @@ func TestALookupGoesOnlyToAShellOnThisMachine(t *testing.T) {
 	if _, sent := h.sendLookup(t, call{session: "session_2", turn: 1, body: shell, project: "astrlink"}, ""); strings.Contains(string(sent), "<lookup") {
 		t.Fatalf("a client on another machine got the usage: %s", sent)
 	}
-	_, sent := h.sendLookup(t, call{session: "session_3", turn: 1, body: shell, project: "astrlink"}, lookupBase)
+	run, sent := h.sendLookup(t, call{session: "session_3", turn: 1, body: shell, project: "astrlink"}, lookupBase)
 	usage := systemOf(sent)
 	token := credentialIn(t, usage)
+	// The record tells the usage apart from the plugin's own block.
+	records, _ := run.Report()
+	if record := recordOf(t, records, plugin.HookPrepareSession); record.Injection == nil || record.Injection.UsageBytes != len(usage) || record.Injection.InjectedBytes != len(usage) {
+		t.Fatalf("session record = %+v, injection %+v", record, record.Injection)
+	}
 	want := `<lookup name="finder">` + "\nSearch this project's memory by a sentence. Run it with your shell (read-only):\n" +
 		`curl -s -G http://127.0.0.1:18317/tools/finder/search -H "Authorization: Bearer ` + token + `" --data-urlencode "query=what to look up"` +
 		"\nAt most 3 lookups per turn; if nothing turns up, carry on with what you have and make nothing up.\n</lookup>"
@@ -1102,6 +1107,114 @@ func TestPausesStopLookups(t *testing.T) {
 	}
 }
 
+// reporterPlugin offers a search and a report its settings turn on and off.
+const reporterPlugin = `export const meta = {
+  apiVersion: 1, key: "reporter", name: "Reporter", version: "1.0.0",
+  capabilities: ["context.inject", "request.read", "model.tools"],
+  metadata: [{ key: "project", label: "Project", pattern: "^[a-z0-9-]{1,32}$", marker: "memo-project" }],
+  settings: [{ key: "report", label: "Report", type: "switch", default: true }],
+  tools: [
+    { name: "search", description: "Search this project's memory by a sentence.",
+      params: [{ name: "query", type: "string", required: true, example: "what to look up" }] },
+    { name: "note", description: "Note what is worth keeping about this project.", writes: true, setting: "report",
+      params: [{ name: "text", type: "string", required: true, maxLength: 1000, example: "what to note" }] },
+  ],
+};
+export function callTool(view) {
+  if (view.name === "note")
+    return { text: "noted " + view.input.text + " in " + view.meta.project.value, record: { title: "上报", status: "ok", summary: "记下 1 条" } };
+  return { text: "found " + view.input.query, hits: 1 };
+}
+`
+
+func TestReportsKeepWhatTheModelHandsOverWithinLimitsOfTheirOwn(t *testing.T) {
+	h := newHarness(t, lookupCapabilities(), map[string]string{"reporter": reporterPlugin}, nil)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
+	h.host.now = func() time.Time { return now }
+	history := []string{user("帮我看看分页逻辑")}
+	_, sent := h.sendLookup(t, call{session: "session_1", turn: 1, body: shellBody(history...), project: "astrlink"}, lookupBase)
+	usage := systemOf(sent)
+	token := credentialIn(t, usage)
+	want := `<lookup name="reporter">` +
+		"\nSearch this project's memory by a sentence. Run it with your shell (read-only):\n" +
+		`curl -s -G http://127.0.0.1:18317/tools/reporter/search -H "Authorization: Bearer ` + token + `" --data-urlencode "query=what to look up"` +
+		"\nNote what is worth keeping about this project. Run it with your shell:\n" +
+		`curl -s http://127.0.0.1:18317/tools/reporter/note -H "Authorization: Bearer ` + token + `" --data-urlencode "text=what to note"` +
+		"\nAt most 3 lookups per turn; if nothing turns up, carry on with what you have and make nothing up." +
+		"\nWhat you report stays in the project's memory for good: leave out keys, passwords and other secrets. At most 2 reports per turn.\n</lookup>"
+	if usage != want {
+		t.Fatalf("usage:\n%s\nwant:\n%s", usage, want)
+	}
+	run := func(tool, input string) LookupResult {
+		return h.host.Lookup(ctx, LookupRequest{Plugin: "reporter", Tool: tool, Token: token, Input: json.RawMessage(input)})
+	}
+	added := func() contract.RequestPluginRecord {
+		t.Helper()
+		select {
+		case records := <-h.added:
+			if len(records) != 1 || records[0].Validate() != nil {
+				t.Fatalf("records = %+v", records)
+			}
+			return records[0]
+		case <-time.After(5 * time.Second):
+			t.Fatal("no record was added")
+			return contract.RequestPluginRecord{}
+		}
+	}
+	// A report's answer is the plugin's own words, without the data notice.
+	if result := run("note", `{"text":"分页用游标"}`); result.Status != http.StatusOK || result.Text != "noted 分页用游标 in astrlink" {
+		t.Fatalf("note = %+v", result)
+	}
+	if record := added(); record.Title != "上报" || record.Lookup == nil || !record.Lookup.Writes || record.Lookup.Tool != "note" || record.Lookup.InputRunes != 5 {
+		t.Fatalf("record = %+v", record)
+	}
+	// Two reports a turn; the queries count apart.
+	run("note", `{"text":"二"}`)
+	added()
+	if result := run("note", `{"text":"三"}`); result.Status != http.StatusTooManyRequests || result.Text != "This turn already made 2 reports; keep the rest for later." ||
+		added().SkippedReason != contract.PluginSkipTurnLimit {
+		t.Fatalf("a third report in one turn = %+v", result)
+	}
+	if result := run("search", `{"query":"分页"}`); result.Status != http.StatusOK {
+		t.Fatalf("a search after the reports = %+v", result)
+	}
+	added()
+	// Six a minute, whatever the turns.
+	for turn := 2; turn <= 4; turn++ {
+		history = append(history, assistant("好"), user("继续 "+strconv.Itoa(turn)))
+		h.sendLookup(t, call{session: "session_1", turn: turn, body: shellBody(history...), project: "astrlink"}, lookupBase)
+		for index := 0; index < 2 && turn < 4; index++ {
+			if result := run("note", `{"text":"又一条"}`); result.Status != http.StatusOK {
+				t.Fatalf("turn %d report %d = %+v", turn, index+1, result)
+			}
+			added()
+		}
+	}
+	if result := run("note", `{"text":"太多了"}`); result.Status != http.StatusTooManyRequests || result.Text != "Too many reports; try again in a minute." ||
+		added().SkippedReason != contract.PluginSkipRateLimited {
+		t.Fatalf("a seventh report in a minute = %+v", result)
+	}
+	now = now.Add(time.Minute)
+	if result := run("note", `{"text":"一分钟后"}`); result.Status != http.StatusOK {
+		t.Fatalf("a report a minute later = %+v", result)
+	}
+	added()
+	// Turned off in the plugin's settings, the report leaves the usage and
+	// the outlet; the search stays.
+	settings := lookupCapabilities()
+	settings.Config = json.RawMessage(`{"report":false}`)
+	h.reconfigure(t, settings)
+	if result := run("note", `{"text":"关了"}`); result.Status != http.StatusForbidden || result.Text != "Reporting is turned off." {
+		t.Fatalf("a report turned off = %+v", result)
+	}
+	history = append(history, assistant("好"), user("最后一轮"))
+	_, sent = h.sendLookup(t, call{session: "session_1", turn: 5, body: shellBody(history...), project: "astrlink"}, lookupBase)
+	if usage := systemOf(sent); strings.Contains(usage, "/note") || strings.Contains(usage, "What you report") || !strings.Contains(usage, "/search") {
+		t.Fatalf("usage with reports off:\n%s", usage)
+	}
+}
+
 func TestTheBuiltinMemoryPluginLooksUpForAShell(t *testing.T) {
 	settings := lookupCapabilities()
 	settings.Config = json.RawMessage(`{"serverUrl":"https://memory.test"}`)
@@ -1128,7 +1241,10 @@ func TestTheBuiltinMemoryPluginLooksUpForAShell(t *testing.T) {
 		`curl -s -G http://127.0.0.1:18317/tools/powercontext/search -H "Authorization: Bearer ` + token + `" --data-urlencode "query=要查的内容，一句话"` + "\n" +
 		"要看某个主题的正文时，按主题目录里的标题读取。用 shell 执行（只读）：\n" +
 		`curl -s -G http://127.0.0.1:18317/tools/powercontext/read -H "Authorization: Bearer ` + token + `" --data-urlencode "topic=主题标题"` + "\n" +
-		"每轮最多查 3 次；查不到就按现有信息继续，不要编造。\n</lookup>"
+		"知道了以后还用得上、而上面的画像和主题目录里没有的项目信息（背景、目标、约定、决定、进展）时，用一两句话记进本项目的记忆。用 shell 执行：\n" +
+		`curl -s http://127.0.0.1:18317/tools/powercontext/note -H "Authorization: Bearer ` + token + `" --data-urlencode "text=要记下的内容"` + "\n" +
+		"每轮最多查 3 次；查不到就按现有信息继续，不要编造。\n" +
+		"上报的内容会长期留在项目记忆里，不要写密钥、密码等敏感信息；每轮最多上报 2 次。\n</lookup>"
 	if !strings.HasPrefix(system, "<project-context>") || !strings.HasSuffix(system, "</project-context>\n\n"+usage) {
 		t.Fatalf("system:\n%s", system)
 	}
@@ -1144,5 +1260,30 @@ func TestTheBuiltinMemoryPluginLooksUpForAShell(t *testing.T) {
 	result = h.host.Lookup(ctx, LookupRequest{Plugin: "powercontext", Tool: "read", Token: token, Input: json.RawMessage(`{"topic":"分页"}`)})
 	if result.Status != http.StatusOK || !strings.HasSuffix(result.Text, "正文：\n游标是 id。") {
 		t.Fatalf("read = %+v", result)
+	}
+	<-h.added
+	// A report goes to the project's memory and says so in plain words.
+	result = h.host.Lookup(ctx, LookupRequest{Plugin: "powercontext", Tool: "note", Token: token, Input: json.RawMessage(`{"text":"分页统一用游标。"}`)})
+	if result.Status != http.StatusOK || result.Text != "已记下，服务器会把它整理进项目 astrlink 的记忆。" {
+		t.Fatalf("note = %+v", result)
+	}
+	record = (<-h.added)[0]
+	if record.Title != "记忆上报" || record.Summary != "上报 8 字" || record.Lookup == nil || !record.Lookup.Writes || record.Lookup.Tool != "note" {
+		t.Fatalf("record = %+v %+v", record, record.Lookup)
+	}
+	// Turned off in the plugin's settings, the report leaves the usage.
+	settings.Config = json.RawMessage(`{"serverUrl":"https://memory.test","report":false}`)
+	h.reconfigure(t, settings)
+	result = h.host.Lookup(ctx, LookupRequest{Plugin: "powercontext", Tool: "note", Token: token, Input: json.RawMessage(`{"text":"再记一条。"}`)})
+	if result.Status != http.StatusForbidden || result.Text != "上报已关闭。" {
+		t.Fatalf("a report turned off = %+v", result)
+	}
+	body = shellBody(user("帮我看看分页逻辑"), toolRound)
+	run = h.host.Begin(ctx, Input{
+		RequestID: "request_1", Protocol: contract.ProtocolAnthropicMessages, Model: "claude", Client: "claude_code",
+		Header: header, Session: "session_1", Turn: 1, Body: []byte(body), LookupBase: lookupBase,
+	})
+	if system := systemOf(run.Inject([]byte(body))); strings.Contains(system, "/note") || strings.Contains(system, "上报") || !strings.Contains(system, "/search") {
+		t.Fatalf("system with reports off:\n%s", system)
 	}
 }

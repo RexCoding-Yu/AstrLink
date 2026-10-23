@@ -28,6 +28,8 @@ export interface PluginSummary {
   version: string;
   source: PluginSource;
   file?: string;
+  /** The plugin's icon as a data URL of a PNG or SVG image. */
+  icon?: string;
   enabled: boolean;
   state: "loaded" | "failed";
   error?: PluginLoadError;
@@ -97,12 +99,14 @@ export interface PluginDetail extends PluginSummary {
   host_storage: PluginHostStorage[];
 }
 
-/** A read-only query a plugin offers the model. */
+/** A query a plugin offers the model, or a report it takes from it. */
 export interface PluginTool {
   name: string;
   description: string;
   /** It runs before the session has the plugin's values, such as listing projects. */
   unbound?: boolean;
+  /** A report: the model hands the plugin something to keep. */
+  writes?: boolean;
 }
 
 /** Something a plugin keeps, as its manifest declares it. */
@@ -208,7 +212,8 @@ export interface PluginDayStats {
     unanswered: number;
     changed: number;
   };
-  write: { ok: number; failed: number };
+  /** Turns and reports written; reported counts the reports among ok. */
+  write: { ok: number; failed: number; reported: number };
   problems: {
     failed: number;
     timeouts: number;
@@ -297,8 +302,10 @@ export interface PluginCredit {
   /** An SPDX identifier such as Apache-2.0. */
   license?: string;
   url: string;
-  note?: string;
 }
+
+/** The GitHub stars of the repositories a plugin credits, by their address. */
+export type PluginCreditStars = Record<string, number>;
 
 /** The waits the plugin page offers, in milliseconds. */
 export const PLUGIN_TURN_WAITS = [
@@ -382,15 +389,19 @@ export interface PluginInjection {
   injected_bytes: number;
   replayed_blocks: number;
   dropped_items: number;
+  /** The part of injected_bytes that is the usage of the plugin's lookups. */
+  usage_bytes?: number;
 }
 
-/** A query the model ran: its size only, never what it asked or got. */
+/** A query the model ran, or a report it made: its size only, never what it sent or got. */
 export interface PluginLookup {
   tool: string;
   input_runes: number;
   result_bytes: number;
   /** How many things the result held, when the plugin counts them. */
   hits?: number;
+  /** A report: the model handed the plugin something to keep. */
+  writes?: boolean;
 }
 
 /** A plugin's part in a request: what it reported and what the host did. */
@@ -593,6 +604,18 @@ function parseLoadError(value: unknown, path: string): PluginLoadError {
   });
 }
 
+/**
+ * A plugin's icon, kept only as a data URL of a PNG or SVG image: the page
+ * puts it in an img, and anything else is left out rather than refused.
+ */
+function pluginIcon(value: unknown, path: string): string | undefined {
+  const icon = plugin.optionalString(value, path);
+  return icon &&
+    /^data:image\/(png|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(icon)
+    ? icon
+    : undefined;
+}
+
 function parseSummaryAt(value: unknown, path: string): PluginSummary {
   const summary = plugin.object(value, path);
   return defined({
@@ -605,6 +628,7 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
       `${path}.source`,
     ),
     file: plugin.optionalString(summary.file, `${path}.file`),
+    icon: pluginIcon(summary.icon, `${path}.icon`),
     enabled: plugin.boolean(summary.enabled, `${path}.enabled`),
     state: plugin.oneOf(
       summary.state,
@@ -716,7 +740,6 @@ export function parsePluginDetail(value: unknown): PluginDetail {
         owner: plugin.optionalString(credit.owner, `${path}.owner`),
         license: plugin.optionalString(credit.license, `${path}.license`),
         url: plugin.string(credit.url, `${path}.url`),
-        note: plugin.optionalString(credit.note, `${path}.note`),
       });
     }),
     excluded_clients:
@@ -740,6 +763,7 @@ export function parsePluginDetail(value: unknown): PluginDetail {
         name: plugin.string(tool.name, `${path}.name`),
         description: plugin.string(tool.description, `${path}.description`),
         unbound: plugin.optionalBoolean(tool.unbound, `${path}.unbound`),
+        writes: plugin.optionalBoolean(tool.writes, `${path}.writes`),
       });
     }),
     storage: (detail.storage === undefined
@@ -906,7 +930,11 @@ function parseDayStats(value: unknown, path: string): PluginDayStats {
       "unanswered",
       "changed",
     ] as const),
-    write: counts(day.write, `${path}.write`, ["ok", "failed"] as const),
+    write: counts(day.write, `${path}.write`, [
+      "ok",
+      "failed",
+      "reported",
+    ] as const),
     problems: counts(day.problems, `${path}.problems`, [
       "failed",
       "timeouts",
@@ -929,6 +957,18 @@ export function parsePluginStats(value: unknown): PluginStats {
       .map((day, index) => parseDayStats(day, `$.days[${index}]`)),
     total: parseDayStats(stats.total, "$.total"),
   };
+}
+
+/** Reads the GitHub stars of the repositories a plugin credits. */
+export function parsePluginCreditStars(value: unknown): PluginCreditStars {
+  const answer = plugin.object(value, "$");
+  const stars = plugin.object(answer.stars ?? {}, "$.stars");
+  return Object.fromEntries(
+    Object.entries(stars).map(([url, count]) => [
+      url,
+      plugin.integer(count, `$.stars.${url}`),
+    ]),
+  );
 }
 
 /** Reads how many a clearing removed. */
@@ -1169,6 +1209,7 @@ export function parseRequestPluginRecords(
           `${lookupPath}.result_bytes`,
         ),
         hits: plugin.optionalInteger(raw.hits, `${lookupPath}.hits`),
+        writes: plugin.optionalBoolean(raw.writes, `${lookupPath}.writes`),
       });
     }
     let injection: PluginInjection | undefined;
@@ -1192,6 +1233,10 @@ export function parseRequestPluginRecords(
         dropped_items: plugin.integer(
           raw.dropped_items,
           `${injectionPath}.dropped_items`,
+        ),
+        usage_bytes: plugin.optionalInteger(
+          raw.usage_bytes,
+          `${injectionPath}.usage_bytes`,
         ),
       };
     }

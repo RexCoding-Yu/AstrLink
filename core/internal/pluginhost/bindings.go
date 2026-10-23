@@ -355,9 +355,9 @@ func (run *Run) Finish(ctx context.Context, hits []metadata.MarkerHit, succeeded
 }
 
 // settleAwaited queues the captures that waited for the reply, with the
-// values it bound. A plugin whose attributes the session still lacks
-// captures nothing. While the privacy check of the turn's text runs, the
-// captures wait for it.
+// values it bound. A plugin whose attributes the session still lacks has the
+// capture held until the session has them. While the privacy check of the
+// turn's text runs, the captures wait for it.
 func (run *Run) settleAwaited() {
 	if !run.checked() {
 		go func() {
@@ -375,6 +375,9 @@ func (run *Run) settleAwaited() {
 		meta, complete := run.boundMeta(current)
 		if !complete || current.awaited == nil {
 			current.observe = observeSkippedUnbound
+			if current.awaited != nil && run.host.held.hold(lookupKey{run.input.Session, current.plugin.Key}, *current.awaited) {
+				current.observe = observeHeld
+			}
 			continue
 		}
 		view := *current.awaited

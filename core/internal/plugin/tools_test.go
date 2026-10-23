@@ -28,6 +28,16 @@ func TestToolsValidate(t *testing.T) {
 	if err := validateMeta(toolsMeta(), "powercontext"); err != nil {
 		t.Fatalf("validateMeta: %v", err)
 	}
+	// A report turned on and off by a switch of the plugin's.
+	reporting := toolsMeta()
+	reporting.Settings = []Setting{{Key: "report", Label: "上报", Type: SettingSwitch, Default: json.RawMessage(`true`)}}
+	reporting.Tools = append(reporting.Tools, Tool{
+		Name: "note", Description: Localized{"": "Note what is worth keeping."}, Writes: true, Setting: "report",
+		Params: []ToolParam{{Name: "text", Type: ToolParamString, Required: true, MaxRunes: 1000, Example: Localized{"": "what to note"}}},
+	})
+	if err := validateMeta(reporting, "powercontext"); err != nil {
+		t.Fatalf("validateMeta with a report: %v", err)
+	}
 	for _, test := range []struct {
 		name   string
 		change func(*Meta)
@@ -49,6 +59,16 @@ func TestToolsValidate(t *testing.T) {
 			meta.Tools = nil
 			meta.Settings = []Setting{{Key: HostSettingLookup}}
 		}, "$lookup needs a query"},
+		{"a report before the session has a value", func(meta *Meta) { meta.Tools[1].Writes = true }, "cannot be unbound"},
+		{"a switch not declared", func(meta *Meta) { meta.Tools[0].Setting = "report" }, `setting "report" must name a switch`},
+		{"a setting that is no switch", func(meta *Meta) {
+			meta.Settings = []Setting{{Key: "report", Label: "上报", Type: SettingText}}
+			meta.Tools[0].Setting = "report"
+		}, "must name a switch"},
+		{"a host setting", func(meta *Meta) {
+			meta.Settings = []Setting{{Key: HostSettingTrusted}}
+			meta.Tools[0].Setting = HostSettingTrusted
+		}, "must name a switch"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			meta := toolsMeta()

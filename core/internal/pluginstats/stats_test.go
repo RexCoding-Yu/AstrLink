@@ -74,6 +74,14 @@ func TestAnAccountSumsEachDayAndTheWhole(t *testing.T) {
 				record(plugin.HookCallTool, "skipped", func(entry *contract.RequestPluginRecord) {
 					entry.SkippedReason, entry.Lookup = contract.PluginSkipTurnLimit, &contract.PluginLookup{Tool: "search"}
 				}),
+				// A report the plugin wrote counts with the writes, one
+				// turned away nowhere; neither is a lookup.
+				record(plugin.HookCallTool, "ok", func(entry *contract.RequestPluginRecord) {
+					entry.ElapsedMs, entry.Lookup = 50, &contract.PluginLookup{Tool: "note", InputRunes: 8, Writes: true}
+				}),
+				record(plugin.HookCallTool, "skipped", func(entry *contract.RequestPluginRecord) {
+					entry.SkippedReason, entry.Lookup = contract.PluginSkipTurnLimit, &contract.PluginLookup{Tool: "note", Writes: true}
+				}),
 				record(plugin.HookObserveTurn, "failed", func(entry *contract.RequestPluginRecord) { entry.SkippedReason = contract.PluginSkipPluginError }),
 			}},
 		// A session asked for its project that never answered.
@@ -139,6 +147,7 @@ func TestAnAccountSumsEachDayAndTheWhole(t *testing.T) {
 	if second.Lookup.Ran != 2 || second.Lookup.Refused != 1 || second.Lookup.Counted != 2 || second.Lookup.WithHits != 1 ||
 		second.Lookup.Ms == nil || *second.Lookup.Ms != (contract.PluginPercentiles{P50: 200, P95: 800}) ||
 		second.Lookup.Sessions != 2 || second.Lookup.LookingUp != 1 || second.Write.Failed != 1 || second.Problems.Failed != 1 ||
+		second.Write.OK != 1 || second.Write.Reported != 1 ||
 		second.Binding.Unanswered != 1 || second.Load.InjectedBytes != 4900 {
 		t.Fatalf("20th = %+v %+v", second, second.Lookup.Ms)
 	}

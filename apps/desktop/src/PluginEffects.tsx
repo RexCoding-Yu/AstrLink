@@ -1,5 +1,10 @@
+import type { CSSProperties, ReactNode } from "react";
+
+import { BarList, type BarListItem } from "@/components/BarList";
 import { HelpPopover } from "@/components/HelpPopover";
+import { Metric } from "@/components/Metric";
 import { Panel, PanelHeader } from "@/components/Panel";
+import { Sparkline } from "@/components/Sparkline";
 import {
   Table,
   TableBody,
@@ -8,6 +13,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
+import { dayLabel } from "./chart-axis";
+import { formatCompactNumber } from "./format-compact-number";
 import { useT } from "./i18n";
 import type {
   PluginCacheShare,
@@ -24,10 +32,26 @@ const REFRESH_TRIGGERS = ["compact", "manual", "auto"];
 /** About 3 bytes of injected text make a token, Chinese or English. */
 const BYTES_PER_TOKEN = 3;
 
+/** The ways a session got its value, in the order the card lists them. */
+const BINDING_WAYS = [
+  "workspace",
+  "picked",
+  "created",
+  "declined",
+  "unanswered",
+] as const;
+
+/** The kinds of trouble, in the order the card lists them. */
+const PROBLEM_KINDS = ["failed", "timeouts", "privacy", "over_budget"] as const;
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function tokensOf(bytes: number): number {
+  return Math.round(bytes / BYTES_PER_TOKEN);
 }
 
 function percent(part: number, whole: number): string | null {
@@ -38,6 +62,10 @@ function cacheRate(share: PluginCacheShare): string | null {
   return percent(share.cache_read_tokens, share.input_tokens);
 }
 
+function problemCount(day: PluginDayStats): number {
+  return PROBLEM_KINDS.reduce((sum, kind) => sum + day.problems[kind], 0);
+}
+
 /** Which parts of the account apply to the plugin. */
 function partsOf(detail: PluginDetail) {
   const injects = ["prepareSession", "prepareTurn"].some((hook) =>
@@ -45,9 +73,11 @@ function partsOf(detail: PluginDetail) {
   );
   return {
     load: injects,
-    lookup: detail.tools.length > 0,
+    lookup: detail.tools.some((tool) => !tool.writes),
     binding: detail.metadata.length > 0,
-    write: detail.hooks.includes("observeTurn"),
+    write:
+      detail.hooks.includes("observeTurn") ||
+      detail.tools.some((tool) => tool.writes),
     cache: injects,
   };
 }
@@ -55,88 +85,131 @@ function partsOf(detail: PluginDetail) {
 /** Whether a day or the whole has anything to show. */
 function active(day: PluginDayStats): boolean {
   const binding = Object.values(day.binding).some((count) => count > 0);
-  const problems = Object.values(day.problems).some((count) => count > 0);
   return (
     day.load.requests > 0 ||
     day.load.count > 0 ||
     day.lookup.ran + day.lookup.refused > 0 ||
     binding ||
     day.write.ok + day.write.failed > 0 ||
-    problems
+    problemCount(day) > 0
   );
 }
 
-function loadText(day: PluginDayStats, t: Translate): string {
-  const load = day.load;
-  const refreshes = REFRESH_TRIGGERS.reduce(
-    (sum, trigger) => sum + (load.by_trigger[trigger] ?? 0),
-    0,
-  );
-  return [
-    t("plugins.effects.loadValue", {
-      count: load.count,
-      size: formatSize(load.injected_bytes),
-      tokens: Math.round(
-        load.injected_bytes / BYTES_PER_TOKEN,
-      ).toLocaleString(),
-    }),
-    refreshes > 0 ? t("plugins.effects.refreshes", { count: refreshes }) : "",
-    load.wait_ms
-      ? t("plugins.effects.wait", {
-          p50: load.wait_ms.p50,
-          p95: load.wait_ms.p95,
-        })
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
+/** The parts of a line that have something to say, joined. */
+function joined(parts: Array<string | false | null | undefined>): string {
+  return parts.filter(Boolean).join(" · ");
 }
 
-function lookupText(day: PluginDayStats, t: Translate): string {
-  const lookup = day.lookup;
-  if (lookup.ran + lookup.refused === 0) return t("plugins.effects.noLookups");
-  const hits = percent(lookup.with_hits, lookup.counted);
-  return [
-    t("plugins.effects.lookupValue", { count: lookup.ran }),
-    hits ? t("plugins.effects.hitRate", { rate: hits }) : "",
-    lookup.sessions > 0
-      ? t("plugins.effects.lookupSessions", {
-          lookingUp: lookup.looking_up,
-          sessions: lookup.sessions,
-        })
-      : "",
-    lookup.ms ? t("plugins.effects.lookupMs", { p50: lookup.ms.p50 }) : "",
-    lookup.refused > 0
-      ? t("plugins.effects.refused", { count: lookup.refused })
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
+interface Tile {
+  key: string;
+  label: string;
+  value: string;
+  detail: ReactNode;
+  trend: (day: PluginDayStats) => number;
+  format: (value: number) => string;
+  tone?: "warning";
 }
 
-function bindingText(day: PluginDayStats, t: Translate): string {
-  const binding = day.binding;
-  return [
-    t("plugins.effects.bindingValue", binding),
-    binding.changed > 0
-      ? t("plugins.effects.changed", { count: binding.changed })
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-function cacheText(day: PluginDayStats, t: Translate): string {
-  return t("plugins.effects.cacheValue", {
-    with: cacheRate(day.cache.with) ?? "—",
-    without: cacheRate(day.cache.without) ?? "—",
+function tilesOf(
+  total: PluginDayStats,
+  parts: ReturnType<typeof partsOf>,
+  t: Translate,
+): Tile[] {
+  const tiles: Tile[] = [];
+  if (parts.load) {
+    const refreshes = REFRESH_TRIGGERS.reduce(
+      (sum, trigger) => sum + (total.load.by_trigger[trigger] ?? 0),
+      0,
+    );
+    tiles.push({
+      key: "load",
+      label: t("plugins.effects.load"),
+      value: t("plugins.effects.tokens", {
+        tokens: formatCompactNumber(tokensOf(total.load.injected_bytes)),
+      }),
+      detail: joined([
+        t("plugins.effects.loads", { count: total.load.count }),
+        total.load.wait_ms &&
+          t("plugins.effects.wait", { p50: total.load.wait_ms.p50 }),
+        refreshes > 0 && t("plugins.effects.refreshes", { count: refreshes }),
+      ]),
+      trend: (day) => tokensOf(day.load.injected_bytes),
+      format: (value) =>
+        t("plugins.effects.tokens", { tokens: formatCompactNumber(value) }),
+    });
+  }
+  if (parts.lookup) {
+    const lookup = total.lookup;
+    tiles.push({
+      key: "lookup",
+      label: t("plugins.effects.lookup"),
+      value: t("plugins.effects.times", { count: lookup.ran }),
+      detail: joined([
+        percent(lookup.with_hits, lookup.counted) &&
+          t("plugins.effects.hitRate", {
+            rate: percent(lookup.with_hits, lookup.counted),
+          }),
+        lookup.looking_up > 0 &&
+          t("plugins.effects.lookupSessions", { count: lookup.looking_up }),
+        lookup.refused > 0 &&
+          t("plugins.effects.refused", { count: lookup.refused }),
+      ]),
+      trend: (day) => day.lookup.ran,
+      format: (value) => t("plugins.effects.times", { count: value }),
+    });
+  }
+  if (parts.write) {
+    const write = total.write;
+    tiles.push({
+      key: "write",
+      label: t("plugins.effects.write"),
+      value: t("plugins.effects.entries", { count: write.ok }),
+      detail: (
+        <>
+          {write.reported > 0
+            ? t("plugins.effects.reported", { count: write.reported })
+            : null}
+          {write.failed > 0 ? (
+            <span className="text-warning-foreground">
+              {write.reported > 0 ? " · " : ""}
+              {t("plugins.effects.writeFailed", { count: write.failed })}
+            </span>
+          ) : null}
+        </>
+      ),
+      trend: (day) => day.write.ok,
+      format: (value) => t("plugins.effects.entries", { count: value }),
+    });
+  }
+  const problems = problemCount(total);
+  tiles.push({
+    key: "problems",
+    label: t("plugins.effects.problems"),
+    value: String(problems),
+    detail:
+      problems === 0
+        ? t("plugins.effects.noProblems")
+        : joined(
+            PROBLEM_KINDS.map(
+              (kind) =>
+                total.problems[kind] > 0 &&
+                t(`plugins.effects.problemKinds.${kind}`, {
+                  count: total.problems[kind],
+                }),
+            ),
+          ),
+    trend: problemCount,
+    format: (value) => String(value),
+    tone: problems > 0 ? "warning" : undefined,
   });
+  return tiles;
 }
 
 /**
- * The plugin's account over the last 7 days on the overview: what its blocks
- * cost, how the model used its lookups, how sessions got their values, what
- * it wrote, what went wrong and how the prompt cache fared.
+ * How the plugin ran over the last 7 days on the overview: a tile for each of
+ * what its blocks cost, how often the model looked things up, what it wrote
+ * and what went wrong, each with its days as small columns; then how sessions
+ * got their values and how the prompt cache fared, as bars.
  */
 export function EffectCard({
   detail,
@@ -148,25 +221,27 @@ export function EffectCard({
   const t = useT();
   const total = stats.total;
   const parts = partsOf(detail);
-  const rows: Array<[string, string]> = [];
-  if (parts.load) rows.push([t("plugins.effects.load"), loadText(total, t)]);
-  if (parts.lookup)
-    rows.push([t("plugins.effects.lookup"), lookupText(total, t)]);
-  if (parts.binding)
-    rows.push([t("plugins.effects.binding"), bindingText(total, t)]);
-  if (parts.write)
-    rows.push([
-      t("plugins.effects.write"),
-      t("plugins.effects.writeValue", total.write),
-    ]);
-  rows.push([
-    t("plugins.effects.problems"),
-    t("plugins.effects.problemsValue", {
-      ...total.problems,
-      overBudget: total.problems.over_budget,
-    }),
-  ]);
-  if (parts.cache) rows.push([t("plugins.effects.cache"), cacheText(total, t)]);
+  const tiles = tilesOf(total, parts, t);
+  const ways: BarListItem[] = BINDING_WAYS.filter(
+    (way) => total.binding[way] > 0,
+  ).map((way) => ({
+    key: way,
+    label: t(`plugins.effects.ways.${way}`),
+    value: total.binding[way],
+  }));
+  const cacheKnown =
+    parts.cache &&
+    (cacheRate(total.cache.with) !== null ||
+      cacheRate(total.cache.without) !== null);
+  const cache: BarListItem[] = (["with", "without"] as const).map((side) => {
+    const rate = cacheRate(total.cache[side]);
+    return {
+      key: side,
+      label: t(`plugins.effects.cacheSides.${side}`),
+      value: rate === null ? 0 : Number.parseInt(rate, 10),
+      display: rate ?? "—",
+    };
+  });
   return (
     <Panel data-testid="plugin-effects">
       <PanelHeader
@@ -177,17 +252,84 @@ export function EffectCard({
         }
         size="sm"
       >
-        <h3 className="text-xs font-semibold">{t("plugins.effects.title")}</h3>
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-xs font-semibold">
+            {t("plugins.effects.title")}
+          </h3>
+          <span className="text-micro text-muted-foreground">
+            {t("plugins.effects.period")}
+          </span>
+        </div>
       </PanelHeader>
       {active(total) ? (
-        <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 p-3 text-xs">
-          {rows.map(([label, value]) => (
-            <div className="contents" key={label}>
-              <dt className="text-muted-foreground">{label}</dt>
-              <dd className="min-w-0 break-words tabular-nums">{value}</dd>
+        <>
+          <dl
+            className="grid grid-cols-2 gap-px bg-border @[560px]/overview:[grid-template-columns:repeat(var(--tiles),minmax(0,1fr))]"
+            style={{ "--tiles": tiles.length } as CSSProperties}
+          >
+            {tiles.map((tile, index) => (
+              <div
+                className={cn(
+                  "grid",
+                  index === tiles.length - 1 &&
+                    tiles.length % 2 === 1 &&
+                    "col-span-2 @[560px]/overview:col-span-1",
+                )}
+                data-testid="plugin-effect-tile"
+                key={tile.key}
+              >
+                <Metric
+                  detail={tile.detail || undefined}
+                  label={tile.label}
+                  size="sm"
+                  trend={
+                    <Sparkline
+                      format={tile.format}
+                      label={tile.label}
+                      points={stats.days.map((day) => ({
+                        label: day.date ? dayLabel(day.date, "short") : "",
+                        value: tile.trend(day),
+                      }))}
+                      tone={tile.tone}
+                    />
+                  }
+                  value={tile.value}
+                />
+              </div>
+            ))}
+          </dl>
+          {(parts.binding && ways.length > 0) || cacheKnown ? (
+            <div className="grid gap-x-6 gap-y-4 border-t p-3 @[560px]/overview:grid-cols-2">
+              {parts.binding && ways.length > 0 ? (
+                <section data-testid="plugin-effect-bindings">
+                  <h4 className="mb-2 text-micro font-medium text-muted-foreground">
+                    {t("plugins.effects.binding")}
+                  </h4>
+                  <BarList items={ways} label={t("plugins.effects.binding")} />
+                  {total.binding.changed > 0 ? (
+                    <p className="mt-1.5 text-micro text-muted-foreground">
+                      {t("plugins.effects.changed", {
+                        count: total.binding.changed,
+                      })}
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+              {cacheKnown ? (
+                <section data-testid="plugin-effect-cache">
+                  <h4 className="mb-2 text-micro font-medium text-muted-foreground">
+                    {t("plugins.effects.cache")}
+                  </h4>
+                  <BarList
+                    items={cache}
+                    label={t("plugins.effects.cache")}
+                    max={100}
+                  />
+                </section>
+              ) : null}
             </div>
-          ))}
-        </dl>
+          ) : null}
+        </>
       ) : (
         <p className="p-3 text-xs text-muted-foreground">
           {t("plugins.effects.empty")}
@@ -246,18 +388,16 @@ export function DailyEffects({
         </TableHeader>
         <TableBody>
           {days.map((day) => {
-            const bindings =
-              day.binding.workspace +
-              day.binding.picked +
-              day.binding.created +
-              day.binding.declined;
-            const problems =
-              day.problems.failed +
-              day.problems.timeouts +
-              day.problems.privacy +
-              day.problems.over_budget;
+            const bindings = BINDING_WAYS.filter(
+              (way) => way !== "unanswered",
+            ).reduce((sum, way) => sum + day.binding[way], 0);
             return (
-              <TableRow key={day.date}>
+              // A day without activity stays in the column of days, quietly.
+              <TableRow
+                className={cn(!active(day) && "text-muted-foreground")}
+                data-active={active(day) ? "true" : "false"}
+                key={day.date}
+              >
                 <TableCell className="tabular-nums">{day.date}</TableCell>
                 {parts.load ? (
                   <>
@@ -289,7 +429,9 @@ export function DailyEffects({
                       : day.write.ok}
                   </TableCell>
                 ) : null}
-                <TableCell className="tabular-nums">{problems}</TableCell>
+                <TableCell className="tabular-nums">
+                  {problemCount(day)}
+                </TableCell>
                 {parts.cache ? (
                   <TableCell className="tabular-nums">
                     {t("plugins.effects.cacheCell", {

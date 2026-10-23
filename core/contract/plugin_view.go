@@ -338,8 +338,9 @@ type RequestPluginRecord struct {
 	Injection *PluginInjection   `json:"injection,omitempty"`
 	Network   PluginNetworkCount `json:"network"`
 	// Observe tells what became of the turn's capture: queued,
-	// skipped_privacy, skipped_binding_turn, skipped_continuation,
-	// queue_full or disabled.
+	// awaiting_reply, held_unbound (kept until the session has a value,
+	// then captured), skipped_unbound, skipped_privacy,
+	// skipped_binding_turn, skipped_continuation, queue_full or disabled.
 	Observe string `json:"observe,omitempty"`
 	// Trigger tells why a resident block was computed, on the record of
 	// the request that first carried it.
@@ -354,14 +355,17 @@ type RequestPluginRecord struct {
 	Commands []string `json:"commands,omitempty"`
 }
 
-// PluginLookup is a query the model ran: which, how long its input was in
-// characters, how many bytes of result it got, and how many hits the
-// plugin said they held.
+// PluginLookup is a query the model ran, or a report it made: which, how
+// long its input was in characters, how many bytes of result it got, and
+// how many hits the plugin said they held.
 type PluginLookup struct {
 	Tool        string `json:"tool"`
 	InputRunes  int    `json:"input_runes"`
 	ResultBytes int    `json:"result_bytes"`
 	Hits        *int   `json:"hits,omitempty"`
+	// Writes marks a report: the model handed the plugin something to
+	// keep.
+	Writes bool `json:"writes,omitempty"`
 }
 
 // PluginInjection is what the host injected into one request for a plugin.
@@ -370,6 +374,9 @@ type PluginInjection struct {
 	InjectedBytes  int    `json:"injected_bytes"`
 	ReplayedBlocks int    `json:"replayed_blocks"`
 	DroppedItems   int    `json:"dropped_items"`
+	// UsageBytes is the part of InjectedBytes that tells the model how to
+	// use the plugin's lookups, which the gateway adds itself.
+	UsageBytes int `json:"usage_bytes,omitempty"`
 }
 
 func (record RequestPluginRecord) Validate() error {
@@ -419,8 +426,8 @@ func (record RequestPluginRecord) Validate() error {
 		if injection.Placement != PluginPlacementSystem && injection.Placement != PluginPlacementTurnMessage {
 			return fmt.Errorf("unknown injection placement %q", injection.Placement)
 		}
-		if injection.InjectedBytes < 0 || injection.ReplayedBlocks < 0 || injection.DroppedItems < 0 {
-			return fmt.Errorf("injection counts must be non-negative")
+		if injection.InjectedBytes < 0 || injection.ReplayedBlocks < 0 || injection.DroppedItems < 0 || injection.UsageBytes < 0 || injection.UsageBytes > injection.InjectedBytes {
+			return fmt.Errorf("injection counts must be non-negative, the usage within what was injected")
 		}
 	}
 	return nil

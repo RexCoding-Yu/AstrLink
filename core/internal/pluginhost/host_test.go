@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -338,7 +339,7 @@ func TestASessionIsAskedThenBoundThenRecalled(t *testing.T) {
 		turnRecord.Injection == nil || turnRecord.Injection.InjectedBytes != len(block) {
 		t.Fatalf("prepareTurn record = %+v", turnRecord)
 	}
-	if len(events) != 1 || events[0].Title != "记忆" || events[0].Summary != "召回 1/1" {
+	if len(events) != 1 || events[0].Title != "Memo" || events[0].Summary != "召回 1/1" {
 		t.Fatalf("events = %+v", events)
 	}
 
@@ -542,22 +543,122 @@ export function prepareTurn(turn) {
 	}
 }
 
-func TestATurnWithoutAProjectAndNoMarkerIsNotCaptured(t *testing.T) {
-	h := newHarness(t, allCapabilities(), map[string]string{"memo": memoPlugin}, nil)
-	body := messages(user("帮我看看分页逻辑"))
-	run := h.begin(t, 1, body, nil)
+// latePlugin writes each turn it sees, marked when it sees it late.
+const latePlugin = `export const meta = {
+  apiVersion: 1, key: "memo", name: "Memo", version: "1.0.0",
+  capabilities: ["request.read", "storage"],
+  metadata: [{ key: "project", label: "Project", pattern: "^[a-z0-9-]{1,32}$", marker: "memo-project" }],
+};
+export function observeTurn(turn) {
+  astrlink.store.set("seen:" + turn.session.turn, (turn.late ? "late " : "") + turn.meta.project.value + " " + turn.user.typed);
+}
+`
+
+// beginIn begins a request of session.
+func (h *harness) beginIn(t *testing.T, session string, turn int, body string) *Run {
+	t.Helper()
+	run := h.host.Begin(context.Background(), Input{
+		RequestID: "request_1", Protocol: contract.ProtocolAnthropicMessages, Model: "claude", Client: "claude_code",
+		Header: http.Header{}, Session: session, Turn: turn, Body: []byte(body),
+	})
+	if run == nil {
+		t.Fatal("Begin = nil")
+	}
 	run.Inject([]byte(body))
 	run.Report()
-	if events := run.Finish(context.Background(), nil, true); len(events) != 0 {
-		t.Fatalf("Finish = %+v", events)
-	}
-	if captures := run.Captures(); captures["memo"] != observeSkippedUnbound {
-		t.Fatalf("captures = %+v", captures)
-	}
+	return run
+}
+
+func (h *harness) nothingWritten(t *testing.T, what string) {
+	t.Helper()
 	select {
 	case write := <-h.writes:
-		t.Fatalf("an unbound turn was captured: %s", write)
+		t.Fatalf("%s: %s", what, write)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestTurnsBeforeTheSessionHasAProjectAreWrittenOnceItHasOne(t *testing.T) {
+	h := newHarness(t, allCapabilities(), map[string]string{"memo": latePlugin}, nil)
+	ctx := context.Background()
+	opening := user("这个项目用来对比原厂和自部署的模型")
+	// The session has no project and the reply sets none: the turn is held.
+	run := h.beginIn(t, "session_1", 1, messages(opening))
+	if events := run.Finish(ctx, nil, true); len(events) != 0 {
+		t.Fatalf("Finish = %+v", events)
+	}
+	if captures := run.Captures(); captures["memo"] != observeHeld {
+		t.Fatalf("captures = %+v", captures)
+	}
+	h.nothingWritten(t, "a turn without a project was written")
+	// The next reply binds the session: the held turn is written late with
+	// the project, and the binding turn after it.
+	run = h.beginIn(t, "session_1", 2, messages(opening, assistant("要纳入哪个项目？"), user("llm-arena 吧")))
+	scanner := run.NewMarkerScanner()
+	scanner.Write("<memo-project>llm-arena</memo-project>\n好的。")
+	run.Finish(ctx, scanner.Close(), true)
+	if writes := map[string]bool{h.seen(t): true, h.seen(t): true}; !writes[`seen:1="late llm-arena 这个项目用来对比原厂和自部署的模型"`] || !writes[`seen:2="llm-arena llm-arena 吧"`] {
+		t.Fatalf("writes = %v", writes)
+	}
+
+	// A user's marker line binds there and then: the turns held before it
+	// are written with that request, the line itself is not.
+	first := user("先看看大屏的刷新逻辑")
+	run = h.beginIn(t, "session_2", 1, messages(first))
+	run.Finish(ctx, nil, true)
+	run = h.beginIn(t, "session_2", 2, messages(first, assistant("好"), user("再看推送间隔")))
+	run.Finish(ctx, nil, true)
+	h.beginIn(t, "session_2", 3, messages(first, assistant("好"), user("再看推送间隔"), assistant("要纳入哪个项目？"), user("<memo-project>datav</memo-project>")))
+	if writes := map[string]bool{h.seen(t): true, h.seen(t): true}; !writes[`seen:1="late datav 先看看大屏的刷新逻辑"`] || !writes[`seen:2="late datav 再看推送间隔"`] {
+		t.Fatalf("writes = %v", writes)
+	}
+	h.nothingWritten(t, "the marker line was written")
+
+	// A session left out drops what it held.
+	run = h.beginIn(t, "session_3", 1, messages(user("随便聊聊")))
+	run.Finish(ctx, nil, true)
+	h.beginIn(t, "session_3", 2, messages(user("随便聊聊"), assistant("要纳入哪个项目？"), user("<memo-project>none</memo-project>")))
+	h.nothingWritten(t, "a session left out wrote a held turn")
+	if held := h.host.held.take(lookupKey{"session_3", "memo"}); held != nil {
+		t.Fatalf("held after the session was left out: %+v", held)
+	}
+}
+
+func TestHeldTurnsAreTheFirstOnesWithinASize(t *testing.T) {
+	held := newHeldCaptures()
+	key := lookupKey{"session_1", "memo"}
+	view := func(turn int, text string) TurnView {
+		return TurnView{SessionView: SessionView{Session: plugin.SessionRef{ID: "session_1", Turn: turn}}, User: UserText{Text: text, Typed: text}}
+	}
+	for turn := 1; turn <= maxHeldTurns; turn++ {
+		if !held.hold(key, view(turn, "第 "+strconv.Itoa(turn)+" 轮")) {
+			t.Fatalf("turn %d was not held", turn)
+		}
+	}
+	if held.hold(key, view(maxHeldTurns+1, "再多一轮")) {
+		t.Fatal("a turn past the first ones was held")
+	}
+	// A turn sent again replaces itself.
+	if !held.hold(key, view(2, "第 2 轮重发")) {
+		t.Fatal("a turn sent again was not held")
+	}
+	turns := held.take(key)
+	if len(turns) != maxHeldTurns || turns[1].User.Typed != "第 2 轮重发" || turns[0].Session.Turn != 1 {
+		t.Fatalf("held = %+v", turns)
+	}
+	if held.take(key) != nil {
+		t.Fatal("take left turns behind")
+	}
+	// A turn past the size is not held.
+	if held.hold(key, view(1, strings.Repeat("长", maxHeldBytes/6+1))) {
+		t.Fatal("a turn past the size was held")
+	}
+	// The sessions held least recently go first.
+	for index := range maxHeldSessions + 1 {
+		held.hold(lookupKey{"session_" + strconv.Itoa(index), "memo"}, view(1, "x"))
+	}
+	if held.take(lookupKey{"session_0", "memo"}) != nil || held.take(lookupKey{"session_1", "memo"}) == nil {
+		t.Fatal("the session held least recently was kept")
 	}
 }
 

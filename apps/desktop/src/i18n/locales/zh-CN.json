@@ -4708,7 +4708,7 @@
       "network": "网络",
       "storage": "插件存储",
       "uiViews": "界面视图",
-      "modelTools": "供模型查询"
+      "modelTools": "允许 Agent 查询"
     },
     "loadErrors": {
       "not_found": "没有 plugin.ts 或 plugin.js",
@@ -4798,18 +4798,20 @@
       "capabilities": "用到的权限"
     },
     "overview": {
-      "connection": "连接",
-      "server": "服务器",
       "noServer": "未设置",
-      "lastTest": "最近测试",
       "notTested": "还没测试",
       "bindings": "已绑定的{{label}}",
       "sessions": "会话",
       "lastUsed": "最近使用",
       "none": "不纳入",
       "noBindings": "还没有会话绑定{{label}}",
-      "pluginStatus": "插件状态",
-      "credits": "开源项目"
+      "statusUnread": "没读出来",
+      "statusErrorLabel": "插件返回的错误",
+      "gateway": "本机网关",
+      "uses": "使用了开源项目 {{name}}",
+      "onGitHub": "在 GitHub 上查看 {{name}}",
+      "onGitHubStars_one": "在 GitHub 上查看 {{name}}，{{stars}} 颗星",
+      "onGitHubStars_other": "在 GitHub 上查看 {{name}}，{{stars}} 颗星"
     },
     "settings": {
       "save": "保存",
@@ -4830,15 +4832,22 @@
       "consent": "「{{label}}」是明文 HTTP 地址，勾选「允许明文 HTTP」才能保存",
       "replace": "更换",
       "keep": "不更换",
-      "noOrigin": "先填好服务器地址，再保存令牌"
+      "noOrigin": "先填好服务器地址，再保存令牌",
+      "choices": {
+        "all": "全部",
+        "none": "都不选",
+        "clear": "全不选",
+        "selectAll": "全选",
+        "count_one": "{{count}} 项",
+        "count_other": "{{count}} 项",
+        "separator": "、"
+      }
     },
     "host": {
       "pause": "暂停所有插件",
-      "pauseHelpLabel": "关于暂停所有插件",
       "pauseHelp": "暂停期间所有插件都不运行：不装载、不询问、不写入，请求原样发出。每轮第一个请求的记录里会写明原因。恢复后照常工作。",
       "pausedNotice": "所有插件已暂停，请求原样发出。",
       "budget": "注入总预算",
-      "budgetHelpLabel": "关于注入总预算",
       "budgetHelp": "所有插件往一次请求里注入的内容合计不超过这么多。超出时按插件顺序丢掉后面插件的块，请求记录里写明「超出注入总预算」。",
       "budgetValue": "{{value}} KB",
       "saveFailed": "无法保存插件的总设置。"
@@ -4871,40 +4880,48 @@
       "confirm": "打开"
     },
     "stored": {
-      "title": "存了什么",
+      "title": "数据存储",
       "kinds": {
         "session_bindings": {
           "label": "会话绑定的值",
-          "detail": "值、怎么绑定的、第几轮 · AstrLink 数据库 · 不含对话内容 · 跟会话记录一样"
+          "what": "每个会话绑定的值、怎么绑定的、在第几轮绑定。",
+          "retention": "跟会话记录一样"
         },
         "workspace_bindings": {
           "label": "工作区和值的对应",
-          "detail": "目录路径的指纹和最后一级目录名，不存路径 · AstrLink 数据库 · 不含对话内容 · 直到清除"
+          "what": "工作目录路径的指纹和最后一级目录名，不存完整路径，用来让同一目录的新会话自动绑定。",
+          "retention": "直到清除"
         },
         "plugin_sessions": {
-          "label": "插件在每个会话里的第一轮和暂停状态",
-          "detail": "AstrLink 数据库 · 不含对话内容 · 一直保留"
+          "label": "各会话的第一轮和暂停",
+          "what": "插件在每个会话里第一次参与的是哪一轮，以及这个会话有没有暂停插件。",
+          "retention": "一直保留"
         },
         "request_records": {
           "label": "插件记录",
-          "detail": "次数、字节数、耗时、原因 · 请求记录里 · 不含对话内容 · 跟请求记录一样"
+          "what": "插件在每个请求里做了什么：次数、字节数、耗时和原因，不含查询和上报的内容。",
+          "retention": "跟请求记录一样"
         },
         "resident_block": {
           "label": "当前装载块",
-          "detail": "只在内存里 · 含记忆内容 · 网关重启就没了"
+          "what": "会话系统提示词里正在用的那份项目记忆。",
+          "retention": "网关重启就没了"
         },
         "plugin_values": {
           "label": "插件存储",
-          "detail": "插件自己存的小数据 · AstrLink 数据库 · 停用插件后仍保留，可以清除"
+          "what": "插件自己存的小数据，停用插件后仍保留。插件声明它存了下面这些。",
+          "retention": "直到清除"
         },
         "lookup_credentials": {
           "label": "查询凭证",
-          "detail": "各会话运行查询用的凭证 · 只在内存里，存的是哈希 · 不含对话内容 · 会话 24 小时没有请求或网关重启就作废"
+          "what": "各会话运行查询和上报用的凭证，只存哈希。",
+          "retention": "24 小时没有请求或网关重启就作废"
         }
       },
-      "declared": "插件声明：{{label}} · {{content}} · {{retention}}",
-      "withContent": "含对话内容",
-      "withoutContent": "不含对话内容",
+      "holds": {
+        "memory": "含记忆内容",
+        "conversation": "含对话内容"
+      },
       "clear": "清除",
       "clearTitle": {
         "workspaces": "清除工作区记录？",
@@ -4919,61 +4936,97 @@
       "clearFailed": "无法清除。",
       "count_one": "{{count}} 条",
       "count_other": "{{count}} 条",
-      "revoke": "作废"
+      "revoke": "作废",
+      "helpLabel": "关于数据存储",
+      "help": "AstrLink 为这个插件存的东西，按存放的地方分开列出。都不含对话内容，标明的除外。",
+      "places": {
+        "database": "AstrLink 数据库",
+        "memory": "只在内存里",
+        "records": "请求记录"
+      },
+      "retention": "保留：{{retention}}。",
+      "declared": "{{label}}（{{retention}}）"
     },
     "lookup": {
-      "label": "供模型查询",
-      "helpLabel": "关于供模型查询",
-      "help": "模型需要细节时，可以用自己的 shell 运行插件的只读查询，查的是会话绑定的项目，每轮最多 3 次。只有客户端和网关在同一台电脑上、请求里带着 shell 工具时，才在系统提示词里附上查询方法和本会话的凭证。启用插件时要勾选「供模型查询」。插件提供的查询：",
-      "toolSeparator": "："
+      "label": "允许 Agent 查询",
+      "helpLabel": "关于允许 Agent 查询",
+      "help": "Agent 需要细节时，可以用自己的 shell 运行插件的只读查询，每轮最多 3 次；插件提供上报时，Agent 也可以把值得长期记住的内容交给插件，每轮最多 2 次，插件设置里可以单独关掉。查的、记的都是会话绑定的项目。只有客户端和网关在同一台电脑上、请求里带着 shell 工具时，才在系统提示词里附上用法和本会话的凭证。启用插件时要勾选「允许 Agent 查询」。插件提供的查询和上报：",
+      "toolSeparator": "：",
+      "reportMark": "（上报）"
     },
     "effects": {
-      "title": "效果",
-      "helpLabel": "关于效果",
-      "help": "最近 7 天，按本机的请求记录汇总：只有次数、大小、耗时和原因，不含对话内容，也不上报到任何地方。多带的内容按字节计，约 3 个字节算 1 个 token。缓存命中是缓存读取占输入 token 的比例；「开了记忆」指出现过插件注入内容的会话。",
+      "title": "运行情况",
+      "helpLabel": "关于运行情况",
+      "help": "最近 7 天，按本机的请求记录汇总：只有次数、大小、耗时和原因，不含对话内容，也不上报到任何地方。装载消耗按注入的字节估算，约 3 个字节算 1 个 token；等待取中位数。小柱是每天的数，最右一根是今天。缓存命中是缓存读取占输入 token 的比例，「开了记忆」指出现过插件注入内容的会话。",
       "empty": "最近 7 天还没有记录。",
-      "load": "装载",
-      "loadValue_one": "{{count}} 次 · 多带 {{size}}（约 {{tokens}} token）",
-      "loadValue_other": "{{count}} 次 · 多带 {{size}}（约 {{tokens}} token）",
-      "refreshes_one": "其中刷新 {{count}} 次",
-      "refreshes_other": "其中刷新 {{count}} 次",
-      "wait": "等待中位 {{p50}} ms，最慢 5% {{p95}} ms",
+      "load": "装载消耗",
+      "refreshes_one": "刷新 {{count}} 次",
+      "refreshes_other": "刷新 {{count}} 次",
+      "wait": "等待约 {{p50}} ms",
       "lookup": "查询",
-      "noLookups": "没有查询",
-      "lookupValue_one": "{{count}} 次",
-      "lookupValue_other": "{{count}} 次",
-      "hitRate": "有结果 {{rate}}",
-      "lookupSessions": "{{sessions}} 个会话里 {{lookingUp}} 个查过",
-      "lookupMs": "耗时中位 {{p50}} ms",
+      "hitRate": "命中 {{rate}}",
       "refused_one": "拒绝 {{count}} 次",
       "refused_other": "拒绝 {{count}} 次",
-      "binding": "绑定",
-      "bindingValue": "工作区自动 {{workspace}} · 选已有 {{picked}} · 新建 {{created}} · 不纳入 {{declined}} · 没回答 {{unanswered}}",
-      "changed_one": "自动绑定后改掉 {{count}}",
-      "changed_other": "自动绑定后改掉 {{count}}",
+      "binding": "绑定方式",
+      "changed_one": "自动绑定后改掉 {{count}} 次",
+      "changed_other": "自动绑定后改掉 {{count}} 次",
       "write": "写入",
-      "writeValue": "{{ok}} 条 · 失败 {{failed}}",
+      "reported_one": "Agent 上报 {{count}} 条",
+      "reported_other": "Agent 上报 {{count}} 条",
       "problems": "问题",
-      "problemsValue": "失败 {{failed}} · 超时 {{timeouts}} · 隐私拦截 {{privacy}} · 超出预算 {{overBudget}}",
       "cache": "缓存命中",
-      "cacheValue": "开了记忆 {{with}} · 其他会话 {{without}}",
       "daily": "按天明细",
-      "dailyHelp": "每一行是一天，按网关所在时区。缓存命中一栏是「开了记忆的会话 / 其他会话」。其余口径同「效果」：只有次数、大小和原因，不含对话内容，也不上报。",
+      "dailyHelp": "每一行是一天，按网关所在时区，没有活动的日子显示为灰色。消耗是注入的字节数，结果是查询里有结果的比例，缓存命中一栏是「开了记忆的会话 / 其他会话」。其余口径同「运行情况」：只有次数、大小和原因，不含对话内容，也不上报。",
       "dailyHelpLabel": "关于按天明细",
       "writeCell": "{{ok}}（失败 {{failed}}）",
       "cacheCell": "{{with}} / {{without}}",
       "columns": {
         "date": "日期",
         "loads": "装载",
-        "injected": "多带",
+        "injected": "消耗",
         "lookups": "查询",
-        "hits": "有结果",
+        "hits": "结果",
         "bindings": "绑定",
         "writes": "写入",
         "problems": "问题",
         "cache": "缓存命中"
+      },
+      "period": "最近 7 天",
+      "tokens": "约 {{tokens}} token",
+      "loads_one": "装载 {{count}} 次",
+      "loads_other": "装载 {{count}} 次",
+      "times_one": "{{count}} 次",
+      "times_other": "{{count}} 次",
+      "lookupSessions_one": "{{count}} 个会话用过",
+      "lookupSessions_other": "{{count}} 个会话用过",
+      "entries_one": "{{count}} 条",
+      "entries_other": "{{count}} 条",
+      "writeFailed_one": "失败 {{count}} 条",
+      "writeFailed_other": "失败 {{count}} 条",
+      "noProblems": "运行正常",
+      "problemKinds": {
+        "failed_one": "失败 {{count}}",
+        "failed_other": "失败 {{count}}",
+        "timeouts_one": "超时 {{count}}",
+        "timeouts_other": "超时 {{count}}",
+        "privacy_one": "隐私拦截 {{count}}",
+        "privacy_other": "隐私拦截 {{count}}",
+        "over_budget_one": "超出预算 {{count}}",
+        "over_budget_other": "超出预算 {{count}}"
+      },
+      "ways": {
+        "workspace": "按工作区自动",
+        "picked": "选了已有的",
+        "created": "新建",
+        "declined": "不纳入",
+        "unanswered": "没回答"
+      },
+      "cacheSides": {
+        "with": "开了记忆",
+        "without": "其他会话"
       }
-    }
+    },
+    "headerHelpLabel": "关于插件的总设置"
   },
   "pluginRecords": {
     "none": "这个请求没有插件记录。",
@@ -5007,27 +5060,41 @@
       "unbound": "会话还没有绑定项目",
       "invalid_input": "参数不对"
     },
+    "reportSkipReasons": {
+      "rate_limited": "上报得太频繁",
+      "turn_limit": "这一轮已经上报满 2 次"
+    },
     "injection": "注入",
     "placement": {
       "system_append": "系统提示词",
-      "turn_message_prefix": "本轮用户开口消息开头"
+      "turn_message_prefix": "本轮用户消息开头"
     },
-    "replayed_one": "重放 {{count}} 段",
-    "replayed_other": "重放 {{count}} 段",
+    "replayed_one": "沿用之前的 {{count}} 段",
+    "replayed_other": "沿用之前的 {{count}} 段",
     "dropped_one": "超预算丢弃 {{count}} 条",
     "dropped_other": "超预算丢弃 {{count}} 条",
     "network": "网络",
     "networkCount": "{{requests}} 个请求 · 拒绝 {{denied}} · 失败 {{errors}} · 等待 {{wait}} ms",
+    "injected": "{{placement}} +{{size}}",
+    "observeLine": "写入：{{state}}",
+    "networkShort_one": "{{count}} 个请求 · 等待 {{wait}} ms",
+    "networkShort_other": "{{count}} 个请求 · 等待 {{wait}} ms",
+    "networkDenied_one": "拒绝 {{count}}",
+    "networkDenied_other": "拒绝 {{count}}",
+    "networkErrors_one": "失败 {{count}}",
+    "networkErrors_other": "失败 {{count}}",
+    "quiet": "这一轮没有新内容",
     "observe": "写入",
     "observeStates": {
       "queued": "已排队",
       "skipped_privacy": "被隐私策略跳过",
-      "skipped_binding_turn": "跳过：本轮已在绑定项目后写入",
-      "skipped_continuation": "跳过：不是本轮首个调用",
-      "queue_full": "丢弃：队列已满",
+      "skipped_binding_turn": "这一轮绑定项目时已写过",
+      "skipped_continuation": "不是这一轮的第一个调用，不再写",
+      "queue_full": "队列满了，没写",
       "disabled": "未开启",
       "awaiting_reply": "等回复确定项目",
-      "skipped_unbound": "跳过：会话没有项目"
+      "held_unbound": "先记下，会话选定项目后补写",
+      "skipped_unbound": "会话没有项目，没写"
     },
     "truncated": "超出上限，已截断",
     "metadata": "元信息",
@@ -5072,12 +5139,15 @@
     "metadataNormalized": "原写法 {{value}}",
     "actionFailedPlain": "没能完成。",
     "lookup": "查询",
+    "report": "上报",
     "lookupInput_one": "参数 {{count}} 字",
     "lookupInput_other": "参数 {{count}} 字",
     "lookupResult": "结果 {{size}}",
     "lookupHits_one": "{{count}} 条结果",
     "lookupHits_other": "{{count}} 条结果",
-    "commands": "附上查询"
+    "commands": "附上查询",
+    "usageOnly": "只附上查询方法 · {{placement}} +{{size}}",
+    "usagePart": "其中查询方法 {{size}}"
   },
   "metadata": {
     "title": "元信息",
@@ -5150,7 +5220,7 @@
     "saveFailed": "无法保存会话元信息。",
     "turn": "{{source}} · 第 {{turn}} 轮",
     "setBy": {
-      "model_marker": "模型回复",
+      "model_marker": "询问后选定",
       "user_marker": "用户消息",
       "manual": "手动设置",
       "user_answer": "回答直接匹配",

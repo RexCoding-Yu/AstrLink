@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,16 @@ import (
 // 30 MiB of temporary memory per MiB of source, once per load; a plugin made
 // of several files is bundled into one first.
 const MaxSourceBytes = 8 << 20
+
+// MaxIconBytes bounds a plugin's icon, which the plugin page shows as is.
+const MaxIconBytes = 64 << 10
+
+// iconFiles are the names a plugin's icon may have beside its source, the
+// vector one first.
+var iconFiles = []struct{ name, mime string }{
+	{"icon.svg", "image/svg+xml"},
+	{"icon.png", "image/png"},
+}
 
 // Codes of LoadError, stable for the desktop to word.
 const (
@@ -82,6 +94,8 @@ type Source struct {
 	File string
 	Text string
 	Err  *LoadError
+	// Icon is the icon beside the source as a data URL, "" for none.
+	Icon string
 }
 
 // sourceFiles are the names a plugin's source may have, TypeScript first.
@@ -146,7 +160,7 @@ func discoverFS(fsys fs.FS, origin Origin) ([]Source, error) {
 }
 
 func readSource(fsys fs.FS, key string, origin Origin) Source {
-	source := Source{Key: key, Origin: origin}
+	source := Source{Key: key, Origin: origin, Icon: readIcon(fsys, key)}
 	var found []string
 	for _, name := range sourceFiles {
 		if info, err := fs.Stat(fsys, path.Join(key, name)); err == nil && info.Mode().IsRegular() {
@@ -175,6 +189,64 @@ func readSource(fsys fs.FS, key string, origin Origin) Source {
 	}
 	source.Text = string(text)
 	return source
+}
+
+// readIcon returns the plugin's icon as a data URL, or "" when it has none
+// the page can show: each name is skipped when missing, larger than
+// MaxIconBytes, or not the image it says. An icon never keeps a plugin from
+// loading.
+func readIcon(fsys fs.FS, key string) string {
+	for _, icon := range iconFiles {
+		file, err := fsys.Open(path.Join(key, icon.name))
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(file, MaxIconBytes+1))
+		file.Close()
+		if err != nil || len(data) > MaxIconBytes {
+			continue
+		}
+		valid := bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n"))
+		if icon.mime == "image/svg+xml" {
+			valid = svgDocument(data)
+		}
+		if valid {
+			return "data:" + icon.mime + ";base64," + base64.StdEncoding.EncodeToString(data)
+		}
+	}
+	return ""
+}
+
+// svgDocument tells whether data is an SVG document without scripts: its
+// root, after any XML declaration, comments and doctype, is an svg element.
+// The page shows icons as images, where scripts never run; refusing them
+// keeps an icon opened on its own from running one either.
+func svgDocument(data []byte) bool {
+	text := strings.TrimPrefix(string(data), "\xef\xbb\xbf")
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "<script") || strings.Contains(lower, "javascript:") {
+		return false
+	}
+	for {
+		text = strings.TrimLeft(text, " \t\r\n")
+		var end string
+		switch {
+		case strings.HasPrefix(text, "<?xml"):
+			end = "?>"
+		case strings.HasPrefix(text, "<!--"):
+			end = "-->"
+		case strings.HasPrefix(text, "<!DOCTYPE"), strings.HasPrefix(text, "<!doctype"):
+			end = ">"
+		default:
+			rest, ok := strings.CutPrefix(text, "<svg")
+			return ok && rest != "" && strings.ContainsRune(" \t\r\n>", rune(rest[0]))
+		}
+		_, after, found := strings.Cut(text, end)
+		if !found {
+			return false
+		}
+		text = after
+	}
 }
 
 // Path returns where a directory plugin's source lives under dir.

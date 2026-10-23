@@ -296,7 +296,7 @@ describe("plugin model", () => {
         unanswered: 0,
         changed: 0,
       },
-      write: { ok: 4, failed: 0 },
+      write: { ok: 4, failed: 0, reported: 1 },
       problems: { failed: 0, timeouts: 1, privacy: 0, over_budget: 0 },
       cache: {
         with: { requests: 4, input_tokens: 4000, cache_read_tokens: 3000 },
@@ -313,13 +313,13 @@ describe("plugin model", () => {
     expect(() =>
       parsePluginStats({
         days: [],
-        total: { ...day, write: { ok: -1, failed: 0 } },
+        total: { ...day, write: { ok: -1, failed: 0, reported: 0 } },
       }),
     ).toThrow("$.total.write.ok");
   });
 
   it("reads a lookup by its size and the lookups a block offered", () => {
-    const [lookup, ask] = parseRequestPluginRecords(
+    const [lookup, ask, report] = parseRequestPluginRecords(
       [
         {
           plugin: "powercontext",
@@ -348,6 +348,22 @@ describe("plugin model", () => {
           network: { requests: 1, denied: 0, errors: 0, wait_ms: 90 },
           commands: ["projects"],
         },
+        {
+          plugin: "powercontext",
+          plugin_version: "2.1.0",
+          hook: "callTool",
+          title: "记忆上报",
+          status: "ok",
+          summary: "上报 15 字",
+          elapsed_ms: 120,
+          network: { requests: 1, denied: 0, errors: 0, wait_ms: 110 },
+          lookup: {
+            tool: "note",
+            input_runes: 15,
+            result_bytes: 60,
+            writes: true,
+          },
+        },
       ],
       "$.plugin_records",
     );
@@ -358,6 +374,12 @@ describe("plugin model", () => {
       hits: 2,
     });
     expect(ask?.commands).toEqual(["projects"]);
+    expect(report?.lookup).toEqual({
+      tool: "note",
+      input_runes: 15,
+      result_bytes: 60,
+      writes: true,
+    });
     expect(() =>
       parseRequestPluginRecords(
         [

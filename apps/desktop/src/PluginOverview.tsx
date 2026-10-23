@@ -1,10 +1,18 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 
+import astrlinkLogo from "@/assets/astrlink-logo.svg";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import {
+  ConnectionLink,
+  type ConnectionLinkState,
+} from "@/components/ConnectionLink";
 import { ExternalLink } from "@/components/ExternalLink";
 import { FormMessage } from "@/components/FormMessage";
+import { GitHubRepoBadge } from "@/components/GitHubRepoBadge";
+import { HelpPopover } from "@/components/HelpPopover";
 import { LoadingState } from "@/components/LoadingState";
 import { Panel, PanelHeader } from "@/components/Panel";
+import { PluginIcon } from "@/components/PluginIcon";
 import { PluginView } from "@/components/PluginView";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
@@ -19,6 +27,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatAgo } from "@/lib/format-ago";
+import {
+  formatCompactNumber,
+  formatExactNumber,
+} from "./format-compact-number";
 import { useT } from "./i18n";
 import { EffectCard } from "./PluginEffects";
 import {
@@ -27,32 +39,20 @@ import {
   type PluginBindings,
   type PluginClearTarget,
   type PluginCredit,
+  type PluginCreditStars,
   type PluginDetail,
   type PluginHostStorage,
   type PluginStats,
   type PluginStatus,
-  type PluginTestResult,
+  type PluginViewBlock,
 } from "./plugin-model";
 
-const testTones: Record<PluginTestResult["status"], StatusTone> = {
+type Translate = ReturnType<typeof useT>;
+
+const testTones: Record<string, StatusTone> = {
   ok: "positive",
   error: "negative",
   failed: "negative",
-};
-
-/** Full names of the licenses plugins credit most; others show as written. */
-const licenseNames: Record<string, string> = {
-  "Apache-2.0": "Apache License 2.0",
-  MIT: "MIT License",
-  "BSD-2-Clause": "BSD 2-Clause License",
-  "BSD-3-Clause": "BSD 3-Clause License",
-  "MPL-2.0": "Mozilla Public License 2.0",
-  "GPL-3.0-only": "GNU GPL v3.0",
-  "GPL-3.0-or-later": "GNU GPL v3.0 or later",
-  "AGPL-3.0-only": "GNU AGPL v3.0",
-  "AGPL-3.0-or-later": "GNU AGPL v3.0 or later",
-  "LGPL-3.0-only": "GNU LGPL v3.0",
-  ISC: "ISC License",
 };
 
 function displayAddress(url: string): string {
@@ -64,9 +64,33 @@ function CardTitle({ children }: { children: string }) {
 }
 
 /**
- * The plugin page's overview: the plugin's server and its last test, the
- * values sessions are bound to, what the plugin says of itself and the
- * projects it credits.
+ * What the last test and the plugin's own status say, as one view: their
+ * rows in order, a row of the status replacing the test's of the same label,
+ * since the status is read anew; their other blocks after.
+ */
+function statusView(...views: Array<PluginViewBlock[] | undefined>) {
+  const items: Array<{ label: string; value: string; mono?: boolean }> = [];
+  const others: PluginViewBlock[] = [];
+  for (const block of views.flatMap((view) => view ?? [])) {
+    if (block.type !== "kv") {
+      others.push(block);
+      continue;
+    }
+    for (const item of block.items) {
+      const at = items.findIndex((kept) => kept.label === item.label);
+      if (at >= 0) items[at] = item;
+      else items.push(item);
+    }
+  }
+  const merged: PluginViewBlock[] =
+    items.length > 0 ? [{ type: "kv", items }] : [];
+  return [...merged, ...others];
+}
+
+/**
+ * The plugin page's overview: the plugin joined to AstrLink and what its
+ * server says, how it ran lately, the values sessions are bound to, what is
+ * kept for it and the projects it is built on.
  */
 export function PluginOverview({
   detail,
@@ -75,6 +99,8 @@ export function PluginOverview({
   busy = false,
   onClear,
   stats = null,
+  stars = null,
+  linkPlay = 0,
   now = new Date(),
 }: {
   detail: PluginDetail;
@@ -83,103 +109,187 @@ export function PluginOverview({
   statusError: string | null;
   busy?: boolean;
   onClear?: (what: PluginClearTarget) => Promise<boolean>;
+  /** The GitHub stars of the projects the plugin credits. */
+  stars?: PluginCreditStars | null;
+  /** Each new value plays the link joining, as when the plugin is enabled. */
+  linkPlay?: number;
   now?: Date;
+}) {
+  return (
+    <div
+      className="@container/overview grid gap-3"
+      data-testid="plugin-overview"
+    >
+      {statusError ? (
+        <FormMessage tone="error">{statusError}</FormMessage>
+      ) : null}
+      <ConnectionCard
+        detail={detail}
+        linkPlay={linkPlay}
+        now={now}
+        status={status}
+        statusError={statusError}
+      />
+      {stats ? <EffectCard detail={detail} stats={stats} /> : null}
+      {status?.bindings?.map((bindings) => (
+        <BindingsCard bindings={bindings} key={bindings.key} now={now} />
+      ))}
+      {detail.host_storage.length > 0 ? (
+        <StorageCard busy={busy} detail={detail} onClear={onClear} />
+      ) : null}
+      {detail.credits.length > 0 ? (
+        <CreditsLine credits={detail.credits} stars={stars} />
+      ) : null}
+    </div>
+  );
+}
+
+/** How the link stands, and its badge. */
+function linkState(
+  detail: PluginDetail,
+  status: PluginStatus | null,
+  t: Translate,
+): { state: ConnectionLinkState; tone: StatusTone; text: string } {
+  if (!detail.enabled)
+    return {
+      state: "off",
+      tone: "neutral",
+      text: t("plugins.state.disabled"),
+    };
+  if (!detail.hooks.includes("testConnection"))
+    return {
+      state: "connected",
+      tone: "positive",
+      text: t("plugins.state.running"),
+    };
+  const test = status?.last_test;
+  if (!test)
+    return {
+      state: "idle",
+      tone: "neutral",
+      text: t("plugins.overview.notTested"),
+    };
+  return {
+    state: test.status === "ok" ? "connected" : "failed",
+    tone: testTones[test.status] ?? "neutral",
+    text: t(`plugins.testStatus.${test.status}`),
+  };
+}
+
+/**
+ * The plugin joined to AstrLink, with its server under it and the last test
+ * on the link, then what the test and the plugin's own status say, two
+ * columns wide where there is room.
+ */
+function ConnectionCard({
+  detail,
+  status,
+  statusError,
+  now,
+  linkPlay,
+}: {
+  detail: PluginDetail;
+  status: PluginStatus | null;
+  statusError: string | null;
+  now: Date;
+  linkPlay: number;
 }) {
   const t = useT();
   const server = detail.settings.find((setting) => setting.type === "server");
   const describes = detail.hooks.includes("describeStatus");
+  const address = server ? settingValue(detail.config, server.key) : undefined;
+  const view = statusView(
+    status?.last_test?.view,
+    describes ? status?.view : undefined,
+  );
+  const link = linkState(detail, status, t);
+  const test = status?.last_test;
   return (
-    <div className="grid gap-3" data-testid="plugin-overview">
-      {statusError ? (
-        <FormMessage tone="error">{statusError}</FormMessage>
-      ) : null}
-      {server || detail.hooks.includes("testConnection") ? (
-        <Panel data-testid="plugin-connection">
-          <PanelHeader
-            actions={
-              status?.last_test ? (
-                <StatusBadge tone={testTones[status.last_test.status]}>
-                  {t(`plugins.testStatus.${status.last_test.status}`)}
-                </StatusBadge>
-              ) : (
-                <StatusBadge tone="neutral">
-                  {t("plugins.overview.notTested")}
-                </StatusBadge>
-              )
-            }
-            size="sm"
-          >
-            <CardTitle>{t("plugins.overview.connection")}</CardTitle>
-          </PanelHeader>
-          <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 p-3 text-xs">
-            {server ? (
-              <ServerRow detail={detail} serverKey={server.key} />
-            ) : null}
-            {status?.last_test ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("plugins.overview.lastTest")}
-                </dt>
-                <dd className="min-w-0 break-words">
-                  {status.last_test.summary}
-                  <span className="text-muted-foreground">
-                    {" · "}
-                    {formatAgo(new Date(status.last_test.tested_at), now)}
+    <Panel data-testid="plugin-connection">
+      <ConnectionLink
+        badge={<StatusBadge tone={link.tone}>{link.text}</StatusBadge>}
+        className="px-4 pt-5 pb-4"
+        data-testid="plugin-link"
+        detail={
+          test
+            ? `${test.summary} · ${formatAgo(new Date(test.tested_at), now)}`
+            : undefined
+        }
+        from={{
+          mark: (
+            <img
+              alt=""
+              className="size-7"
+              height={28}
+              src={astrlinkLogo}
+              width={28}
+            />
+          ),
+          name: "AstrLink",
+          caption: t("plugins.overview.gateway"),
+        }}
+        playKey={linkPlay}
+        state={link.state}
+        to={{
+          mark: <PluginIcon className="size-7" icon={detail.icon} />,
+          name: detail.name,
+          caption: server ? (
+            typeof address === "string" && address !== "" ? (
+              <span className="inline-flex items-center gap-1">
+                <span className="font-mono">{displayAddress(address)}</span>
+                {plaintextOrigin(address) ? (
+                  <span className="text-warning-foreground">
+                    {t("plugins.network.plaintext")}
                   </span>
-                </dd>
-              </>
-            ) : null}
-          </dl>
-          {status?.last_test?.view && status.last_test.view.length > 0 ? (
-            <div className="px-3 pb-3">
+                ) : null}
+              </span>
+            ) : (
+              t("plugins.overview.noServer")
+            )
+          ) : undefined,
+        }}
+      />
+      {view.length > 0 ||
+      (describes && (status === null || status.view_error)) ? (
+        <div className="grid gap-2 border-t p-3 text-xs">
+          {describes && status?.view_error ? (
+            <p
+              className="flex min-w-0 items-center gap-1 text-warning-foreground"
+              data-testid="plugin-status-error"
+            >
+              {t("plugins.overview.statusUnread")}
+              <HelpPopover label={t("plugins.overview.statusErrorLabel")}>
+                <p className="break-words">{status.view_error}</p>
+              </HelpPopover>
+            </p>
+          ) : null}
+          {view.length > 0 ? (
+            <div data-testid="plugin-own-status">
               <PluginView
-                blocks={status.last_test.view}
-                truncated={status.last_test.truncated}
+                blocks={view}
+                kvClassName="grid-cols-[7rem_minmax(0,1fr)] gap-x-4 gap-y-2 @[640px]/overview:grid-cols-[7rem_minmax(0,1fr)_7rem_minmax(0,1fr)]"
+                truncated={
+                  !!status?.truncated || !!status?.last_test?.truncated
+                }
                 truncatedLabel={t("plugins.truncated")}
               />
             </div>
           ) : null}
-        </Panel>
-      ) : null}
-      {status?.bindings?.map((bindings) => (
-        <BindingsCard bindings={bindings} key={bindings.key} now={now} />
-      ))}
-      {stats ? <EffectCard detail={detail} stats={stats} /> : null}
-      {describes && status === null && !statusError ? (
-        <LoadingState label={t("plugins.loading")} />
-      ) : null}
-      {describes && status?.view_error ? (
-        <FormMessage tone="warning">{status.view_error}</FormMessage>
-      ) : null}
-      {describes && status?.view && status.view.length > 0 ? (
-        <Panel data-testid="plugin-own-status">
-          <PanelHeader size="sm">
-            <CardTitle>{t("plugins.overview.pluginStatus")}</CardTitle>
-          </PanelHeader>
-          <div className="p-3">
-            <PluginView
-              blocks={status.view}
-              truncated={status.truncated}
-              truncatedLabel={t("plugins.truncated")}
-            />
-          </div>
-        </Panel>
+          {describes && status === null && !statusError ? (
+            <LoadingState label={t("plugins.loading")} />
+          ) : null}
+        </div>
       ) : null}
       {describes &&
       status !== null &&
       !(status.view && status.view.length > 0) &&
+      !status.view_error &&
       !detail.granted_capabilities.includes("ui.views") ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="border-t p-3 text-xs text-muted-foreground">
           {t("plugins.overviewNeedsViews")}
         </p>
       ) : null}
-      {detail.host_storage.length > 0 ? (
-        <StoredCard busy={busy} detail={detail} onClear={onClear} />
-      ) : null}
-      {detail.credits.length > 0 ? (
-        <CreditsCard credits={detail.credits} />
-      ) : null}
-    </div>
+    </Panel>
   );
 }
 
@@ -191,11 +301,32 @@ const clearable: Partial<Record<PluginHostStorage["kind"], PluginClearTarget>> =
     lookup_credentials: "lookups",
   };
 
+/** What holds memory text of what the host keeps. */
+const holdsMemory: Partial<Record<PluginHostStorage["kind"], boolean>> = {
+  resident_block: true,
+};
+
+type Place = "database" | "memory" | "records";
+
+/** Where each thing is kept, which the card groups them by. */
+const places: Record<PluginHostStorage["kind"], Place> = {
+  session_bindings: "database",
+  workspace_bindings: "database",
+  plugin_sessions: "database",
+  plugin_values: "database",
+  resident_block: "memory",
+  lookup_credentials: "memory",
+  request_records: "records",
+};
+
+const placeOrder: Place[] = ["database", "memory", "records"];
+
 /**
- * What is kept for the plugin, where, whether it holds conversation text and
- * for how long: what the host keeps, then what the plugin says it keeps.
+ * What is kept for the plugin, a column for each place it is kept in, with
+ * how much and clearing what can be cleared. What each one is and how long
+ * it stays is in the one ? of the card.
  */
-function StoredCard({
+function StorageCard({
   detail,
   busy,
   onClear,
@@ -209,62 +340,82 @@ function StoredCard({
   // Credentials are voided, not cleared: each session gets a new one.
   const actionLabel = (what: PluginClearTarget) =>
     what === "lookups" ? t("plugins.stored.revoke") : t("plugins.stored.clear");
+  const groups = placeOrder
+    .map((place) => ({
+      place,
+      kept: detail.host_storage.filter((kept) => places[kept.kind] === place),
+    }))
+    .filter((group) => group.kept.length > 0);
   return (
     <Panel data-testid="plugin-stored">
-      <PanelHeader size="sm">
+      <PanelHeader
+        actions={
+          <HelpPopover label={t("plugins.stored.helpLabel")} size="wide">
+            <StorageHelp detail={detail} />
+          </HelpPopover>
+        }
+        size="sm"
+      >
         <CardTitle>{t("plugins.stored.title")}</CardTitle>
       </PanelHeader>
-      <ul className="divide-y text-xs">
-        {detail.host_storage.map((kept) => {
-          const what = clearable[kept.kind];
-          return (
-            <li
-              className="flex min-w-0 items-start gap-3 px-3 py-2"
-              data-testid="plugin-stored-item"
-              key={kept.kind}
-            >
-              <div className="grid min-w-0 flex-1 gap-0.5">
-                <span className="font-medium">
-                  {t(`plugins.stored.kinds.${kept.kind}.label`)}
-                </span>
-                <span className="text-muted-foreground">
-                  {t(`plugins.stored.kinds.${kept.kind}.detail`)}
-                </span>
-                {kept.kind === "plugin_values"
-                  ? detail.storage.map((item) => (
-                      <span className="text-muted-foreground" key={item.label}>
-                        {t("plugins.stored.declared", {
-                          label: item.label,
-                          content: item.content
-                            ? t("plugins.stored.withContent")
-                            : t("plugins.stored.withoutContent"),
-                          retention: item.retention,
-                        })}
+      <div
+        className="grid gap-px bg-border @[640px]/overview:[grid-template-columns:repeat(var(--places),minmax(0,1fr))]"
+        style={{ "--places": groups.length } as CSSProperties}
+      >
+        {groups.map(({ place, kept: items }) => (
+          <section
+            className="bg-card p-3"
+            data-testid="plugin-stored-place"
+            key={place}
+          >
+            <h4 className="mb-2 text-micro font-medium text-muted-foreground">
+              {t(`plugins.stored.places.${place}`)}
+            </h4>
+            <ul className="grid gap-1.5 text-xs">
+              {items.map((kept) => {
+                const what = clearable[kept.kind];
+                return (
+                  <li
+                    className="flex min-h-6 min-w-0 items-center justify-between gap-2"
+                    data-testid="plugin-stored-item"
+                    key={kept.kind}
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate">
+                        {t(`plugins.stored.kinds.${kept.kind}.label`)}
                       </span>
-                    ))
-                  : null}
-              </div>
-              {kept.count !== undefined ? (
-                <span className="shrink-0 text-muted-foreground tabular-nums">
-                  {t("plugins.stored.count", { count: kept.count })}
-                </span>
-              ) : null}
-              {what && onClear ? (
-                <Button
-                  className="h-6 shrink-0 px-2 text-xs"
-                  disabled={busy || kept.count === 0}
-                  onClick={() => setClearing(what)}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  {actionLabel(what)}
-                </Button>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
+                      {holdsMemory[kept.kind] ? (
+                        <StatusBadge className="shrink-0" tone="pending">
+                          {t("plugins.stored.holds.memory")}
+                        </StatusBadge>
+                      ) : null}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      {kept.count !== undefined ? (
+                        <span className="text-muted-foreground tabular-nums">
+                          {t("plugins.stored.count", { count: kept.count })}
+                        </span>
+                      ) : null}
+                      {what && onClear ? (
+                        <Button
+                          className="h-6 px-2 text-xs"
+                          disabled={busy || kept.count === 0}
+                          onClick={() => setClearing(what)}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          {actionLabel(what)}
+                        </Button>
+                      ) : null}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
+      </div>
       <ConfirmDialog
         confirmLabel={clearing ? actionLabel(clearing) : ""}
         description={
@@ -287,35 +438,61 @@ function StoredCard({
   );
 }
 
-function ServerRow({
-  detail,
-  serverKey,
-}: {
-  detail: PluginDetail;
-  serverKey: string;
-}) {
+/** What each kept thing is and how long it stays, behind the card's ?. */
+function StorageHelp({ detail }: { detail: PluginDetail }) {
   const t = useT();
-  const address = settingValue(detail.config, serverKey);
   return (
-    <>
-      <dt className="text-muted-foreground">{t("plugins.overview.server")}</dt>
-      <dd className="flex min-w-0 flex-wrap items-center gap-2">
-        {typeof address === "string" && address !== "" ? (
-          <>
-            <span className="font-mono break-all">{address}</span>
-            {plaintextOrigin(address) ? (
-              <StatusBadge tone="pending">
-                {t("plugins.network.plaintext")}
-              </StatusBadge>
-            ) : null}
-          </>
-        ) : (
-          <span className="text-muted-foreground">
-            {t("plugins.overview.noServer")}
-          </span>
-        )}
-      </dd>
-    </>
+    <div className="grid gap-3" data-testid="plugin-stored-help">
+      <p>{t("plugins.stored.help")}</p>
+      {placeOrder.map((place) => {
+        const items = detail.host_storage.filter(
+          (kept) => places[kept.kind] === place,
+        );
+        if (items.length === 0) return null;
+        return (
+          <section className="grid gap-1.5" key={place}>
+            <h4 className="text-xs font-medium text-muted-foreground">
+              {t(`plugins.stored.places.${place}`)}
+            </h4>
+            <dl className="grid gap-1.5">
+              {items.map((kept) => (
+                <div key={kept.kind}>
+                  <dt className="font-medium">
+                    {t(`plugins.stored.kinds.${kept.kind}.label`)}
+                  </dt>
+                  <dd className="text-muted-foreground">
+                    {t(`plugins.stored.kinds.${kept.kind}.what`)}
+                    {t("plugins.stored.retention", {
+                      retention: t(
+                        `plugins.stored.kinds.${kept.kind}.retention`,
+                      ),
+                    })}
+                  </dd>
+                  {kept.kind === "plugin_values" &&
+                  detail.storage.length > 0 ? (
+                    <dd>
+                      <ul className="mt-1 grid gap-0.5 text-muted-foreground">
+                        {detail.storage.map((item) => (
+                          <li key={item.label}>
+                            {t("plugins.stored.declared", {
+                              label: item.label,
+                              retention: item.retention,
+                            })}
+                            {item.content
+                              ? ` · ${t("plugins.stored.holds.conversation")}`
+                              : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </dd>
+                  ) : null}
+                </div>
+              ))}
+            </dl>
+          </section>
+        );
+      })}
+    </div>
   );
 }
 
@@ -390,37 +567,70 @@ function BindingsCard({
   );
 }
 
-function CreditsCard({ credits }: { credits: PluginCredit[] }) {
+/** github.com/owner/name of a repository address, null for any other. */
+function githubRepository(url: string): string | null {
+  const match =
+    /^https:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(
+      url,
+    );
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
+/**
+ * The projects the plugin is built on, one line under the overview: its name,
+ * and for a GitHub repository its stars beside GitHub's mark, which opens it.
+ */
+function CreditsLine({
+  credits,
+  stars,
+}: {
+  credits: PluginCredit[];
+  stars: PluginCreditStars | null;
+}) {
   const t = useT();
   return (
-    <Panel data-testid="plugin-credits">
-      <PanelHeader size="sm">
-        <CardTitle>{t("plugins.overview.credits")}</CardTitle>
-      </PanelHeader>
-      <ul className="divide-y">
-        {credits.map((credit) => (
-          <li className="grid gap-1.5 p-3 text-xs" key={credit.url}>
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-              <strong className="text-sm font-semibold">{credit.name}</strong>
-              <span className="text-muted-foreground">
-                {[
-                  credit.owner,
-                  credit.license
-                    ? (licenseNames[credit.license] ?? credit.license)
-                    : undefined,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </span>
-              <span className="flex-1" />
+    <div
+      className="grid gap-1.5 rounded-md border px-3 py-2.5 text-xs"
+      data-testid="plugin-credits"
+    >
+      {credits.map((credit) => {
+        const repository = githubRepository(credit.url);
+        const count = stars?.[credit.url];
+        return (
+          <div
+            className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1"
+            data-testid="plugin-credit"
+            key={credit.url}
+          >
+            <span className="min-w-0">
+              {t("plugins.overview.uses", { name: credit.name })}
+            </span>
+            {repository ? (
+              <GitHubRepoBadge
+                href={credit.url}
+                label={
+                  count === undefined
+                    ? t("plugins.overview.onGitHub", { name: credit.name })
+                    : t("plugins.overview.onGitHubStars", {
+                        name: credit.name,
+                        count,
+                        stars: formatExactNumber(count),
+                      })
+                }
+                stars={count}
+                starsText={
+                  count === undefined ? undefined : formatCompactNumber(count)
+                }
+                title={[repository, credit.license].filter(Boolean).join(" · ")}
+              />
+            ) : (
               <ExternalLink className="text-xs" href={credit.url}>
                 {displayAddress(credit.url)}
               </ExternalLink>
-            </div>
-            {credit.note ? <p className="leading-5">{credit.note}</p> : null}
-          </li>
-        ))}
-      </ul>
-    </Panel>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }

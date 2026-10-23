@@ -168,6 +168,18 @@ func (counted *day) record(record contract.RequestPluginRecord, session string) 
 		if record.Lookup == nil {
 			break
 		}
+		if record.Lookup.Writes {
+			// A report the plugin wrote counts with the writes; one the
+			// gateway turned away is no write.
+			switch record.Status {
+			case contract.PluginRecordOK:
+				stats.Write.OK++
+				stats.Write.Reported++
+			case contract.PluginRecordFailed:
+				stats.Write.Failed++
+			}
+			break
+		}
 		if record.Status == contract.PluginRecordSkipped {
 			stats.Lookup.Refused++
 			break

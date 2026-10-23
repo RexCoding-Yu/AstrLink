@@ -130,6 +130,8 @@ type Plugin struct {
 	Key    string
 	Origin Origin
 	File   string
+	// Icon is the plugin's icon as a data URL, "" for none.
+	Icon string
 	// Meta is the manifest, zero when the plugin did not load.
 	Meta Meta
 	// Err is why the plugin did not load, nil when it did.
@@ -402,7 +404,7 @@ func (manager *Manager) publish(settings map[string]Settings) {
 	for _, source := range manager.sources {
 		result := manager.programs[sourceIdentity(source)]
 		current := settings[source.Key]
-		if kept := previous.Plugin(source.Key); kept != nil && kept.Origin == source.Origin && kept.program == result.program && kept.Err == result.err && reflect.DeepEqual(kept.Settings, current) {
+		if kept := previous.Plugin(source.Key); kept != nil && kept.Origin == source.Origin && kept.Icon == source.Icon && kept.program == result.program && kept.Err == result.err && reflect.DeepEqual(kept.Settings, current) {
 			plugins = append(plugins, kept)
 			continue
 		}
@@ -411,7 +413,7 @@ func (manager *Manager) publish(settings map[string]Settings) {
 			count = &counter{}
 			manager.counters[source.Key] = count
 		}
-		plugin := &Plugin{Key: source.Key, Origin: source.Origin, File: source.File, Settings: current, services: manager.services, counter: count}
+		plugin := &Plugin{Key: source.Key, Origin: source.Origin, File: source.File, Icon: source.Icon, Settings: current, services: manager.services, counter: count}
 		if result.program == nil {
 			plugin.Err = result.err
 		} else {

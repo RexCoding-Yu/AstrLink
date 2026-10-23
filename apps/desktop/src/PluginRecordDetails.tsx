@@ -1,10 +1,11 @@
 import { useState } from "react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { DisclosureRow } from "@/components/DisclosureRow";
 import { PluginView } from "@/components/PluginView";
-import { StatusBadge } from "@/components/StatusBadge";
-import type { StatusTone } from "@/components/StatusDot";
+import { StatusDot, type StatusTone } from "@/components/StatusDot";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { runPluginAction } from "./bridge";
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
@@ -57,9 +58,13 @@ const knownTriggers = new Set([
   "auto",
 ]);
 
+/** The limits a report has apart from the queries'. */
+const reportLimits = new Set(["rate_limited", "turn_limit"]);
+
 const knownObserve = new Set([
   "queued",
   "awaiting_reply",
+  "held_unbound",
   "skipped_unbound",
   "skipped_privacy",
   "skipped_binding_turn",
@@ -70,13 +75,170 @@ const knownObserve = new Set([
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+type Translate = ReturnType<typeof useT>;
+
+/** Why the hook gave the request nothing, in words. */
+function skipReason(entry: RequestPluginRecord, t: Translate): string {
+  const reason = entry.skipped_reason;
+  if (!reason) return "";
+  if (!knownSkipReasons.has(reason)) return reason;
+  return entry.lookup?.writes && reportLimits.has(reason)
+    ? t(`pluginRecords.reportSkipReasons.${reason}`)
+    : t(`pluginRecords.skipReasons.${reason}`);
+}
+
+function observeState(observe: string, t: Translate): string {
+  return knownObserve.has(observe)
+    ? t(`pluginRecords.observeStates.${observe}`)
+    : observe;
+}
+
+function lookupText(entry: RequestPluginRecord, t: Translate): string {
+  const lookup = entry.lookup;
+  if (!lookup) return "";
+  return [
+    lookup.tool,
+    t("pluginRecords.lookupInput", { count: lookup.input_runes }),
+    entry.status === "ok"
+      ? t("pluginRecords.lookupResult", {
+          size: formatBytes(lookup.result_bytes),
+        })
+      : "",
+    lookup.hits !== undefined
+      ? t("pluginRecords.lookupHits", { count: lookup.hits })
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function injectionText(entry: RequestPluginRecord, t: Translate): string {
+  const injection = entry.injection;
+  if (!injection) return "";
+  return [
+    t(`pluginRecords.placement.${injection.placement}`),
+    formatBytes(injection.injected_bytes),
+    injection.replayed_blocks > 0
+      ? t("pluginRecords.replayed", { count: injection.replayed_blocks })
+      : "",
+    injection.dropped_items > 0
+      ? t("pluginRecords.dropped", { count: injection.dropped_items })
+      : "",
+    injection.usage_bytes
+      ? t("pluginRecords.usagePart", {
+          size: formatBytes(injection.usage_bytes),
+        })
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function networkText(entry: RequestPluginRecord, t: Translate): string {
+  const network = entry.network;
+  return [
+    t("pluginRecords.networkShort", {
+      count: network.requests,
+      wait: network.wait_ms,
+    }),
+    network.denied > 0
+      ? t("pluginRecords.networkDenied", { count: network.denied })
+      : "",
+    network.errors > 0
+      ? t("pluginRecords.networkErrors", { count: network.errors })
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /**
- * The plugins' parts in one request: what each plugin reported, its view,
- * and what the host did for it. The inspector's plugin tab shows them all,
- * grouped by plugin.
+ * The status a record shows: a block the plugin skipped while the request
+ * still carried the usage of its lookups was no skip as far as the request
+ * goes.
+ */
+export function shownStatus(
+  entry: RequestPluginRecord,
+): RequestPluginRecord["status"] {
+  return entry.status === "skipped" && (entry.injection?.usage_bytes ?? 0) > 0
+    ? "ok"
+    : entry.status;
+}
+
+/**
+ * What a record says at a glance, and what waits behind it. The headline is
+ * what the plugin did; the points under it are why, what it added to the
+ * request and what became of the turn's capture; the rest, down to the
+ * hook's name, opens on demand.
+ */
+function describe(entry: RequestPluginRecord, t: Translate) {
+  const reason = skipReason(entry, t);
+  const usageOnly = shownStatus(entry) !== entry.status;
+  const observe =
+    entry.observe && entry.observe !== "queued"
+      ? observeState(entry.observe, t)
+      : "";
+  const headline =
+    entry.summary ||
+    (entry.status !== "ok" ? reason : "") ||
+    lookupText(entry, t) ||
+    (observe ? t("pluginRecords.observeLine", { state: observe }) : "");
+  const points = [
+    entry.trigger
+      ? knownTriggers.has(entry.trigger)
+        ? t(`pluginRecords.triggers.${entry.trigger}`)
+        : entry.trigger
+      : "",
+    entry.injection && entry.injection.injected_bytes > 0
+      ? t(usageOnly ? "pluginRecords.usageOnly" : "pluginRecords.injected", {
+          placement: t(`pluginRecords.placement.${entry.injection.placement}`),
+          size: formatBytes(entry.injection.injected_bytes),
+        })
+      : "",
+    entry.summary && reason ? reason : "",
+    observe && headline !== t("pluginRecords.observeLine", { state: observe })
+      ? t("pluginRecords.observeLine", { state: observe })
+      : "",
+  ].filter(Boolean);
+  const details: Array<[string, string, string?]> = [];
+  if (entry.injection)
+    details.push([t("pluginRecords.injection"), injectionText(entry, t)]);
+  if (entry.lookup)
+    details.push([
+      entry.lookup.writes
+        ? t("pluginRecords.report")
+        : t("pluginRecords.lookup"),
+      lookupText(entry, t),
+      "plugin-record-lookup",
+    ]);
+  if (entry.commands && entry.commands.length > 0)
+    details.push([t("pluginRecords.commands"), entry.commands.join(", ")]);
+  if (entry.network.requests > 0)
+    details.push([t("pluginRecords.network"), networkText(entry, t)]);
+  // Quiet: a turn that went as usual, with nothing of its own to say.
+  const quiet =
+    entry.status === "ok" &&
+    !entry.summary &&
+    !entry.lookup &&
+    points.length === 0 &&
+    !(entry.view && entry.view.length > 0) &&
+    !(entry.actions && entry.actions.length > 0);
+  return {
+    headline: headline || (quiet ? t("pluginRecords.quiet") : ""),
+    points,
+    details,
+    quiet,
+    usageOnly,
+  };
+}
+
+/**
+ * The plugins' parts in one request, one line each: what the plugin did,
+ * why and at what cost, in that order of weight. The sizes, the network and
+ * the plugin's own view open from the line; a failure opens by itself.
  */
 export function PluginRecordDetails({ record }: { record: RequestRecord }) {
   const t = useT();
@@ -122,159 +284,22 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
     );
   }
   return (
-    <div className="grid min-w-0 gap-4" data-testid="plugin-records">
-      {records.map((entry, index) => (
-        <section
-          className="grid min-w-0 gap-2"
-          data-testid="plugin-record"
-          key={`${entry.plugin}:${entry.hook}:${index}`}
-        >
-          <header className="flex min-w-0 flex-wrap items-center gap-2">
-            <strong className="truncate text-xs font-medium">
-              {entry.title}
-            </strong>
-            <StatusBadge tone={statusTones[entry.status]}>
-              {t(`pluginRecords.status.${entry.status}`)}
-            </StatusBadge>
-            <span className="truncate font-mono text-micro text-muted-foreground">
-              {entry.plugin} {entry.plugin_version} · {entry.hook}
-            </span>
-          </header>
-          {entry.summary ? <p className="text-xs">{entry.summary}</p> : null}
-          <dl className="grid min-w-0 grid-cols-[minmax(5rem,auto)_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
-            <dt className="text-muted-foreground">
-              {t("pluginRecords.elapsed")}
-            </dt>
-            <dd className="tabular-nums">{entry.elapsed_ms} ms</dd>
-            {entry.trigger ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("pluginRecords.trigger")}
-                </dt>
-                <dd>
-                  {knownTriggers.has(entry.trigger)
-                    ? t(`pluginRecords.triggers.${entry.trigger}`)
-                    : entry.trigger}
-                </dd>
-              </>
-            ) : null}
-            {entry.skipped_reason ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("pluginRecords.skipped")}
-                </dt>
-                <dd>
-                  {knownSkipReasons.has(entry.skipped_reason)
-                    ? t(`pluginRecords.skipReasons.${entry.skipped_reason}`)
-                    : entry.skipped_reason}
-                </dd>
-              </>
-            ) : null}
-            {entry.injection ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("pluginRecords.injection")}
-                </dt>
-                <dd>
-                  {t(`pluginRecords.placement.${entry.injection.placement}`)}
-                  {" · "}
-                  {formatBytes(entry.injection.injected_bytes)}
-                  {entry.injection.replayed_blocks > 0
-                    ? ` · ${t("pluginRecords.replayed", { count: entry.injection.replayed_blocks })}`
-                    : ""}
-                  {entry.injection.dropped_items > 0
-                    ? ` · ${t("pluginRecords.dropped", { count: entry.injection.dropped_items })}`
-                    : ""}
-                </dd>
-              </>
-            ) : null}
-            {entry.lookup ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("pluginRecords.lookup")}
-                </dt>
-                <dd className="tabular-nums" data-testid="plugin-record-lookup">
-                  <span className="font-mono">{entry.lookup.tool}</span>
-                  {" · "}
-                  {t("pluginRecords.lookupInput", {
-                    count: entry.lookup.input_runes,
-                  })}
-                  {entry.status === "ok"
-                    ? ` · ${t("pluginRecords.lookupResult", { size: formatBytes(entry.lookup.result_bytes) })}`
-                    : ""}
-                  {entry.lookup.hits !== undefined
-                    ? ` · ${t("pluginRecords.lookupHits", { count: entry.lookup.hits })}`
-                    : ""}
-                </dd>
-              </>
-            ) : null}
-            {entry.commands && entry.commands.length > 0 ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("pluginRecords.commands")}
-                </dt>
-                <dd className="font-mono">{entry.commands.join(", ")}</dd>
-              </>
-            ) : null}
-            {entry.network.requests > 0 ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("pluginRecords.network")}
-                </dt>
-                <dd className="tabular-nums">
-                  {t("pluginRecords.networkCount", {
-                    requests: entry.network.requests,
-                    denied: entry.network.denied,
-                    errors: entry.network.errors,
-                    wait: entry.network.wait_ms,
-                  })}
-                </dd>
-              </>
-            ) : null}
-            {entry.observe ? (
-              <>
-                <dt className="text-muted-foreground">
-                  {t("pluginRecords.observe")}
-                </dt>
-                <dd>
-                  {knownObserve.has(entry.observe)
-                    ? t(`pluginRecords.observeStates.${entry.observe}`)
-                    : entry.observe}
-                </dd>
-              </>
-            ) : null}
-          </dl>
-          {entry.view && entry.view.length > 0 ? (
-            <PluginView
-              blocks={entry.view}
-              truncated={entry.truncated}
-              truncatedLabel={t("pluginRecords.truncated")}
-            />
-          ) : null}
-          {entry.actions && entry.actions.length > 0 && record.session_id ? (
-            <div className="flex flex-wrap gap-2">
-              {entry.actions.map((action) => (
-                <Button
-                  className="h-7 text-xs"
-                  data-testid="plugin-record-action"
-                  disabled={running}
-                  key={action.id}
-                  onClick={() => {
-                    if (action.confirm)
-                      setConfirming({ plugin: entry.plugin, action });
-                    else void run(entry.plugin, action);
-                  }}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  {action.label}
-                </Button>
-              ))}
-            </div>
-          ) : null}
-        </section>
-      ))}
+    <div className="grid min-w-0" data-testid="plugin-records">
+      <ul className="min-w-0 divide-y rounded-md border">
+        {records.map((entry, index) => (
+          <PluginRecordRow
+            actions={record.session_id ? entry.actions : undefined}
+            entry={entry}
+            key={`${entry.plugin}:${entry.hook}:${index}`}
+            onAction={(action) => {
+              if (action.confirm)
+                setConfirming({ plugin: entry.plugin, action });
+              else void run(entry.plugin, action);
+            }}
+            running={running}
+          />
+        ))}
+      </ul>
       <ConfirmDialog
         confirmLabel={confirming?.action.label ?? ""}
         description={<p>{confirming?.action.confirm}</p>}
@@ -289,6 +314,136 @@ export function PluginRecordDetails({ record }: { record: RequestRecord }) {
         title={confirming?.action.label ?? ""}
       />
     </div>
+  );
+}
+
+/** The label column the details and the plugin's own view share. */
+const detailColumns = "grid-cols-[5rem_minmax(0,1fr)]";
+
+function PluginRecordRow({
+  entry,
+  actions,
+  running,
+  onAction,
+}: {
+  entry: RequestPluginRecord;
+  actions?: PluginRecordAction[];
+  running: boolean;
+  onAction: (action: PluginRecordAction) => void;
+}) {
+  const t = useT();
+  const { headline, points, details, quiet, usageOnly } = describe(entry, t);
+  const view = entry.view && entry.view.length > 0 ? entry.view : null;
+  const buttons = actions && actions.length > 0 ? actions : null;
+  const line = (
+    <div className="grid min-w-0 flex-1 gap-0.5">
+      <div className="flex min-w-0 items-center gap-2">
+        <StatusDot tone={statusTones[entry.status]} />
+        <span
+          className={cn(
+            "min-w-0 truncate text-xs font-medium",
+            quiet && "font-normal text-muted-foreground",
+          )}
+        >
+          {entry.title}
+        </span>
+        {entry.status !== "ok" && !usageOnly ? (
+          <span
+            className={cn(
+              "shrink-0 text-micro",
+              entry.status === "failed"
+                ? "text-danger-foreground"
+                : "text-muted-foreground",
+            )}
+          >
+            {t(`pluginRecords.status.${entry.status}`)}
+          </span>
+        ) : null}
+        <span className="flex-1" />
+        {entry.elapsed_ms > 0 ? (
+          <span className="shrink-0 text-micro text-muted-foreground tabular-nums">
+            {entry.elapsed_ms} ms
+          </span>
+        ) : null}
+      </div>
+      {headline ? (
+        <p
+          className={cn(
+            "min-w-0 pl-3.5 text-xs break-words",
+            quiet && "text-muted-foreground",
+            entry.status === "failed" && "text-danger-foreground",
+          )}
+          data-testid="plugin-record-headline"
+        >
+          {headline}
+        </p>
+      ) : null}
+      {points.length > 0 ? (
+        <p className="min-w-0 pl-3.5 text-micro break-words text-muted-foreground">
+          {points.join(" · ")}
+        </p>
+      ) : null}
+    </div>
+  );
+  return (
+    <li data-testid="plugin-record">
+      <DisclosureRow defaultOpen={entry.status === "failed"} summary={line}>
+        <div
+          className="grid min-w-0 gap-2.5 pt-0.5 pr-3 pb-3 pl-[1.625rem]"
+          data-testid="plugin-record-details"
+        >
+          {details.length > 0 ? (
+            <dl
+              className={cn(
+                "grid min-w-0 gap-x-4 gap-y-1 text-xs",
+                detailColumns,
+              )}
+            >
+              {details.map(([label, value, testID]) => (
+                <div className="contents" key={label}>
+                  <dt className="text-muted-foreground">{label}</dt>
+                  <dd
+                    className="min-w-0 break-words tabular-nums"
+                    data-testid={testID}
+                  >
+                    {value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+          {view ? (
+            <PluginView
+              blocks={view}
+              kvClassName={detailColumns}
+              truncated={entry.truncated}
+              truncatedLabel={t("pluginRecords.truncated")}
+            />
+          ) : null}
+          {buttons ? (
+            <div className="flex flex-wrap gap-2">
+              {buttons.map((action) => (
+                <Button
+                  className="h-7 text-xs"
+                  data-testid="plugin-record-action"
+                  disabled={running}
+                  key={action.id}
+                  onClick={() => onAction(action)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {action.label}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+          <p className="truncate font-mono text-micro text-muted-foreground">
+            {entry.plugin} {entry.plugin_version} · {entry.hook}
+          </p>
+        </div>
+      </DisclosureRow>
+    </li>
   );
 }
 

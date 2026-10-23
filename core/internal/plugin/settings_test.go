@@ -27,7 +27,7 @@ func settingsMeta() Meta {
 		{Key: HostSettingRefresh, Group: "会话"},
 	}
 	meta.Storage = []StorageItem{{Label: "项目对应的服务器编号", Retention: "停用插件时可以清除"}}
-	meta.Credits = []Credit{{Name: "PowerContext", Owner: "OceanBase", License: "Apache-2.0", URL: "https://github.com/oceanbase/powercontext", Note: "本插件只通过公开的 HTTP 接口通信。"}}
+	meta.Credits = []Credit{{Name: "PowerContext", Owner: "OceanBase", License: "Apache-2.0", URL: "https://github.com/oceanbase/powercontext"}}
 	return meta
 }
 
@@ -118,6 +118,33 @@ func TestConfigGetsTheDefaultsItLacks(t *testing.T) {
 	}
 	if got := string(validMeta().WithDefaults(json.RawMessage(`{"a":1}`))); got != `{"a":1}` {
 		t.Fatalf("a manifest without settings changed the config: %s", got)
+	}
+}
+
+func TestSwitchOnReadsTheConfigThenTheDefault(t *testing.T) {
+	meta := settingsMeta()
+	for _, test := range []struct {
+		config string
+		want   bool
+	}{
+		{``, true},
+		{`{"askProject":false}`, false},
+		{`{"askProject":true}`, true},
+		{`{"askProject":null}`, true},
+		{`{"askProject":"no"}`, false},
+		{`[1]`, true},
+	} {
+		if got := meta.SwitchOn(json.RawMessage(test.config), "askProject"); got != test.want {
+			t.Fatalf("SwitchOn(%s) = %v, want %v", test.config, got, test.want)
+		}
+	}
+	// What is no switch of the plugin's is off, and so is a switch without
+	// a default that the config leaves out.
+	meta.Settings = append(meta.Settings, Setting{Key: "quiet", Label: "安静", Type: SettingSwitch})
+	for _, key := range []string{"style", "missing", HostSettingTrusted, "quiet"} {
+		if meta.SwitchOn(nil, key) {
+			t.Fatalf("SwitchOn(%s) = true", key)
+		}
 	}
 }
 

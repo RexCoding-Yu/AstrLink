@@ -24,11 +24,17 @@ const badgeTones: Record<"ok" | "warn" | "error", StatusTone> = {
 export function PluginView({
   blocks,
   className,
+  kvClassName,
   truncated = false,
   truncatedLabel,
 }: {
   blocks: PluginViewBlock[];
   className?: string;
+  /**
+   * Classes for the label-value rows, such as the label column of the rows
+   * around the view, so both line up.
+   */
+  kvClassName?: string;
   truncated?: boolean;
   /** Shown under the view when Core cut it to its limits. */
   truncatedLabel: string;
@@ -39,7 +45,11 @@ export function PluginView({
       data-testid="plugin-view"
     >
       {blocks.map((block, index) => (
-        <PluginViewBlockItem block={block} key={index} />
+        <PluginViewBlockItem
+          block={block}
+          key={index}
+          kvClassName={kvClassName}
+        />
       ))}
       {truncated ? (
         <p className="text-micro text-muted-foreground">{truncatedLabel}</p>
@@ -48,11 +58,22 @@ export function PluginView({
   );
 }
 
-function PluginViewBlockItem({ block }: { block: PluginViewBlock }) {
+function PluginViewBlockItem({
+  block,
+  kvClassName,
+}: {
+  block: PluginViewBlock;
+  kvClassName?: string;
+}) {
   switch (block.type) {
     case "kv":
       return (
-        <dl className="grid min-w-0 grid-cols-[minmax(5rem,auto)_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
+        <dl
+          className={cn(
+            "grid min-w-0 grid-cols-[minmax(5rem,auto)_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs",
+            kvClassName,
+          )}
+        >
           {block.items.map((item, index) => (
             <div className="contents" key={index}>
               <dt className="text-muted-foreground">{item.label}</dt>

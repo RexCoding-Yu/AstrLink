@@ -59,7 +59,7 @@ declare namespace AstrLinkPlugin {
   interface Tool {
     /** A lowercase letter, then up to 31 lowercase letters, digits and underscores. */
     name: string;
-    /** What the query finds and when to run it; at most 300 characters in each language. */
+    /** What the query finds, or the report keeps, and when to run it; at most 300 characters in each language. */
     description: Localized;
     /** At most 8. */
     params?: ToolParam[];
@@ -69,6 +69,14 @@ declare namespace AstrLinkPlugin {
      * model only through a block that names it, as {{lookup:name}}.
      */
     unbound?: boolean;
+    /**
+     * A report: the model hands the plugin something to keep. Its command
+     * posts the parameters; it needs the session's values, has limits of
+     * its own (2 a turn, 6 a minute) and answers without the data notice.
+     */
+    writes?: boolean;
+    /** The key of a switch in settings that turns the tool on and off. */
+    setting?: string;
   }
 
   /** A string or number parameter. Strings are trimmed; anything not declared is refused. */
@@ -156,10 +164,8 @@ declare namespace AstrLinkPlugin {
     owner?: string;
     /** An SPDX identifier, such as Apache-2.0. */
     license?: string;
-    /** An https address. */
+    /** An https address; a GitHub repository also shows its stars. */
     url: string;
-    /** At most 200 characters. */
-    note?: string;
   }
 
   /**
@@ -263,6 +269,12 @@ declare namespace AstrLinkPlugin {
       /** The previous turn's typed text, at most 4 KiB. */
       previous?: string;
     };
+    /**
+     * Only in observeTurn: the turn came while the session had no value of
+     * the plugin's attributes and is captured now that it has one, with
+     * that value in meta.
+     */
+    late?: boolean;
   }
 
   /**
@@ -357,7 +369,7 @@ declare namespace AstrLinkPlugin {
   }
 
   interface ToolResult {
-    /** What the model reads, at most 8 KiB; the gateway marks it as data, not instructions. */
+    /** What the model reads, at most 8 KiB; the gateway marks a query's as data, not instructions. */
     text: string;
     /** How many things the text holds, for the plugin's statistics. */
     hits?: number;
@@ -403,7 +415,12 @@ declare namespace AstrLinkPlugin {
   }
 
   interface HttpResponse {
-    /** 0 when no response arrived; error then says why. HTTP errors come back as they are. */
+    /**
+     * 0 when no response arrived; error then says why. HTTP errors come back
+     * as they are. A body that could not be read in full (too_large, or a
+     * timeout while it came) keeps the status that arrived, with error set
+     * and neither json nor text.
+     */
     status: number;
     /** The first value of each header, keyed in lowercase. */
     headers: Record<string, string>;

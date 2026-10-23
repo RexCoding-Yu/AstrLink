@@ -9,6 +9,7 @@ import { HelpPopover } from "@/components/HelpPopover";
 import { IconButton } from "@/components/IconButton";
 import { LoadingState } from "@/components/LoadingState";
 import { Panel, PanelHeader } from "@/components/Panel";
+import { PluginIcon } from "@/components/PluginIcon";
 import { SplitWorkspace } from "@/components/SplitWorkspace";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
@@ -30,6 +31,7 @@ import {
   clearPluginData,
   deletePluginCredential,
   getPlugin,
+  getPluginCreditStars,
   getPluginHostSettings,
   getPluginStats,
   getPluginStatus,
@@ -49,6 +51,7 @@ import {
   MAX_INJECTION_BUDGET_BYTES,
   MIN_INJECTION_BUDGET_BYTES,
   type PluginClearTarget,
+  type PluginCreditStars,
   type PluginDetail,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
@@ -137,6 +140,9 @@ export function PluginManager({
   const [status, setStatus] = useState<PluginStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [stats, setStats] = useState<PluginStats | null>(null);
+  const [stars, setStars] = useState<PluginCreditStars | null>(null);
+  // Counts the times the plugin was joined anew: enabled, or tested fine.
+  const [linkPlay, setLinkPlay] = useState(0);
   const [tab, setTab] = useState<DetailTab>("overview");
   const [testing, setTesting] = useState(false);
   // Every detail Core sends starts the settings form afresh.
@@ -236,11 +242,18 @@ export function PluginManager({
     setDetail(null);
     setStatus(null);
     setStats(null);
+    setStars(null);
     setActionError(null);
     setTab("overview");
     if (!selectedKey) return;
     void loadDetail(selectedKey).then((next) => {
-      if (next?.state === "loaded") void loadStatus(selectedKey);
+      if (next?.state !== "loaded") return;
+      void loadStatus(selectedKey);
+      // GitHub's answer comes apart from everything else, if at all.
+      if (next.credits.length > 0)
+        void getPluginCreditStars(selectedKey)
+          .then(setStars)
+          .catch(() => setStars(null));
     });
   }, [selectedKey, loadDetail, loadStatus]);
 
@@ -315,10 +328,11 @@ export function PluginManager({
     setTesting(true);
     setActionError(null);
     try {
-      await testPlugin(key);
+      const result = await testPlugin(key);
       setTab("overview");
       // The overview shows the test, with what it changed in the counts.
       await loadStatus(key);
+      if (result.status === "ok") setLinkPlay((count) => count + 1);
     } catch (error) {
       setActionError(controlErrorMessage(error, t("plugins.testFailed")));
     } finally {
@@ -381,11 +395,38 @@ export function PluginManager({
                 onChange={(update) => void changeHost(update)}
               />
             ) : null}
-            {list ? (
-              <HelpPopover label={t("plugins.directoryHelpLabel")}>
-                <p>{t("plugins.directoryHelp")}</p>
-                <p className="font-mono text-xs break-all">{list.directory}</p>
-                <p>{t("plugins.rescanHelp")}</p>
+            {list || host ? (
+              <HelpPopover label={t("plugins.headerHelpLabel")} size="wide">
+                <div className="grid gap-3">
+                  {host ? (
+                    <>
+                      <section className="grid gap-1">
+                        <h3 className="text-xs font-medium text-muted-foreground">
+                          {t("plugins.host.pause")}
+                        </h3>
+                        <p>{t("plugins.host.pauseHelp")}</p>
+                      </section>
+                      <section className="grid gap-1">
+                        <h3 className="text-xs font-medium text-muted-foreground">
+                          {t("plugins.host.budget")}
+                        </h3>
+                        <p>{t("plugins.host.budgetHelp")}</p>
+                      </section>
+                    </>
+                  ) : null}
+                  {list ? (
+                    <section className="grid gap-1">
+                      <h3 className="text-xs font-medium text-muted-foreground">
+                        {t("plugins.directoryHelpLabel")}
+                      </h3>
+                      <p>{t("plugins.directoryHelp")}</p>
+                      <p className="font-mono text-xs break-all">
+                        {list.directory}
+                      </p>
+                      <p>{t("plugins.rescanHelp")}</p>
+                    </section>
+                  ) : null}
+                </div>
               </HelpPopover>
             ) : null}
             <Button
@@ -451,7 +492,7 @@ export function PluginManager({
           variant="page"
         />
       ) : list !== null ? (
-        <SplitWorkspace className="grid-rows-[auto_minmax(360px,1fr)] @[720px]:grid-cols-[minmax(15rem,0.8fr)_minmax(0,1.7fr)]">
+        <SplitWorkspace className="grid-rows-[auto_minmax(360px,1fr)] @[720px]:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)]">
           <Panel className="flex min-h-0 flex-col overflow-hidden">
             <ul
               aria-label={t("plugins.listLabel")}
@@ -501,7 +542,9 @@ export function PluginManager({
                 onRefreshStatus={() => void loadStatus(detail.key)}
                 onTab={setTab}
                 onTest={() => void runTest(detail.key)}
+                linkPlay={linkPlay}
                 revision={revision}
+                stars={stars}
                 stats={stats}
                 status={status}
                 statusError={statusError}
@@ -536,7 +579,11 @@ export function PluginManager({
                 granted_capabilities: grants,
               }),
             ).then((enabled) => {
-              if (enabled && target.hooks.includes("describeStatus"))
+              if (!enabled) return;
+              // Show the plugin joining AstrLink.
+              setTab("overview");
+              setLinkPlay((count) => count + 1);
+              if (target.hooks.includes("describeStatus"))
                 void loadStatus(target.key);
             });
         }}
@@ -578,6 +625,7 @@ function PluginRow({
       variant="ghost"
     >
       <span className="flex min-w-0 items-center gap-2">
+        <PluginIcon icon={plugin.icon} />
         <strong className="truncate text-sm font-semibold">
           {plugin.name}
         </strong>
@@ -585,14 +633,15 @@ function PluginRow({
           {plugin.version}
         </span>
       </span>
-      <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+      {/* Under the name, past the icon. */}
+      <span className="flex min-w-0 flex-wrap items-center gap-1.5 pl-7">
         <StatusBadge tone={pluginTone(plugin)}>
           {pluginState(plugin, t)}
         </StatusBadge>
       </span>
       {plugin.error ? (
         <span
-          className="truncate text-micro text-danger-foreground"
+          className="truncate pl-7 text-micro text-danger-foreground"
           title={plugin.error.message}
         >
           {loadErrorText(plugin.error, t)}
@@ -634,9 +683,6 @@ function PluginHostControls({
         <Label className="text-xs font-normal" htmlFor="plugin-host-pause">
           {t("plugins.host.pause")}
         </Label>
-        <HelpPopover label={t("plugins.host.pauseHelpLabel")}>
-          <p>{t("plugins.host.pauseHelp")}</p>
-        </HelpPopover>
       </div>
       <div className="flex items-center gap-1.5">
         <Label className="text-xs font-normal" htmlFor="plugin-host-budget">
@@ -660,9 +706,6 @@ function PluginHostControls({
             ))}
           </SelectContent>
         </Select>
-        <HelpPopover label={t("plugins.host.budgetHelpLabel")}>
-          <p>{t("plugins.host.budgetHelp")}</p>
-        </HelpPopover>
       </div>
     </div>
   );
@@ -671,6 +714,8 @@ function PluginHostControls({
 function PluginDetailPane({
   detail,
   stats,
+  stars,
+  linkPlay,
   status,
   statusError,
   testing,
@@ -691,6 +736,8 @@ function PluginDetailPane({
 }: {
   detail: PluginDetail;
   stats: PluginStats | null;
+  stars: PluginCreditStars | null;
+  linkPlay: number;
   status: PluginStatus | null;
   statusError: string | null;
   testing: boolean;
@@ -759,6 +806,7 @@ function PluginDetailPane({
         size="sm"
       >
         <div className="flex min-w-0 items-center gap-2">
+          <PluginIcon icon={detail.icon} />
           <h2 className="truncate text-sm font-semibold">{detail.name}</h2>
           <StatusBadge tone={pluginTone(detail)}>
             {pluginState(detail, t)}
@@ -769,7 +817,7 @@ function PluginDetailPane({
             </HelpPopover>
           ) : null}
         </div>
-        <p className="truncate text-micro text-muted-foreground">
+        <p className="truncate pl-7 text-micro text-muted-foreground">
           {[t(`plugins.source.${detail.source}`), detail.version]
             .filter(Boolean)
             .join(" · ")}
@@ -828,7 +876,9 @@ function PluginDetailPane({
             <PluginOverview
               busy={busy}
               detail={detail}
+              linkPlay={linkPlay}
               onClear={onClearData}
+              stars={stars}
               stats={stats}
               status={status}
               statusError={statusError}

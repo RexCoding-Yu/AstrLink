@@ -359,6 +359,15 @@ func TestTheLookupOutletAnswersAShellOnThisMachineOnly(t *testing.T) {
 	if answer := lookup(http.MethodPost, "/tools/finder/search", `{"query":"cursor"}`, nil); answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), "found cursor") {
 		t.Fatalf("POST = %d %q", answer.Code, answer.Body.String())
 	}
+	// curl --data-urlencode without -G posts a form, as a report's command
+	// does.
+	form := func(request *http.Request) { request.Header.Set("Content-Type", "application/x-www-form-urlencoded") }
+	if answer := lookup(http.MethodPost, "/tools/finder/search", "query=%E6%B8%B8%E6%A0%87+id", form); answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), "found 游标 id") {
+		t.Fatalf("POST form = %d %q", answer.Code, answer.Body.String())
+	}
+	if answer := lookup(http.MethodPost, "/tools/finder/search", "query=%zz", form); answer.Code != http.StatusBadRequest {
+		t.Fatalf("a broken form = %d %q", answer.Code, answer.Body.String())
+	}
 	for name, test := range map[string]struct {
 		method, target, payload string
 		edit                    func(*http.Request)

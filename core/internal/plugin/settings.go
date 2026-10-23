@@ -85,8 +85,7 @@ type Credit struct {
 	// License is an SPDX identifier such as Apache-2.0.
 	License string `json:"license,omitempty"`
 	// URL is the project's https address.
-	URL  string `json:"url"`
-	Note string `json:"note,omitempty"`
+	URL string `json:"url"`
 }
 
 var (
@@ -327,8 +326,6 @@ func validateCredits(credits []Credit) error {
 			return fmt.Errorf("%s.owner must be at most 64 characters", where)
 		case credit.License != "" && !spdxPattern.MatchString(credit.License):
 			return fmt.Errorf("%s.license must be an SPDX identifier such as Apache-2.0", where)
-		case credit.Note != "" && !displayText(credit.Note, 200, ""):
-			return fmt.Errorf("%s.note must be at most 200 characters", where)
 		}
 		parsed, err := url.Parse(credit.URL)
 		if err != nil || len(credit.URL) > maxCreditURLLength || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
@@ -407,6 +404,23 @@ func (meta Meta) Setting(key string) (Setting, bool) {
 		}
 	}
 	return Setting{}, false
+}
+
+// SwitchOn reports whether the switch of key is on in config: its value
+// there, else its default, else off.
+func (meta Meta) SwitchOn(config json.RawMessage, key string) bool {
+	setting, declared := meta.Setting(key)
+	if !declared || setting.Host() || setting.Type != SettingSwitch {
+		return false
+	}
+	if object, ok := decodeObject(config); ok {
+		if value, found := lookup(object, setting.path()); found && value != nil {
+			on, isSwitch := value.(bool)
+			return isSwitch && on
+		}
+	}
+	var on bool
+	return json.Unmarshal(setting.Default, &on) == nil && on
 }
 
 // WithDefaults returns config with the defaults of the settings it has no

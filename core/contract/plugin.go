@@ -150,7 +150,10 @@ type PluginSummary struct {
 	// that replaces the builtin of its key.
 	Source string `json:"source"`
 	// File is the source's name, plugin.ts or plugin.js.
-	File    string `json:"file,omitempty"`
+	File string `json:"file,omitempty"`
+	// Icon is the icon beside the source as a data URL of a PNG or SVG
+	// image, absent for none.
+	Icon    string `json:"icon,omitempty"`
 	Enabled bool   `json:"enabled"`
 	// State is loaded or failed; Error says why a plugin failed.
 	State                 string           `json:"state"`
@@ -208,13 +211,15 @@ type PluginDetail struct {
 	HostStorage []PluginHostStorage `json:"host_storage"`
 }
 
-// PluginTool is a query a plugin offers the model: its name and what it
-// says of itself in the interface language.
+// PluginTool is a query a plugin offers the model, or a report it takes:
+// its name and what it says of itself in the interface language.
 type PluginTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	// Unbound marks a query a session may run before it is bound.
 	Unbound bool `json:"unbound,omitempty"`
+	// Writes marks a report: the model hands the plugin something to keep.
+	Writes bool `json:"writes,omitempty"`
 }
 
 // PluginStorageItem is something a plugin says it keeps in its own store.
@@ -282,13 +287,18 @@ type PluginSettingOption struct {
 	Label string `json:"label"`
 }
 
+// PluginCreditStars holds the GitHub stars of the repositories a plugin
+// credits, by their address; one GitHub has not answered for is absent.
+type PluginCreditStars struct {
+	Stars map[string]int `json:"stars"`
+}
+
 // PluginCredit is an open-source project a plugin credits.
 type PluginCredit struct {
 	Name    string `json:"name"`
 	Owner   string `json:"owner,omitempty"`
 	License string `json:"license,omitempty"`
 	URL     string `json:"url"`
-	Note    string `json:"note,omitempty"`
 }
 
 // PluginNetworkOrigin is an address a plugin may reach.

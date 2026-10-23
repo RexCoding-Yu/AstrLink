@@ -31,7 +31,7 @@ type fakePowerContext struct {
 	profile  string
 	topics   []string
 	// processing is what capabilities say of automatic processing: on, off
-	// or absent.
+	// or absent; cut answers 200 without the body.
 	processing string
 	topicPages int
 	down       bool
@@ -102,6 +102,9 @@ func (server *fakePowerContext) Fetch(_ context.Context, _ *Plugin, request HTTP
 			version = "1.3.0"
 		}
 		return reply(200, `{"package_version":"`+version+`"}`)
+	case request.Method == "GET" && target.Path == "/v1/capabilities" && server.processing == "cut":
+		// The status came, the body did not, as when a read times out.
+		return HTTPResponse{Status: 200, Error: FetchTimeout, Took: 3 * time.Second}
 	case request.Method == "GET" && target.Path == "/v1/capabilities":
 		background := `"automatic_processing_enabled":true`
 		if server.processing == "off" {
@@ -481,12 +484,12 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 		t.Fatalf("the ask names the gateway:\n%s", result.Context)
 	}
 	// A turn that is not the first, or a session with a project, asks
-	// nothing.
+	// nothing; its record keeps a title of its own.
 	notFirst := powerContextView("", "zh-CN", nil)
 	notFirst["session"] = map[string]any{"id": "session_1", "turn": 2}
 	for _, view := range []map[string]any{notFirst, powerContextView("datav", "zh-CN", nil), powerContextView("none", "zh-CN", nil)} {
-		if got := h.call(HookPrepareTurn, view); got != "" && got != "null" {
-			t.Fatalf("prepareTurn = %s", got)
+		if quiet := decodeTurn(t, h.call(HookPrepareTurn, view)); quiet.Context != "" || quiet.Record.Title != "本轮补充" || quiet.Record.Summary != "" {
+			t.Fatalf("prepareTurn = %+v", quiet)
 		}
 	}
 	// English and Japanese sessions are asked in their language; a list cut
@@ -522,8 +525,8 @@ func TestThePowerContextPluginAsksOnceWithTheKnownProjects(t *testing.T) {
 	}
 	// The user may opt out of asking.
 	h = newPowerContextHarness(t, `{"serverUrl":"https://memory.test","askProject":false}`, used)
-	if got := h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil)); got != "" && got != "null" {
-		t.Fatalf("prepareTurn with asking off = %s", got)
+	if quiet := decodeTurn(t, h.call(HookPrepareTurn, powerContextView("", "zh-CN", nil))); quiet.Context != "" || quiet.Record.Title != "本轮补充" {
+		t.Fatalf("prepareTurn with asking off = %+v", quiet)
 	}
 }
 
@@ -554,6 +557,68 @@ func TestThePowerContextPluginWritesWithoutProcessing(t *testing.T) {
 	}
 }
 
+func TestThePowerContextPluginWritesAHeldTurnLate(t *testing.T) {
+	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	result := decodeResult[struct {
+		Record struct{ Status, Summary string } `json:"record"`
+	}](t, h.call(HookObserveTurn, powerContextView("paseo", "zh-CN", map[string]any{"late": true})))
+	if result.Record.Status != "ok" || result.Record.Summary != "已补写第 1 轮" {
+		t.Fatalf("a late turn = %+v", result)
+	}
+	sources := h.server.requests("POST", "/v1/sources/content")
+	if len(sources) != 1 || !strings.Contains(string(sources[0].JSON), `"source_id":"astrlink:paseo:session_1:1:`) {
+		t.Fatalf("sources = %+v", sources)
+	}
+}
+
+func TestThePowerContextPluginKeepsWhatTheModelReports(t *testing.T) {
+	h := newLookupHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
+	// A report goes to the project's scope, made when the server has none,
+	// as a source of its own, and answers in plain words.
+	result := decodeResult[toolResult](t, h.call(HookCallTool, toolView("note", "brand-new", "zh-CN", map[string]any{"text": " 游标分页：最后一页返回空游标。 "})))
+	if result.Text != "已记下，服务器会把它整理进项目 brand-new 的记忆。" || result.Hits != nil ||
+		result.Record.Title != "记忆上报" || result.Record.Status != "ok" || result.Record.Summary != "上报 15 字" {
+		t.Fatalf("note = %+v", result)
+	}
+	sources := h.server.requests("POST", "/v1/sources/content")
+	if len(sources) != 1 {
+		t.Fatalf("sources = %+v", sources)
+	}
+	var sent struct {
+		ScopeID  string         `json:"scope_id"`
+		SourceID string         `json:"source_id"`
+		Content  string         `json:"content"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(sources[0].JSON, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.ScopeID != "scp_brand-new" || !strings.HasPrefix(sent.SourceID, "astrlink:brand-new:session_1:note:") || sent.Content != "游标分页：最后一页返回空游标。" ||
+		sent.Metadata["kind"] != "model_note" || sent.Metadata["origin"] != "astrlink" || sent.Metadata["turn"] != float64(2) {
+		t.Fatalf("sent %+v", sent)
+	}
+	// The same words in the session are the same source.
+	h.call(HookCallTool, toolView("note", "brand-new", "zh-CN", map[string]any{"text": "游标分页：最后一页返回空游标。"}))
+	if again := h.server.requests("POST", "/v1/sources/content"); len(again) != 2 || !strings.Contains(string(again[1].JSON), `"source_id":"`+sent.SourceID+`"`) {
+		t.Fatalf("the same report again = %+v", again)
+	}
+	// The overview tells the last write, a report as well as a turn.
+	last, _, _ := h.store.Get(context.Background(), "powercontext", "last-write")
+	if !strings.Contains(string(last), `"summary":"上报 15 字"`) {
+		t.Fatalf("last write = %s", last)
+	}
+	// A session without a project has nowhere to report to.
+	if none := decodeResult[toolResult](t, h.call(HookCallTool, toolView("note", "", "zh-CN", map[string]any{"text": "x"}))); none.Record.Status != "skipped" || none.Text != "会话还没有项目" {
+		t.Fatalf("a report without a project = %+v", none)
+	}
+	// A server that does not answer keeps nothing, and the model is told.
+	h.server.down = true
+	failed := decodeResult[toolResult](t, h.call(HookCallTool, toolView("note", "brand-new", "en", map[string]any{"text": "x"})))
+	if failed.Record.Status != "failed" || failed.Record.Title != "Memory report" || failed.Text != "Not noted: unreachable" {
+		t.Fatalf("a report to a server that is down = %+v", failed)
+	}
+}
+
 func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 	h := newPowerContextHarness(t, `{"serverUrl":"https://memory.test"}`, nil)
 	test := decodeResult[struct {
@@ -571,7 +636,7 @@ func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 		got[item.Label] = item.Value
 	}
 	// In New York 03:04 UTC on the 21st is 23:04 on the 20th.
-	if got["自动整理"] != "已打开" || got["最近整理成功"] != "10 月 20 日 23:04" || got["最近整理失败"] != "10 月 20 日 11:00 · model_timeout" ||
+	if got["自动整理"] != "已打开" || got["最近整理成功"] != "10 月 20 日 23:04" || got["最近整理失败"] != "10 月 20 日 11:00 · 模型超时" ||
 		got["可检索"] != "原子记忆 / 主题记忆 / 经验 / 技能" {
 		t.Fatalf("view = %+v", got)
 	}
@@ -581,6 +646,16 @@ func TestThePowerContextPluginShowsTheServersProcessing(t *testing.T) {
 	if !strings.Contains(status, `"Automatic processing","value":"off: no atomic memory is made"`) || !strings.Contains(status, `"Last write","value":"datav · Written · just now"`) {
 		t.Fatalf("describeStatus = %s", status)
 	}
+	// A status whose body never came shows nothing of the processing, and
+	// throws nothing.
+	h.server.processing = "cut"
+	if cut := h.call(HookDescribeStatus, map[string]any{"language": "en"}); strings.Contains(cut, "Automatic processing") || !strings.Contains(cut, `"Last write"`) {
+		t.Fatalf("describeStatus without the capabilities body = %s", cut)
+	}
+	if checked := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(checked, `"status":"ok"`) || strings.Contains(checked, `"view"`) {
+		t.Fatalf("testConnection without the capabilities body = %s", checked)
+	}
+	h.server.processing = "on"
 	h.server.version = "1.4.0"
 	if checked := h.call(HookTestConnection, map[string]any{"language": "en"}); !strings.Contains(checked, `"summary":"PowerContext 1.4.0 · 3 ms"`) {
 		t.Fatalf("a 1.4 server = %s", checked)

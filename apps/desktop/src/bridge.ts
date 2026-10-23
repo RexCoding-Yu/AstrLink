@@ -182,6 +182,7 @@ import {
   parseMetadataValues,
   parsePluginActionResult,
   parsePluginClearResult,
+  parsePluginCreditStars,
   parsePluginDetail,
   parsePluginHostSettings,
   parsePluginList,
@@ -195,6 +196,7 @@ import {
   type MetadataValueUsage,
   type PluginActionResult,
   type PluginClearTarget,
+  type PluginCreditStars,
   type PluginDetail,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
@@ -1444,6 +1446,16 @@ export async function getPluginStatus(key: string): Promise<PluginStatus> {
 }
 
 /** A plugin's account over its last days, from this computer's request records. */
+/** How many stars the GitHub repositories the plugin credits have. */
+export async function getPluginCreditStars(
+  key: string,
+): Promise<PluginCreditStars> {
+  requireNativeBridge();
+  return parsePluginCreditStars(
+    await invoke<unknown>("plugin_action", { action: "credits", key }),
+  );
+}
+
 export async function getPluginStats(
   key: string,
   days = 7,

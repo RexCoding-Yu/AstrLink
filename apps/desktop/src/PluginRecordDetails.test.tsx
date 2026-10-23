@@ -52,6 +52,13 @@ const record: RequestRecord = {
   ...emptyTrajectoryFields,
 };
 
+/** Opens a record's line to show what waits behind it. */
+async function open(row: Element | undefined) {
+  const trigger = row?.querySelector<HTMLButtonElement>("button");
+  if (!trigger) throw new Error("Missing the record's line");
+  await act(async () => trigger.click());
+}
+
 describe("PluginRecordDetails", () => {
   let container: HTMLDivElement;
   let reactRoot: Root;
@@ -72,7 +79,7 @@ describe("PluginRecordDetails", () => {
     container.remove();
   });
 
-  it("shows what each plugin did and what the host did for it", async () => {
+  it("puts what each plugin did on its line and the rest behind it", async () => {
     await act(async () => {
       reactRoot.render(
         <PluginRecordDetails
@@ -111,27 +118,99 @@ describe("PluginRecordDetails", () => {
                 elapsed_ms: 1,
                 network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
               },
+              {
+                plugin: "team-rules",
+                plugin_version: "1.0.0",
+                hook: "observeTurn",
+                title: "团队规则写入",
+                status: "failed",
+                summary: "写入失败：连不上",
+                skipped_reason: "plugin_error",
+                elapsed_ms: 30,
+                network: { requests: 1, denied: 0, errors: 1, wait_ms: 30 },
+              },
             ],
           }}
         />,
       );
     });
-    const [memory, rules] = document.querySelectorAll(
+    const [memory, rules, failed] = document.querySelectorAll(
       '[data-testid="plugin-record"]',
     );
-    expect(memory?.textContent).toContain(
-      "本轮用户开口消息开头 · 1.8 KiB · 重放 2 段",
+    // The line: what the plugin did, then what it added; a capture that
+    // went as usual says nothing.
+    expect(memory?.textContent).toContain("记忆412 ms召回 3/9");
+    expect(memory?.textContent).toContain("本轮用户消息开头 +1.8 KB");
+    expect(memory?.textContent).not.toContain("已排队");
+    expect(
+      memory?.querySelector('[data-testid="plugin-record-details"]'),
+    ).toBeNull();
+    // Behind it: the sizes, the network, the plugin's view and its hook.
+    await open(memory);
+    const details = memory?.querySelector(
+      '[data-testid="plugin-record-details"]',
     );
-    expect(memory?.textContent).toContain(
-      "3 个请求 · 拒绝 0 · 失败 0 · 等待 402 ms",
+    expect(details?.textContent).toContain(
+      "本轮用户消息开头 · 1.8 KB · 沿用之前的 2 段",
     );
-    expect(memory?.textContent).toContain("已排队");
-    expect(memory?.textContent).toContain("astrlink");
-    expect(memory?.textContent).toContain("超出上限，已截断");
+    expect(details?.textContent).toContain("3 个请求 · 等待 402 ms");
+    expect(details?.textContent).not.toContain("拒绝");
+    expect(details?.textContent).toContain("astrlink");
+    expect(details?.textContent).toContain("超出上限，已截断");
+    expect(details?.textContent).toContain("powercontext 1.0.0 · prepareTurn");
+    // A record without a summary says why it was skipped.
     expect(rules?.textContent).toContain("已跳过");
     expect(rules?.textContent).toContain("问题太短");
     // A plugin that sent nothing shows no network line.
+    await open(rules);
     expect(rules?.textContent).not.toContain("个请求");
+    // A failure opens by itself.
+    expect(failed?.textContent).toContain("失败");
+    expect(failed?.textContent).toContain("插件出错");
+    expect(
+      failed?.querySelector('[data-testid="plugin-record-details"]')
+        ?.textContent,
+    ).toContain("1 个请求 · 等待 30 ms · 失败 1");
+  });
+
+  it("does not call a block skipped when the request still carries the lookup usage", async () => {
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            plugin_records: [
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.1",
+                hook: "prepareSession",
+                title: "记忆装载",
+                status: "skipped",
+                summary: "项目还没有画像和主题",
+                trigger: "bound",
+                elapsed_ms: 21,
+                injection: {
+                  placement: "system_append",
+                  injected_bytes: 1229,
+                  replayed_blocks: 0,
+                  dropped_items: 0,
+                  usage_bytes: 1229,
+                },
+                network: { requests: 5, denied: 0, errors: 0, wait_ms: 5 },
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    const [load] = document.querySelectorAll('[data-testid="plugin-record"]');
+    expect(load?.textContent).not.toContain("已跳过");
+    expect(load?.textContent).toContain("项目还没有画像和主题");
+    expect(load?.textContent).toContain("只附上查询方法 · 系统提示词 +1.2 KB");
+    await open(load);
+    expect(
+      load?.querySelector('[data-testid="plugin-record-details"]')?.textContent,
+    ).toContain("系统提示词 · 1.2 KB · 其中查询方法 1.2 KB");
   });
 
   it("shows a turn waiting for its project and what the capture wrote", async () => {
@@ -171,8 +250,35 @@ describe("PluginRecordDetails", () => {
     const [turn, write] = document.querySelectorAll(
       '[data-testid="plugin-record"]',
     );
-    expect(turn?.textContent).toContain("有检索失败，没有命中");
-    expect(turn?.textContent).toContain("写入等回复确定项目");
+    expect(turn?.textContent).toContain("召回 0/9 · 1 个检索失败");
+    expect(turn?.textContent).toContain(
+      "有检索失败，没有命中 · 写入：等回复确定项目",
+    );
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            plugin_records: [
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.0",
+                hook: "prepareTurn",
+                title: "询问项目",
+                status: "ok",
+                summary: "列出 2 个项目",
+                elapsed_ms: 90,
+                network: { requests: 1, denied: 0, errors: 0, wait_ms: 80 },
+                observe: "held_unbound",
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    expect(
+      document.querySelector('[data-testid="plugin-record"]')?.textContent,
+    ).toContain("写入：先记下，会话选定项目后补写");
     expect(write?.textContent).toContain("记忆写入");
     expect(write?.textContent).toContain("已写入 · 已整理成记忆");
   });
@@ -223,23 +329,66 @@ describe("PluginRecordDetails", () => {
                 network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
                 lookup: { tool: "read", input_runes: 4, result_bytes: 0 },
               },
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.0",
+                hook: "callTool",
+                title: "记忆上报",
+                status: "ok",
+                summary: "上报 15 字",
+                elapsed_ms: 140,
+                network: { requests: 1, denied: 0, errors: 0, wait_ms: 130 },
+                lookup: {
+                  tool: "note",
+                  input_runes: 15,
+                  result_bytes: 72,
+                  writes: true,
+                },
+              },
+              {
+                plugin: "powercontext",
+                plugin_version: "2.1.0",
+                hook: "callTool",
+                title: "PowerContext 记忆",
+                status: "skipped",
+                summary: "",
+                skipped_reason: "turn_limit",
+                elapsed_ms: 0,
+                network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+                lookup: {
+                  tool: "note",
+                  input_runes: 3,
+                  result_bytes: 0,
+                  writes: true,
+                },
+              },
             ],
           }}
         />,
       );
     });
-    const [ask, search, refused] = document.querySelectorAll(
+    const [ask, search, refused, report, tooMany] = document.querySelectorAll(
       '[data-testid="plugin-record"]',
     );
+    await open(ask);
     expect(ask?.textContent).toContain("附上查询projects");
-    expect(search?.textContent).toContain(
-      "search · 参数 12 字 · 结果 2.1 KiB · 3 条结果",
-    );
+    expect(search?.textContent).toContain("检索 · 命中 3 条");
+    await open(search);
+    expect(
+      search?.querySelector('[data-testid="plugin-record-lookup"]')
+        ?.textContent,
+    ).toBe("search · 参数 12 字 · 结果 2.1 KB · 3 条结果");
     expect(refused?.textContent).toContain("这一轮已经查满 3 次");
+    await open(refused);
     expect(
       refused?.querySelector('[data-testid="plugin-record-lookup"]')
         ?.textContent,
     ).toBe("read · 参数 4 字");
+    // A report says so, and its limits are its own.
+    await open(report);
+    expect(report?.textContent).toContain("上报note · 参数 15 字 · 结果 72 B");
+    expect(tooMany?.textContent).toContain("这一轮已经上报满 2 次");
+    expect(tooMany?.textContent).not.toContain("查满");
   });
 
   it("says so when no plugin ran", async () => {
@@ -295,6 +444,10 @@ describe("PluginRecordDetails", () => {
     });
     expect(container.textContent).toContain("compact 后刷新");
     expect(container.textContent).toContain("超出注入总预算");
+    // The plugin's buttons wait behind the record's line.
+    await open(
+      container.querySelector('[data-testid="plugin-record"]') ?? undefined,
+    );
     const action = container.querySelector<HTMLButtonElement>(
       "[data-testid=plugin-record-action]",
     );

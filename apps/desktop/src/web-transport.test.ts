@@ -263,6 +263,13 @@ describe("web command transport", () => {
     ],
     [
       "plugin_action",
+      { action: "credits", key: "powercontext" },
+      "GET",
+      "/control/v1/plugins/powercontext/credits",
+      undefined,
+    ],
+    [
+      "plugin_action",
       { action: "revoke_lookups", key: "powercontext" },
       "DELETE",
       "/control/v1/plugins/powercontext/lookup-credentials",

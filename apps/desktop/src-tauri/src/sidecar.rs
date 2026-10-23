@@ -3494,6 +3494,8 @@ fn plugin_request(
         ),
         "test" => (Method::POST, format!("{plugin}/test"), None),
         "status" => (Method::GET, format!("{plugin}/status"), None),
+        // The GitHub stars of the projects the plugin credits.
+        "credits" => (Method::GET, format!("{plugin}/credits"), None),
         // The plugin's account over its last 1 to 30 days.
         "stats" => {
             let days = input
@@ -6935,6 +6937,14 @@ mod tests {
         ] {
             assert!(plugin_request("stats", Some("powercontext"), None, Some(days)).is_err());
         }
+        assert_eq!(
+            plugin_request("credits", Some("powercontext"), None, None).unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/powercontext/credits".into(),
+                None
+            )
+        );
         assert_eq!(
             plugin_request("host", None, None, None).unwrap(),
             (Method::GET, "/control/v1/plugin-host".into(), None)

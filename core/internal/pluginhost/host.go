@@ -108,6 +108,7 @@ type Host struct {
 	sessions     *sessions
 	lookups      *lookups
 	observe      *observeQueue
+	held         *heldCaptures
 	records      RecordAppender
 	workspaceKey []byte
 	logf         func(string, ...any)
@@ -135,6 +136,7 @@ func New(options Options) *Host {
 		sessions:     newSessions(),
 		lookups:      newLookups(),
 		observe:      newObserveQueue(logf),
+		held:         newHeldCaptures(),
 		records:      options.Records,
 		workspaceKey: options.WorkspaceKey,
 		logf:         logf,
@@ -350,6 +352,13 @@ func (host *Host) Begin(ctx context.Context, input Input) *Run {
 	run.load(ctx, plugins)
 	run.plan(plugins)
 	run.start(ctx)
+	// A session bound since its turns were held, in this request or in
+	// between, has them captured now.
+	for _, current := range run.parts {
+		if current.off == "" && current.plugin.Has(plugin.HookObserveTurn) && current.plugin.Can(plugin.CapabilityRequest) {
+			run.release(current, current.view.Meta)
+		}
+	}
 	go run.work()
 	return run
 }
@@ -722,9 +731,10 @@ func (run *Run) work() {
 	}
 }
 
-// queue queues the plugin's capture of the turn and returns what became of
-// it. The caller holds run.mutex.
+// queue queues the plugin's capture of the turn, after the turns held for
+// it, and returns what became of it. The caller holds run.mutex.
 func (run *Run) queue(current *part, view TurnView) string {
+	run.release(current, view.Meta)
 	job := observeJob{plugin: current.plugin, view: view, info: current.info, deliver: run.deliverObserve}
 	if run.host.observe.push(job) {
 		return observeQueued
@@ -1033,7 +1043,7 @@ func (run *Run) lookupOpen(current *part) bool {
 // blocks, false when the session cannot run it.
 func (run *Run) lookupCommand(current *part, name string) (string, bool) {
 	tool, declared := current.plugin.Meta.Tool(name)
-	if !declared || !run.lookupOpen(current) || (!tool.Unbound && !current.bound) {
+	if !declared || !run.lookupOpen(current) || !current.plugin.Offers(tool) || (!tool.Unbound && !current.bound) {
 		return "", false
 	}
 	token := run.host.lookups.issue(lookupKey{run.input.Session, current.plugin.Key}, current.plugin, run.stamp)
