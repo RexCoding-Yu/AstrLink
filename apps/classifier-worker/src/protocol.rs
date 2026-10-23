@@ -58,6 +58,61 @@ pub struct ProtocolError {
     pub code: &'static str,
 }
 
+/// One embedding request: every text of the batch is embedded the same way.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbedRequest {
+    pub version: u8,
+    pub id: u64,
+    pub kind: String,
+    pub texts: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmbedResponse {
+    pub version: u8,
+    pub id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vectors: Option<Vec<Vec<f32>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ProtocolError>,
+}
+
+impl EmbedResponse {
+    pub fn success(id: u64, vectors: Vec<Vec<f32>>) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            id,
+            vectors: Some(vectors),
+            error: None,
+        }
+    }
+
+    pub fn failure(id: u64, code: &'static str) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            id,
+            vectors: None,
+            error: Some(ProtocolError { code }),
+        }
+    }
+}
+
+pub fn read_embed_request(reader: &mut impl Read) -> io::Result<Option<EmbedRequest>> {
+    let Some(payload) = read_frame(reader)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&payload)
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid request"))
+}
+
+pub fn write_embed_response(writer: &mut impl Write, response: &EmbedResponse) -> io::Result<()> {
+    let payload = serde_json::to_vec(response)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid response"))?;
+    write_frame(writer, &payload)
+}
+
 pub fn read_request(reader: &mut impl Read) -> io::Result<Option<ClassifyRequest>> {
     let Some(payload) = read_frame(reader)? else {
         return Ok(None);

@@ -1,3 +1,4 @@
+pub mod embedding;
 pub mod engine;
 pub mod manifest;
 pub mod normalize;

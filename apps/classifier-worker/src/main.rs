@@ -6,14 +6,30 @@ use std::{
 };
 
 use astrlink_classifier_worker::{
+    embedding::{EmbeddingEngine, TextKind},
     engine::ClassifierEngine,
     priority,
-    protocol::{ClassifyResponse, PROTOCOL_VERSION, read_request, write_ready, write_response},
+    protocol::{
+        ClassifyResponse, EmbedResponse, PROTOCOL_VERSION, read_embed_request, read_request,
+        write_embed_response, write_ready, write_response,
+    },
 };
+
+/// The worker serves one model: a routing classifier (`--model-dir`) or a
+/// knowledge-base embedding model (`--embedding-model-dir`).
+enum Mode {
+    Classify(PathBuf),
+    Embed(PathBuf),
+}
 
 fn main() -> ExitCode {
     priority::lower_process();
-    match run() {
+    let result = match parse_mode() {
+        Some(Mode::Classify(directory)) => run_classifier(directory),
+        Some(Mode::Embed(directory)) => run_embedder(directory),
+        None => Err(()),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(()) => {
             eprintln!("astrlink-classifier-worker: startup_or_protocol_failure");
@@ -22,8 +38,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), ()> {
-    let model_directory = parse_model_directory().ok_or(())?;
+fn run_classifier(model_directory: PathBuf) -> Result<(), ()> {
     let mut engine = ClassifierEngine::load(&model_directory).map_err(|_| ())?;
     let stdout = io::stdout();
     let mut writer = BufWriter::new(stdout.lock());
@@ -47,15 +62,45 @@ fn run() -> Result<(), ()> {
     }
 }
 
-fn parse_model_directory() -> Option<PathBuf> {
+fn run_embedder(model_directory: PathBuf) -> Result<(), ()> {
+    let mut engine = EmbeddingEngine::load(&model_directory).map_err(|error| {
+        eprintln!("astrlink-classifier-worker: embedding model: {error}");
+    })?;
+    let stdout = io::stdout();
+    let mut writer = BufWriter::new(stdout.lock());
+    write_ready(&mut writer).map_err(|_| ())?;
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+
+    loop {
+        let Some(request) = read_embed_request(&mut reader).map_err(|_| ())? else {
+            return Ok(());
+        };
+        let response = if request.version != PROTOCOL_VERSION {
+            EmbedResponse::failure(request.id, "unsupported_protocol")
+        } else if let Some(kind) = TextKind::parse(&request.kind) {
+            match engine.embed(&request.texts, kind) {
+                Ok(vectors) => EmbedResponse::success(request.id, vectors),
+                Err(error) => EmbedResponse::failure(request.id, error.code()),
+            }
+        } else {
+            EmbedResponse::failure(request.id, "invalid_kind")
+        };
+        write_embed_response(&mut writer, &response).map_err(|_| ())?;
+    }
+}
+
+fn parse_mode() -> Option<Mode> {
     let mut arguments = env::args_os();
     let _executable = arguments.next()?;
-    if arguments.next()?.to_str()? != "--model-dir" {
-        return None;
-    }
+    let flag = arguments.next()?;
     let directory = PathBuf::from(arguments.next()?);
     if arguments.next().is_some() || !directory.is_dir() {
         return None;
     }
-    Some(directory)
+    match flag.to_str()? {
+        "--model-dir" => Some(Mode::Classify(directory)),
+        "--embedding-model-dir" => Some(Mode::Embed(directory)),
+        _ => None,
+    }
 }

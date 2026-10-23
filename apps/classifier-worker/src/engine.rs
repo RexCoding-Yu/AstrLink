@@ -263,7 +263,9 @@ pub fn pad_to_multiple(ids: &[i64], pad_id: i64, multiple: usize) -> (Vec<i64>, 
     (padded, mask)
 }
 
-fn commit_session(model_path: &Path) -> Result<Session, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn commit_session(
+    model_path: &Path,
+) -> Result<Session, Box<dyn std::error::Error + Send + Sync>> {
     // Without spinning, idle pool threads sleep between operators instead of
     // busy-waiting on cores the rest of the machine could use.
     let builder = Session::builder()?
@@ -301,7 +303,7 @@ fn validate_session(session: &Session, manifest: &ModelManifest) -> io::Result<(
     Ok(())
 }
 
-fn initialize_onnx_runtime() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn initialize_onnx_runtime() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
     {
         const RUNTIME_NAME: &str = "libonnxruntime.1.23.2.dylib";
@@ -407,7 +409,7 @@ fn runtime_library_candidates(executable: &Path, runtime_name: &str) -> Vec<Path
     candidates
 }
 
-fn synthetic_models_only() -> io::Result<bool> {
+pub(crate) fn synthetic_models_only() -> io::Result<bool> {
     parse_synthetic_models_only(env::var_os(CI_SYNTHETIC_MODELS_ONLY_ENV).as_deref())
 }
 
