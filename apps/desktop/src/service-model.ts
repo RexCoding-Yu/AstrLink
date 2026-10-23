@@ -38,7 +38,9 @@ export type HTTPServiceKind =
   | "doubao"
   | "xai"
   | "openai_compatible"
-  | "custom";
+  | "custom"
+  /** A provider a plugin adapts; Service.plugin names the plugin. */
+  | "plugin";
 
 export type ServiceAuthScheme =
   | "none"
@@ -313,8 +315,16 @@ export interface Service {
   capabilities: ServiceCapability[];
   http?: HTTPServiceConnection;
   subscription?: SubscriptionServiceConnection;
+  /** The plugin that adapts a provider of kind plugin. */
+  plugin?: ServicePlugin;
   created_at: string;
   updated_at: string;
+}
+
+/** A plugin that adapts a provider, and which of its providers this is. */
+export interface ServicePlugin {
+  key: string;
+  provider: string;
 }
 
 export type RoutableService = Pick<
@@ -372,6 +382,8 @@ export type HTTPServiceCreateInput = {
     model_list_path?: string;
   };
   capabilities: ServiceCapability[];
+  /** Required for kind plugin. */
+  plugin?: ServicePlugin;
 };
 
 export type ServiceCreateInput =
@@ -453,6 +465,7 @@ const httpKinds = new Set<HTTPServiceKind>([
   "xai",
   "openai_compatible",
   "custom",
+  "plugin",
 ]);
 const authSchemes = new Set<ServiceAuthScheme>([
   "none",
@@ -956,6 +969,18 @@ function parseSubscriptionConnection(
   return result;
 }
 
+const pluginNamePattern = /^[a-z][a-z0-9-]{0,31}$/;
+
+function parseServicePlugin(value: unknown, path: string): ServicePlugin {
+  const plugin = objectAt(value, path);
+  keysAt(plugin, ["key", "provider"], [], path);
+  const key = stringAt(plugin.key, `${path}.key`, 1, 32);
+  const provider = stringAt(plugin.provider, `${path}.provider`, 1, 32);
+  if (!pluginNamePattern.test(key) || !pluginNamePattern.test(provider))
+    invalid(path, "invalid plugin provider");
+  return { key, provider };
+}
+
 export function parseService(value: unknown, path = "$"): Service {
   const service = objectAt(value, path);
   keysAt(
@@ -979,6 +1004,7 @@ export function parseService(value: unknown, path = "$"): Service {
       "model_redirects",
       "model_protocols",
       "proxy",
+      "plugin",
     ],
     path,
   );
@@ -1109,6 +1135,9 @@ export function parseService(value: unknown, path = "$"): Service {
     models,
     capabilities,
     http: parseHTTPConnection(service.http, `${path}.http`),
+    ...(service.kind === "plugin"
+      ? { plugin: parseServicePlugin(service.plugin, `${path}.plugin`) }
+      : {}),
     created_at: createdAt,
     updated_at: updatedAt,
     ...(Object.hasOwn(service, "failure_policy")

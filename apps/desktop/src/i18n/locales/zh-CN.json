@@ -1256,7 +1256,9 @@
       "chat": "OpenCode、OpenClaw 及多数兼容工具使用",
       "messages": "Claude Code 使用",
       "gemini": "Gemini CLI 使用"
-    }
+    },
+    "groupPlugins": "插件",
+    "kindPickerPluginHint": "由「{{plugin}}」插件转接"
   },
   "models": {
     "deleteNamed": "删除 {{label}}",
@@ -1401,7 +1403,8 @@
     "xai": "xAI（Grok） API",
     "antigravity_subscription": "Antigravity 订阅",
     "copilot_subscription": "GitHub Copilot 订阅",
-    "droid_subscription": "Droid 订阅"
+    "droid_subscription": "Droid 订阅",
+    "plugin": "插件提供商"
   },
   "subscription": {
     "tag": "订阅",
@@ -1458,7 +1461,8 @@
     "glmDescription": "智谱开放平台 API Key，按量付费，使用通用 /api/paas/v4 接口；请添加已开通的模型 ID。",
     "minimaxDescription": "MiniMax 开放平台 API Key，按量付费；请使用开放平台密钥。",
     "doubaoDescription": "火山方舟 API Key，按量付费。默认北京地域；请添加已开通的模型 ID 或推理接入点 ID（ep-…）。",
-    "xaiDescription": "xAI 开放平台 API Key，按量付费；支持 Grok Chat、Responses 与模型列表。"
+    "xaiDescription": "xAI 开放平台 API Key，按量付费；支持 Grok Chat、Responses 与模型列表。",
+    "pluginDescription": "由插件转接的提供商：插件构造请求、解析响应，网关负责发送、密钥和故障切换。"
   },
   "usage": {
     "allLimits": "全部额度",

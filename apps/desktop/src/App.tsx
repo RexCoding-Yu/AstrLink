@@ -1342,7 +1342,13 @@ export default function App() {
       />
       <ServiceKindPickerDialog
         onOpenChange={setServiceKindPickerOpen}
-        onSelect={(serviceKind) => navigate({ kind: "create", serviceKind })}
+        onSelect={(serviceKind, plugin) =>
+          navigate({
+            kind: "create",
+            serviceKind,
+            ...(plugin ? { plugin } : {}),
+          })
+        }
         open={serviceKindPickerOpen}
       />
       <ConfirmDialog

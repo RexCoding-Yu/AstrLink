@@ -570,11 +570,23 @@ const profileDefinitions: Readonly<
     capabilityIDs: [],
     advancedOnStart: true,
   },
+  // What a plugin declares for its provider replaces these.
+  plugin: {
+    id: "plugin",
+    kind: "plugin",
+    baseURL: "",
+    baseURLPlaceholder: "https://api.example.com",
+    authScheme: "bearer",
+    headerName: "",
+    capabilityIDs: [],
+    advancedOnStart: false,
+  },
 };
 
-export const httpServicePresetIDs = Object.keys(
-  profileDefinitions,
-) as HTTPServicePresetID[];
+/** The presets a user picks; a plugin's provider is picked by its own name. */
+export const httpServicePresetIDs = (
+  Object.keys(profileDefinitions) as HTTPServicePresetID[]
+).filter((id) => id !== "plugin");
 
 export function protocolDescriptors(
   discovered: readonly ProtocolDescriptor[],
@@ -607,7 +619,9 @@ export function httpServicePreset(
       ? { convert_to: definition.convertTo[protocol] }
       : {}),
   }));
-  if (!["opencode_go", "opencode_zen", "custom"].includes(profileID)) {
+  if (
+    !["opencode_go", "opencode_zen", "custom", "plugin"].includes(profileID)
+  ) {
     // Existing conversion entries (e.g. Gemini's Chat entry) are not upstreams.
     const upstream = definition.capabilityIDs.filter(
       (protocol) => !definition.convertTo?.[protocol],
@@ -680,6 +694,12 @@ function presetText(
         description: i18n.t("presets.customDescription"),
         defaultName: i18n.t("presets.customName"),
       };
+    case "plugin":
+      return {
+        label: i18n.t("kind.plugin"),
+        description: i18n.t("presets.pluginDescription"),
+        defaultName: i18n.t("kind.plugin"),
+      };
     case "openai":
       return {
         label: i18n.t("presets.openaiOfficial"),
@@ -748,6 +768,7 @@ export function httpServiceKindLabel(kind: HTTPServiceKind): string {
       xai: i18n.t("kind.xai"),
       openai_compatible: i18n.t("kind.openai_compatible"),
       custom: i18n.t("kind.custom"),
+      plugin: i18n.t("kind.plugin"),
       opencode_go: "OpenCode Go",
       opencode_zen: "OpenCode Zen",
       kimi_coding: "Kimi Coding",

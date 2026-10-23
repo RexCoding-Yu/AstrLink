@@ -1256,7 +1256,9 @@
       "chat": "OpenCode、OpenClaw、ほとんどの互換ツールが使用",
       "messages": "Claude Code が使用",
       "gemini": "Gemini CLI が使用"
-    }
+    },
+    "groupPlugins": "プラグイン",
+    "kindPickerPluginHint": "「{{plugin}}」プラグインが中継"
   },
   "models": {
     "deleteNamed": "{{label}} を削除",
@@ -1401,7 +1403,8 @@
     "xai": "xAI（Grok）API",
     "antigravity_subscription": "Antigravity サブスクリプション",
     "copilot_subscription": "GitHub Copilot サブスクリプション",
-    "droid_subscription": "Droid サブスクリプション"
+    "droid_subscription": "Droid サブスクリプション",
+    "plugin": "プラグインのプロバイダー"
   },
   "subscription": {
     "tag": "サブスク",
@@ -1458,7 +1461,8 @@
     "glmDescription": "/api/paas/v4 経由で従量課金する Zhipu プラットフォームの APIキーです。アカウントで有効なモデル ID を追加してください。",
     "minimaxDescription": "従量課金の MiniMax プラットフォーム APIキーです。プラットフォームの APIキーを使ってください。",
     "doubaoDescription": "従量課金の Volcengine Ark APIキーです。既定は北京です。有効なモデル ID または推論エンドポイント ID（ep-…）を追加してください。",
-    "xaiDescription": "従量課金の xAI プラットフォーム APIキーです。Grok Chat、Responses、モデル検出に対応しています。"
+    "xaiDescription": "従量課金の xAI プラットフォーム APIキーです。Grok Chat、Responses、モデル検出に対応しています。",
+    "pluginDescription": "プラグインが中継するプロバイダー：プラグインがリクエストを組み立てて応答を解析し、送信・キー・フェイルオーバーはゲートウェイが担います。"
   },
   "usage": {
     "allLimits": "すべての利用枠",

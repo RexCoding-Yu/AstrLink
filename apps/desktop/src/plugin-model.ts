@@ -203,6 +203,21 @@ export interface PluginSummary {
   installed?: PluginInstallSource;
   /** Set while the plugin's interface code loads; it changes with the code. */
   ui_version?: string;
+  /** The kinds of provider the plugin adapts, while it is enabled with provider granted. */
+  providers?: PluginProvider[];
+}
+
+/** A kind of provider a plugin adapts, as the add-provider picker offers it. */
+export interface PluginProvider {
+  id: string;
+  name: string;
+  base_url?: string;
+  /** How the gateway sends the provider's key. */
+  auth: { scheme: string; header_name?: string };
+  /** The protocols the plugin serves, the first the one others convert to. */
+  protocols: { protocol: string; stream: boolean; sync: boolean }[];
+  convert?: boolean;
+  models?: string[];
 }
 
 /** The project a development build comes from. */
@@ -924,6 +939,47 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
         ? undefined
         : parseInstallSource(summary.installed, `${path}.installed`),
     ui_version: plugin.optionalString(summary.ui_version, `${path}.ui_version`),
+    providers:
+      summary.providers === undefined
+        ? undefined
+        : plugin
+            .array(summary.providers, `${path}.providers`)
+            .map((item, index) =>
+              parseProvider(item, `${path}.providers[${index}]`),
+            ),
+  });
+}
+
+function parseProvider(value: unknown, path: string): PluginProvider {
+  const provider = plugin.object(value, path);
+  const auth = plugin.object(provider.auth, `${path}.auth`);
+  return defined({
+    id: plugin.string(provider.id, `${path}.id`),
+    name: plugin.string(provider.name, `${path}.name`),
+    base_url: plugin.optionalString(provider.base_url, `${path}.base_url`),
+    auth: defined({
+      scheme: plugin.string(auth.scheme, `${path}.auth.scheme`),
+      header_name: plugin.optionalString(
+        auth.header_name,
+        `${path}.auth.header_name`,
+      ),
+    }),
+    protocols: plugin
+      .array(provider.protocols, `${path}.protocols`)
+      .map((item, index) => {
+        const at = `${path}.protocols[${index}]`;
+        const entry = plugin.object(item, at);
+        return {
+          protocol: plugin.string(entry.protocol, `${at}.protocol`),
+          stream: plugin.boolean(entry.stream, `${at}.stream`),
+          sync: plugin.boolean(entry.sync, `${at}.sync`),
+        };
+      }),
+    convert: plugin.optionalBoolean(provider.convert, `${path}.convert`),
+    models:
+      provider.models === undefined
+        ? undefined
+        : plugin.strings(provider.models, `${path}.models`),
   });
 }
 

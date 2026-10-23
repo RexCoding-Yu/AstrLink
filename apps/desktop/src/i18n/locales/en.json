@@ -1256,7 +1256,9 @@
       "chat": "Used by OpenCode, OpenClaw, and most compatible tools",
       "messages": "Used by Claude Code",
       "gemini": "Used by Gemini CLI"
-    }
+    },
+    "groupPlugins": "Plugins",
+    "kindPickerPluginHint": "Adapted by the {{plugin}} plugin"
   },
   "models": {
     "deleteNamed": "Delete {{label}}",
@@ -1401,7 +1403,8 @@
     "xai": "xAI (Grok) API",
     "antigravity_subscription": "Antigravity subscription",
     "copilot_subscription": "GitHub Copilot subscription",
-    "droid_subscription": "Droid subscription"
+    "droid_subscription": "Droid subscription",
+    "plugin": "Plugin provider"
   },
   "subscription": {
     "tag": "Sub",
@@ -1458,7 +1461,8 @@
     "glmDescription": "Zhipu platform API key with usage-based billing through /api/paas/v4. Add model IDs enabled for your account.",
     "minimaxDescription": "MiniMax platform API key with usage-based billing. Use your platform API key.",
     "doubaoDescription": "Volcengine Ark API key with usage-based billing. Defaults to Beijing; add an enabled model ID or inference endpoint ID (ep-…).",
-    "xaiDescription": "xAI platform API key with usage-based billing; supports Grok Chat, Responses, and model discovery."
+    "xaiDescription": "xAI platform API key with usage-based billing; supports Grok Chat, Responses, and model discovery.",
+    "pluginDescription": "A provider a plugin adapts: the plugin builds the requests and reads the answers, while the gateway sends them with the key and fails over."
   },
   "usage": {
     "allLimits": "All quotas",
