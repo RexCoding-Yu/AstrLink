@@ -2807,7 +2807,8 @@
     "window": {
       "trajectoryInspector": "AstrLink · 轨迹链路",
       "trajectoryInspectorPinned": "AstrLink · 轨迹链路（已置顶）",
-      "rawAccessApproval": "AstrLink · 原文申请"
+      "rawAccessApproval": "AstrLink · 原文申请",
+      "pluginApproval": "AstrLink · 插件确认"
     },
     "rawAccess": {
       "notificationTitle": "Agent 申请读取原文",
@@ -4709,7 +4710,18 @@
       "network": "网络",
       "storage": "插件存储",
       "uiViews": "界面视图",
-      "modelTools": "允许 Agent 查询"
+      "modelTools": "允许 Agent 查询",
+      "requestWrite": "修改请求",
+      "requestWriteRaw": "改写整个请求体",
+      "requestGate": "拒绝请求",
+      "routing": "调整路由",
+      "responseRead": "读取响应",
+      "responseWrite": "改写响应",
+      "events": "网关事件",
+      "schedule": "定时任务",
+      "httpServe": "本机接口",
+      "provider": "供应商适配器",
+      "uiCode": "界面代码"
     },
     "loadErrors": {
       "not_found": "没有 plugin.ts 或 plugin.js",
@@ -5066,7 +5078,62 @@
         "info": "信息",
         "warn": "警告",
         "error": "错误"
-      }
+      },
+      "breaker": "「{{point}}」最近失败太多，{{time}} 前暂时不参与请求。"
+    },
+    "hooks": {
+      "onRequest": "入口",
+      "route": "路由",
+      "beforeForward": "转发前",
+      "beforeUpstream": "转发到上游前",
+      "rewriteResponse": "改写响应",
+      "onStreamEvent": "流式改写",
+      "onResponse": "响应后",
+      "onEvent": "网关事件",
+      "onSchedule": "定时任务",
+      "onHttp": "本机接口",
+      "provider": "供应商适配器",
+      "providerEvent": "适配器流式事件",
+      "observeTurn": "每轮结束后",
+      "prepareSession": "会话装载",
+      "prepareTurn": "本轮补充"
+    },
+    "approval": {
+      "loading": "正在读取要确认的修改…",
+      "nothing": "没有等待确认的插件修改",
+      "enableTitle": "启用「{{name}}」",
+      "grantTitle": "允许「{{name}}」做更多事",
+      "capabilitiesEnable": "插件申请以下能力，取消勾选的不会授予：",
+      "capabilitiesAdded": "这次要新授予的能力，取消勾选的不会授予：",
+      "noCapabilities": "插件没有申请任何能力。",
+      "origins": "新增可访问的地址",
+      "plaintext": "明文 HTTP",
+      "plaintextExisting": "允许用明文 HTTP 访问：{{origins}}",
+      "trusted": "设为受信任：跳过隐私检查，插件会看到对话原文。",
+      "failClosed": "插件的入口钩子出错或超时时，拦下请求而不是放行。",
+      "risk": {
+        "ui_code": "界面代码和 AstrLink 界面同等权限：能看请求记录、改设置，凡是 AstrLink 界面能做的都能做。"
+      },
+      "deny": "拒绝",
+      "confirm": "同意",
+      "confirmEnable": "启用",
+      "waiting": "这个修改正在等你在「插件确认」窗口里确认。",
+      "open": "打开确认窗口"
+    },
+    "limits": {
+      "label": "扩展点时间上限",
+      "helpLabel": "关于扩展点时间上限",
+      "help": "请求最多等插件每个扩展点这么久，留空就按插件声明的（框里灰色的数），插件没声明时用网关的默认值。超时后：入口放行、路由保持原顺序、转发前原样发出、改写响应原样返回、流式改写这条事件原样放过。插件用得越久，请求越慢，「开发」页签能看到每个扩展点实际用了多久。",
+      "ms": "毫秒",
+      "invalid": "{{point}}的时间上限要是 1 到 {{max}} 之间的整数毫秒",
+      "failClosed": "出错时拦下请求",
+      "failClosedHelpLabel": "关于出错时拦下请求",
+      "failClosedHelp": "插件申请：它的入口钩子出错或超时时，拦下请求而不是放行，比如用来做必须执行的内容审查。打开后，插件一出问题请求就会失败，所以要在确认窗口里确认。"
+    },
+    "order": {
+      "open": "调整顺序",
+      "title": "插件的执行顺序",
+      "description": "同一个扩展点上，插件从上到下依次执行，每个插件拿到上一个插件的结果。"
     }
   },
   "pluginRecords": {
@@ -5099,7 +5166,18 @@
       "rate_limited": "查得太频繁",
       "turn_limit": "这一轮已经查满 3 次",
       "unbound": "会话还没有绑定项目",
-      "invalid_input": "参数不对"
+      "invalid_input": "参数不对",
+      "circuit_open": "失败太多，暂时停用",
+      "no_request_gate": "想拒绝请求，但没有授予「拒绝请求」",
+      "no_request_write": "想改请求，但没有授予「修改请求」",
+      "no_request_write_raw": "想替换请求体，但没有授予「改写整个请求体」",
+      "would_exclude_all": "想排除所有提供商，没有生效",
+      "invalid_body": "返回的请求体无效，没有用",
+      "header_denied": "有请求头不许插件设置，已忽略",
+      "stream_stopped": "连续出错，这次流的后续事件不再交给它",
+      "memory_limit": "内存超限",
+      "canceled": "请求已结束",
+      "unavailable": "插件不可用"
     },
     "reportSkipReasons": {
       "rate_limited": "上报得太频繁",
@@ -5188,7 +5266,27 @@
     "lookupHits_other": "{{count}} 条结果",
     "commands": "附上查询",
     "usageOnly": "只附上查询方法 · {{placement}} +{{size}}",
-    "usagePart": "其中查询方法 {{size}}"
+    "usagePart": "其中查询方法 {{size}}",
+    "effects": {
+      "deny": "拒绝了请求",
+      "tag": "打了标签",
+      "tagged": "标签：{{tags}}",
+      "order": "调整了提供商顺序",
+      "exclude": "排除了部分提供商",
+      "model": "换了模型",
+      "system": "追加了系统提示词",
+      "turn": "在本轮前加了内容",
+      "params": "改了参数",
+      "tools": "改了工具",
+      "body": "替换了请求体",
+      "headers": "加了请求头",
+      "rewrite": "改写了响应",
+      "stream": "改写了流式事件",
+      "observed": "看过了响应",
+      "separator": "、"
+    },
+    "streamEvents": "处理了 {{count}} 条事件",
+    "streamEventsFailed": "处理了 {{count}} 条事件，{{failures}} 条出错后原样放过"
   },
   "metadata": {
     "title": "元信息",

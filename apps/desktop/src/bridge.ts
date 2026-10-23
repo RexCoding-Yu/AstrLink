@@ -1,5 +1,5 @@
 import { isWebEdition } from "./edition";
-import { webInvoke, RAW_CHANGED } from "./web-transport";
+import { ConsoleError, webInvoke, RAW_CHANGED } from "./web-transport";
 import {
   parseServiceTestResult,
   type ServiceTestInput,
@@ -190,6 +190,9 @@ import {
   parsePluginStatus,
   parsePluginJournal,
   parsePluginDryRun,
+  parsePluginApproval,
+  parsePendingPluginApproval,
+  parsePluginApprovalFinished,
   parsePluginTestResult,
   parseSessionMetadata,
   parseSessionPlugins,
@@ -202,6 +205,9 @@ import {
   type PluginDetail,
   type PluginDryRunResult,
   type PluginJournal,
+  type PluginApproval,
+  type PluginApprovalFinished,
+  type PendingPluginApproval,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
   type PluginList,
@@ -1421,9 +1427,16 @@ export async function getPlugin(key: string): Promise<PluginDetail> {
   );
 }
 
+/**
+ * Saves a plugin's settings. A change that grants the plugin more waits for
+ * the user: the desktop holds it for its confirmation window and fails with
+ * `approval_pending`; the web console fails with `approval_required` and
+ * sends it again `approved` once its own dialog confirmed it.
+ */
 export async function updatePlugin(
   key: string,
   update: PluginSettingsUpdate,
+  approved = false,
 ): Promise<PluginDetail> {
   requireNativeBridge();
   return parsePluginDetail(
@@ -1431,8 +1444,71 @@ export async function updatePlugin(
       action: "update",
       key,
       input: update,
+      ...(approved ? { approved: true } : {}),
     }),
   );
+}
+
+/** What a change the web console must confirm grants, from its error. */
+export function pluginApprovalOf(error: unknown): PluginApproval | null {
+  if (!(error instanceof ConsoleError) || error.code !== "approval_required")
+    return null;
+  try {
+    return parsePluginApproval(
+      (error.body as { approval?: unknown })?.approval,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** The change waiting in the plugin confirmation window, for that window. */
+export async function pendingPluginApproval(): Promise<PendingPluginApproval | null> {
+  requireNativeBridge();
+  return parsePendingPluginApproval(
+    await invoke<unknown>("plugin_approval_pending"),
+  );
+}
+
+/**
+ * Decides the change waiting for confirmation, from the confirmation window
+ * alone. `kept` are the added capabilities the user left ticked.
+ */
+export async function decidePluginApproval(
+  id: string,
+  approve: boolean,
+  kept?: string[],
+): Promise<void> {
+  requireNativeBridge();
+  await invoke<unknown>("plugin_approval_decide", { id, approve, kept });
+}
+
+/** Brings the confirmation window back; false when nothing waits in it. */
+export async function openPluginApproval(): Promise<boolean> {
+  requireNativeBridge();
+  return Boolean(await invoke<unknown>("open_plugin_approval"));
+}
+
+/** Calls onFinished once the user decided a change in the confirmation window. */
+export async function listenPluginApprovalFinished(
+  onFinished: (finished: PluginApprovalFinished) => void,
+): Promise<() => void> {
+  if (isWebEdition || !hasNativeBridge()) return () => {};
+  return listen("plugin-approval-finished", (event) => {
+    try {
+      onFinished(parsePluginApprovalFinished(event.payload));
+    } catch {
+      // A malformed announcement changes nothing.
+    }
+  });
+}
+
+/** Calls onChange when a newer change replaced the one waiting. */
+export async function listenPluginApprovalChanged(
+  onChange: () => void,
+): Promise<() => void> {
+  if (isWebEdition || !hasNativeBridge()) return () => {};
+  return listen("plugin-approval-changed", () => onChange());
 }
 
 export async function testPlugin(key: string): Promise<PluginTestResult> {

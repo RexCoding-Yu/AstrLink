@@ -8,7 +8,53 @@ export const PLUGIN_CAPABILITIES = [
   "storage",
   "ui.views",
   "model.tools",
+  "request.write",
+  "request.write.raw",
+  "request.gate",
+  "routing",
+  "response.read",
+  "response.write",
+  "events",
+  "schedule",
+  "http.serve",
+  "provider",
+  "ui.code",
 ] as const;
+
+/** Capabilities confirmed on their own, in red: they reach what the user sees. */
+export const HIGH_RISK_CAPABILITIES: readonly string[] = ["ui.code"];
+
+/**
+ * What a change grants a plugin beyond what it had, which the user confirms
+ * where nothing the plugin runs can click: enabling it, capabilities,
+ * addresses, plain HTTP among them, the privacy check skipped, and refusing
+ * requests its entry hook cannot decide.
+ */
+export interface PluginApproval {
+  plugin: string;
+  name: string;
+  enable?: boolean;
+  added_capabilities?: string[];
+  added_origins?: string[];
+  plaintext?: string[];
+  trusted?: boolean;
+  fail_closed?: boolean;
+}
+
+/** A change waiting in the plugin confirmation window. */
+export interface PendingPluginApproval {
+  id: string;
+  key: string;
+  approval: PluginApproval;
+}
+
+/** What the main window hears once a change was decided. */
+export interface PluginApprovalFinished {
+  id: string;
+  key: string;
+  approved: boolean;
+  error?: string;
+}
 
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
 
@@ -76,6 +122,8 @@ export interface PluginJournal {
   entries: PluginJournalEntry[];
   timings: PluginHookTiming[];
   latest: number;
+  /** Extension points kept out of requests for now after failing too often. */
+  breakers: Array<{ hook: string; until: string }>;
 }
 
 /** What a hook run by hand returned, or why it failed. */
@@ -146,6 +194,28 @@ export interface PluginDetail extends PluginSummary {
   storage: PluginStorageItem[];
   /** What the host keeps for the plugin, with counts where it can clear them. */
   host_storage: PluginHostStorage[];
+  /** The time limits of the extension points the plugin serves. */
+  limits: PluginHookLimit[];
+  /** The plugin asks to refuse requests its entry hook cannot decide. */
+  fail_closed_requested?: boolean;
+  /** The user agreed to that. */
+  fail_closed?: boolean;
+  /** The plugin has interface code. */
+  client?: boolean;
+  /** The user lets its interface code load. */
+  ui_enabled: boolean;
+}
+
+/** One extension point's time limit: its bounds, the plugin's own and the user's, in ms. */
+export interface PluginHookLimit {
+  hook: string;
+  default_ms: number;
+  max_ms: number;
+  /** What the plugin asks for; absent for the default. */
+  plugin_ms?: number;
+  /** What the user set; absent to follow the plugin. */
+  ms?: number;
+  effective_ms: number;
 }
 
 /** A query a plugin offers the model, or a report it takes from it. */
@@ -195,6 +265,8 @@ export const HOST_SETTINGS = [
   "$workspace",
   "$refresh",
   "$lookup",
+  "$limits",
+  "$failClosed",
 ] as const;
 export type HostSettingKey = (typeof HOST_SETTINGS)[number];
 
@@ -203,6 +275,10 @@ export type PluginLanguage = "en" | "zh-CN" | "ja";
 
 /** The settings of every plugin at once. */
 export interface PluginHostSettings {
+  /** Plugin keys in the order their extension points run; the rest follow by key. */
+  order?: string[];
+  /** The web console loads plugins' interface code. */
+  web_ui?: boolean;
   /** Every plugin stays out of requests, which go out as they came. */
   paused: boolean;
   /** What all plugins together may inject into one request. */
@@ -215,6 +291,8 @@ export const MIN_INJECTION_BUDGET_BYTES = 4 * 1024;
 export const MAX_INJECTION_BUDGET_BYTES = 64 * 1024;
 
 export interface PluginHostSettingsUpdate {
+  order?: string[];
+  web_ui?: boolean;
   paused?: boolean;
   injection_budget_bytes?: number;
   language?: PluginLanguage;
@@ -371,6 +449,10 @@ export interface PluginSettingsUpdate {
   config?: Record<string, unknown>;
   /** Plain http server origins the user agrees to reach in the clear. */
   plaintext_consent?: string[];
+  /** Time limits by hook in ms; 0 follows the plugin again. */
+  hook_limits_ms?: Record<string, number>;
+  fail_closed?: boolean;
+  ui_enabled?: boolean;
 }
 
 export type PluginViewItem =
@@ -472,6 +554,13 @@ export interface RequestPluginRecord {
   lookup?: PluginLookup;
   /** The queries whose commands the plugin's turn block carried. */
   commands?: string[];
+  /** What an extension point's call did, as effect codes such as deny or system. */
+  effects?: string[];
+  /** The tags the entry hook gave the request. */
+  tags?: string[];
+  /** The stream events a stream hook saw, and those it failed on. */
+  events?: number;
+  failures?: number;
 }
 
 /** A button on a plugin's record; confirm is asked before the click goes out. */
@@ -736,6 +825,54 @@ function milliseconds(value: unknown, path: string): number {
   return number;
 }
 
+export function parsePluginApproval(
+  value: unknown,
+  path = "$",
+): PluginApproval {
+  const approval = plugin.object(value, path);
+  const list = (field: string) =>
+    approval[field] === undefined
+      ? undefined
+      : plugin.strings(approval[field], `${path}.${field}`);
+  return defined({
+    plugin: plugin.string(approval.plugin, `${path}.plugin`),
+    name: plugin.string(approval.name, `${path}.name`),
+    enable: plugin.optionalBoolean(approval.enable, `${path}.enable`),
+    added_capabilities: list("added_capabilities"),
+    added_origins: list("added_origins"),
+    plaintext: list("plaintext"),
+    trusted: plugin.optionalBoolean(approval.trusted, `${path}.trusted`),
+    fail_closed: plugin.optionalBoolean(
+      approval.fail_closed,
+      `${path}.fail_closed`,
+    ),
+  });
+}
+
+export function parsePendingPluginApproval(
+  value: unknown,
+): PendingPluginApproval | null {
+  if (value === null || value === undefined) return null;
+  const pending = plugin.object(value, "$");
+  return {
+    id: plugin.string(pending.id, "$.id"),
+    key: plugin.string(pending.key, "$.key"),
+    approval: parsePluginApproval(pending.approval, "$.approval"),
+  };
+}
+
+export function parsePluginApprovalFinished(
+  value: unknown,
+): PluginApprovalFinished {
+  const finished = plugin.object(value, "$");
+  return defined({
+    id: plugin.string(finished.id, "$.id"),
+    key: plugin.string(finished.key, "$.key"),
+    approved: plugin.boolean(finished.approved, "$.approved"),
+    error: plugin.optionalString(finished.error, "$.error"),
+  });
+}
+
 export function parsePluginJournal(value: unknown): PluginJournal {
   const journal = plugin.object(value, "$");
   return {
@@ -756,6 +893,17 @@ export function parsePluginJournal(value: unknown): PluginJournal {
       };
     }),
     latest: plugin.integer(journal.latest, "$.latest"),
+    breakers: (journal.breakers === undefined
+      ? []
+      : plugin.array(journal.breakers, "$.breakers")
+    ).map((item, index) => {
+      const path = `$.breakers[${index}]`;
+      const breaker = plugin.object(item, path);
+      return {
+        hook: plugin.string(breaker.hook, `${path}.hook`),
+        until: plugin.string(breaker.until, `${path}.until`),
+      };
+    }),
   };
 }
 
@@ -886,6 +1034,32 @@ export function parsePluginDetail(value: unknown): PluginDetail {
       plugin.optionalBoolean(detail.auto_refresh, "$.auto_refresh") ?? false,
     lookup_enabled:
       plugin.optionalBoolean(detail.lookup_enabled, "$.lookup_enabled") ?? true,
+    limits: (detail.limits === undefined
+      ? []
+      : plugin.array(detail.limits, "$.limits")
+    ).map((item, index) => {
+      const path = `$.limits[${index}]`;
+      const limit = plugin.object(item, path);
+      return defined({
+        hook: plugin.string(limit.hook, `${path}.hook`),
+        default_ms: plugin.integer(limit.default_ms, `${path}.default_ms`),
+        max_ms: plugin.integer(limit.max_ms, `${path}.max_ms`),
+        plugin_ms: plugin.optionalInteger(limit.plugin_ms, `${path}.plugin_ms`),
+        ms: plugin.optionalInteger(limit.ms, `${path}.ms`),
+        effective_ms: plugin.integer(
+          limit.effective_ms,
+          `${path}.effective_ms`,
+        ),
+      });
+    }),
+    fail_closed_requested: plugin.optionalBoolean(
+      detail.fail_closed_requested,
+      "$.fail_closed_requested",
+    ),
+    fail_closed: plugin.optionalBoolean(detail.fail_closed, "$.fail_closed"),
+    client: plugin.optionalBoolean(detail.client, "$.client"),
+    ui_enabled:
+      plugin.optionalBoolean(detail.ui_enabled, "$.ui_enabled") ?? true,
     tools: (detail.tools === undefined
       ? []
       : plugin.array(detail.tools, "$.tools")
@@ -941,6 +1115,12 @@ export function parsePluginHostSettings(value: unknown): PluginHostSettings {
       "$.injection_budget_bytes",
     ),
     language: plugin.oneOf(settings.language, languages, "$.language"),
+    ...(settings.order === undefined
+      ? {}
+      : { order: plugin.strings(settings.order, "$.order") }),
+    ...(settings.web_ui === undefined
+      ? {}
+      : { web_ui: plugin.boolean(settings.web_ui, "$.web_ui") }),
   };
 }
 
@@ -1401,6 +1581,19 @@ export function parseRequestPluginRecords(
       network: parseNetworkCount(record.network, `${recordPath}.network`),
       observe: plugin.optionalString(record.observe, `${recordPath}.observe`),
       trigger: plugin.optionalString(record.trigger, `${recordPath}.trigger`),
+      effects:
+        record.effects === undefined
+          ? undefined
+          : plugin.strings(record.effects, `${recordPath}.effects`),
+      tags:
+        record.tags === undefined
+          ? undefined
+          : plugin.strings(record.tags, `${recordPath}.tags`),
+      events: plugin.optionalInteger(record.events, `${recordPath}.events`),
+      failures: plugin.optionalInteger(
+        record.failures,
+        `${recordPath}.failures`,
+      ),
       actions:
         record.actions === undefined
           ? undefined

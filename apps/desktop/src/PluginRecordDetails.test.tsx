@@ -391,6 +391,79 @@ describe("PluginRecordDetails", () => {
     expect(tooMany?.textContent).not.toContain("查满");
   });
 
+  it("names the extension point and says what its call did", async () => {
+    const base = {
+      plugin: "gate",
+      plugin_version: "1.0.0",
+      title: "Gate",
+      status: "ok" as const,
+      summary: "",
+      elapsed_ms: 3,
+      network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+    };
+    await act(async () => {
+      reactRoot.render(
+        <PluginRecordDetails
+          record={{
+            ...record,
+            plugin_records: [
+              {
+                ...base,
+                hook: "onRequest",
+                effects: ["tag"],
+                tags: ["night", "cheap"],
+              },
+              {
+                ...base,
+                hook: "route",
+                effects: ["order"],
+                summary: "Beta is cheaper",
+              },
+              { ...base, hook: "beforeForward", effects: ["system", "params"] },
+              {
+                ...base,
+                hook: "onStreamEvent",
+                effects: ["stream"],
+                events: 5,
+                failures: 1,
+                summary: "",
+              },
+              {
+                ...base,
+                hook: "onRequest",
+                status: "skipped",
+                skipped_reason: "circuit_open",
+              },
+            ],
+          }}
+        />,
+      );
+    });
+    const rows = [
+      ...document.querySelectorAll('[data-testid="plugin-record"]'),
+    ];
+    const point = (row: Element) =>
+      row.querySelector('[data-testid="plugin-record-point"]')?.textContent;
+    const headline = (row: Element) =>
+      row.querySelector('[data-testid="plugin-record-headline"]')?.textContent;
+    expect(rows.map(point)).toEqual([
+      "入口",
+      "路由",
+      "转发前",
+      "流式改写",
+      "入口",
+    ]);
+    expect(headline(rows[0]!)).toBe("标签：night、cheap");
+    expect(headline(rows[1]!)).toBe("Beta is cheaper");
+    expect(rows[1]?.textContent).toContain("调整了提供商顺序");
+    expect(headline(rows[2]!)).toBe("追加了系统提示词、改了参数");
+    expect(headline(rows[3]!)).toBe("改写了流式事件");
+    expect(rows[3]?.textContent).toContain(
+      "处理了 5 条事件，1 条出错后原样放过",
+    );
+    expect(headline(rows[4]!)).toBe("失败太多，暂时停用");
+  });
+
   it("says so when no plugin ran", async () => {
     await act(async () => {
       reactRoot.render(<PluginRecordDetails record={record} />);

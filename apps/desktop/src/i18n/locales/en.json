@@ -2807,7 +2807,8 @@
     "window": {
       "trajectoryInspector": "AstrLink · Trajectory call",
       "trajectoryInspectorPinned": "AstrLink · Trajectory call (Pinned)",
-      "rawAccessApproval": "AstrLink · Raw access requests"
+      "rawAccessApproval": "AstrLink · Raw access requests",
+      "pluginApproval": "AstrLink · Plugin confirmation"
     },
     "rawAccess": {
       "notificationTitle": "An agent asks to read raw content",
@@ -4709,7 +4710,18 @@
       "network": "Network",
       "storage": "Plugin storage",
       "uiViews": "Views",
-      "modelTools": "Agent lookups"
+      "modelTools": "Agent lookups",
+      "requestWrite": "Change requests",
+      "requestWriteRaw": "Rewrite whole request bodies",
+      "requestGate": "Refuse requests",
+      "routing": "Adjust routing",
+      "responseRead": "Read responses",
+      "responseWrite": "Rewrite responses",
+      "events": "Gateway events",
+      "schedule": "Scheduled tasks",
+      "httpServe": "Local endpoint",
+      "provider": "Provider adapter",
+      "uiCode": "Interface code"
     },
     "loadErrors": {
       "not_found": "No plugin.ts or plugin.js",
@@ -5066,7 +5078,62 @@
         "info": "Info",
         "warn": "Warning",
         "error": "Error"
-      }
+      },
+      "breaker": "{{point}} failed too often lately and sits out of requests until {{time}}."
+    },
+    "hooks": {
+      "onRequest": "Entry",
+      "route": "Routing",
+      "beforeForward": "Before forwarding",
+      "beforeUpstream": "Before the upstream",
+      "rewriteResponse": "Response rewrite",
+      "onStreamEvent": "Stream rewrite",
+      "onResponse": "After the response",
+      "onEvent": "Gateway events",
+      "onSchedule": "Scheduled task",
+      "onHttp": "Local endpoint",
+      "provider": "Provider adapter",
+      "providerEvent": "Adapter stream events",
+      "observeTurn": "After each turn",
+      "prepareSession": "Session load",
+      "prepareTurn": "Turn context"
+    },
+    "approval": {
+      "loading": "Reading the change to confirm…",
+      "nothing": "No plugin change is waiting for confirmation",
+      "enableTitle": "Enable {{name}}",
+      "grantTitle": "Let {{name}} do more",
+      "capabilitiesEnable": "The plugin asks for these capabilities; unticked ones are not granted:",
+      "capabilitiesAdded": "Capabilities this change grants; unticked ones are not granted:",
+      "noCapabilities": "The plugin asks for no capabilities.",
+      "origins": "New addresses it may reach",
+      "plaintext": "plain HTTP",
+      "plaintextExisting": "Plain HTTP allowed to: {{origins}}",
+      "trusted": "Trusted: the privacy check is skipped and the plugin sees conversations as they are.",
+      "failClosed": "When the plugin's entry hook fails or runs out of time, the request is refused instead of let in.",
+      "risk": {
+        "ui_code": "Interface code has the AstrLink interface's own powers: it can read request records, change settings, and do anything the interface can."
+      },
+      "deny": "Deny",
+      "confirm": "Allow",
+      "confirmEnable": "Enable",
+      "waiting": "This change is waiting for you in the plugin confirmation window.",
+      "open": "Open the confirmation window"
+    },
+    "limits": {
+      "label": "Extension point time limits",
+      "helpLabel": "About extension point time limits",
+      "help": "How long a request waits for each of the plugin's extension points. Empty follows what the plugin asks for, shown greyed in the box, or the gateway's default. Past it, the entry lets the request in, routing keeps its order, forwarding sends the request as it was, and a rewrite leaves the response or the event as it came. The longer a plugin takes, the slower requests get; the Develop tab shows how long each point really took.",
+      "ms": "ms",
+      "invalid": "The time limit of {{point}} is a whole number of milliseconds from 1 to {{max}}",
+      "failClosed": "Refuse requests when it fails",
+      "failClosedHelpLabel": "About refusing requests when it fails",
+      "failClosedHelp": "The plugin asks that a request its entry hook fails on, or runs out of time for, is refused instead of let in, as a check that must run does. With it on, any trouble of the plugin fails requests, so it is confirmed in the confirmation window."
+    },
+    "order": {
+      "open": "Change the order",
+      "title": "The order plugins run in",
+      "description": "At each extension point the plugins run from top to bottom, each with what the one above returned."
     }
   },
   "pluginRecords": {
@@ -5099,7 +5166,18 @@
       "rate_limited": "Too many lookups",
       "turn_limit": "The turn's 3 lookups were used",
       "unbound": "The session has no project yet",
-      "invalid_input": "Wrong input"
+      "invalid_input": "Wrong input",
+      "circuit_open": "Off for a while after failing too often",
+      "no_request_gate": "Tried to refuse the request without Refuse requests granted",
+      "no_request_write": "Tried to change the request without Change requests granted",
+      "no_request_write_raw": "Tried to replace the body without Rewrite whole request bodies granted",
+      "would_exclude_all": "Tried to exclude every provider; nothing was excluded",
+      "invalid_body": "Returned a body that is not valid; it was not used",
+      "header_denied": "Set a header plugins may not set; it was ignored",
+      "stream_stopped": "Failed several events in a row; the rest of the stream went past it",
+      "memory_limit": "Out of memory",
+      "canceled": "The request had ended",
+      "unavailable": "The plugin is unavailable"
     },
     "reportSkipReasons": {
       "rate_limited": "Too many reports",
@@ -5188,7 +5266,27 @@
     "lookupHits_other": "{{count}} hits",
     "commands": "Lookups offered",
     "usageOnly": "Only the lookup usage · {{placement}} +{{size}}",
-    "usagePart": "lookup usage {{size}}"
+    "usagePart": "lookup usage {{size}}",
+    "effects": {
+      "deny": "refused the request",
+      "tag": "tagged the request",
+      "tagged": "tags: {{tags}}",
+      "order": "reordered the providers",
+      "exclude": "excluded some providers",
+      "model": "changed the model",
+      "system": "added to the system prompt",
+      "turn": "added context before the turn",
+      "params": "changed parameters",
+      "tools": "changed the tools",
+      "body": "replaced the request body",
+      "headers": "added headers",
+      "rewrite": "rewrote the response",
+      "stream": "rewrote stream events",
+      "observed": "read the response",
+      "separator": ", "
+    },
+    "streamEvents": "Handled {{count}} events",
+    "streamEventsFailed": "Handled {{count}} events; {{failures}} failed and went on as they came"
   },
   "metadata": {
     "title": "Metadata",

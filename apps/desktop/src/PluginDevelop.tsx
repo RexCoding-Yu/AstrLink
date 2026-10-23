@@ -33,10 +33,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { dryRunPlugin, getPluginJournal } from "./bridge";
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
+import { hookLabel } from "./plugin-labels";
 import type {
   PluginDetail,
   PluginDryRunResult,
   PluginHookTiming,
+  PluginJournal,
   PluginJournalEntry,
 } from "./plugin-model";
 
@@ -98,6 +100,7 @@ export function PluginDevelop({ detail }: { detail: PluginDetail }) {
   const t = useT();
   const [entries, setEntries] = useState<PluginJournalEntry[]>([]);
   const [timings, setTimings] = useState<PluginHookTiming[]>([]);
+  const [breakers, setBreakers] = useState<PluginJournal["breakers"]>([]);
   const [error, setError] = useState<string | null>(null);
   const since = useRef(0);
 
@@ -112,6 +115,7 @@ export function PluginDevelop({ detail }: { detail: PluginDetail }) {
         if (stopped) return;
         since.current = journal.latest;
         setTimings(journal.timings);
+        setBreakers(journal.breakers ?? []);
         if (journal.entries.length > 0) {
           setEntries((previous) =>
             [...previous, ...journal.entries].slice(-MAX_LINES),
@@ -136,6 +140,18 @@ export function PluginDevelop({ detail }: { detail: PluginDetail }) {
     <div className="grid gap-5" data-testid="plugin-develop">
       {detail.development ? <DevelopmentBuild detail={detail} /> : null}
       {error ? <FormMessage tone="error">{error}</FormMessage> : null}
+      {breakers.map((breaker) => (
+        <FormMessage
+          data-testid="plugin-breaker"
+          key={breaker.hook}
+          tone="notice"
+        >
+          {t("plugins.develop.breaker", {
+            point: hookLabel(breaker.hook, t),
+            time: new Date(breaker.until).toLocaleTimeString(),
+          })}
+        </FormMessage>
+      ))}
       <Timings timings={timings} />
       <DryRun detail={detail} />
       <Log entries={entries} onClear={() => setEntries([])} />

@@ -10,6 +10,7 @@ import { runPluginAction } from "./bridge";
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
 import { notify } from "./notify";
+import { hookLabel } from "./plugin-labels";
 import type {
   MetadataEvent,
   MetadataValue,
@@ -47,7 +48,60 @@ const knownSkipReasons = new Set([
   "turn_limit",
   "unbound",
   "invalid_input",
+  "circuit_open",
+  "no_request_gate",
+  "no_request_write",
+  "no_request_write_raw",
+  "would_exclude_all",
+  "invalid_body",
+  "header_denied",
+  "stream_stopped",
+  "memory_limit",
+  "canceled",
+  "unavailable",
 ]);
+
+/** The hooks of the extension points, whose records name the point. */
+const extensionHooks = new Set([
+  "onRequest",
+  "route",
+  "beforeForward",
+  "beforeUpstream",
+  "rewriteResponse",
+  "onStreamEvent",
+  "onResponse",
+]);
+
+const knownEffects = new Set([
+  "deny",
+  "tag",
+  "order",
+  "exclude",
+  "model",
+  "system",
+  "turn",
+  "params",
+  "tools",
+  "body",
+  "headers",
+  "rewrite",
+  "stream",
+  "observed",
+]);
+
+/** What an extension point's call did, in words. */
+function effectsText(entry: RequestPluginRecord, t: Translate): string {
+  const effects = (entry.effects ?? []).map((effect) =>
+    effect === "tag" && entry.tags && entry.tags.length > 0
+      ? t("pluginRecords.effects.tagged", {
+          tags: entry.tags.join(t("pluginRecords.effects.separator")),
+        })
+      : knownEffects.has(effect)
+        ? t(`pluginRecords.effects.${effect}`)
+        : effect,
+  );
+  return effects.join(t("pluginRecords.effects.separator"));
+}
 
 const knownTriggers = new Set([
   "start",
@@ -181,9 +235,21 @@ function describe(entry: RequestPluginRecord, t: Translate) {
     entry.observe && entry.observe !== "queued"
       ? observeState(entry.observe, t)
       : "";
+  const effects = effectsText(entry, t);
+  const stream =
+    entry.events !== undefined && entry.events > 0
+      ? entry.failures
+        ? t("pluginRecords.streamEventsFailed", {
+            count: entry.events,
+            failures: entry.failures,
+          })
+        : t("pluginRecords.streamEvents", { count: entry.events })
+      : "";
   const headline =
     entry.summary ||
     (entry.status !== "ok" ? reason : "") ||
+    effects ||
+    stream ||
     lookupText(entry, t) ||
     (observe ? t("pluginRecords.observeLine", { state: observe }) : "");
   const points = [
@@ -199,6 +265,9 @@ function describe(entry: RequestPluginRecord, t: Translate) {
         })
       : "",
     entry.summary && reason ? reason : "",
+    entry.summary && effects ? effects : "",
+    stream && headline !== stream ? stream : "",
+    entry.status === "ok" && reason && !entry.summary ? reason : "",
     observe && headline !== t("pluginRecords.observeLine", { state: observe })
       ? t("pluginRecords.observeLine", { state: observe })
       : "",
@@ -333,6 +402,7 @@ function PluginRecordRow({
 }) {
   const t = useT();
   const { headline, points, details, quiet, usageOnly } = describe(entry, t);
+  const point = extensionHooks.has(entry.hook) ? hookLabel(entry.hook, t) : "";
   const view = entry.view && entry.view.length > 0 ? entry.view : null;
   const buttons = actions && actions.length > 0 ? actions : null;
   const line = (
@@ -347,6 +417,14 @@ function PluginRecordRow({
         >
           {entry.title}
         </span>
+        {point ? (
+          <span
+            className="shrink-0 text-micro text-muted-foreground"
+            data-testid="plugin-record-point"
+          >
+            {point}
+          </span>
+        ) : null}
         {entry.status !== "ok" && !usageOnly ? (
           <span
             className={cn(

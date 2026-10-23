@@ -33,6 +33,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { useT } from "./i18n";
+import { hookLabel } from "./plugin-labels";
 import {
   configBytes,
   MAX_PLUGIN_CONFIG_BYTES,
@@ -82,6 +83,9 @@ interface Draft {
   secrets: Record<string, string>;
   /** The origin a credential no server sends goes to. */
   credentialOrigins: Record<string, string>;
+  /** The user's time limits by hook, as typed; "" follows the plugin. */
+  limits: Record<string, string>;
+  failClosed: boolean;
 }
 
 type Item =
@@ -106,6 +110,8 @@ const hostKeys: HostSettingKey[] = [
   "$workspace",
   "$refresh",
   "$lookup",
+  "$limits",
+  "$failClosed",
   "$origins",
 ];
 
@@ -172,6 +178,10 @@ function hostApplies(detail: PluginDetail, key: HostSettingKey): boolean {
       );
     case "$lookup":
       return detail.tools.length > 0;
+    case "$limits":
+      return detail.limits.length > 0;
+    case "$failClosed":
+      return detail.fail_closed_requested === true;
   }
 }
 
@@ -232,7 +242,36 @@ function draftOf(detail: PluginDetail): Draft {
     consent,
     secrets: {},
     credentialOrigins,
+    limits: Object.fromEntries(
+      detail.limits.map((limit) => [
+        limit.hook,
+        limit.ms ? String(limit.ms) : "",
+      ]),
+    ),
+    failClosed: detail.fail_closed === true,
   };
+}
+
+/** The time limits the draft changes, 0 where it follows the plugin again. */
+function changedLimits(
+  detail: PluginDetail,
+  draft: Draft,
+): Record<string, number> {
+  const changed: Record<string, number> = {};
+  for (const limit of detail.limits) {
+    const typed = (draft.limits[limit.hook] ?? "").trim();
+    const value = typed === "" ? 0 : Number(typed);
+    if (value !== (limit.ms ?? 0)) changed[limit.hook] = value;
+  }
+  return changed;
+}
+
+/** Whether a typed time limit is one Core takes. */
+function validLimit(limit: PluginDetail["limits"][number], typed: string) {
+  const text = typed.trim();
+  if (text === "") return true;
+  const value = Number(text);
+  return Number.isInteger(value) && value >= 1 && value <= limit.max_ms;
 }
 
 /** The value a field saves; undefined leaves its place empty. */
@@ -282,6 +321,13 @@ function problems(
   t: Translate,
 ): Record<string, string> {
   const found: Record<string, string> = {};
+  for (const limit of detail.limits) {
+    if (!validLimit(limit, draft.limits[limit.hook] ?? ""))
+      found[`$limits.${limit.hook}`] = t("plugins.limits.invalid", {
+        point: hookLabel(limit.hook, t),
+        max: limit.max_ms,
+      });
+  }
   for (const setting of declared(detail)) {
     if (setting.type === "switch") continue;
     const label = fieldLabel(setting);
@@ -433,8 +479,11 @@ export function PluginSettingsForm({
   const clientsChanged =
     stableJSON([...draft.excluded].sort()) !==
     stableJSON([...detail.excluded_clients].sort());
+  const limitsChanged = Object.keys(changedLimits(detail, draft)).length > 0;
   const dirty =
     configChanged ||
+    limitsChanged ||
+    draft.failClosed !== (detail.fail_closed === true) ||
     draft.wait !== detail.turn_wait_ms ||
     draft.trusted !== detail.privacy_trusted ||
     clientsChanged ||
@@ -467,6 +516,9 @@ export function PluginSettingsForm({
       update.auto_refresh = draft.refresh;
     if (draft.lookup !== detail.lookup_enabled)
       update.lookup_enabled = draft.lookup;
+    if (limitsChanged) update.hook_limits_ms = changedLimits(detail, draft);
+    if (draft.failClosed !== (detail.fail_closed === true))
+      update.fail_closed = draft.failClosed;
     if (originsChanged) update.network_origins = draft.origins;
     const consent = servers
       .map((setting) => {
@@ -1197,7 +1249,85 @@ function HostRow({
           />
         </SettingRow>
       );
+    case "$limits":
+      return <LimitRows detail={detail} draft={draft} onDraft={onDraft} />;
+    case "$failClosed":
+      return (
+        <SettingRow
+          help={<p>{t("plugins.limits.failClosedHelp")}</p>}
+          helpLabel={t("plugins.limits.failClosedHelpLabel")}
+          htmlFor={id}
+          label={t("plugins.limits.failClosed")}
+        >
+          <Switch
+            checked={draft.failClosed}
+            id={id}
+            onCheckedChange={(checked) =>
+              onDraft((current) => ({ ...current, failClosed: checked }))
+            }
+          />
+        </SettingRow>
+      );
   }
+}
+
+/**
+ * The time limits of the extension points the plugin serves, one per row:
+ * empty follows what the plugin asks for, which shows as the placeholder.
+ */
+function LimitRows({
+  detail,
+  draft,
+  onDraft,
+}: {
+  detail: PluginDetail;
+  draft: Draft;
+  onDraft: (change: (current: Draft) => Draft) => void;
+}) {
+  const t = useT();
+  const id = useId();
+  return (
+    <SettingRow
+      help={<p>{t("plugins.limits.help")}</p>}
+      helpLabel={t("plugins.limits.helpLabel")}
+      htmlFor={`${id}-0`}
+      label={t("plugins.limits.label")}
+    >
+      <div className="grid gap-1.5" data-testid="plugin-limits">
+        {detail.limits.map((limit, index) => {
+          const typed = draft.limits[limit.hook] ?? "";
+          return (
+            <div className="flex items-center gap-2" key={limit.hook}>
+              <Label
+                className="w-28 shrink-0 text-xs font-normal text-muted-foreground"
+                htmlFor={`${id}-${index}`}
+              >
+                {hookLabel(limit.hook, t)}
+              </Label>
+              <Input
+                aria-invalid={!validLimit(limit, typed) || undefined}
+                className="h-7 w-24 text-right tabular-nums"
+                id={`${id}-${index}`}
+                inputMode="numeric"
+                onChange={(event) => {
+                  const value = event.target.value;
+                  onDraft((current) => ({
+                    ...current,
+                    limits: { ...current.limits, [limit.hook]: value },
+                  }));
+                }}
+                placeholder={String(limit.plugin_ms ?? limit.default_ms)}
+                value={typed}
+              />
+              <span className="text-xs text-muted-foreground">
+                {t("plugins.limits.ms")}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </SettingRow>
+  );
 }
 
 /**

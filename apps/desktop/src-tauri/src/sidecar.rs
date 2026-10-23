@@ -1737,7 +1737,7 @@ impl CoreManager {
         let body = crate::raw_access::decision_body(grant_id, decision, proof)?;
         let path = crate::raw_access::decision_path(grant_id);
         let (status, _, response) = self
-            .authenticated_control_encoded(Method::POST, &path, Some(&body), None)
+            .authenticated_control_encoded(Method::POST, &path, Some(&body), None, false)
             .await?;
         let outcome = crate::raw_access::decision_outcome(status, &response)
             .ok_or_else(|| control_status_error(&Method::POST, &path, status, &response))?;
@@ -1802,7 +1802,7 @@ impl CoreManager {
         body: &[u8],
     ) -> Result<serde_json::Value, String> {
         let (status, _, response) = self
-            .authenticated_control_encoded(Method::POST, path, Some(body), None)
+            .authenticated_control_encoded(Method::POST, path, Some(body), None, false)
             .await?;
         let outcome = crate::raw_access::sealing_outcome(status, &response)
             .ok_or_else(|| control_status_error(&Method::POST, path, status, &response))?;
@@ -2320,6 +2320,39 @@ impl CoreManager {
             .authenticated_control(method, &path, body, None)
             .await?;
         serde_json::from_slice(&body).map_err(|_| "plugins returned invalid JSON".into())
+    }
+
+    /// Saves a plugin's settings. A change that grants the plugin more and
+    /// is not `approved` comes back as `NeedsApproval` with what it grants:
+    /// the user confirms it in the plugin confirmation window, which sends
+    /// it again approved.
+    pub async fn update_plugin(
+        &self,
+        key: &str,
+        input: serde_json::Value,
+        approved: bool,
+    ) -> Result<PluginUpdate, String> {
+        if !valid_plugin_name(key, '-') {
+            return Err("invalid plugin".into());
+        }
+        let path = format!("/control/v1/plugins/{key}");
+        let encoded = serde_json::to_vec(&input)
+            .map_err(|error| format!("unable to encode control request: {error}"))?;
+        let (status, _, body) = self
+            .authenticated_control_encoded(Method::PATCH, &path, Some(&encoded), None, approved)
+            .await?;
+        if status == reqwest::StatusCode::CONFLICT {
+            let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if parsed["error"]["code"] == "approval_required" {
+                return Ok(PluginUpdate::NeedsApproval(parsed["approval"].clone()));
+            }
+        }
+        if !status.is_success() {
+            return Err(control_status_error(&Method::PATCH, &path, status, &body));
+        }
+        serde_json::from_slice(&body)
+            .map(PluginUpdate::Saved)
+            .map_err(|_| "plugins returned invalid JSON".into())
     }
 
     /// The request attributes of the metadata settings.
@@ -3088,16 +3121,19 @@ impl CoreManager {
             ),
             None => None,
         };
-        self.authenticated_control_encoded(method, path, encoded_body.as_deref(), if_match)
+        self.authenticated_control_encoded(method, path, encoded_body.as_deref(), if_match, false)
             .await
     }
 
+    /// `approved` marks a change of a plugin's settings the user confirmed
+    /// in the plugin confirmation window.
     async fn authenticated_control_encoded(
         &self,
         method: Method,
         path: &str,
         encoded_body: Option<&[u8]>,
         if_match: Option<&str>,
+        approved: bool,
     ) -> Result<(reqwest::StatusCode, Option<String>, Vec<u8>), String> {
         let (base_url, control_token) = {
             let inner = self.lock_inner();
@@ -3125,7 +3161,7 @@ impl CoreManager {
                     &url,
                     path,
                     encoded_body,
-                    if_match,
+                    ControlHeaders { if_match, approved },
                     &control_token,
                 )
                 .await
@@ -3162,7 +3198,7 @@ impl CoreManager {
         url: &str,
         path: &str,
         encoded_body: Option<&[u8]>,
-        if_match: Option<&str>,
+        headers: ControlHeaders<'_>,
         control_token: &str,
     ) -> Result<(reqwest::StatusCode, Option<String>, Vec<u8>), String> {
         let mut request = self
@@ -3170,7 +3206,10 @@ impl CoreManager {
             .request(method.clone(), url)
             .timeout(control_request_timeout(&method, path))
             .header(header::AUTHORIZATION, format!("Bearer {control_token}"));
-        if let Some(etag) = if_match {
+        if headers.approved {
+            request = request.header(PLUGIN_APPROVAL_HEADER, "confirmed");
+        }
+        if let Some(etag) = headers.if_match {
             request = request.header(header::IF_MATCH, etag);
         }
         if let Some(body) = encoded_body {
@@ -3459,6 +3498,26 @@ fn valid_plugin_name(value: &str, extra: char) -> bool {
 }
 
 /// Translates a plugin page action into the control request it makes.
+/// Marks a plugin change the user confirmed; Core refuses a change that
+/// grants a plugin more without it.
+const PLUGIN_APPROVAL_HEADER: &str = "X-AstrLink-Plugin-Approval";
+
+/// The optional headers of a control request: the ETag a change expects,
+/// and the mark of a plugin change the user confirmed.
+#[derive(Clone, Copy)]
+struct ControlHeaders<'a> {
+    if_match: Option<&'a str>,
+    approved: bool,
+}
+
+/// What saving a plugin's settings came to.
+#[derive(Debug)]
+pub enum PluginUpdate {
+    Saved(serde_json::Value),
+    /// What the change grants, for the user to confirm first.
+    NeedsApproval(serde_json::Value),
+}
+
 fn plugin_request(
     action: &str,
     key: Option<&str>,

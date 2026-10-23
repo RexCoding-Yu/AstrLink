@@ -2807,7 +2807,8 @@
     "window": {
       "trajectoryInspector": "AstrLink · 軌跡の呼び出し",
       "trajectoryInspectorPinned": "AstrLink · 軌跡の呼び出し（最前面）",
-      "rawAccessApproval": "AstrLink · 原文アクセス申請"
+      "rawAccessApproval": "AstrLink · 原文アクセス申請",
+      "pluginApproval": "AstrLink · プラグインの確認"
     },
     "rawAccess": {
       "notificationTitle": "Agent が原文の閲覧を申請しています",
@@ -4709,7 +4710,18 @@
       "network": "ネットワーク",
       "storage": "プラグインストレージ",
       "uiViews": "ビュー",
-      "modelTools": "エージェントからの検索"
+      "modelTools": "エージェントからの検索",
+      "requestWrite": "リクエストの変更",
+      "requestWriteRaw": "リクエスト本文の書き換え",
+      "requestGate": "リクエストの拒否",
+      "routing": "ルーティングの調整",
+      "responseRead": "レスポンスの読み取り",
+      "responseWrite": "レスポンスの書き換え",
+      "events": "ゲートウェイのイベント",
+      "schedule": "定期実行",
+      "httpServe": "ローカルエンドポイント",
+      "provider": "プロバイダーアダプター",
+      "uiCode": "画面のコード"
     },
     "loadErrors": {
       "not_found": "plugin.ts も plugin.js もありません",
@@ -5066,7 +5078,62 @@
         "info": "情報",
         "warn": "警告",
         "error": "エラー"
-      }
+      },
+      "breaker": "「{{point}}」は最近失敗が多いため、{{time}} までリクエストに参加しません。"
+    },
+    "hooks": {
+      "onRequest": "入口",
+      "route": "ルーティング",
+      "beforeForward": "転送前",
+      "beforeUpstream": "上流への転送前",
+      "rewriteResponse": "レスポンスの書き換え",
+      "onStreamEvent": "ストリームの書き換え",
+      "onResponse": "レスポンスの後",
+      "onEvent": "ゲートウェイのイベント",
+      "onSchedule": "定期実行",
+      "onHttp": "ローカルエンドポイント",
+      "provider": "プロバイダーアダプター",
+      "providerEvent": "アダプターのストリームイベント",
+      "observeTurn": "各ターンの後",
+      "prepareSession": "セッションの読み込み",
+      "prepareTurn": "ターンの補足"
+    },
+    "approval": {
+      "loading": "確認する変更を読み込んでいます…",
+      "nothing": "確認を待っているプラグインの変更はありません",
+      "enableTitle": "「{{name}}」を有効にする",
+      "grantTitle": "「{{name}}」にできることを増やす",
+      "capabilitiesEnable": "プラグインが求める権限です。チェックを外したものは許可されません：",
+      "capabilitiesAdded": "この変更で新たに許可する権限です。チェックを外したものは許可されません：",
+      "noCapabilities": "プラグインは権限を求めていません。",
+      "origins": "新たにアクセスできるアドレス",
+      "plaintext": "平文の HTTP",
+      "plaintextExisting": "平文の HTTP でのアクセスを許可：{{origins}}",
+      "trusted": "信頼済みにする：プライバシーチェックを飛ばし、プラグインは会話をそのまま見ます。",
+      "failClosed": "プラグインの入口フックが失敗またはタイムアウトしたとき、リクエストを通さずに拒否します。",
+      "risk": {
+        "ui_code": "画面のコードは AstrLink の画面と同じ権限を持ちます。リクエスト記録を読み、設定を変えるなど、画面にできることは何でもできます。"
+      },
+      "deny": "拒否",
+      "confirm": "許可",
+      "confirmEnable": "有効にする",
+      "waiting": "この変更は「プラグインの確認」ウィンドウで確認を待っています。",
+      "open": "確認ウィンドウを開く"
+    },
+    "limits": {
+      "label": "拡張ポイントの時間上限",
+      "helpLabel": "拡張ポイントの時間上限について",
+      "help": "リクエストがプラグインの各拡張ポイントを待つ最大時間です。空欄ならプラグインが宣言した値（欄内の薄い数字）、宣言がなければゲートウェイの既定値を使います。超えると、入口は通し、ルーティングは順序を保ち、転送前はそのまま送り、書き換えはレスポンスやイベントをそのまま返します。プラグインが時間を使うほどリクエストは遅くなります。各ポイントの実際の所要時間は「開発」タブで見られます。",
+      "ms": "ミリ秒",
+      "invalid": "{{point}}の時間上限は 1 から {{max}} までの整数ミリ秒にしてください",
+      "failClosed": "失敗時にリクエストを拒否",
+      "failClosedHelpLabel": "失敗時にリクエストを拒否することについて",
+      "failClosedHelp": "プラグインの希望で、入口フックが失敗またはタイムアウトしたリクエストを通さずに拒否します。必ず通すべき審査などに使います。オンにするとプラグインの不調でリクエストが失敗するため、確認ウィンドウで確認します。"
+    },
+    "order": {
+      "open": "順序を変更",
+      "title": "プラグインの実行順序",
+      "description": "各拡張ポイントでプラグインは上から順に実行され、それぞれが上のプラグインの結果を受け取ります。"
     }
   },
   "pluginRecords": {
@@ -5099,7 +5166,18 @@
       "rate_limited": "検索が多すぎます",
       "turn_limit": "このターンの 3 回を使い切りました",
       "unbound": "セッションにまだプロジェクトがありません",
-      "invalid_input": "パラメーターが正しくありません"
+      "invalid_input": "パラメーターが正しくありません",
+      "circuit_open": "失敗が多いため一時停止中",
+      "no_request_gate": "リクエストを拒否しようとしましたが、「リクエストの拒否」が許可されていません",
+      "no_request_write": "リクエストを変えようとしましたが、「リクエストの変更」が許可されていません",
+      "no_request_write_raw": "本文を置き換えようとしましたが、「リクエスト本文の書き換え」が許可されていません",
+      "would_exclude_all": "すべてのプロバイダーを除外しようとしたため、何も除外していません",
+      "invalid_body": "返した本文が不正なため、使っていません",
+      "header_denied": "プラグインが設定できないヘッダーは無視しました",
+      "stream_stopped": "続けて失敗したため、このストリームの残りのイベントは渡していません",
+      "memory_limit": "メモリ上限超過",
+      "canceled": "リクエストは終了していました",
+      "unavailable": "プラグインを使えません"
     },
     "reportSkipReasons": {
       "rate_limited": "報告が多すぎます",
@@ -5188,7 +5266,27 @@
     "lookupHits_other": "{{count}} 件",
     "commands": "付けた検索",
     "usageOnly": "検索の使い方だけ · {{placement}} +{{size}}",
-    "usagePart": "うち検索の使い方 {{size}}"
+    "usagePart": "うち検索の使い方 {{size}}",
+    "effects": {
+      "deny": "リクエストを拒否",
+      "tag": "タグを付与",
+      "tagged": "タグ：{{tags}}",
+      "order": "プロバイダーの順序を変更",
+      "exclude": "一部のプロバイダーを除外",
+      "model": "モデルを変更",
+      "system": "システムプロンプトに追記",
+      "turn": "このターンの前に内容を追加",
+      "params": "パラメーターを変更",
+      "tools": "ツールを変更",
+      "body": "リクエスト本文を置き換え",
+      "headers": "ヘッダーを追加",
+      "rewrite": "レスポンスを書き換え",
+      "stream": "ストリームのイベントを書き換え",
+      "observed": "レスポンスを確認",
+      "separator": "、"
+    },
+    "streamEvents": "{{count}} 件のイベントを処理",
+    "streamEventsFailed": "{{count}} 件のイベントを処理し、失敗した {{failures}} 件はそのまま通しました"
   },
   "metadata": {
     "title": "メタデータ",
