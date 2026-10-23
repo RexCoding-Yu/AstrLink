@@ -33,7 +33,6 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/servicetest"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	syncengine "github.com/QuantumNous/astrlink/core/internal/sync"
-	builtinplugins "github.com/QuantumNous/astrlink/core/plugins"
 )
 
 // installOutboundProxy configures the outbound proxy once per process,
@@ -310,7 +309,6 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		logf("create plugin directory: %v", err)
 	}
 	pluginManager := plugin.NewManager(plugin.ManagerOptions{
-		Builtin:  builtinplugins.Builtin,
 		Dir:      pluginDirectory,
 		Settings: hostapi.Settings{Store: store},
 		Services: plugin.Services{
