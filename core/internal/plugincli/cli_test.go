@@ -150,3 +150,22 @@ func TestDevInstallsADevelopmentBuild(t *testing.T) {
 		t.Fatalf("dev --force = %d: %s", code, stderr)
 	}
 }
+
+func TestEveryTemplateBuildsAndPassesItsTests(t *testing.T) {
+	for _, name := range templateNames() {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			key := "demo-" + name
+			if code, _, stderr := run(t, Environment{}, "new", key, "--template", name, "--dir", parent); code != 0 {
+				t.Fatalf("new = %d: %s", code, stderr)
+			}
+			dir := filepath.Join(parent, key)
+			if code, stdout, stderr := run(t, Environment{}, "test", dir); code != 0 {
+				t.Fatalf("test = %d: %s %s", code, stdout, stderr)
+			}
+			if code, _, stderr := run(t, Environment{}, "check", dir); code != 0 {
+				t.Fatalf("check = %d: %s", code, stderr)
+			}
+		})
+	}
+}

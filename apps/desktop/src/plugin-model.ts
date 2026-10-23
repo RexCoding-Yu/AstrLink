@@ -391,7 +391,11 @@ export interface MetadataValueUsage {
 }
 
 export type PluginSettingType =
-  "server" | "text" | "number" | "switch" | "choice";
+  | "server"
+  | "text"
+  | "number"
+  | "switch"
+  | "choice";
 
 /**
  * A field of a plugin's settings form. `key` is where the value sits in the
