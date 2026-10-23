@@ -5239,6 +5239,22 @@
         "busy": "Another plugin is being built. Try again shortly.",
         "unknown": "Could not install ({{reason}})."
       }
+    },
+    "ui": {
+      "switch": "Plugin interfaces",
+      "switchHelp": "Turn this off for safe mode: no plugin's interface code loads, while plugins' backend parts keep running. When the window did not keep running after plugin interfaces last loaded, the next start enters safe mode by itself.",
+      "webHelp": "The web console does not load plugins' interface code by default. Once on, plugin interfaces run in this page and can do anything the console can.",
+      "webConfirmTitle": "Load plugin interfaces in the web console",
+      "webConfirmDescription": "Plugins with their interface on run their code in this page, where it can do anything the console can, including reading request records and changing settings. Turn it on?",
+      "webConfirm": "Turn on",
+      "crashed": "The window did not keep running after plugin interfaces last loaded, so none loaded this time.",
+      "load": "Load plugin interfaces",
+      "turnedOff": "The interface of “{{name}}” failed again and again and was turned off. You can turn it back on in Plugins.",
+      "failed": "The interface of “{{name}}” failed: {{message}}",
+      "pageGone": "This plugin page is no longer there",
+      "tab": "Plugin",
+      "pluginSwitch": "Load this plugin's interface",
+      "pluginSwitchLabel": "Interface"
     }
   },
   "pluginRecords": {

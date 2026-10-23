@@ -48,6 +48,7 @@ import { ModelBrandIcon } from "@/components/ModelBrandIcon";
 import { Panel, PanelHeader } from "@/components/Panel";
 import { OrderedList } from "@/components/OrderedList";
 import { useOverviewLayout, type OverviewModuleId } from "./overview-layout";
+import { PluginSlot } from "./plugin-ui";
 import { PaginatedList } from "@/components/PaginatedList";
 import { StatusBadge } from "@/components/StatusBadge";
 import { StatusDot } from "@/components/StatusDot";
@@ -942,6 +943,10 @@ export function Overview({
             >
               {({ id }) => !layout.hidden.includes(id) && moduleContent[id]}
             </OrderedList>
+            {/* What plugins' interfaces add to the overview. */}
+            {!editingLayout ? (
+              <PluginSlot className="mt-3 grid gap-3" name="overview.widget" />
+            ) : null}
           </>
         )}
       </div>

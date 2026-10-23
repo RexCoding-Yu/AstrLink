@@ -427,7 +427,13 @@ const commands: Record<string, Command> = {
     if (a.action === "reload") return route("/plugins/reload", "POST")(a);
     if (a.action === "host") return route("/plugin-host")(a);
     if (a.action === "update_host")
-      return route("/plugin-host", "PATCH", input)(a);
+      return consoleRequest(
+        "/control/v1/plugin-host",
+        "PATCH",
+        a.input,
+        undefined,
+        a.approved === true,
+      ).then((result) => result.value);
     if (a.action === "source_preview")
       return route("/plugins/sources/preview", "POST", input)(a);
     if (a.action === "source_install")
@@ -442,6 +448,8 @@ const commands: Record<string, Command> = {
     switch (a.action) {
       case "source_check":
         return route(`${plugin}/source/check`, "POST")(a);
+      case "ui_call":
+        return route(`${plugin}/ui-call`, "POST", input)(a);
       case "source_rollback":
         return consoleRequest(
           `/control/v1${plugin}/source/rollback`,

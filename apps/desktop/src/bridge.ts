@@ -1581,6 +1581,24 @@ export async function rollbackPlugin(
   );
 }
 
+/**
+ * Runs a plugin's onUiCall hook for its interface code, in its sandbox and
+ * under its grants; resolves with what the hook returned.
+ */
+export async function callPluginUi(
+  key: string,
+  name: string,
+  input?: unknown,
+): Promise<unknown> {
+  requireNativeBridge();
+  const answer = await invoke<unknown>("plugin_action", {
+    action: "ui_call",
+    key,
+    input: { name, ...(input === undefined ? {} : { input }) },
+  });
+  return (answer as { result?: unknown } | null)?.result ?? null;
+}
+
 /** Removes a plugin installed from source; a builtin of its key comes back. */
 export async function uninstallPlugin(key: string): Promise<PluginList> {
   requireNativeBridge();
@@ -1726,12 +1744,14 @@ export async function getPluginHostSettings(): Promise<PluginHostSettings> {
 
 export async function updatePluginHostSettings(
   update: PluginHostSettingsUpdate,
+  approved = false,
 ): Promise<PluginHostSettings> {
   requireNativeBridge();
   return parsePluginHostSettings(
     await invoke<unknown>("plugin_action", {
       action: "update_host",
       input: update,
+      ...(approved ? { approved: true } : {}),
     }),
   );
 }

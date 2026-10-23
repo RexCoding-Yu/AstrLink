@@ -16,6 +16,7 @@ mod kek_store;
 mod macos_app;
 mod model_updates;
 mod plugin_approval;
+mod plugin_client;
 mod preferences;
 mod privacy_warnings;
 mod provider_import;
@@ -2657,6 +2658,7 @@ pub fn run() {
         .manage(Arc::new(model_updates::PrivacyModelUpdates::default()))
         .manage(provider_import::ProviderImports::default())
         .manage(plugin_approval::Approvals::default())
+        .register_asynchronous_uri_scheme_protocol(plugin_client::SCHEME, plugin_client::handle)
         .invoke_handler(tauri::generate_handler![
             client_updates::local_client_status,
             provider_import::pending_provider_import,

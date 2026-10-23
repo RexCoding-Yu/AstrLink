@@ -166,6 +166,7 @@ import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
 import { decodeModelEditorValue, encodeModelEditorValue } from "./model-editor";
 import { filterModels } from "./model-groups";
+import { PluginSlot } from "./plugin-ui";
 import {
   ServiceModelsEditor,
   type UpstreamModelSnapshot,
@@ -3973,6 +3974,14 @@ export function ServiceManager({
                 value="connection"
               >
                 {connectionFields}
+                {/* What plugins' interfaces show of the provider. */}
+                {editingServiceID ? (
+                  <PluginSlot
+                    className="mt-4 grid gap-3"
+                    context={{ service: editingServiceID }}
+                    name="service.section"
+                  />
+                ) : null}
               </TabsContent>
               <TabsContent
                 className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto pr-4 pb-1"

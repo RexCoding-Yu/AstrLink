@@ -2402,6 +2402,27 @@ impl CoreManager {
         Err(control_status_error(&method, &path, status, &body))
     }
 
+    /// A plugin's interface code, or its source map, as Core serves it to
+    /// the main window; the status Core answered when it does not.
+    pub async fn plugin_client(
+        &self,
+        key: &str,
+        file: &str,
+    ) -> Result<Vec<u8>, reqwest::StatusCode> {
+        if !valid_plugin_name(key, '-') || !matches!(file, "client.js" | "client.js.map") {
+            return Err(reqwest::StatusCode::NOT_FOUND);
+        }
+        let path = format!("/control/v1/plugins/{key}/{file}");
+        match self
+            .authenticated_control_encoded(Method::GET, &path, None, None, false)
+            .await
+        {
+            Ok((status, _, body)) if status.is_success() => Ok(body),
+            Ok((status, _, _)) => Err(status),
+            Err(_) => Err(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+
     /// The request attributes of the metadata settings.
     pub async fn metadata_action(
         &self,
@@ -3649,6 +3670,12 @@ fn plugin_request(
             Some(input.ok_or("the action is required")?),
         ),
         "source_check" => (Method::POST, format!("{plugin}/source/check"), None),
+        // A call of the plugin's interface code to its backend part.
+        "ui_call" => (
+            Method::POST,
+            format!("{plugin}/ui-call"),
+            Some(input.ok_or("the call is required")?),
+        ),
         "source_rollback" => (
             Method::POST,
             format!("{plugin}/source/rollback"),
@@ -3835,7 +3862,9 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
         return Duration::from_secs(200);
     }
     if path.starts_with("/control/v1/plugins/")
-        && (path.contains("/source") || path.ends_with("/sources/install"))
+        && (path.contains("/source")
+            || path.ends_with("/sources/install")
+            || path.ends_with("/ui-call"))
     {
         return Duration::from_secs(75);
     }

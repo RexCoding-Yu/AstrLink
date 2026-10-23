@@ -201,6 +201,8 @@ export interface PluginSummary {
   development?: PluginDevelopment;
   /** Set for a plugin installed from source. */
   installed?: PluginInstallSource;
+  /** Set while the plugin's interface code loads; it changes with the code. */
+  ui_version?: string;
 }
 
 /** The project a development build comes from. */
@@ -921,6 +923,7 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
       summary.installed === undefined
         ? undefined
         : parseInstallSource(summary.installed, `${path}.installed`),
+    ui_version: plugin.optionalString(summary.ui_version, `${path}.ui_version`),
   });
 }
 

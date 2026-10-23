@@ -61,6 +61,13 @@ import {
 } from "./PluginInstallReview";
 import { orderedPlugins, PluginOrderDialog } from "./PluginOrder";
 import { PluginSourceCard } from "./PluginSource";
+import {
+  PluginSlotView,
+  refreshPluginUi,
+  setPluginUiSafeMode,
+  usePluginSlot,
+  usePluginUi,
+} from "./plugin-ui";
 import { capabilityLabel } from "./plugin-labels";
 import { PluginOverview } from "./PluginOverview";
 import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
@@ -85,7 +92,13 @@ import {
 import { DailyEffects } from "./PluginEffects";
 
 type Translate = ReturnType<typeof useT>;
-type DetailTab = "overview" | "settings" | "status" | "develop";
+type DetailTab =
+  | "overview"
+  | "settings"
+  | "status"
+  | "develop"
+  /** A tab the plugin's interface registered. */
+  | `plugin:${string}`;
 
 /** The injection budgets the plugin page offers, in KiB. */
 const INJECTION_BUDGETS_KIB = [4, 8, 16, 32, 64].filter(
@@ -187,6 +200,10 @@ export function PluginManager({
     review: PluginInstallReview;
   } | null>(null);
   const [uninstalling, setUninstalling] = useState<PluginDetail | null>(null);
+  // Loading plugins' interface code in the web console takes the console's
+  // own confirmation.
+  const [confirmingWebUi, setConfirmingWebUi] = useState(false);
+  const ui = usePluginUi();
   const afterApproval = useRef<{
     key: string;
     run: (detail: PluginDetail | null) => Promise<void>;
@@ -212,14 +229,32 @@ export function PluginManager({
     }
   }, [t]);
 
-  async function changeHost(update: PluginHostSettingsUpdate) {
+  async function changeHost(
+    update: PluginHostSettingsUpdate,
+    approved = false,
+  ) {
     setHostError(null);
     try {
-      setHost(await updatePluginHostSettings(update));
+      setHost(
+        approved
+          ? await updatePluginHostSettings(update, true)
+          : await updatePluginHostSettings(update),
+      );
+      if (update.web_ui !== undefined) refreshPluginUi();
     } catch (error) {
+      if (update.web_ui && controlErrorCode(error) === "approval_required") {
+        setConfirmingWebUi(true);
+        return;
+      }
       setHostError(controlErrorMessage(error, t("plugins.host.saveFailed")));
     }
   }
+
+  // What the plugins' interfaces load follows the list: a plugin enabled,
+  // turned off, updated or removed.
+  useEffect(() => {
+    if (list) refreshPluginUi();
+  }, [list]);
 
   /** Clears what the host keeps for the plugin, then shows the new counts. */
   async function clearData(key: string, what: PluginClearTarget) {
@@ -603,6 +638,12 @@ export function PluginManager({
                 disabled={!isReady}
                 host={host}
                 onChange={(update) => void changeHost(update)}
+                onUi={(on) =>
+                  isWebEdition
+                    ? void changeHost({ web_ui: on })
+                    : setPluginUiSafeMode(!on)
+                }
+                ui={isWebEdition ? host.web_ui === true : ui.safeMode === "off"}
               />
             ) : null}
             {list || host ? (
@@ -621,6 +662,16 @@ export function PluginManager({
                           {t("plugins.host.budget")}
                         </h3>
                         <p>{t("plugins.host.budgetHelp")}</p>
+                      </section>
+                      <section className="grid gap-1">
+                        <h3 className="text-xs font-medium text-muted-foreground">
+                          {t("plugins.ui.switch")}
+                        </h3>
+                        <p>
+                          {isWebEdition
+                            ? t("plugins.ui.webHelp")
+                            : t("plugins.ui.switchHelp")}
+                        </p>
                       </section>
                     </>
                   ) : null}
@@ -686,6 +737,23 @@ export function PluginManager({
       {host?.paused ? (
         <FormMessage className="mb-3" tone="notice">
           {t("plugins.host.pausedNotice")}
+        </FormMessage>
+      ) : null}
+      {ui.safeMode === "crashed" ? (
+        <FormMessage
+          className="mb-3 flex flex-wrap items-center gap-2"
+          data-testid="plugin-ui-crashed"
+          tone="warning"
+        >
+          <span className="flex-1">{t("plugins.ui.crashed")}</span>
+          <Button
+            onClick={() => setPluginUiSafeMode(false)}
+            size="xs"
+            type="button"
+            variant="outline"
+          >
+            {t("plugins.ui.load")}
+          </Button>
         </FormMessage>
       ) : null}
       {!isReady && list !== null ? (
@@ -795,6 +863,9 @@ export function PluginManager({
                 onUpdate={(link) => setInstalling({ link })}
                 onRollback={(version) => void rollback(detail.key, version)}
                 onUninstall={() => setUninstalling(detail)}
+                onUiEnabled={(on) =>
+                  void apply(() => save(detail.key, { ui_enabled: on }))
+                }
                 onRefreshStatus={() => void loadStatus(detail.key)}
                 onTab={setTab}
                 onTest={() => void runTest(detail.key)}
@@ -877,6 +948,18 @@ export function PluginManager({
         title={t("plugins.install.rollbackTitle", {
           name: confirmingRollback?.review.name ?? "",
         })}
+      />
+      <ConfirmDialog
+        confirmLabel={t("plugins.ui.webConfirm")}
+        description={<p>{t("plugins.ui.webConfirmDescription")}</p>}
+        onCancel={() => setConfirmingWebUi(false)}
+        onConfirm={() => {
+          setConfirmingWebUi(false);
+          void changeHost({ web_ui: true }, true);
+        }}
+        open={confirmingWebUi}
+        title={t("plugins.ui.webConfirmTitle")}
+        tone="warning"
       />
       <ConfirmDialog
         confirmDisabled={busy}
@@ -1043,10 +1126,15 @@ function PluginHostControls({
   host,
   disabled,
   onChange,
+  ui,
+  onUi,
 }: {
   host: PluginHostSettings;
   disabled: boolean;
   onChange: (update: PluginHostSettingsUpdate) => void;
+  /** Whether plugins' interfaces load in this window. */
+  ui: boolean;
+  onUi: (on: boolean) => void;
 }) {
   const t = useT();
   const budgetKib = Math.round(host.injection_budget_bytes / 1024);
@@ -1066,6 +1154,19 @@ function PluginHostControls({
         />
         <Label className="text-xs font-normal" htmlFor="plugin-host-pause">
           {t("plugins.host.pause")}
+        </Label>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <Switch
+          aria-label={t("plugins.ui.switch")}
+          checked={ui}
+          disabled={disabled}
+          id="plugin-host-ui"
+          onCheckedChange={onUi}
+          size="sm"
+        />
+        <Label className="text-xs font-normal" htmlFor="plugin-host-ui">
+          {t("plugins.ui.switch")}
         </Label>
       </div>
       <div className="flex items-center gap-1.5">
@@ -1122,6 +1223,7 @@ function PluginDetailPane({
   onUpdate,
   onRollback,
   onUninstall,
+  onUiEnabled,
 }: {
   detail: PluginDetail;
   stats: PluginStats | null;
@@ -1152,11 +1254,19 @@ function PluginDetailPane({
   onUpdate: (link: string) => void;
   onRollback: (version: PluginInstalledVersion) => void;
   onUninstall: () => void;
+  onUiEnabled: (on: boolean) => void;
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
+  const pluginTabs = usePluginSlot("plugin.tab", detail.key);
   const tabs: DetailTab[] = loaded
-    ? ["overview", "settings", "status", "develop"]
+    ? [
+        "overview",
+        "settings",
+        "status",
+        "develop",
+        ...pluginTabs.map((entry) => `plugin:${entry.id}` as const),
+      ]
     : [];
   const current = tabs.includes(tab) ? tab : "overview";
   return (
@@ -1165,6 +1275,24 @@ function PluginDetailPane({
         actions={
           loaded ? (
             <>
+              {detail.client ? (
+                <div className="flex items-center gap-1.5">
+                  <Switch
+                    aria-label={t("plugins.ui.pluginSwitch")}
+                    checked={detail.ui_enabled}
+                    disabled={busy}
+                    id="plugin-ui-enabled"
+                    onCheckedChange={onUiEnabled}
+                    size="sm"
+                  />
+                  <Label
+                    className="text-xs font-normal"
+                    htmlFor="plugin-ui-enabled"
+                  >
+                    {t("plugins.ui.pluginSwitchLabel")}
+                  </Label>
+                </div>
+              ) : null}
               {detail.hooks.includes("testConnection") ? (
                 <Button
                   disabled={testing || busy}
@@ -1271,12 +1399,15 @@ function PluginDetailPane({
             <TabsList aria-label={t("plugins.tabsLabel")} scrollable>
               {tabs.map((item) => (
                 <TabsTrigger key={item} value={item}>
-                  {t(`plugins.tabs.${item}`)}
+                  {item.startsWith("plugin:")
+                    ? (pluginTabs.find((entry) => `plugin:${entry.id}` === item)
+                        ?.title ?? t("plugins.ui.tab"))
+                    : t(`plugins.tabs.${item}`)}
                 </TabsTrigger>
               ))}
             </TabsList>
             <span className="flex-1" />
-            {current !== "settings" && current !== "develop" ? (
+            {current === "overview" || current === "status" ? (
               <IconButton
                 label={t("common.refresh")}
                 onClick={onRefreshStatus}
@@ -1349,6 +1480,21 @@ function PluginDetailPane({
           >
             {current === "develop" ? <PluginDevelop detail={detail} /> : null}
           </TabsContent>
+          {pluginTabs.map((entry) => (
+            <TabsContent
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
+              data-tab-scroller
+              key={entry.id}
+              value={`plugin:${entry.id}`}
+            >
+              {current === `plugin:${entry.id}` ? (
+                <PluginSlotView
+                  context={{ plugin: detail.key }}
+                  entry={entry}
+                />
+              ) : null}
+            </TabsContent>
+          ))}
         </Tabs>
       )}
     </>

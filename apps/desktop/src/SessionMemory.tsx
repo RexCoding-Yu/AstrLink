@@ -28,6 +28,7 @@ import type {
 } from "./plugin-model";
 import type { RequestRecord } from "./request-record-model";
 import { SessionMetadataDialog, sessionBindingSource } from "./SessionMetadata";
+import { PluginSlot } from "./plugin-ui";
 
 const statusTones: Record<RequestPluginRecord["status"], StatusTone> = {
   ok: "positive",
@@ -165,6 +166,12 @@ export function SessionMemory({
       data-testid="session-memory"
     >
       {error ? <FormMessage tone="error">{error}</FormMessage> : null}
+      {/* What plugins' interfaces show of the session. */}
+      <PluginSlot
+        className="space-y-3"
+        context={{ session: sessionId }}
+        name="session.section"
+      />
       {bindings && shown.length > 0 ? (
         <Panel>
           <PanelHeader

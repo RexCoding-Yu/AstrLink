@@ -28,7 +28,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self' 'unsafe-eval'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self' 'unsafe-eval' astrlink-plugin: http://astrlink-plugin.localhost"
     }
   },
   "bundle": {
