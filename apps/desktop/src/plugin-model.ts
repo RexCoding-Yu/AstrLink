@@ -36,6 +36,55 @@ export interface PluginSummary {
   requested_capabilities: string[];
   granted_capabilities: string[];
   needs_network: boolean;
+  /** The plugin contract the manifest names; absent for a plugin that did not load. */
+  api_version?: number;
+  /** Set for a plugin `astrlink plugin dev` keeps built from a project on this computer. */
+  development?: PluginDevelopment;
+}
+
+/** The project a development build comes from. */
+export interface PluginDevelopment {
+  project: string;
+  built_at?: string;
+}
+
+/** A log line or failed call of the plugin's recent calls. */
+export interface PluginJournalEntry {
+  seq: number;
+  time: string;
+  hook: string;
+  level: string;
+  message: string;
+  reason?: string;
+  stack?: string;
+  dry_run?: boolean;
+}
+
+/** How long a hook's recent calls took, in milliseconds. */
+export interface PluginHookTiming {
+  hook: string;
+  calls: number;
+  failures: number;
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+  script_ms: number;
+}
+
+/** The development tab's log and timings; ask after `latest` next time. */
+export interface PluginJournal {
+  entries: PluginJournalEntry[];
+  timings: PluginHookTiming[];
+  latest: number;
+}
+
+/** What a hook run by hand returned, or why it failed. */
+export interface PluginDryRunResult {
+  result?: unknown;
+  error?: { reason: string; message: string; stack?: string };
+  elapsed_ms: number;
+  script_ms: number;
+  logs: PluginJournalEntry[];
 }
 
 export interface PluginList {
@@ -264,11 +313,7 @@ export interface MetadataValueUsage {
 }
 
 export type PluginSettingType =
-  | "server"
-  | "text"
-  | "number"
-  | "switch"
-  | "choice";
+  "server" | "text" | "number" | "switch" | "choice";
 
 /**
  * A field of a plugin's settings form. `key` is where the value sits in the
@@ -651,7 +696,95 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
       summary.needs_network,
       `${path}.needs_network`,
     ),
+    api_version: plugin.optionalInteger(
+      summary.api_version,
+      `${path}.api_version`,
+    ),
+    development:
+      summary.development === undefined
+        ? undefined
+        : parseDevelopment(summary.development, `${path}.development`),
   });
+}
+
+function parseDevelopment(value: unknown, path: string): PluginDevelopment {
+  const development = plugin.object(value, path);
+  return defined({
+    project: plugin.string(development.project, `${path}.project`),
+    built_at: plugin.optionalString(development.built_at, `${path}.built_at`),
+  });
+}
+
+function parseJournalEntry(value: unknown, path: string): PluginJournalEntry {
+  const entry = plugin.object(value, path);
+  return defined({
+    seq: plugin.integer(entry.seq, `${path}.seq`),
+    time: plugin.string(entry.time, `${path}.time`),
+    hook: plugin.string(entry.hook, `${path}.hook`),
+    level: plugin.string(entry.level, `${path}.level`),
+    message: plugin.string(entry.message, `${path}.message`),
+    reason: plugin.optionalString(entry.reason, `${path}.reason`),
+    stack: plugin.optionalString(entry.stack, `${path}.stack`),
+    dry_run: plugin.optionalBoolean(entry.dry_run, `${path}.dry_run`),
+  });
+}
+
+function milliseconds(value: unknown, path: string): number {
+  const number = plugin.optionalNumber(value, path);
+  if (number === undefined || number < 0)
+    return invalid("plugin", path, "number");
+  return number;
+}
+
+export function parsePluginJournal(value: unknown): PluginJournal {
+  const journal = plugin.object(value, "$");
+  return {
+    entries: plugin
+      .array(journal.entries, "$.entries")
+      .map((entry, index) => parseJournalEntry(entry, `$.entries[${index}]`)),
+    timings: plugin.array(journal.timings, "$.timings").map((item, index) => {
+      const path = `$.timings[${index}]`;
+      const timing = plugin.object(item, path);
+      return {
+        hook: plugin.string(timing.hook, `${path}.hook`),
+        calls: plugin.integer(timing.calls, `${path}.calls`),
+        failures: plugin.integer(timing.failures, `${path}.failures`),
+        p50_ms: milliseconds(timing.p50_ms, `${path}.p50_ms`),
+        p95_ms: milliseconds(timing.p95_ms, `${path}.p95_ms`),
+        max_ms: milliseconds(timing.max_ms, `${path}.max_ms`),
+        script_ms: milliseconds(timing.script_ms, `${path}.script_ms`),
+      };
+    }),
+    latest: plugin.integer(journal.latest, "$.latest"),
+  };
+}
+
+export function parsePluginDryRun(value: unknown): PluginDryRunResult {
+  const run = plugin.object(value, "$");
+  let error: PluginDryRunResult["error"];
+  if (run.error !== undefined) {
+    const failure = plugin.object(run.error, "$.error");
+    error = defined({
+      reason: plugin.string(failure.reason, "$.error.reason"),
+      message: plugin.string(failure.message, "$.error.message"),
+      stack: plugin.optionalString(failure.stack, "$.error.stack"),
+    });
+  }
+  return defined({
+    result: run.result,
+    error,
+    elapsed_ms: milliseconds(run.elapsed_ms, "$.elapsed_ms"),
+    script_ms: milliseconds(run.script_ms, "$.script_ms"),
+    logs: plugin
+      .array(run.logs, "$.logs")
+      .map((entry, index) => parseLogLine(entry, `$.logs[${index}]`)),
+  });
+}
+
+/** A dry run's log line, which has no sequence number. */
+function parseLogLine(value: unknown, path: string): PluginJournalEntry {
+  const entry = plugin.object(value, path);
+  return parseJournalEntry({ ...entry, seq: entry.seq ?? 0 }, path);
 }
 
 export function parsePluginList(value: unknown): PluginList {

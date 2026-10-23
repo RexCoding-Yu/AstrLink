@@ -436,6 +436,10 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/stats${query(a.input as Args)}`)(a);
       case "credits":
         return route(`${plugin}/credits`)(a);
+      case "journal":
+        return route(`${plugin}/journal${query(a.input as Args)}`)(a);
+      case "dry_run":
+        return route(`${plugin}/dry-run`, "POST", input)(a);
       case "action":
         return route(`${plugin}/actions`, "POST", input)(a);
       case "clear_workspaces":

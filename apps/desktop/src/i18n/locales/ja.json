@@ -4692,7 +4692,8 @@
     "tabs": {
       "overview": "概要",
       "settings": "設定",
-      "status": "稼働状況"
+      "status": "稼働状況",
+      "develop": "開発"
     },
     "testStatus": {
       "ok": "接続 OK",
@@ -4716,8 +4717,8 @@
       "too_large": "8 MiB を超えています",
       "encoding": "UTF-8 ではありません",
       "syntax": "構文エラー",
-      "async": "async は使えません",
-      "await": "await は使えません",
+      "async": "async には apiVersion 2 が必要です",
+      "await": "await には apiVersion 2 が必要です",
       "import": "import は使えません",
       "reexport": "export … from は使えません",
       "missing_meta": "meta がエクスポートされていません",
@@ -5026,7 +5027,47 @@
         "without": "その他のセッション"
       }
     },
-    "headerHelpLabel": "プラグイン全体の設定について"
+    "headerHelpLabel": "プラグイン全体の設定について",
+    "develop": {
+      "build": "開発版",
+      "builtAt": "{{time}} にビルド",
+      "loadFailed": "プラグインのログを読み込めません。",
+      "timings": "フックの所要時間",
+      "timingsHelpLabel": "フックの所要時間について",
+      "timingsHelp": "各フックの直近 256 回の呼び出しにかかった時間です。試し実行は含みません。「JS 時間」はスクリプト自体が動いた時間だけで、ネットワークやストレージを待った時間は含みません。Core を再起動すると数え直します。",
+      "noCalls": "まだ呼び出しがありません。",
+      "hook": "フック",
+      "calls": "呼び出し",
+      "failures": "失敗",
+      "p50": "中央値",
+      "p95": "P95",
+      "max": "最長",
+      "script": "JS 時間",
+      "dryRun": "試し実行",
+      "dryRunHelpLabel": "試し実行について",
+      "dryRunHelp": "プラグインの今の設定と許可で、フックをサンドボックス内で一度実行します。試し実行ではネットワークを使えないため、プラグインのリクエストは予算切れで失敗し、リクエスト記録にも残りません。引数はフックに渡す JSON 配列です。",
+      "args": "引数",
+      "argsInvalid": "引数は JSON 配列で書いてください。",
+      "run": "実行",
+      "running": "実行中…",
+      "runFailed": "試し実行が完了しませんでした。",
+      "result": "戻り値",
+      "noResult": "戻り値なし（undefined）",
+      "took": "所要 {{elapsed}}・JS {{script}}",
+      "log": "ログ",
+      "logHelpLabel": "ログについて",
+      "logHelp": "プラグインが console と astrlink.log で書いたログと、失敗した呼び出しとそのスタックです。新しいものが上です。メモリにだけ残り、プラグインごとに最大 400 行、Core を再起動すると消えます。",
+      "noLog": "まだログがありません。",
+      "clear": "クリア",
+      "dryRunTag": "試し実行",
+      "stack": "スタック",
+      "levels": {
+        "debug": "デバッグ",
+        "info": "情報",
+        "warn": "警告",
+        "error": "エラー"
+      }
+    }
   },
   "pluginRecords": {
     "none": "このリクエストにプラグインの記録はありません。",

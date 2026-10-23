@@ -18,6 +18,8 @@ const bridgeMocks = vi.hoisted(() => ({
   getPluginHostSettings: vi.fn(),
   updatePluginHostSettings: vi.fn(),
   clearPluginData: vi.fn(),
+  getPluginJournal: vi.fn(),
+  dryRunPlugin: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -477,7 +479,9 @@ describe("PluginManager", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]?.textContent).toContain("PowerContext 记忆");
     expect(rows[0]?.textContent).not.toContain("内置");
-    expect(rows[1]?.textContent).toContain("plugin.ts 第 12 行 · 不支持 async");
+    expect(rows[1]?.textContent).toContain(
+      "plugin.ts 第 12 行 · async 需要 apiVersion 2",
+    );
     // The title says where the plugin comes from, never its key.
     expect(document.body.textContent).toContain("内置 · 1.0.0");
     expect(document.body.textContent).not.toContain("powercontext · 1.0.0");
@@ -632,6 +636,102 @@ describe("PluginManager", () => {
     expect(rows[0]?.getAttribute("data-active")).toBe("true");
     expect(rows[1]?.getAttribute("data-active")).toBe("false");
     expect(rows[1]?.className).toContain("text-muted-foreground");
+  });
+
+  it("shows hook timings, the log and a dry run on the develop tab", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      development: {
+        project: "/home/me/powercontext",
+        built_at: "2026-10-23T12:00:00Z",
+      },
+    });
+    bridgeMocks.getPluginJournal.mockResolvedValue({
+      entries: [
+        {
+          seq: 1,
+          time: "2026-10-23T12:00:01Z",
+          hook: "prepareTurn",
+          level: "info",
+          message: "recalled 3 memories",
+        },
+        {
+          seq: 2,
+          time: "2026-10-23T12:00:02Z",
+          hook: "observeTurn",
+          level: "error",
+          message: "threw TypeError: x is undefined",
+          reason: "plugin_error",
+          stack:
+            "TypeError: x is undefined\n    at observeTurn (src/plugin.ts:40:3)",
+        },
+      ],
+      timings: [
+        {
+          hook: "prepareTurn",
+          calls: 12,
+          failures: 1,
+          p50_ms: 42.5,
+          p95_ms: 310,
+          max_ms: 1250,
+          script_ms: 3.2,
+        },
+      ],
+      latest: 2,
+    });
+    bridgeMocks.dryRunPlugin.mockResolvedValue({
+      result: [{ type: "text", text: "ok" }],
+      elapsed_ms: 12.3,
+      script_ms: 1.5,
+      logs: [
+        {
+          seq: 0,
+          time: "2026-10-23T12:00:03Z",
+          hook: "describeStatus",
+          level: "info",
+          message: "status read",
+          dry_run: true,
+        },
+      ],
+    });
+    await render();
+    // A development build says so instead of where it came from.
+    expect(document.body.textContent).toContain("开发版 · 1.0.0");
+    await openTab("开发");
+    expect(bridgeMocks.getPluginJournal).toHaveBeenCalledWith(
+      "powercontext",
+      0,
+    );
+    const develop = document.querySelector('[data-testid="plugin-develop"]');
+    expect(
+      develop?.querySelector('[data-testid="plugin-development"]')?.textContent,
+    ).toContain("powercontext");
+    const timings = develop?.querySelector('[data-testid="plugin-timings"]');
+    expect(timings?.textContent).toContain("prepareTurn");
+    expect(timings?.textContent).toContain("43 ms");
+    expect(timings?.textContent).toContain("310 ms");
+    expect(timings?.textContent).toContain("1.25 s");
+    const log = develop?.querySelector('[data-testid="plugin-log"]');
+    const lines = log?.querySelectorAll("li") ?? [];
+    // Newest first, failures with their stack.
+    expect(lines[0]?.textContent).toContain("错误");
+    expect(lines[0]?.textContent).toContain("src/plugin.ts:40:3");
+    expect(lines[1]?.textContent).toContain("recalled 3 memories");
+
+    const run = develop?.querySelector('[data-testid="plugin-dry-run"]');
+    const args = run?.querySelector("textarea") as HTMLTextAreaElement;
+    expect(JSON.parse(args.value)).toEqual([{ language: "zh-CN" }]);
+    await click(button("运行", run as ParentNode));
+    expect(bridgeMocks.dryRunPlugin).toHaveBeenCalledWith(
+      "powercontext",
+      "describeStatus",
+      [{ language: "zh-CN" }],
+    );
+    const outcome = run?.querySelector(
+      '[data-testid="plugin-dry-run-outcome"]',
+    );
+    expect(outcome?.textContent).toContain('"text": "ok"');
+    expect(outcome?.textContent).toContain("status read");
   });
 
   it("grants only the capabilities left ticked when enabling", async () => {

@@ -4692,7 +4692,8 @@
     "tabs": {
       "overview": "Overview",
       "settings": "Settings",
-      "status": "Activity"
+      "status": "Activity",
+      "develop": "Develop"
     },
     "testStatus": {
       "ok": "Connected",
@@ -4716,8 +4717,8 @@
       "too_large": "Larger than 8 MiB",
       "encoding": "Not UTF-8",
       "syntax": "Syntax error",
-      "async": "async is not supported",
-      "await": "await is not supported",
+      "async": "async needs apiVersion 2",
+      "await": "await needs apiVersion 2",
       "import": "import is not supported",
       "reexport": "export … from is not supported",
       "missing_meta": "No meta export",
@@ -5026,7 +5027,47 @@
         "without": "Other sessions"
       }
     },
-    "headerHelpLabel": "About the settings of all plugins"
+    "headerHelpLabel": "About the settings of all plugins",
+    "develop": {
+      "build": "Development build",
+      "builtAt": "built at {{time}}",
+      "loadFailed": "Could not read the plugin's log.",
+      "timings": "Hook timings",
+      "timingsHelpLabel": "About hook timings",
+      "timingsHelp": "How long each hook's last 256 calls took, dry runs left out. JS time counts only the script's own running, not its waits on the network or storage. The counts start over when Core restarts.",
+      "noCalls": "No calls yet.",
+      "hook": "Hook",
+      "calls": "Calls",
+      "failures": "Failures",
+      "p50": "Median",
+      "p95": "P95",
+      "max": "Longest",
+      "script": "JS time",
+      "dryRun": "Dry run",
+      "dryRunHelpLabel": "About dry runs",
+      "dryRunHelp": "Runs one hook in the sandbox with the plugin's current settings and grants. A dry run has no network, so the plugin's requests fail for lack of budget, and it is not kept in request records. The arguments are the JSON array the hook is called with.",
+      "args": "Arguments",
+      "argsInvalid": "Write the arguments as a JSON array.",
+      "run": "Run",
+      "running": "Running…",
+      "runFailed": "The dry run did not finish.",
+      "result": "Result",
+      "noResult": "No result (undefined)",
+      "took": "took {{elapsed}} · JS {{script}}",
+      "log": "Log",
+      "logHelpLabel": "About the log",
+      "logHelp": "What the plugin wrote with console and astrlink.log, and the calls that failed with their stacks, newest first. It lives in memory only, at most 400 lines a plugin, and clears when Core restarts.",
+      "noLog": "Nothing logged yet.",
+      "clear": "Clear",
+      "dryRunTag": "dry run",
+      "stack": "Stack",
+      "levels": {
+        "debug": "Debug",
+        "info": "Info",
+        "warn": "Warning",
+        "error": "Error"
+      }
+    }
   },
   "pluginRecords": {
     "none": "No plugin recorded anything for this request.",

@@ -3496,6 +3496,21 @@ fn plugin_request(
         "status" => (Method::GET, format!("{plugin}/status"), None),
         // The GitHub stars of the projects the plugin credits.
         "credits" => (Method::GET, format!("{plugin}/credits"), None),
+        // The development tab: the log lines after a sequence number, and a
+        // hook run by hand without the network.
+        "journal" => {
+            let since = input
+                .as_ref()
+                .and_then(|input| input.get("since"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            (Method::GET, format!("{plugin}/journal?since={since}"), None)
+        }
+        "dry_run" => (
+            Method::POST,
+            format!("{plugin}/dry-run"),
+            Some(input.ok_or("the dry run is required")?),
+        ),
         // The plugin's account over its last 1 to 30 days.
         "stats" => {
             let days = input
@@ -6937,6 +6952,30 @@ mod tests {
         ] {
             assert!(plugin_request("stats", Some("powercontext"), None, Some(days)).is_err());
         }
+        assert_eq!(
+            plugin_request(
+                "journal",
+                Some("notes"),
+                None,
+                Some(serde_json::json!({ "since": 42 }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/notes/journal?since=42".into(),
+                None
+            )
+        );
+        let run = serde_json::json!({ "hook": "describeStatus", "args": [] });
+        assert_eq!(
+            plugin_request("dry_run", Some("notes"), None, Some(run.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/notes/dry-run".into(),
+                Some(run)
+            )
+        );
+        assert!(plugin_request("dry_run", Some("notes"), None, None).is_err());
         assert_eq!(
             plugin_request("credits", Some("powercontext"), None, None).unwrap(),
             (

@@ -45,6 +45,7 @@ import {
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
 import { PageHeader } from "./PageHeader";
+import { PluginDevelop } from "./PluginDevelop";
 import { PluginOverview } from "./PluginOverview";
 import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
 import {
@@ -65,7 +66,7 @@ import {
 import { DailyEffects } from "./PluginEffects";
 
 type Translate = ReturnType<typeof useT>;
-type DetailTab = "overview" | "settings" | "status";
+type DetailTab = "overview" | "settings" | "status" | "develop";
 
 /** The injection budgets the plugin page offers, in KiB. */
 const INJECTION_BUDGETS_KIB = [4, 8, 16, 32, 64].filter(
@@ -761,7 +762,9 @@ function PluginDetailPane({
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
-  const tabs: DetailTab[] = loaded ? ["overview", "settings", "status"] : [];
+  const tabs: DetailTab[] = loaded
+    ? ["overview", "settings", "status", "develop"]
+    : [];
   const current = tabs.includes(tab) ? tab : "overview";
   return (
     <>
@@ -818,7 +821,12 @@ function PluginDetailPane({
           ) : null}
         </div>
         <p className="truncate pl-7 text-micro text-muted-foreground">
-          {[t(`plugins.source.${detail.source}`), detail.version]
+          {[
+            detail.development
+              ? t("plugins.develop.build")
+              : t(`plugins.source.${detail.source}`),
+            detail.version,
+          ]
             .filter(Boolean)
             .join(" · ")}
         </p>
@@ -856,7 +864,7 @@ function PluginDetailPane({
               ))}
             </TabsList>
             <span className="flex-1" />
-            {current !== "settings" ? (
+            {current !== "settings" && current !== "develop" ? (
               <IconButton
                 label={t("common.refresh")}
                 onClick={onRefreshStatus}
@@ -909,6 +917,13 @@ function PluginDetailPane({
               status={status}
               statusError={statusError}
             />
+          </TabsContent>
+          <TabsContent
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
+            data-tab-scroller
+            value="develop"
+          >
+            {current === "develop" ? <PluginDevelop detail={detail} /> : null}
           </TabsContent>
         </Tabs>
       )}

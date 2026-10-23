@@ -4692,7 +4692,8 @@
     "tabs": {
       "overview": "概览",
       "settings": "设置",
-      "status": "运行状态"
+      "status": "运行状态",
+      "develop": "开发"
     },
     "testStatus": {
       "ok": "连接正常",
@@ -4716,8 +4717,8 @@
       "too_large": "超过 8 MiB",
       "encoding": "不是 UTF-8",
       "syntax": "语法错误",
-      "async": "不支持 async",
-      "await": "不支持 await",
+      "async": "async 需要 apiVersion 2",
+      "await": "await 需要 apiVersion 2",
       "import": "不支持 import",
       "reexport": "不支持 export … from",
       "missing_meta": "没有导出 meta",
@@ -5026,7 +5027,47 @@
         "without": "其他会话"
       }
     },
-    "headerHelpLabel": "关于插件的总设置"
+    "headerHelpLabel": "关于插件的总设置",
+    "develop": {
+      "build": "开发版",
+      "builtAt": "{{time}} 构建",
+      "loadFailed": "无法读取插件的日志。",
+      "timings": "钩子耗时",
+      "timingsHelpLabel": "关于钩子耗时",
+      "timingsHelp": "每个钩子最近 256 次调用的用时，手动试运行不算在内。「JS 时间」只算脚本自己运行的时间，等网络和存储的时间不算。Core 重启后重新统计。",
+      "noCalls": "还没有调用。",
+      "hook": "钩子",
+      "calls": "调用",
+      "failures": "失败",
+      "p50": "中位",
+      "p95": "P95",
+      "max": "最长",
+      "script": "JS 时间",
+      "dryRun": "试运行",
+      "dryRunHelpLabel": "关于试运行",
+      "dryRunHelp": "按插件现在的设置和授权，在沙箱里跑一次钩子。试运行不访问网络，插件发出的请求会因为没有网络预算而失败；也不写进请求记录。参数是传给钩子的 JSON 数组。",
+      "args": "参数",
+      "argsInvalid": "参数要写成 JSON 数组。",
+      "run": "运行",
+      "running": "运行中…",
+      "runFailed": "试运行没有完成。",
+      "result": "返回值",
+      "noResult": "没有返回值（undefined）",
+      "took": "用时 {{elapsed}} · JS {{script}}",
+      "log": "日志",
+      "logHelpLabel": "关于日志",
+      "logHelp": "插件用 console 和 astrlink.log 写的日志，以及失败的调用和调用栈，最新的在最上面。只存在内存里，每个插件最多 400 行，Core 重启后清空。",
+      "noLog": "还没有日志。",
+      "clear": "清空",
+      "dryRunTag": "试运行",
+      "stack": "调用栈",
+      "levels": {
+        "debug": "调试",
+        "info": "信息",
+        "warn": "警告",
+        "error": "错误"
+      }
+    }
   },
   "pluginRecords": {
     "none": "这个请求没有插件记录。",

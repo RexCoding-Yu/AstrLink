@@ -188,6 +188,8 @@ import {
   parsePluginList,
   parsePluginStats,
   parsePluginStatus,
+  parsePluginJournal,
+  parsePluginDryRun,
   parsePluginTestResult,
   parseSessionMetadata,
   parseSessionPlugins,
@@ -198,6 +200,8 @@ import {
   type PluginClearTarget,
   type PluginCreditStars,
   type PluginDetail,
+  type PluginDryRunResult,
+  type PluginJournal,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
   type PluginList,
@@ -1442,6 +1446,37 @@ export async function getPluginStatus(key: string): Promise<PluginStatus> {
   requireNativeBridge();
   return parsePluginStatus(
     await invoke<unknown>("plugin_action", { action: "status", key }),
+  );
+}
+
+/** The plugin's log lines and failures after `since`, and its hooks' timings. */
+export async function getPluginJournal(
+  key: string,
+  since: number,
+): Promise<PluginJournal> {
+  requireNativeBridge();
+  return parsePluginJournal(
+    await invoke<unknown>("plugin_action", {
+      action: "journal",
+      key,
+      input: { since },
+    }),
+  );
+}
+
+/** Runs one hook by hand, without the network. */
+export async function dryRunPlugin(
+  key: string,
+  hook: string,
+  args: unknown[],
+): Promise<PluginDryRunResult> {
+  requireNativeBridge();
+  return parsePluginDryRun(
+    await invoke<unknown>("plugin_action", {
+      action: "dry_run",
+      key,
+      input: { hook, args },
+    }),
   );
 }
 
