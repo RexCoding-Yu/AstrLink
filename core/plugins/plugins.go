@@ -15,3 +15,9 @@ var Builtin embed.FS
 //
 //go:embed astrlink-plugin.d.ts
 var TypeDefinitions string
+
+// ClientTypeDefinitions is astrlink-plugin-client.d.ts, the types of the
+// SDK a plugin's interface code imports, for a project with a client entry.
+//
+//go:embed astrlink-plugin-client.d.ts
+var ClientTypeDefinitions string

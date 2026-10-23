@@ -2,6 +2,7 @@ package controlapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strconv"
@@ -36,6 +37,8 @@ type PluginHost interface {
 	// Breakers returns the extension points of plugin kept out of requests
 	// after too many failures, and until when.
 	Breakers(plugin string) map[string]time.Time
+	// UICall answers a call of the plugin's interface code.
+	UICall(ctx context.Context, target *plugin.Plugin, name string, input json.RawMessage) (json.RawMessage, error)
 }
 
 // pluginHostRequiredRole lets observers read the settings of every plugin

@@ -84,6 +84,13 @@ func (plugin *Plugin) Limit(hook string) time.Duration {
 	return time.Duration(min(ms, bounds.MaxMs)) * time.Millisecond
 }
 
+// UILoads reports whether the plugin's interface code loads: it has some,
+// it is enabled with ui.code granted, and the user did not turn its
+// interface off.
+func (plugin *Plugin) UILoads() bool {
+	return plugin.Client && plugin.Enabled() && plugin.Can(CapabilityUICode) && plugin.Settings.UIEnabled
+}
+
 // FailsClosed reports whether a request is refused when the plugin's entry
 // hook cannot decide it: the plugin asks for it and the user agreed.
 func (plugin *Plugin) FailsClosed() bool {
@@ -172,8 +179,10 @@ type Plugin struct {
 	Development *Development
 	// Installed is set for a plugin installed from source.
 	Installed *contract.PluginInstallRecord
-	// Client is set for a plugin with interface code.
-	Client bool
+	// Client is set for a plugin with interface code; ClientHash names
+	// the code.
+	Client     bool
+	ClientHash string
 	// Meta is the manifest, zero when the plugin did not load.
 	Meta Meta
 	// Err is why the plugin did not load, nil when it did.
@@ -511,7 +520,7 @@ func (manager *Manager) publish(settings map[string]Settings) {
 	for _, source := range manager.sources {
 		result := manager.programs[sourceIdentity(source)]
 		current := settings[source.Key]
-		if kept := previous.Plugin(source.Key); kept != nil && kept.Origin == source.Origin && kept.Icon == source.Icon && reflect.DeepEqual(kept.Development, source.Development) && reflect.DeepEqual(kept.Installed, source.Installed) && kept.Client == source.Client && kept.program == result.program && kept.Err == result.err && reflect.DeepEqual(kept.Settings, current) {
+		if kept := previous.Plugin(source.Key); kept != nil && kept.Origin == source.Origin && kept.Icon == source.Icon && reflect.DeepEqual(kept.Development, source.Development) && reflect.DeepEqual(kept.Installed, source.Installed) && kept.ClientHash == source.ClientHash && kept.program == result.program && kept.Err == result.err && reflect.DeepEqual(kept.Settings, current) {
 			plugins = append(plugins, kept)
 			continue
 		}
@@ -520,7 +529,7 @@ func (manager *Manager) publish(settings map[string]Settings) {
 			count = &counter{}
 			manager.counters[source.Key] = count
 		}
-		plugin := &Plugin{Key: source.Key, Origin: source.Origin, File: source.File, Icon: source.Icon, Development: source.Development, Installed: source.Installed, Client: source.Client, Settings: current, services: manager.services, counter: count}
+		plugin := &Plugin{Key: source.Key, Origin: source.Origin, File: source.File, Icon: source.Icon, Development: source.Development, Installed: source.Installed, Client: source.Client, ClientHash: source.ClientHash, Settings: current, services: manager.services, counter: count}
 		if result.program == nil {
 			plugin.Err = result.err
 		} else {

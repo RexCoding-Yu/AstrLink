@@ -71,7 +71,8 @@ declare namespace AstrLinkPlugin {
      * extension points, within the host's bounds (onRequest and route 5000,
      * beforeForward 5000, beforeUpstream 5000, rewriteResponse 5000,
      * onStreamEvent 1000 per event, onResponse and onEvent 60000,
-     * onSchedule 300000, onHttp 30000). The user may change them.
+     * onSchedule 300000, onHttp and onUiCall 30000). The user may change
+     * them.
      */
     limits?: Partial<Record<LimitedHook, number>>;
     /**
@@ -95,7 +96,8 @@ declare namespace AstrLinkPlugin {
     | "onResponse"
     | "onEvent"
     | "onSchedule"
-    | "onHttp";
+    | "onHttp"
+    | "onUiCall";
 
   interface Schedule {
     /** A lowercase letter, then up to 31 lowercase letters, digits, _ and -. */
@@ -541,7 +543,19 @@ declare namespace AstrLinkPlugin {
      */
     turn?: { prepend: string };
     /** Generation parameters in the protocol's own fields; null removes one. Needs request.write. */
-    params?: Partial<Record<"temperature" | "top_p" | "top_k" | "max_tokens" | "stop" | "seed" | "presence_penalty" | "frequency_penalty", unknown>>;
+    params?: Partial<
+      Record<
+        | "temperature"
+        | "top_p"
+        | "top_k"
+        | "max_tokens"
+        | "stop"
+        | "seed"
+        | "presence_penalty"
+        | "frequency_penalty",
+        unknown
+      >
+    >;
     /** Function tools added or removed by name; needs request.write. */
     tools?: { add?: ToolSpec[]; remove?: string[] };
     /** Replaces the whole body; needs request.write.raw. */
@@ -559,7 +573,13 @@ declare namespace AstrLinkPlugin {
   /** What beforeUpstream sees: one attempt, in its provider's protocol. */
   interface UpstreamContext {
     request: RequestSummary;
-    attempt: { provider: string; kind: string; protocol: string; model: string; index: number };
+    attempt: {
+      provider: string;
+      kind: string;
+      protocol: string;
+      model: string;
+      index: number;
+    };
     /** The body the attempt sends. */
     body: unknown;
   }
@@ -604,7 +624,12 @@ declare namespace AstrLinkPlugin {
     provider?: string;
     model?: string;
     elapsedMs: number;
-    usage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+    usage?: {
+      input: number;
+      output: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    };
     error?: string;
     /** The reply's visible text, as the privacy check left it; onResponse only. */
     text?: string;
@@ -646,6 +671,17 @@ declare namespace AstrLinkPlugin {
     headers?: Record<string, string>;
     body?: string;
     json?: unknown;
+  }
+
+  /**
+   * A call of the plugin's interface code, as onUiCall(call) gets it: what
+   * call(name, input) of @astrlink/plugin/client sent. What the hook
+   * returns goes back as JSON. Needs ui.code.
+   */
+  interface UiCall {
+    name: string;
+    input: unknown;
+    language: Language;
   }
 
   /** What astrlink.textStream takes. */
@@ -715,8 +751,12 @@ declare const astrlink: {
      * against the 200 ms of script time. fetch() is the same with the web's
      * Response.
      */
-    fetch(request: AstrLinkPlugin.HttpRequest): Promise<AstrLinkPlugin.HttpResponse>;
-    fetch(requests: AstrLinkPlugin.HttpRequest[]): Promise<AstrLinkPlugin.HttpResponse[]>;
+    fetch(
+      request: AstrLinkPlugin.HttpRequest,
+    ): Promise<AstrLinkPlugin.HttpResponse>;
+    fetch(
+      requests: AstrLinkPlugin.HttpRequest[],
+    ): Promise<AstrLinkPlugin.HttpResponse[]>;
   };
   /** Needs storage. JSON values of at most 64 KiB each, 1 MiB in all; keys of 1 to 256 characters. */
   store: {
@@ -761,8 +801,15 @@ declare const astrlink: {
    * astrlink.textStream({ … })`. Needs response.write.
    */
   textStream(options: AstrLinkPlugin.TextStreamOptions): {
-    onStreamEvent(ctx: AstrLinkPlugin.RequestSummary, event: AstrLinkPlugin.StreamEvent, state: unknown): AstrLinkPlugin.StreamResult;
-    onStreamEnd(ctx: AstrLinkPlugin.RequestSummary, state: unknown): { events: AstrLinkPlugin.StreamEvent[] };
+    onStreamEvent(
+      ctx: AstrLinkPlugin.RequestSummary,
+      event: AstrLinkPlugin.StreamEvent,
+      state: unknown,
+    ): AstrLinkPlugin.StreamResult;
+    onStreamEnd(
+      ctx: AstrLinkPlugin.RequestSummary,
+      state: unknown,
+    ): { events: AstrLinkPlugin.StreamEvent[] };
   };
 };
 

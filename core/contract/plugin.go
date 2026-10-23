@@ -178,6 +178,7 @@ const (
 	PluginHookOnEvent         = "onEvent"
 	PluginHookOnSchedule      = "onSchedule"
 	PluginHookOnHTTP          = "onHttp"
+	PluginHookOnUICall        = "onUiCall"
 	PluginHookProvider        = "provider"
 	PluginHookProviderEvent   = "providerEvent"
 )
@@ -204,6 +205,7 @@ var PluginHookLimits = map[string]PluginHookLimit{
 	PluginHookOnEvent:         {DefaultMs: 30000, MaxMs: 60000},
 	PluginHookOnSchedule:      {DefaultMs: 60000, MaxMs: 300000},
 	PluginHookOnHTTP:          {DefaultMs: 10000, MaxMs: 30000},
+	PluginHookOnUICall:        {DefaultMs: 10000, MaxMs: 30000},
 	PluginHookProvider:        {DefaultMs: 1000, MaxMs: 5000},
 	PluginHookProviderEvent:   {DefaultMs: 50, MaxMs: 1000},
 }
@@ -306,6 +308,22 @@ type PluginSummary struct {
 	// Installed is set for a plugin installed from source: where it came
 	// from.
 	Installed *PluginInstallSource `json:"installed,omitempty"`
+	// UIVersion is set when the plugin's interface code loads: enabled,
+	// granted ui.code, and its interface not turned off. It changes with
+	// the code.
+	UIVersion string `json:"ui_version,omitempty"`
+}
+
+// PluginUICallRequest is a call of a plugin's interface code to its
+// backend part, the onUiCall hook.
+type PluginUICallRequest struct {
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+// PluginUICallResult is what onUiCall returned.
+type PluginUICallResult struct {
+	Result json.RawMessage `json:"result"`
 }
 
 // PluginDevelopment is the project a development build comes from.

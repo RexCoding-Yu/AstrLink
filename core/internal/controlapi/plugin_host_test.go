@@ -42,9 +42,11 @@ export function describeStatus(view) {
 `
 
 type pluginHostFixture struct {
-	store   *sqlite.Store
-	handler *Handler
-	host    *pluginhost.Host
+	store     *sqlite.Store
+	handler   *Handler
+	host      *pluginhost.Host
+	manager   *plugin.Manager
+	directory string
 }
 
 func newPluginHostFixture(t *testing.T) pluginHostFixture {
@@ -97,7 +99,7 @@ func buildPluginHostFixture(t *testing.T, others map[string]string) pluginHostFi
 		`{"enabled":true,"granted_capabilities":["context.inject","request.read","storage","ui.views"]}`, ""); response.Code != http.StatusOK {
 		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
 	}
-	return pluginHostFixture{store: store, handler: handler, host: host}
+	return pluginHostFixture{store: store, handler: handler, host: host, manager: manager, directory: directory}
 }
 
 // send runs one request of session through the plugins, as the gateway

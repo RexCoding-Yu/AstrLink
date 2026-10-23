@@ -89,6 +89,15 @@ func projectFiles(key string, chosen template) map[string]string {
 	if chosen.client != "" {
 		entries += `, "client": "src/client.tsx"`
 	}
+	// The interface's React types are for the editor alone: the window
+	// provides React.
+	devDependencies := ""
+	include := `"src", "astrlink-plugin.d.ts"`
+	if chosen.client != "" {
+		devDependencies = `,
+  "devDependencies": { "@types/react": "^19.1.0" }`
+		include += `, "astrlink-plugin-client.d.ts"`
+	}
 	files := map[string]string{
 		"package.json": replace.Replace(`{
   "name": "astrlink-plugin-{{key}}",
@@ -96,7 +105,7 @@ func projectFiles(key string, chosen template) map[string]string {
   "private": true,
   "type": "module",
   "engines": { "astrlink": ">=0.1.0" },
-  "astrlink": { ` + entries + ` }
+  "astrlink": { ` + entries + ` }` + devDependencies + `
 }
 `),
 		"tsconfig.json": `{
@@ -111,7 +120,7 @@ func projectFiles(key string, chosen template) map[string]string {
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "astrlink-plugin.d.ts"]
+  "include": [` + include + `]
 }
 `,
 		".gitignore":           "node_modules/\ndist/\n",
@@ -126,6 +135,7 @@ func projectFiles(key string, chosen template) map[string]string {
 	}
 	if chosen.client != "" {
 		files["src/client.tsx"] = replace.Replace(chosen.client)
+		files["astrlink-plugin-client.d.ts"] = builtinplugins.ClientTypeDefinitions
 	}
 	return files
 }
@@ -354,6 +364,65 @@ export async function onHttp(request: AstrLinkPlugin.HttpServeRequest): Promise<
     "hook": "onHttp",
     "args": [{ "method": "GET", "path": "/health", "query": {}, "headers": {} }],
     "expect": { "result": { "json": { "ok": true } } }
+  }
+]
+`,
+		},
+		"ui": {
+			summary: "An interface: a card on the overview and a tab on its plugin page, which ask the plugin's backend for a count.",
+			plugin: `// {{name}}: keeps a count of the turns it saw; its interface shows it.
+
+export const meta = {
+  apiVersion: 2,
+  key: "{{key}}",
+  name: "{{name}}",
+  version: "0.1.0",
+  capabilities: ["storage", "ui.code"],
+  storage: [{ label: "The number of turns seen", retention: "Until the plugin is removed" }],
+} satisfies AstrLinkPlugin.Meta;
+
+export async function observeTurn() {
+  const seen = ((await astrlink.store.get("turns")) as number | null) ?? 0;
+  await astrlink.store.set("turns", seen + 1);
+}
+
+// The interface's calls: call("count") in src/client.tsx.
+export async function onUiCall(call: AstrLinkPlugin.UiCall) {
+  if (call.name === "count") return { turns: ((await astrlink.store.get("turns")) as number | null) ?? 0 };
+  throw new Error("no such call: " + call.name);
+}
+`,
+			client: `// {{name}}: the interface. React and the components come from the window.
+import { useEffect, useState } from "react";
+import { call, LoadingState, Panel, PanelHeader, registerSlot, t } from "@astrlink/plugin/client";
+
+function Count() {
+  const [turns, setTurns] = useState<number | null>(null);
+  useEffect(() => {
+    void call<{ turns: number }>("count").then((answer) => setTurns(answer.turns));
+  }, []);
+  if (turns === null) return <LoadingState label={t({ en: "Counting…", "zh-CN": "统计中…" })} />;
+  return <p>{t({ en: "{{n}} turns seen", "zh-CN": "看到了 {{n}} 轮对话" }, { n: turns })}</p>;
+}
+
+registerSlot("overview.widget", () => (
+  <Panel>
+    <PanelHeader size="sm">{{name}}</PanelHeader>
+    <div className="p-3 text-sm">
+      <Count />
+    </div>
+  </Panel>
+));
+
+registerSlot("plugin.tab", Count, { title: t({ en: "Count", "zh-CN": "统计" }) });
+`,
+			tests: `[
+  {
+    "name": "answers the count",
+    "hook": "onUiCall",
+    "args": [{ "name": "count", "input": null, "language": "en" }],
+    "store": { "turns": 4 },
+    "expect": { "result": { "turns": 4 } }
   }
 ]
 `,

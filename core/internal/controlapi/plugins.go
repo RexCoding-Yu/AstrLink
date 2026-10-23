@@ -123,6 +123,14 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodPost) {
 			handler.pluginDryRun(writer, request, target)
 		}
+	case action == "client.js" || action == "client.js.map":
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.pluginClient(writer, target, action)
+		}
+	case action == "ui-call":
+		if allowMethods(writer, request, http.MethodPost) {
+			handler.pluginUICall(writer, request, target)
+		}
 	case action == "source" || strings.HasPrefix(action, "source/"):
 		handler.pluginSource(writer, request, target, strings.TrimPrefix(strings.TrimPrefix(action, "source"), "/"))
 	default:
@@ -167,6 +175,9 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 		source := installed.Source
 		summary.Installed = &source
 	}
+	if target.UILoads() {
+		summary.UIVersion = target.ClientHash
+	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed
 		if target.Err != nil {
@@ -203,7 +214,7 @@ func limitedHooks(target *plugin.Plugin) []string {
 	for _, hook := range []string{
 		contract.PluginHookOnRequest, contract.PluginHookRoute, contract.PluginHookBeforeForward, contract.PluginHookBeforeUpstream,
 		contract.PluginHookRewriteResponse, contract.PluginHookOnStreamEvent, contract.PluginHookOnResponse, contract.PluginHookOnEvent,
-		contract.PluginHookOnSchedule, contract.PluginHookOnHTTP,
+		contract.PluginHookOnSchedule, contract.PluginHookOnHTTP, contract.PluginHookOnUICall,
 	} {
 		if target.Has(hook) {
 			hooks = append(hooks, hook)

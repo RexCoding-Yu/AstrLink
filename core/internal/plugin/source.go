@@ -2,7 +2,9 @@ package plugin
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,8 +111,9 @@ type Source struct {
 	// beside it says where it came from.
 	Installed *contract.PluginInstallRecord
 	// Client is set for a built plugin with interface code, client.js
-	// beside plugin.js.
-	Client bool
+	// beside plugin.js; ClientHash names its content.
+	Client     bool
+	ClientHash string
 }
 
 // InstallRecord is the file an install from source writes beside the
@@ -221,8 +224,9 @@ func readSource(fsys fs.FS, key string, origin Origin) Source {
 	source.Text = string(text)
 	if source.File == "plugin.js" {
 		source.SourceMap = readSourceMap(fsys, key)
-		if info, err := fs.Stat(fsys, path.Join(key, "client.js")); err == nil && info.Mode().IsRegular() {
-			source.Client = true
+		if client, err := fs.ReadFile(fsys, path.Join(key, "client.js")); err == nil {
+			sum := sha256.Sum256(client)
+			source.Client, source.ClientHash = true, hex.EncodeToString(sum[:8])
 		}
 	}
 	if origin != OriginBuiltin {
