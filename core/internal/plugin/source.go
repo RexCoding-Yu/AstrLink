@@ -17,6 +17,8 @@ import (
 
 	"github.com/Calcium-Ion/moejs"
 	"github.com/Calcium-Ion/moejs/syntax"
+
+	"github.com/QuantumNous/astrlink/core/contract"
 )
 
 // MaxSourceBytes bounds a plugin's source. Compiling takes about 85 ms and
@@ -103,7 +105,17 @@ type Source struct {
 	// Development is set for a plugin astrlink plugin dev keeps built from
 	// a project on this computer, which DevelopmentMarker names.
 	Development *Development
+	// Installed is set for a plugin installed from source: InstallRecord
+	// beside it says where it came from.
+	Installed *contract.PluginInstallRecord
+	// Client is set for a built plugin with interface code, client.js
+	// beside plugin.js.
+	Client bool
 }
+
+// InstallRecord is the file an install from source writes beside the
+// plugin it built.
+const InstallRecord = "install.json"
 
 // DevelopmentMarker is the file astrlink plugin dev writes beside the plugin
 // it builds: the host reloads such a plugin when its files change.
@@ -209,11 +221,29 @@ func readSource(fsys fs.FS, key string, origin Origin) Source {
 	source.Text = string(text)
 	if source.File == "plugin.js" {
 		source.SourceMap = readSourceMap(fsys, key)
+		if info, err := fs.Stat(fsys, path.Join(key, "client.js")); err == nil && info.Mode().IsRegular() {
+			source.Client = true
+		}
 	}
 	if origin != OriginBuiltin {
 		source.Development = readDevelopment(fsys, key)
+		source.Installed = readInstalled(fsys, key)
 	}
 	return source
+}
+
+// readInstalled reads the record of a plugin installed from source, nil
+// when there is none.
+func readInstalled(fsys fs.FS, key string) *contract.PluginInstallRecord {
+	data, err := fs.ReadFile(fsys, path.Join(key, InstallRecord))
+	if err != nil || len(data) > 1<<20 {
+		return nil
+	}
+	var record contract.PluginInstallRecord
+	if json.Unmarshal(data, &record) != nil || record.Source.Repository == "" {
+		return nil
+	}
+	return &record
 }
 
 // readDevelopment reads the marker of a plugin astrlink plugin dev keeps

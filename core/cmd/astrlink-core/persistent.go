@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
+	"github.com/QuantumNous/astrlink/core/internal/buildinfo"
 	"github.com/QuantumNous/astrlink/core/internal/codingplan"
 	"github.com/QuantumNous/astrlink/core/internal/controlapi"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
@@ -22,6 +23,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/hostapi"
 	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
+	"github.com/QuantumNous/astrlink/core/internal/plugininstall"
 	"github.com/QuantumNous/astrlink/core/internal/pricing"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/privacymodel"
@@ -324,6 +326,21 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	if err := pluginHost.LoadSettings(ctx); err != nil {
 		logf("load the settings of the plugins: %v", err)
 	}
+	// Plugins installed from source come through the outbound proxy, with
+	// their packages from the registry the plugin page names, else npm,
+	// then npmmirror.
+	pluginInstaller := plugininstall.New(plugininstall.Options{
+		Dir:    pluginDirectory,
+		Client: networkproxy.WrapClient(&http.Client{}),
+		Registries: func() []string {
+			registries := []string{contract.DefaultNpmRegistry, contract.FallbackNpmRegistry}
+			if registry := pluginHost.Settings().NpmRegistry; registry != "" {
+				registries = append([]string{registry}, registries...)
+			}
+			return registries
+		},
+		Version: buildinfo.Version,
+	})
 	gatewayDependencies.Plugins = pluginHost
 	// One shared inference handler backs both control-plane seams: the builtin
 	// tool tester and the model classification caller used by the classifier
@@ -364,6 +381,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Metadata:           requestMetadata,
 		MetadataStore:      store,
 		PluginHost:         pluginHost,
+		PluginInstaller:    pluginInstaller,
 	})
 	if err != nil {
 		return fail("configure persistent control API: %w", err)

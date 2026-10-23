@@ -28,6 +28,28 @@ type Manifest struct {
 	// Dependencies are the packages the build bundles, which a lock file
 	// pins.
 	Dependencies map[string]string `json:"dependencies"`
+	// Author is a name, "Name <email> (url)", or an object with a name.
+	Author json.RawMessage `json:"author,omitempty"`
+}
+
+// AuthorName is the author's name, "" when the manifest names none.
+func (manifest *Manifest) AuthorName() string {
+	if manifest == nil || len(manifest.Author) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(manifest.Author, &text) == nil {
+		name, _, _ := strings.Cut(text, "<")
+		name, _, _ = strings.Cut(name, "(")
+		return strings.TrimSpace(name)
+	}
+	var object struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(manifest.Author, &object) == nil {
+		return strings.TrimSpace(object.Name)
+	}
+	return ""
 }
 
 // Entries name a project's entry files, relative to its root.

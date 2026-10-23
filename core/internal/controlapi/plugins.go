@@ -58,6 +58,10 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		return
 	}
 	key, action, _ := strings.Cut(rest, "/")
+	if key == "sources" && (action == "preview" || action == "install") && request.Method == http.MethodPost {
+		handler.pluginSources(writer, request, action)
+		return
+	}
 	if key == "reload" && action == "" && request.Method == http.MethodPost {
 		if err := handler.plugins.Reload(request.Context()); err != nil {
 			writeError(writer, http.StatusInternalServerError, "plugin_reload_failed", err.Error())
@@ -119,6 +123,8 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodPost) {
 			handler.pluginDryRun(writer, request, target)
 		}
+	case action == "source" || strings.HasPrefix(action, "source/"):
+		handler.pluginSource(writer, request, target, strings.TrimPrefix(strings.TrimPrefix(action, "source"), "/"))
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
 	}
@@ -156,6 +162,10 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 	}
 	if development := target.Development; development != nil {
 		summary.Development = &contract.PluginDevelopment{Project: development.Project, BuiltAt: development.BuiltAt}
+	}
+	if installed := target.Installed; installed != nil {
+		source := installed.Source
+		summary.Installed = &source
 	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed
@@ -239,7 +249,11 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	detail.Limits = hookLimits(target, settings.HookLimitsMs)
 	detail.FailClosedRequested = target.Meta.FailClosed
 	detail.FailClosed = settings.FailClosed && target.Meta.FailClosed
+	detail.Client = target.Client
 	detail.UIEnabled = settings.UIEnabled
+	if handler.pluginInstaller != nil && target.Origin != plugin.OriginBuiltin {
+		detail.Versions = handler.pluginInstaller.Versions(target.Key)
+	}
 	detail.TurnWaitMs = settings.TurnWaitMs
 	if detail.TurnWaitMs == 0 {
 		detail.TurnWaitMs = contract.DefaultPluginTurnWaitMs

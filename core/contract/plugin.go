@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -100,7 +101,17 @@ type PluginHostSettings struct {
 	// WebUI lets the web console load the interface code of plugins, which
 	// it does not by default: it has no confirmation window of its own.
 	WebUI bool `json:"web_ui,omitempty"`
+	// NpmRegistry is where an install from source fetches the packages a
+	// lock file pins, "" for the npm registry; npmmirror is tried when it
+	// fails. The lock file's hashes check whatever it returns.
+	NpmRegistry string `json:"npm_registry,omitempty"`
 }
+
+// The npm registries an install from source fetches packages from.
+const (
+	DefaultNpmRegistry  = "https://registry.npmjs.org"
+	FallbackNpmRegistry = "https://registry.npmmirror.com"
+)
 
 // MaxPluginOrder bounds the plugins Order lists.
 const MaxPluginOrder = 64
@@ -127,7 +138,21 @@ func (settings PluginHostSettings) Validate() error {
 		}
 		seen[key] = true
 	}
+	if settings.NpmRegistry != "" && !validRegistry(settings.NpmRegistry) {
+		return fmt.Errorf("npm_registry must be an https address without credentials, query or fragment")
+	}
 	return nil
+}
+
+// validRegistry reports whether text can name an npm registry: https, a
+// host, no credentials, query or fragment.
+func validRegistry(text string) bool {
+	if len(text) > 256 {
+		return false
+	}
+	parsed, err := url.Parse(text)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil &&
+		parsed.RawQuery == "" && parsed.Fragment == "" && !parsed.ForceQuery
 }
 
 // PluginHostSettingsUpdate changes what is set and keeps what is absent.
@@ -137,6 +162,7 @@ type PluginHostSettingsUpdate struct {
 	Language             *string   `json:"language,omitempty"`
 	Order                *[]string `json:"order,omitempty"`
 	WebUI                *bool     `json:"web_ui,omitempty"`
+	NpmRegistry          *string   `json:"npm_registry,omitempty"`
 }
 
 // Extension points of apiVersion 2 plugins, by the hook that serves them.
@@ -215,12 +241,16 @@ type PluginApproval struct {
 	Plaintext         []string `json:"plaintext,omitempty"`
 	Trusted           bool     `json:"trusted,omitempty"`
 	FailClosed        bool     `json:"fail_closed,omitempty"`
+	// Install is the review of the code an install, an update or a
+	// rollback puts in place; Rollback is set for a rollback.
+	Install  *PluginInstallReview `json:"install,omitempty"`
+	Rollback bool                 `json:"rollback,omitempty"`
 }
 
 // Empty reports whether the change grants nothing.
 func (approval PluginApproval) Empty() bool {
 	return !approval.Enable && len(approval.AddedCapabilities) == 0 && len(approval.AddedOrigins) == 0 &&
-		len(approval.Plaintext) == 0 && !approval.Trusted && !approval.FailClosed
+		len(approval.Plaintext) == 0 && !approval.Trusted && !approval.FailClosed && approval.Install == nil
 }
 
 // States of a plugin in the plugin list.
@@ -273,6 +303,9 @@ type PluginSummary struct {
 	// Development is set for a plugin astrlink plugin dev keeps built from
 	// a project on this computer.
 	Development *PluginDevelopment `json:"development,omitempty"`
+	// Installed is set for a plugin installed from source: where it came
+	// from.
+	Installed *PluginInstallSource `json:"installed,omitempty"`
 }
 
 // PluginDevelopment is the project a development build comes from.
@@ -409,6 +442,9 @@ type PluginDetail struct {
 	// HostStorage what the host keeps for it.
 	Storage     []PluginStorageItem `json:"storage"`
 	HostStorage []PluginHostStorage `json:"host_storage"`
+	// Versions are the versions of a plugin installed from source that
+	// later installs replaced, the newest first.
+	Versions []PluginInstalledVersion `json:"versions,omitempty"`
 }
 
 // PluginTool is a query a plugin offers the model, or a report it takes:

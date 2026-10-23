@@ -84,6 +84,9 @@ func (handler *Handler) pluginHostResource(writer http.ResponseWriter, request *
 			}
 			merged.WebUI = *update.WebUI
 		}
+		if update.NpmRegistry != nil {
+			merged.NpmRegistry = strings.TrimRight(*update.NpmRegistry, "/")
+		}
 		if err := merged.Validate(); err != nil {
 			writeError(writer, http.StatusUnprocessableEntity, "invalid_plugin_host_settings", err.Error())
 			return

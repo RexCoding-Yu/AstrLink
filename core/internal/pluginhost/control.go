@@ -60,6 +60,9 @@ func (host *Host) UpdateSettings(ctx context.Context, update contract.PluginHost
 	if update.WebUI != nil {
 		settings.WebUI = *update.WebUI
 	}
+	if update.NpmRegistry != nil {
+		settings.NpmRegistry = strings.TrimRight(*update.NpmRegistry, "/")
+	}
 	if err := settings.Validate(); err != nil {
 		return host.Settings(), errors.Join(storage.ErrInvalidArgument, err)
 	}

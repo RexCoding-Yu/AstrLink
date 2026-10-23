@@ -85,9 +85,33 @@ var hostModules = []string{
 // which the host modules read from.
 const clientGlobal = "__astrlinkClient"
 
+// Packages supplies a project's dependencies to a build without
+// node_modules: Core's installer fetches each package a lock file pins as
+// the build first imports it.
+type Packages interface {
+	// Locate returns the directory whose node_modules holds the package
+	// name as a file of importer's package sees it: importer is a file of
+	// the project, or of a package Locate placed. ok is false when the
+	// project does not depend on name; err says why the package cannot be
+	// had.
+	Locate(importer, name string) (dir string, ok bool, err error)
+}
+
+// Options adjust a build.
+type Options struct {
+	// Packages, when set, supplies the dependencies the project's
+	// node_modules would otherwise hold.
+	Packages Packages
+}
+
 // Build builds the project in dir. Its dependencies must already be in
 // dir/node_modules: the build reads nothing from the network.
 func Build(dir string) (*Result, error) {
+	return BuildWith(dir, Options{})
+}
+
+// BuildWith builds the project in dir as options say.
+func BuildWith(dir string, options Options) (*Result, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -102,7 +126,7 @@ func Build(dir string) (*Result, error) {
 	}
 	result := &Result{Manifest: manifest, Entries: entries}
 	inputs := map[string]bool{}
-	plugin, pluginMap, warnings, err := bundle(dir, entries.Plugin, "plugin.js", false, inputs)
+	plugin, pluginMap, warnings, err := bundle(dir, entries.Plugin, "plugin.js", false, inputs, options)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +136,7 @@ func Build(dir string) (*Result, error) {
 	result.Plugin, result.SourceMap = plugin, pluginMap
 	result.Warnings = append(result.Warnings, warnings...)
 	if entries.Client != "" {
-		client, clientMap, warnings, err := bundle(dir, entries.Client, "client.js", true, inputs)
+		client, clientMap, warnings, err := bundle(dir, entries.Client, "client.js", true, inputs, options)
 		if err != nil {
 			return nil, err
 		}
@@ -130,7 +154,7 @@ func Build(dir string) (*Result, error) {
 }
 
 // bundle builds one entry into an output named out and its source map.
-func bundle(dir, entry, out string, client bool, inputs map[string]bool) ([]byte, []byte, []Message, error) {
+func bundle(dir, entry, out string, client bool, inputs map[string]bool, with Options) ([]byte, []byte, []Message, error) {
 	options := api.BuildOptions{
 		EntryPoints:    []string{filepath.Join(dir, filepath.FromSlash(entry))},
 		AbsWorkingDir:  dir,
@@ -158,6 +182,11 @@ func bundle(dir, entry, out string, client bool, inputs map[string]bool) ([]byte
 	} else {
 		options.Format = api.FormatESModule
 	}
+	// The host's modules resolve first: an interface never bundles its own
+	// React.
+	if with.Packages != nil {
+		options.Plugins = append(options.Plugins, packagesPlugin(with.Packages))
+	}
 	built := api.Build(options)
 	warnings := messages(dir, built.Warnings)
 	if len(built.Errors) > 0 {
@@ -184,7 +213,7 @@ func trackInputs(dir string, inputs map[string]bool) api.Plugin {
 	return api.Plugin{Name: "astrlink-inputs", Setup: func(build api.PluginBuild) {
 		build.OnEnd(func(result *api.BuildResult) (api.OnEndResult, error) {
 			for _, input := range metafileInputs(result.Metafile) {
-				if strings.HasPrefix(input, "node_modules/") || strings.Contains(input, ":") {
+				if strings.HasPrefix(input, "node_modules/") || strings.HasPrefix(input, "../") || strings.Contains(input, ":") {
 					continue
 				}
 				inputs[input] = true
@@ -207,6 +236,63 @@ func hostModulePlugin() api.Plugin {
 			return api.OnLoadResult{Contents: &contents, Loader: api.LoaderJS}, nil
 		})
 	}}
+}
+
+// locating marks the resolution packagesPlugin asks the bundler for, which
+// it leaves to the bundler.
+type locating struct{}
+
+// packagesPlugin resolves the project's bare imports in the directories
+// packages places them in, as the bundler would in node_modules.
+func packagesPlugin(packages Packages) api.Plugin {
+	return api.Plugin{Name: "astrlink-packages", Setup: func(build api.PluginBuild) {
+		build.OnResolve(api.OnResolveOptions{Filter: `^[^./]`, Namespace: "file"}, func(args api.OnResolveArgs) (api.OnResolveResult, error) {
+			if _, again := args.PluginData.(locating); again || args.Kind == api.ResolveEntryPoint || filepath.IsAbs(args.Path) {
+				return api.OnResolveResult{}, nil
+			}
+			name := PackageName(args.Path)
+			if name == "" || strings.HasPrefix(args.Path, "node:") {
+				return api.OnResolveResult{}, nil
+			}
+			dir, ok, err := packages.Locate(args.Importer, name)
+			if err != nil {
+				return api.OnResolveResult{}, err
+			}
+			if !ok {
+				return api.OnResolveResult{}, nil
+			}
+			resolved := build.Resolve(args.Path, api.ResolveOptions{
+				Importer: args.Importer, Kind: args.Kind, ResolveDir: dir, PluginData: locating{}, With: args.With,
+			})
+			if len(resolved.Errors) > 0 {
+				return api.OnResolveResult{Errors: resolved.Errors, Warnings: resolved.Warnings}, nil
+			}
+			result := api.OnResolveResult{
+				Path: resolved.Path, External: resolved.External, Namespace: resolved.Namespace,
+				Suffix: resolved.Suffix, PluginData: resolved.PluginData, Warnings: resolved.Warnings,
+			}
+			if !resolved.SideEffects {
+				result.SideEffects = api.SideEffectsFalse
+			}
+			return result, nil
+		})
+	}}
+}
+
+// PackageName is the package a bare import names: its first segment, or
+// its first two for a scoped package. "" for anything else.
+func PackageName(specifier string) string {
+	parts := strings.SplitN(specifier, "/", 3)
+	if strings.HasPrefix(specifier, "@") {
+		if len(parts) < 2 || parts[0] == "@" || parts[1] == "" {
+			return ""
+		}
+		return parts[0] + "/" + parts[1]
+	}
+	if parts[0] == "" {
+		return ""
+	}
+	return parts[0]
 }
 
 func quoteAll(names []string) []string {
