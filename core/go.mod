@@ -4,10 +4,12 @@ go 1.26.9
 
 require (
 	github.com/Calcium-Ion/moejs v0.1.0-alpha.7
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/QuantumNous/astrlink/convo v0.0.0
 	github.com/QuantumNous/new-api/relaykit v0.3.1
 	github.com/deepteams/webp v1.2.8
 	github.com/expr-lang/expr v1.17.8
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/tidwall/gjson v1.19.0
 	github.com/tidwall/sjson v1.2.5
@@ -25,6 +27,7 @@ replace github.com/QuantumNous/astrlink/convo => ../convo
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
