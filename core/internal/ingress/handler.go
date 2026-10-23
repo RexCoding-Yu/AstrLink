@@ -370,6 +370,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && !handler.allowInferenceBoundary(writer, request) {
 		return
 	}
+	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && strings.HasPrefix(request.URL.Path, PluginHTTPPath) {
+		handler.servePluginHTTP(writer, request)
+		return
+	}
 	if isResponsesWebSocket(request) {
 		handler.serveResponsesWebSocket(writer, request)
 		return
@@ -452,6 +456,13 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 		session.pluginsPersisted()
 	}()
+
+	// The entry hooks of plugins may refuse the request before routing.
+	if session != nil && classifierInternalFrom(request.Context()) == nil && builtinInternalFrom(request.Context()) == nil {
+		if handler.beginExtensions(outWriter, request, classified, session) {
+			return
+		}
+	}
 
 	// One read serves model redirects, channel binding and discovery.
 	routingSettings, routingSettingsLoaded, err := handler.loadRoutingSettings(request.Context())
@@ -607,6 +618,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	candidates = handler.preferChannelBinding(request, session, candidates)
+	classified, candidates = handler.routeExtensions(request.Context(), session, classified, resolveRequest, candidates)
 	if len(candidates) > 1 && candidates[0].Failover != nil && !candidates[0].Failover.Enabled {
 		candidates = candidates[:1]
 	}

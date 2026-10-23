@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/astrlink/convo"
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -297,7 +298,11 @@ func (session *recordSession) injectPlugins(body *requestBodySource) {
 // the captures that waited for it and keeps the plugins' records with the
 // request.
 func (session *recordSession) finishPlugins(ctx context.Context) {
-	if session == nil || session.plugins == nil {
+	if session == nil {
+		return
+	}
+	session.finishExtensions()
+	if session.plugins == nil {
 		return
 	}
 	succeeded := session.status == contract.RequestStatusSucceeded && (!session.hasHTTPStatus || session.httpStatus < http.StatusBadRequest)
@@ -319,9 +324,46 @@ func (session *recordSession) finishPlugins(ctx context.Context) {
 
 // pluginsPersisted tells the plugins that the request record is written.
 func (session *recordSession) pluginsPersisted() {
-	if session != nil && session.plugins != nil {
+	if session == nil {
+		return
+	}
+	if session.plugins != nil {
 		session.plugins.Persisted()
 	}
+	session.extensions.Persisted()
+}
+
+// finishExtensions keeps the records of the response hooks with the
+// request, and hands the response's summary to the hooks that follow it.
+func (session *recordSession) finishExtensions() {
+	if session.extensions == nil {
+		return
+	}
+	session.notePlugins(session.extensions.Records(), nil)
+	summary := pluginhost.ResponseSummary{
+		Status: string(session.status), HTTPStatus: session.httpStatus,
+		Model: session.classified.routingModel(), ElapsedMs: time.Since(session.startedAt).Milliseconds(),
+		Text: session.replyPlugins.Text(),
+	}
+	if session.recovery != nil && session.recovery.UpstreamModel != "" {
+		summary.Model = session.recovery.UpstreamModel
+	}
+	if session.plan != nil {
+		summary.Provider = session.servedName
+	}
+	if usage := session.scanner.Usage(); usage != nil {
+		summary.Usage = &pluginhost.ResponseUsage{Input: int64(usage.InputTokens), Output: int64(usage.OutputTokens)}
+		if usage.CacheReadTokens != nil {
+			summary.Usage.CacheRead = int64(*usage.CacheReadTokens)
+		}
+		if usage.CacheWriteTokens != nil {
+			summary.Usage.CacheWrite = int64(*usage.CacheWriteTokens)
+		}
+	}
+	if session.errorSummary != nil {
+		summary.Error = session.errorSummary.Code
+	}
+	session.extensions.Finish(summary)
 }
 
 // notePlugins keeps the plugins' records and their events in the gateway

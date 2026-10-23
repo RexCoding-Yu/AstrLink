@@ -108,12 +108,19 @@ type Host struct {
 	sessions     *sessions
 	lookups      *lookups
 	observe      *observeQueue
+	after        *afterQueue
 	held         *heldCaptures
 	records      RecordAppender
 	workspaceKey []byte
 	logf         func(string, ...any)
 	// settings are the settings of every plugin, as requests read them.
 	settings atomic.Pointer[contract.PluginHostSettings]
+	// breakers keep a plugin's extension point out of requests after it
+	// failed too often, by plugin/hook.
+	breakers sync.Map
+	// forwardTurns remembers the turn each plugin's beforeForward last
+	// settled its turn block in, by session and plugin.
+	forwardTurns *forwardTurns
 	// budget, when set, stands for every plugin's wait; tests shorten it.
 	budget time.Duration
 	// now is the host's clock; tests move it.
@@ -136,7 +143,9 @@ func New(options Options) *Host {
 		sessions:     newSessions(),
 		lookups:      newLookups(),
 		observe:      newObserveQueue(logf),
+		after:        newAfterQueue(),
 		held:         newHeldCaptures(),
+		forwardTurns: newForwardTurns(),
 		records:      options.Records,
 		workspaceKey: options.WorkspaceKey,
 		logf:         logf,
@@ -167,10 +176,12 @@ func (host *Host) appendRecords(id contract.RequestID, records []contract.Reques
 	}
 }
 
-// Close stops the observeTurn queue. Captures still waiting are dropped.
+// Close stops the observeTurn queue and the calls that follow requests.
+// What is still waiting is dropped.
 func (host *Host) Close() {
 	if host != nil {
 		host.observe.close()
+		host.after.close()
 	}
 }
 

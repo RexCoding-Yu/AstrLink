@@ -370,7 +370,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	}
 	monitorCtx, stopMonitors := context.WithCancel(ctx)
 	var monitors sync.WaitGroup
-	monitors.Add(5)
+	monitors.Add(6)
 	go func() {
 		defer monitors.Done()
 		if err := pluginManager.Reload(monitorCtx); err != nil {
@@ -394,6 +394,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		pluginManager.WatchDevelopment(monitorCtx, time.Second, registerAttributes)
 	}()
 	go func() { defer monitors.Done(); pricingManager.Run(monitorCtx, logf) }()
+	go func() { defer monitors.Done(); pluginHost.RunSchedules(monitorCtx) }()
 	go func() { defer monitors.Done(); subscriptionManager.RunUsageMonitor(monitorCtx) }()
 	go func() { defer monitors.Done(); rawVault.Run(monitorCtx) }()
 	go func() { defer monitors.Done(); syncEngine.Run(monitorCtx, logf) }()

@@ -289,6 +289,16 @@ type PluginJournal struct {
 	Entries []PluginJournalEntry `json:"entries"`
 	Timings []PluginHookTiming   `json:"timings"`
 	Latest  uint64               `json:"latest"`
+	// Breakers are the extension points kept out of requests for now,
+	// after failing too often, and until when.
+	Breakers []PluginBreaker `json:"breakers"`
+}
+
+// PluginBreaker is an extension point kept out of requests until Until, in
+// RFC 3339.
+type PluginBreaker struct {
+	Hook  string `json:"hook"`
+	Until string `json:"until"`
 }
 
 // PluginJournalEntry is one log line or failed call. Reason and Stack are

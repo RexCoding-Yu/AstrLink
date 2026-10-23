@@ -33,6 +33,9 @@ type PluginHost interface {
 	LookupCredentials(plugin string) int
 	RevokeSessionLookups(session string)
 	RevokePluginLookups(plugin string) int
+	// Breakers returns the extension points of plugin kept out of requests
+	// after too many failures, and until when.
+	Breakers(plugin string) map[string]time.Time
 }
 
 // pluginHostRequiredRole lets observers read the settings of every plugin

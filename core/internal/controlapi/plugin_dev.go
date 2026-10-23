@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -31,7 +32,13 @@ func (handler *Handler) pluginJournal(writer http.ResponseWriter, request *http.
 		since = parsed
 	}
 	entries, timings := target.Journal(since)
-	journal := contract.PluginJournal{Entries: journalEntries(entries), Timings: make([]contract.PluginHookTiming, 0, len(timings)), Latest: since}
+	journal := contract.PluginJournal{Entries: journalEntries(entries), Timings: make([]contract.PluginHookTiming, 0, len(timings)), Latest: since, Breakers: []contract.PluginBreaker{}}
+	if handler.pluginHost != nil {
+		for hook, until := range handler.pluginHost.Breakers(target.Key) {
+			journal.Breakers = append(journal.Breakers, contract.PluginBreaker{Hook: hook, Until: until.UTC().Format(time.RFC3339)})
+		}
+		slices.SortFunc(journal.Breakers, func(a, b contract.PluginBreaker) int { return strings.Compare(a.Hook, b.Hook) })
+	}
 	if len(entries) > 0 {
 		journal.Latest = entries[len(entries)-1].Seq
 	}
