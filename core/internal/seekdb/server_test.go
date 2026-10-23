@@ -49,7 +49,16 @@ func TestServerLifecycle(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT id FROM chunks WHERE MATCH(content) AGAINST('防火墙') LIMIT 1`).Scan(&id); err != nil || id != 1 {
 		t.Fatalf("full-text query: id=%d err=%v", id, err)
 	}
-	if err := db.QueryRowContext(ctx, `SELECT id FROM chunks ORDER BY l2_distance(embedding, '[0,0.9,0.1]') APPROXIMATE LIMIT 1`).Scan(&id); err != nil || id != 2 {
+	// The vector index follows writes a few hundred milliseconds behind.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err = db.QueryRowContext(ctx, `SELECT id FROM chunks ORDER BY l2_distance(embedding, '[0,0.9,0.1]') APPROXIMATE LIMIT 1`).Scan(&id)
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil || id != 2 {
 		t.Fatalf("vector query: id=%d err=%v", id, err)
 	}
 	if server.PID() == 0 {

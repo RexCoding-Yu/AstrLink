@@ -120,6 +120,9 @@ type Dependencies struct {
 	// PluginHost serves the settings of every plugin and the plugins' part
 	// in each session. Optional; without it those routes report 503.
 	PluginHost PluginHost
+	// Knowledge is the knowledge base's search engine and local embedding
+	// models. Optional; without it the knowledge routes report 503.
+	Knowledge KnowledgeEnvironment
 }
 
 // RateLimitReleaser restores a service after an operator clears its risk.
@@ -199,6 +202,7 @@ type Handler struct {
 	plugins            PluginRegistry
 	pluginStore        storage.PluginStore
 	pluginHost         PluginHost
+	knowledge          KnowledgeEnvironment
 	pluginsMu          sync.Mutex
 	// pluginTests are the last connection test of each plugin.
 	pluginTestsMu sync.Mutex
@@ -282,6 +286,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		plugins:            dependencies.Plugins,
 		pluginStore:        dependencies.PluginStore,
 		pluginHost:         dependencies.PluginHost,
+		knowledge:          dependencies.Knowledge,
 		metadata:           dependencies.Metadata,
 		metadataStore:      dependencies.MetadataStore,
 		repoStars:          newRepoStars(githubAPIBaseURL),
@@ -301,6 +306,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 	handler.mux.HandleFunc(PluginsPath, handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
 	handler.mux.HandleFunc(PluginsPath+"/", handler.authenticatedBy(handler.pluginsResource, pluginsRequiredRole))
 	handler.mux.HandleFunc(PluginHostPath, handler.authenticatedBy(handler.pluginHostResource, pluginHostRequiredRole))
+	handler.mux.HandleFunc(KnowledgePath+"/", handler.authenticatedBy(handler.knowledgeResource, knowledgeRequiredRole))
 	handler.mux.HandleFunc(MetadataAttributesPath, handler.authenticated(handler.metadataAttributesResource, RoleObserver))
 	handler.mux.HandleFunc(MetadataAttributesPath+"/", handler.authenticated(handler.metadataAttributesResource, RoleObserver))
 	handler.mux.HandleFunc(RoutingSettingsPath, handler.authenticated(handler.routingSettingsResource, RoleObserver))

@@ -12,10 +12,12 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
+	"github.com/QuantumNous/astrlink/core/internal/autoclassifier"
 	"github.com/QuantumNous/astrlink/core/internal/codingplan"
 	"github.com/QuantumNous/astrlink/core/internal/controlapi"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/ingress"
+	"github.com/QuantumNous/astrlink/core/internal/knowledge"
 	"github.com/QuantumNous/astrlink/core/internal/localkey"
 	"github.com/QuantumNous/astrlink/core/internal/metadata"
 	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
@@ -325,6 +327,27 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		logf("load the settings of the plugins: %v", err)
 	}
 	gatewayDependencies.Plugins = pluginHost
+	// The knowledge base's search engine and local embedding models install on
+	// demand under <data-dir>/knowledge; nothing runs until the user starts it.
+	knowledgeWorker := options.classifierWorkerPath
+	if knowledgeWorker == "" {
+		if path, err := autoclassifier.SiblingExecutablePath(); err == nil {
+			knowledgeWorker = path
+		}
+	}
+	knowledgeEnvironment := knowledge.NewEnvironment(knowledge.EnvironmentConfig{
+		Directory:        filepath.Join(options.dataDirectory, "knowledge"),
+		WorkerExecutable: knowledgeWorker,
+		Password: func(ctx context.Context) (string, error) {
+			auditKey, err := store.GetAuditKey(ctx)
+			if err != nil {
+				return "", err
+			}
+			defer clear(auditKey)
+			return knowledge.DerivePassword(auditKey)
+		},
+		Logf: logf,
+	})
 	// One shared inference handler backs both control-plane seams: the builtin
 	// tool tester and the model classification caller used by the classifier
 	// dry-run for existing_model sources.
@@ -364,6 +387,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Metadata:           requestMetadata,
 		MetadataStore:      store,
 		PluginHost:         pluginHost,
+		Knowledge:          knowledgeEnvironment,
 	})
 	if err != nil {
 		return fail("configure persistent control API: %w", err)
@@ -407,6 +431,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			stopMonitors()
 			monitors.Wait()
 			pluginHost.Close()
+			knowledgeEnvironment.Close()
 			err := store.Close()
 			privacyWorker.Close()
 			if closeClassifier != nil {
