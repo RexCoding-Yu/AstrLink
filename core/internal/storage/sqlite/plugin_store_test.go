@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -99,14 +100,14 @@ func TestPluginHostSettingsKeepDefaultsUntilChanged(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	settings, err := store.PluginHostSettings(ctx)
-	if err != nil || settings != contract.DefaultPluginHostSettings() {
+	if err != nil || !reflect.DeepEqual(settings, contract.DefaultPluginHostSettings()) {
 		t.Fatalf("settings before a change = %+v, %v", settings, err)
 	}
 	changed := contract.PluginHostSettings{Paused: true, InjectionBudgetBytes: 8 << 10, Language: contract.PluginLanguageJapanese}
 	if err := store.PutPluginHostSettings(ctx, changed); err != nil {
 		t.Fatal(err)
 	}
-	if settings, err := store.PluginHostSettings(ctx); err != nil || settings != changed {
+	if settings, err := store.PluginHostSettings(ctx); err != nil || !reflect.DeepEqual(settings, changed) {
 		t.Fatalf("settings = %+v, %v", settings, err)
 	}
 	for _, invalid := range []contract.PluginHostSettings{

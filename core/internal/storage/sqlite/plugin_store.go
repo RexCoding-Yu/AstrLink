@@ -22,7 +22,7 @@ const (
 
 func (store *Store) ListPluginSettings(ctx context.Context) ([]storage.PluginSettingsRecord, error) {
 	rows, err := store.db.QueryContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json,
-    excluded_clients_json, workspace_binding, auto_refresh, lookup_enabled, created_at, updated_at
+    excluded_clients_json, workspace_binding, auto_refresh, lookup_enabled, hook_limits_json, fail_closed, ui_enabled, created_at, updated_at
 FROM plugin_settings ORDER BY plugin_key`)
 	if err != nil {
 		return nil, fmt.Errorf("read plugin settings: %w", err)
@@ -44,7 +44,7 @@ FROM plugin_settings ORDER BY plugin_key`)
 
 func (store *Store) GetPluginSettings(ctx context.Context, plugin string) (storage.PluginSettingsRecord, error) {
 	row := store.db.QueryRowContext(ctx, `SELECT plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json,
-    excluded_clients_json, workspace_binding, auto_refresh, lookup_enabled, created_at, updated_at
+    excluded_clients_json, workspace_binding, auto_refresh, lookup_enabled, hook_limits_json, fail_closed, ui_enabled, created_at, updated_at
 FROM plugin_settings WHERE plugin_key = ?`, plugin)
 	record, err := scanPluginSettings(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -57,16 +57,17 @@ type scanner interface{ Scan(...any) error }
 
 func scanPluginSettings(row scanner) (storage.PluginSettingsRecord, error) {
 	var record storage.PluginSettingsRecord
-	var capabilities, origins, config, excluded, created, updated string
+	var capabilities, origins, config, excluded, limits, created, updated string
 	if err := row.Scan(&record.Key, &record.Enabled, &capabilities, &origins, &record.Trusted, &record.TurnWaitMs, &config,
-		&excluded, &record.WorkspaceBinding, &record.AutoRefresh, &record.LookupEnabled, &created, &updated); err != nil {
+		&excluded, &record.WorkspaceBinding, &record.AutoRefresh, &record.LookupEnabled, &limits, &record.FailClosed, &record.UIEnabled, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return record, err
 		}
 		return record, fmt.Errorf("read plugin settings: %w", err)
 	}
 	if json.Unmarshal([]byte(capabilities), &record.Capabilities) != nil || json.Unmarshal([]byte(origins), &record.Origins) != nil ||
-		json.Unmarshal([]byte(excluded), &record.ExcludedClients) != nil || !json.Valid([]byte(config)) {
+		json.Unmarshal([]byte(excluded), &record.ExcludedClients) != nil || !json.Valid([]byte(config)) ||
+		json.Unmarshal([]byte(limits), &record.HookLimitsMs) != nil {
 		return record, fmt.Errorf("%w: plugin settings %s", storage.ErrInvalidRecord, record.Key)
 	}
 	record.Config = json.RawMessage(config)
@@ -113,17 +114,28 @@ func (store *Store) PutPluginSettings(ctx context.Context, record storage.Plugin
 	if err != nil {
 		return fmt.Errorf("%w: plugin clients", storage.ErrInvalidArgument)
 	}
+	for hook, ms := range record.HookLimitsMs {
+		bounds, known := contract.PluginHookLimits[hook]
+		if !known || ms < 1 || ms > bounds.MaxMs {
+			return fmt.Errorf("%w: plugin time limit of %s", storage.ErrInvalidArgument, hook)
+		}
+	}
+	limits, err := json.Marshal(nonNilMap(record.HookLimitsMs))
+	if err != nil {
+		return fmt.Errorf("%w: plugin time limits", storage.ErrInvalidArgument)
+	}
 	now := store.now().UTC().Format(time.RFC3339Nano)
 	if _, err := store.db.ExecContext(ctx, `INSERT INTO plugin_settings (plugin_key, enabled, granted_capabilities_json, network_origins_json, privacy_trusted, turn_wait_ms, config_json,
-    excluded_clients_json, workspace_binding, auto_refresh, lookup_enabled, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    excluded_clients_json, workspace_binding, auto_refresh, lookup_enabled, hook_limits_json, fail_closed, ui_enabled, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(plugin_key) DO UPDATE SET enabled = excluded.enabled, granted_capabilities_json = excluded.granted_capabilities_json,
     network_origins_json = excluded.network_origins_json, privacy_trusted = excluded.privacy_trusted, turn_wait_ms = excluded.turn_wait_ms,
     config_json = excluded.config_json, excluded_clients_json = excluded.excluded_clients_json,
     workspace_binding = excluded.workspace_binding, auto_refresh = excluded.auto_refresh, lookup_enabled = excluded.lookup_enabled,
+    hook_limits_json = excluded.hook_limits_json, fail_closed = excluded.fail_closed, ui_enabled = excluded.ui_enabled,
     updated_at = excluded.updated_at`,
 		record.Key, record.Enabled, string(capabilities), string(origins), record.Trusted, wait, string(config),
-		string(excluded), record.WorkspaceBinding, record.AutoRefresh, record.LookupEnabled, now, now); err != nil {
+		string(excluded), record.WorkspaceBinding, record.AutoRefresh, record.LookupEnabled, string(limits), record.FailClosed, record.UIEnabled, now, now); err != nil {
 		return fmt.Errorf("write plugin settings: %w", err)
 	}
 	return nil
@@ -308,6 +320,13 @@ func scanPluginSession(row scanner) (storage.PluginSessionRecord, error) {
 func nonNil[T any](values []T) []T {
 	if values == nil {
 		return []T{}
+	}
+	return values
+}
+
+func nonNilMap[K comparable, V any](values map[K]V) map[K]V {
+	if values == nil {
+		return map[K]V{}
 	}
 	return values
 }

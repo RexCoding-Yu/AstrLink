@@ -1243,5 +1243,15 @@ END`,
 			`ALTER TABLE request_records ADD COLUMN metadata_json TEXT`,
 			`ALTER TABLE request_records ADD COLUMN plugin_records_json TEXT`,
 		}},
+		{Version: 57, Name: "plugin_extension_points", Statements: []string{
+			// hook_limits_json holds the user's time limits of a plugin's
+			// extension points, in milliseconds by hook; fail_closed the
+			// user's consent that a request the plugin's entry hook cannot
+			// decide is refused; ui_enabled whether its interface code
+			// loads.
+			`ALTER TABLE plugin_settings ADD COLUMN hook_limits_json TEXT NOT NULL DEFAULT '{}' CHECK(length(hook_limits_json) <= 4096)`,
+			`ALTER TABLE plugin_settings ADD COLUMN fail_closed INTEGER NOT NULL DEFAULT 0 CHECK(fail_closed IN (0, 1))`,
+			`ALTER TABLE plugin_settings ADD COLUMN ui_enabled INTEGER NOT NULL DEFAULT 1 CHECK(ui_enabled IN (0, 1))`,
+		}},
 	}
 }

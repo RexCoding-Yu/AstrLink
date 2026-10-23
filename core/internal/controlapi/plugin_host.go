@@ -3,6 +3,7 @@ package controlapi
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,18 @@ func (handler *Handler) pluginHostResource(writer http.ResponseWriter, request *
 		}
 		if update.Language != nil {
 			merged.Language = *update.Language
+		}
+		if update.Order != nil {
+			merged.Order = slices.Clone(*update.Order)
+		}
+		if update.WebUI != nil {
+			// Plugin code in the web console can do what the console
+			// can, which takes the user's confirmation.
+			if *update.WebUI && !merged.WebUI && request.Header.Get(contract.PluginApprovalHeader) == "" {
+				writeError(writer, http.StatusConflict, "approval_required", "loading plugin interface code in the web console needs the user's confirmation")
+				return
+			}
+			merged.WebUI = *update.WebUI
 		}
 		if err := merged.Validate(); err != nil {
 			writeError(writer, http.StatusUnprocessableEntity, "invalid_plugin_host_settings", err.Error())

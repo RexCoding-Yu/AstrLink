@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func buildPluginHostFixture(t *testing.T, others map[string]string) pluginHostFi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/loader", "application/json",
+	if response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/loader", "application/json",
 		`{"enabled":true,"granted_capabilities":["context.inject","request.read","storage","ui.views"]}`, ""); response.Code != http.StatusOK {
 		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
 	}
@@ -134,15 +135,15 @@ type sessionPluginList struct {
 func TestPluginHostSettingsArePausedBudgetedAndTold(t *testing.T) {
 	fixture := newPluginHostFixture(t)
 	handler := fixture.handler
-	if got := decodeBody[contract.PluginHostSettings](t, controlRequest(t, handler, http.MethodGet, PluginHostPath, "", "", "")); got != contract.DefaultPluginHostSettings() {
+	if got := decodeBody[contract.PluginHostSettings](t, controlRequest(t, handler, http.MethodGet, PluginHostPath, "", "", "")); !reflect.DeepEqual(got, contract.DefaultPluginHostSettings()) {
 		t.Fatalf("defaults = %+v", got)
 	}
-	response := controlRequest(t, handler, http.MethodPatch, PluginHostPath, "application/json", `{"language":"ja","injection_budget_bytes":8192}`, "")
+	response := approvedRequest(t, handler, http.MethodPatch, PluginHostPath, "application/json", `{"language":"ja","injection_budget_bytes":8192}`, "")
 	if got := decodeBody[contract.PluginHostSettings](t, response); response.Code != http.StatusOK || got.Language != "ja" || got.InjectionBudgetBytes != 8192 || got.Paused {
 		t.Fatalf("PATCH = %d %s", response.Code, response.Body.String())
 	}
 	for _, body := range []string{`{"language":"fr"}`, `{"injection_budget_bytes":100}`} {
-		if response := controlRequest(t, handler, http.MethodPatch, PluginHostPath, "application/json", body, ""); response.Code != http.StatusUnprocessableEntity {
+		if response := approvedRequest(t, handler, http.MethodPatch, PluginHostPath, "application/json", body, ""); response.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("PATCH %s = %d %s", body, response.Code, response.Body.String())
 		}
 	}
@@ -187,13 +188,13 @@ func TestPluginDetailShowsTheHostSwitchesAndWhatIsKept(t *testing.T) {
 	if count := kinds[contract.PluginStoredWorkspaceBindings]; count == nil || *count != 0 {
 		t.Fatalf("workspace bindings = %v", count)
 	}
-	response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/loader", "application/json",
+	response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/loader", "application/json",
 		`{"excluded_clients":["cursor","unknown","cursor"],"workspace_binding":false,"auto_refresh":true}`, "")
 	detail = decodeBody[contract.PluginDetail](t, response)
 	if response.Code != http.StatusOK || len(detail.ExcludedClients) != 2 || detail.WorkspaceBinding || !detail.AutoRefresh {
 		t.Fatalf("PATCH = %d %s", response.Code, response.Body.String())
 	}
-	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/loader", "application/json", `{"excluded_clients":["nobody"]}`, ""); response.Code != http.StatusUnprocessableEntity {
+	if response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/loader", "application/json", `{"excluded_clients":["nobody"]}`, ""); response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("an unknown client = %d %s", response.Code, response.Body.String())
 	}
 }
@@ -340,13 +341,13 @@ func TestLookupsAreListedSwitchedAndRevoked(t *testing.T) {
 	fixture := buildPluginHostFixture(t, map[string]string{"finder": finderPlugin})
 	handler := fixture.handler
 	enable := `{"enabled":true,"granted_capabilities":["request.read","model.tools"]}`
-	response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", enable, "")
+	response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", enable, "")
 	detail := decodeBody[contract.PluginDetail](t, response)
 	if response.Code != http.StatusOK || !detail.LookupEnabled || len(detail.Tools) != 1 ||
 		detail.Tools[0] != (contract.PluginTool{Name: "search", Description: "Search the repository's memory."}) {
 		t.Fatalf("detail = %d %s", response.Code, response.Body.String())
 	}
-	controlRequest(t, handler, http.MethodPatch, PluginHostPath, "application/json", `{"language":"zh-CN"}`, "")
+	approvedRequest(t, handler, http.MethodPatch, PluginHostPath, "application/json", `{"language":"zh-CN"}`, "")
 	detail = decodeBody[contract.PluginDetail](t, controlRequest(t, handler, http.MethodGet, PluginsPath+"/finder", "", "", ""))
 	if detail.Tools[0].Description != "检索本仓库的记忆。" {
 		t.Fatalf("tools in the interface language = %+v", detail.Tools)
@@ -371,16 +372,16 @@ func TestLookupsAreListedSwitchedAndRevoked(t *testing.T) {
 	}
 	// Settings that leave the lookups open keep the credential.
 	token = fixture.sendShell(t, "session_1")
-	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"turn_wait_ms":3000}`, "")
+	approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"turn_wait_ms":3000}`, "")
 	if status := fixture.lookup(token); status != http.StatusOK {
 		t.Fatalf("after other settings = %d", status)
 	}
 	// Turning the lookups off voids it; so does moving the session.
-	response = controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"lookup_enabled":false}`, "")
+	response = approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"lookup_enabled":false}`, "")
 	if detail := decodeBody[contract.PluginDetail](t, response); response.Code != http.StatusOK || detail.LookupEnabled {
 		t.Fatalf("turn off = %d %s", response.Code, response.Body.String())
 	}
-	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"lookup_enabled":true}`, "")
+	approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"lookup_enabled":true}`, "")
 	if status := fixture.lookup(token); status != http.StatusUnauthorized {
 		t.Fatalf("a credential of lookups turned off = %d", status)
 	}
@@ -398,8 +399,8 @@ func TestLookupsAreListedSwitchedAndRevoked(t *testing.T) {
 	if status := fixture.lookup(token); status != http.StatusOK {
 		t.Fatalf("a new credential = %d", status)
 	}
-	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"enabled":false}`, "")
-	controlRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", enable, "")
+	approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", `{"enabled":false}`, "")
+	approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/finder", "application/json", enable, "")
 	if status := fixture.lookup(token); status != http.StatusUnauthorized {
 		t.Fatalf("a credential of a disabled plugin = %d", status)
 	}

@@ -93,7 +93,17 @@ type PluginHostSettings struct {
 	// Language is the interface language, en, zh-CN or ja. A session takes
 	// it when it starts and keeps it.
 	Language string `json:"language"`
+	// Order lists plugin keys in the order their extension points run:
+	// each plugin gets what the one before it returned. Plugins it does not
+	// list come after, in key order.
+	Order []string `json:"order,omitempty"`
+	// WebUI lets the web console load the interface code of plugins, which
+	// it does not by default: it has no confirmation window of its own.
+	WebUI bool `json:"web_ui,omitempty"`
 }
+
+// MaxPluginOrder bounds the plugins Order lists.
+const MaxPluginOrder = 64
 
 // DefaultPluginHostSettings are the settings of a Core nobody changed them in.
 func DefaultPluginHostSettings() PluginHostSettings {
@@ -107,14 +117,110 @@ func (settings PluginHostSettings) Validate() error {
 	if !ValidPluginLanguage(settings.Language) {
 		return fmt.Errorf("language must be en, zh-CN or ja")
 	}
+	if len(settings.Order) > MaxPluginOrder {
+		return fmt.Errorf("order lists at most %d plugins", MaxPluginOrder)
+	}
+	seen := make(map[string]bool, len(settings.Order))
+	for _, key := range settings.Order {
+		if !ValidPluginKey(key) || seen[key] {
+			return fmt.Errorf("order must list distinct plugin keys")
+		}
+		seen[key] = true
+	}
 	return nil
 }
 
 // PluginHostSettingsUpdate changes what is set and keeps what is absent.
 type PluginHostSettingsUpdate struct {
-	Paused               *bool   `json:"paused,omitempty"`
-	InjectionBudgetBytes *int    `json:"injection_budget_bytes,omitempty"`
-	Language             *string `json:"language,omitempty"`
+	Paused               *bool     `json:"paused,omitempty"`
+	InjectionBudgetBytes *int      `json:"injection_budget_bytes,omitempty"`
+	Language             *string   `json:"language,omitempty"`
+	Order                *[]string `json:"order,omitempty"`
+	WebUI                *bool     `json:"web_ui,omitempty"`
+}
+
+// Extension points of apiVersion 2 plugins, by the hook that serves them.
+const (
+	PluginHookOnRequest       = "onRequest"
+	PluginHookRoute           = "route"
+	PluginHookBeforeForward   = "beforeForward"
+	PluginHookBeforeUpstream  = "beforeUpstream"
+	PluginHookRewriteResponse = "rewriteResponse"
+	PluginHookOnStreamEvent   = "onStreamEvent"
+	PluginHookOnResponse      = "onResponse"
+	PluginHookObserveTurn     = "observeTurn"
+	PluginHookOnEvent         = "onEvent"
+	PluginHookOnSchedule      = "onSchedule"
+	PluginHookOnHTTP          = "onHttp"
+	PluginHookProvider        = "provider"
+	PluginHookProviderEvent   = "providerEvent"
+)
+
+// PluginHookLimit bounds how long a request waits for one call of a hook:
+// the default and the most a plugin or the user may set, in milliseconds.
+type PluginHookLimit struct {
+	DefaultMs int `json:"default_ms"`
+	MaxMs     int `json:"max_ms"`
+}
+
+// PluginHookLimits are the time limits of the extension points. A stream
+// event's limit is each event's; providerEvent is each event of a
+// provider's stream.
+var PluginHookLimits = map[string]PluginHookLimit{
+	PluginHookOnRequest:       {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookRoute:           {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookBeforeForward:   {DefaultMs: 2500, MaxMs: 5000},
+	PluginHookBeforeUpstream:  {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookRewriteResponse: {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookOnStreamEvent:   {DefaultMs: 50, MaxMs: 1000},
+	PluginHookOnResponse:      {DefaultMs: 30000, MaxMs: 60000},
+	PluginHookObserveTurn:     {DefaultMs: 30000, MaxMs: 60000},
+	PluginHookOnEvent:         {DefaultMs: 30000, MaxMs: 60000},
+	PluginHookOnSchedule:      {DefaultMs: 60000, MaxMs: 300000},
+	PluginHookOnHTTP:          {DefaultMs: 10000, MaxMs: 30000},
+	PluginHookProvider:        {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookProviderEvent:   {DefaultMs: 50, MaxMs: 1000},
+}
+
+// PluginHookLimitSetting is one hook's time limit on the plugin page: the
+// bounds, what the plugin asks for, and what the user set (0 for none).
+type PluginHookLimitSetting struct {
+	Hook      string `json:"hook"`
+	DefaultMs int    `json:"default_ms"`
+	MaxMs     int    `json:"max_ms"`
+	// PluginMs is what the plugin's manifest asks for, 0 for the default.
+	PluginMs int `json:"plugin_ms,omitempty"`
+	// Ms is what the user set, 0 to follow the plugin.
+	Ms int `json:"ms,omitempty"`
+	// EffectiveMs is the limit in effect.
+	EffectiveMs int `json:"effective_ms"`
+}
+
+// PluginApprovalHeader marks a change of a plugin's settings the user
+// confirmed where nothing else can click for them: the desktop's
+// confirmation window, or the web console's own dialog. A change that grants
+// a plugin more is refused without it.
+const PluginApprovalHeader = "X-AstrLink-Plugin-Approval"
+
+// PluginApproval describes what a change grants a plugin, for the user to
+// confirm: enabling it, capabilities it did not have, addresses it could not
+// reach (plain http among them), the privacy check skipped, and failing a
+// request when its entry hook fails.
+type PluginApproval struct {
+	Plugin            string   `json:"plugin"`
+	Name              string   `json:"name"`
+	Enable            bool     `json:"enable,omitempty"`
+	AddedCapabilities []string `json:"added_capabilities,omitempty"`
+	AddedOrigins      []string `json:"added_origins,omitempty"`
+	Plaintext         []string `json:"plaintext,omitempty"`
+	Trusted           bool     `json:"trusted,omitempty"`
+	FailClosed        bool     `json:"fail_closed,omitempty"`
+}
+
+// Empty reports whether the change grants nothing.
+func (approval PluginApproval) Empty() bool {
+	return !approval.Enable && len(approval.AddedCapabilities) == 0 && len(approval.AddedOrigins) == 0 &&
+		len(approval.Plaintext) == 0 && !approval.Trusted && !approval.FailClosed
 }
 
 // States of a plugin in the plugin list.
@@ -270,6 +376,17 @@ type PluginDetail struct {
 	// LookupEnabled lets the model run the plugin's queries through the
 	// lookup outlet, once the user granted model.tools.
 	LookupEnabled bool `json:"lookup_enabled"`
+	// Limits are the time limits of the extension points the plugin
+	// serves.
+	Limits []PluginHookLimitSetting `json:"limits"`
+	// FailClosedRequested is set when the plugin asks to fail a request
+	// its entry hook cannot decide; FailClosed when the user agreed.
+	FailClosedRequested bool `json:"fail_closed_requested,omitempty"`
+	FailClosed          bool `json:"fail_closed,omitempty"`
+	// Client is set for a plugin with interface code; UIEnabled when the
+	// user lets it load.
+	Client    bool `json:"client,omitempty"`
+	UIEnabled bool `json:"ui_enabled"`
 	// Tools are the queries the plugin offers the model.
 	Tools       []PluginTool              `json:"tools"`
 	Credentials []PluginCredentialStatus  `json:"credentials"`
@@ -416,6 +533,11 @@ type PluginSettingsUpdate struct {
 	AutoRefresh         *bool                       `json:"auto_refresh,omitempty"`
 	LookupEnabled       *bool                       `json:"lookup_enabled,omitempty"`
 	Config              json.RawMessage             `json:"config,omitempty"`
+	// HookLimitsMs sets the time limits of extension points, by hook; 0
+	// follows the plugin again.
+	HookLimitsMs map[string]int `json:"hook_limits_ms,omitempty"`
+	FailClosed   *bool          `json:"fail_closed,omitempty"`
+	UIEnabled    *bool          `json:"ui_enabled,omitempty"`
 	// PlaintextConsent lists the plain http origins of servers the user
 	// agrees to reach in the clear.
 	PlaintextConsent []string `json:"plaintext_consent,omitempty"`

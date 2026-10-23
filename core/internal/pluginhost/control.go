@@ -54,6 +54,12 @@ func (host *Host) UpdateSettings(ctx context.Context, update contract.PluginHost
 	if update.Language != nil {
 		settings.Language = *update.Language
 	}
+	if update.Order != nil {
+		settings.Order = slices.Clone(*update.Order)
+	}
+	if update.WebUI != nil {
+		settings.WebUI = *update.WebUI
+	}
 	if err := settings.Validate(); err != nil {
 		return host.Settings(), errors.Join(storage.ErrInvalidArgument, err)
 	}

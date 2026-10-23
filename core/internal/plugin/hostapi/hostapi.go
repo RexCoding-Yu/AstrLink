@@ -173,6 +173,9 @@ func (settings Settings) PluginSettings(ctx context.Context) (map[string]plugin.
 			WorkspaceBinding: record.WorkspaceBinding,
 			AutoRefresh:      record.AutoRefresh,
 			LookupEnabled:    record.LookupEnabled,
+			LimitsMs:         record.HookLimitsMs,
+			FailClosed:       record.FailClosed,
+			UIEnabled:        record.UIEnabled,
 		}
 	}
 	return all, nil

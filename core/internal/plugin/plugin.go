@@ -44,6 +44,40 @@ const (
 	// CapabilityTools lets the model run the read-only queries the plugin
 	// declares in meta.tools, through the gateway's lookup outlet.
 	CapabilityTools = "model.tools"
+
+	// The capabilities of apiVersion 2.
+
+	// CapabilityRequestWrite lets beforeForward change the request in the
+	// structured ways: the system prompt, the turn, parameters and tools.
+	// It covers what context.inject lets the prepare hooks do.
+	CapabilityRequestWrite = "request.write"
+	// CapabilityRequestWriteRaw lets beforeForward replace the client's
+	// request body, and beforeUpstream the body an attempt sends.
+	CapabilityRequestWriteRaw = "request.write.raw"
+	// CapabilityRequestGate lets onRequest refuse a request.
+	CapabilityRequestGate = "request.gate"
+	// CapabilityRouting lets route reorder and exclude the providers a
+	// request may go to, or change its model.
+	CapabilityRouting = "routing"
+	// CapabilityResponseRead gives onResponse the response once it ended.
+	CapabilityResponseRead = "response.read"
+	// CapabilityResponseWrite lets rewriteResponse change a whole response
+	// and onStreamEvent a stream's events.
+	CapabilityResponseWrite = "response.write"
+	// CapabilityEvents gives onEvent what happened in the gateway, without
+	// any request or response content.
+	CapabilityEvents = "events"
+	// CapabilitySchedule runs onSchedule at the intervals of
+	// meta.schedules.
+	CapabilitySchedule = "schedule"
+	// CapabilityHTTP serves /plugins/<key>/… on the inference listener
+	// through onHttp.
+	CapabilityHTTP = "http.serve"
+	// CapabilityProvider offers the providers of meta.providers.
+	CapabilityProvider = "provider"
+	// CapabilityUICode loads the plugin's interface code into the desktop,
+	// where it can do whatever the desktop can.
+	CapabilityUICode = "ui.code"
 )
 
 var knownCapabilities = []string{
@@ -53,7 +87,25 @@ var knownCapabilities = []string{
 	CapabilityStorage,
 	CapabilityViews,
 	CapabilityTools,
+	CapabilityRequestWrite,
+	CapabilityRequestWriteRaw,
+	CapabilityRequestGate,
+	CapabilityRouting,
+	CapabilityResponseRead,
+	CapabilityResponseWrite,
+	CapabilityEvents,
+	CapabilitySchedule,
+	CapabilityHTTP,
+	CapabilityProvider,
+	CapabilityUICode,
 }
+
+// versionOneCapabilities are those an apiVersion 1 plugin may ask for.
+var versionOneCapabilities = knownCapabilities[:6]
+
+// HighRiskCapabilities are confirmed on their own, in red: interface code
+// can do whatever the desktop can.
+var HighRiskCapabilities = []string{CapabilityUICode}
 
 // Hooks a plugin may export. Each is optional; whether a plugin exports one
 // is settled once, when it loads.
@@ -71,6 +123,38 @@ const (
 	HookCallTool = "callTool"
 )
 
+// The hooks of apiVersion 2's extension points.
+const (
+	// HookOnRequest lets a request in, tags it, or refuses it, before
+	// routing.
+	HookOnRequest = "onRequest"
+	// HookRoute reorders and excludes the request's candidate providers,
+	// or changes its model.
+	HookRoute = "route"
+	// HookBeforeForward changes the request once, before every attempt.
+	HookBeforeForward = "beforeForward"
+	// HookBeforeUpstream changes what one attempt sends to its provider,
+	// in the provider's protocol.
+	HookBeforeUpstream = "beforeUpstream"
+	// HookRewriteResponse changes a whole response before the client gets
+	// it.
+	HookRewriteResponse = "rewriteResponse"
+	// HookOnStreamEvent changes one event of a streamed response, and
+	// HookOnStreamEnd adds the last events once the stream ended.
+	HookOnStreamEvent = "onStreamEvent"
+	HookOnStreamEnd   = "onStreamEnd"
+	// HookOnResponse sees the response once it ended, outside the request.
+	HookOnResponse = "onResponse"
+	// HookOnEvent sees what happened in the gateway.
+	HookOnEvent = "onEvent"
+	// HookOnSchedule runs at the intervals of meta.schedules.
+	HookOnSchedule = "onSchedule"
+	// HookOnHTTP answers /plugins/<key>/… on the inference listener.
+	HookOnHTTP = "onHttp"
+	// HookOnUICall answers the calls of the plugin's interface code.
+	HookOnUICall = "onUiCall"
+)
+
 var knownHooks = []string{
 	HookPrepareSession,
 	HookPrepareTurn,
@@ -79,7 +163,22 @@ var knownHooks = []string{
 	HookTestConnection,
 	HookOnAction,
 	HookCallTool,
+	HookOnRequest,
+	HookRoute,
+	HookBeforeForward,
+	HookBeforeUpstream,
+	HookRewriteResponse,
+	HookOnStreamEvent,
+	HookOnStreamEnd,
+	HookOnResponse,
+	HookOnEvent,
+	HookOnSchedule,
+	HookOnHTTP,
+	HookOnUICall,
 }
+
+// versionOneHooks are those an apiVersion 1 plugin may export.
+var versionOneHooks = knownHooks[:7]
 
 // Limits bound one hook call.
 type Limits struct {

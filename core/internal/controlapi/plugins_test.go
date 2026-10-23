@@ -145,15 +145,15 @@ func TestPluginSettingsCredentialsAndConnectionTest(t *testing.T) {
 		`{"turn_wait_ms":999}`,
 		`{"turn_wait_ms":5001}`,
 	} {
-		if response := controlRequest(t, handler, http.MethodPatch, path, "application/json", body, ""); response.Code != http.StatusUnprocessableEntity {
+		if response := approvedRequest(t, handler, http.MethodPatch, path, "application/json", body, ""); response.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("PATCH %s = %d %s", body, response.Code, response.Body.String())
 		}
 	}
-	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/broken", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusUnprocessableEntity {
+	if response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/broken", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("enabling a failed plugin = %d", response.Code)
 	}
 	update := `{"enabled":true,"granted_capabilities":["network","storage","ui.views","network"],"network_origins":[{"origin":"` + server.URL + `/ignored/path","allow_plaintext":true}],"turn_wait_ms":3500,"config":{"serverUrl":"` + server.URL + `"}}`
-	response := controlRequest(t, handler, http.MethodPatch, path, "application/json", update, "")
+	response := approvedRequest(t, handler, http.MethodPatch, path, "application/json", update, "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("PATCH = %d %s", response.Code, response.Body.String())
 	}
@@ -269,7 +269,7 @@ func TestPluginSettingsFormSavesServersAndChecksValues(t *testing.T) {
 	path := PluginsPath + "/memo"
 	patch := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
-		return controlRequest(t, handler, http.MethodPatch, path, "application/json", body, "")
+		return approvedRequest(t, handler, http.MethodPatch, path, "application/json", body, "")
 	}
 
 	detail := decodeBody[contract.PluginDetail](t, controlRequest(t, handler, http.MethodGet, path, "", "", ""))

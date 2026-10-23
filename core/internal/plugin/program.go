@@ -94,6 +94,9 @@ func load(source Source, limits Limits) (*program, error) {
 		if !slices.Contains(knownHooks, name) {
 			return nil, &LoadError{Code: CodeUnknownExport, File: source.File, Message: fmt.Sprintf("exports %q, which is neither meta nor a hook the host calls (%s)", name, strings.Join(knownHooks, ", "))}
 		}
+		if meta.APIVersion < 2 && !slices.Contains(versionOneHooks, name) {
+			return nil, &LoadError{Code: CodeUnknownExport, File: source.File, Message: fmt.Sprintf("exports %q, a hook of apiVersion 2", name)}
+		}
 		hook, err := module.Hook(name)
 		if err != nil {
 			return nil, &LoadError{Code: CodeNotFunction, File: source.File, Message: fmt.Sprintf("the export %q is not a function", name)}

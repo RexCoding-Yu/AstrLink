@@ -36,7 +36,34 @@ type Meta struct {
 	Storage []StorageItem `json:"storage,omitempty"`
 	// Tools are the read-only queries the plugin offers the model.
 	Tools []Tool `json:"tools,omitempty"`
+
+	// Limits are how long, in milliseconds, the plugin needs at its
+	// extension points, by hook; each within the host's bounds. The user
+	// may change them on the plugin page.
+	Limits map[string]int `json:"limits,omitempty"`
+	// FailClosed asks to refuse a request when onRequest fails or runs out
+	// of time, instead of letting it in. It takes effect once the user
+	// agrees.
+	FailClosed bool `json:"failClosed,omitempty"`
+	// Schedules are the intervals onSchedule runs at.
+	Schedules []Schedule `json:"schedules,omitempty"`
 }
+
+// Schedule is one interval onSchedule runs at, in minutes.
+type Schedule struct {
+	Name         string `json:"name"`
+	EveryMinutes int    `json:"everyMinutes"`
+}
+
+// Bounds of meta.schedules.
+const (
+	maxSchedules        = 8
+	minScheduleMinutes  = 1
+	maxScheduleMinutes  = 7 * 24 * 60
+	scheduleNamePattern = `^[a-z][a-z0-9_-]{0,31}$`
+)
+
+var scheduleName = regexp.MustCompile(scheduleNamePattern)
 
 // StorageItem is one kind of thing a plugin keeps: what it is, whether it
 // holds conversation text, and how long it stays.
@@ -130,6 +157,9 @@ func validateMeta(meta Meta, key string) error {
 		if !slices.Contains(knownCapabilities, capability) {
 			return invalid("meta.capabilities: unknown capability %q", capability)
 		}
+		if meta.APIVersion < 2 && !slices.Contains(versionOneCapabilities, capability) {
+			return invalid("meta.capabilities: %q needs apiVersion 2", capability)
+		}
 		if slices.Contains(meta.Capabilities[:index], capability) {
 			return invalid("meta.capabilities lists %q twice", capability)
 		}
@@ -193,6 +223,49 @@ func validateMeta(meta Meta, key string) error {
 	}
 	if err := validateTools(meta); err != nil {
 		return invalid("%v", err)
+	}
+	if err := validateVersionTwo(meta); err != nil {
+		return invalid("%v", err)
+	}
+	return nil
+}
+
+// validateVersionTwo checks the manifest fields of apiVersion 2.
+func validateVersionTwo(meta Meta) error {
+	if meta.APIVersion < 2 && (len(meta.Limits) > 0 || meta.FailClosed || len(meta.Schedules) > 0) {
+		return fmt.Errorf("meta.limits, meta.failClosed and meta.schedules need apiVersion 2")
+	}
+	for hook, ms := range meta.Limits {
+		bounds, known := contract.PluginHookLimits[hook]
+		if !known {
+			return fmt.Errorf("meta.limits: %q is not an extension point with a time limit", hook)
+		}
+		if ms < 1 || ms > bounds.MaxMs {
+			return fmt.Errorf("meta.limits.%s must be 1 to %d milliseconds", hook, bounds.MaxMs)
+		}
+	}
+	if meta.FailClosed && !slices.Contains(meta.Capabilities, CapabilityRequestGate) {
+		return fmt.Errorf("meta.failClosed needs the %s capability", CapabilityRequestGate)
+	}
+	schedule := slices.Contains(meta.Capabilities, CapabilitySchedule)
+	switch {
+	case len(meta.Schedules) > 0 && !schedule:
+		return fmt.Errorf("meta.schedules needs the %s capability", CapabilitySchedule)
+	case schedule && len(meta.Schedules) == 0:
+		return fmt.Errorf("the %s capability needs meta.schedules", CapabilitySchedule)
+	case len(meta.Schedules) > maxSchedules:
+		return fmt.Errorf("meta.schedules has more than %d entries", maxSchedules)
+	}
+	for index, entry := range meta.Schedules {
+		if !scheduleName.MatchString(entry.Name) {
+			return fmt.Errorf("meta.schedules[%d].name %q must match %s", index, entry.Name, scheduleNamePattern)
+		}
+		if slices.ContainsFunc(meta.Schedules[:index], func(other Schedule) bool { return other.Name == entry.Name }) {
+			return fmt.Errorf("meta.schedules names %q twice", entry.Name)
+		}
+		if entry.EveryMinutes < minScheduleMinutes || entry.EveryMinutes > maxScheduleMinutes {
+			return fmt.Errorf("meta.schedules[%d].everyMinutes must be %d to %d", index, minScheduleMinutes, maxScheduleMinutes)
+		}
 	}
 	return nil
 }

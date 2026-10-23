@@ -56,6 +56,38 @@ type Settings struct {
 	// LookupEnabled lets the model run the plugin's queries, when the user
 	// granted model.tools.
 	LookupEnabled bool
+	// LimitsMs are the user's time limits of extension points, in
+	// milliseconds by hook; a hook without one follows the plugin.
+	LimitsMs map[string]int
+	// FailClosed is the user's consent that a request its entry hook cannot
+	// decide is refused, when the plugin asks for that.
+	FailClosed bool
+	// UIEnabled lets the plugin's interface code load.
+	UIEnabled bool
+}
+
+// Limit returns how long a request waits for one call of hook: what the user
+// set, else what the plugin asks for, else the host's default, at most the
+// host's bound. It is 0 for a hook without a limit of its own.
+func (plugin *Plugin) Limit(hook string) time.Duration {
+	bounds, known := contract.PluginHookLimits[hook]
+	if !known {
+		return 0
+	}
+	ms := bounds.DefaultMs
+	if asked := plugin.Meta.Limits[hook]; asked > 0 {
+		ms = asked
+	}
+	if set := plugin.Settings.LimitsMs[hook]; set > 0 {
+		ms = set
+	}
+	return time.Duration(min(ms, bounds.MaxMs)) * time.Millisecond
+}
+
+// FailsClosed reports whether a request is refused when the plugin's entry
+// hook cannot decide it: the plugin asks for it and the user agreed.
+func (plugin *Plugin) FailsClosed() bool {
+	return plugin.Meta.FailClosed && plugin.Settings.FailClosed && plugin.Can(CapabilityRequestGate)
 }
 
 // Excludes reports whether the plugin is off for requests of client.
