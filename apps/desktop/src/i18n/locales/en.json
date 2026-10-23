@@ -158,6 +158,7 @@
     "routing": "Routing",
     "providerRouting": "Provider routing",
     "intelligentRouting": "Intelligent routing",
+    "knowledge": "Knowledge",
     "agentTools": "Agent tools",
     "settings": "Settings",
     "gateway": "Gateway",
@@ -4115,6 +4116,7 @@
       "unexpectedValue": "unexpected value"
     },
     "plugin": "Invalid plugin data ({{path}}): {{detail}}",
+    "knowledge": "Invalid knowledge base data ({{path}}): {{detail}}",
     "metadata": "Invalid metadata ({{path}}): {{detail}}"
   },
   "routingGroups": {
@@ -4626,7 +4628,12 @@
     "plugin_unavailable": "The plugin settings could not be read or saved.",
     "metadata_unavailable": "The metadata could not be read or saved.",
     "credential_unavailable": "The credential could not be saved.",
-    "plaintext_consent_required": "The server is plain HTTP; tick Allow plain HTTP to save it."
+    "plaintext_consent_required": "The server is plain HTTP; tick Allow plain HTTP to save it.",
+    "knowledge_busy": "Another operation is in progress. Try again shortly.",
+    "knowledge_unsupported": "The search engine is not compatible with this device.",
+    "knowledge_not_installed": "It is not installed yet.",
+    "knowledge_not_running": "The search engine is not running.",
+    "knowledge_timeout": "The operation timed out."
   },
   "webConsole": {
     "title": "AstrLink console",
@@ -5027,6 +5034,91 @@
       }
     },
     "headerHelpLabel": "About the settings of all plugins"
+  },
+  "knowledge": {
+    "title": "Knowledge",
+    "environment": "Environment",
+    "helpLabel": "About the knowledge base environment",
+    "help": "The knowledge base searches text and meaning with a local search engine, and turns text into vectors with an embedding model. Both run on this device, download and start only when you turn them on, and keep your data here.",
+    "runtime": {
+      "title": "Search engine",
+      "version": "seekdb {{version}}",
+      "helpLabel": "About the search engine",
+      "help": "seekdb, open-sourced by OceanBase, provides full-text search with Chinese word segmentation, vector search and hybrid search. It uses about 200 MB of memory while running, opens no network port and reports nothing.",
+      "state": {
+        "unsupported": "Not compatible",
+        "not_installed": "Not installed",
+        "installing": "Downloading",
+        "installed": "Installed",
+        "starting": "Starting",
+        "running": "Running",
+        "failed": "Error"
+      },
+      "reason": {
+        "platform": "seekdb has no runtime for this platform.",
+        "macos_version": "Needs macOS 15.6.1 or later."
+      },
+      "download": "Download · {{size}}",
+      "import": "Import",
+      "start": "Start",
+      "stop": "Stop",
+      "check": "Self-test",
+      "checking": "Testing…",
+      "reset": "Clear data",
+      "remove": "Remove engine",
+      "data": "Data",
+      "startedAt": "Started",
+      "confirmResetTitle": "Clear the search engine's data?",
+      "confirmResetBody": "This stops the search engine and deletes every index it keeps. They will have to be built again.",
+      "confirmRemoveTitle": "Remove the search engine?",
+      "confirmRemoveBody": "This stops the search engine and deletes its program files. The data stays, and you can download it again later.",
+      "checkPassed": "Self-test passed",
+      "checkFailed": "Self-test failed",
+      "engine": "Engine",
+      "steps": {
+        "connect": "Connect",
+        "create": "Create table",
+        "write": "Write",
+        "full_text": "Full-text search",
+        "vector": "Vector search",
+        "hybrid": "Hybrid search"
+      },
+      "indexWait": "Index caught up in {{ms}} ms"
+    },
+    "models": {
+      "title": "Local embedding models",
+      "helpLabel": "About local embedding models",
+      "help": "Turns text into vectors for searching by meaning. The model runs on this device, so content never goes to the cloud. It loads only while indexing and searching (about 750 MB of memory) and is released after 10 idle minutes.",
+      "state": {
+        "not_installed": "Not installed",
+        "installing": "Downloading",
+        "installed": "Installed",
+        "failed": "Error"
+      },
+      "loaded": "Loaded",
+      "download": "Download · {{size}}",
+      "import": "Import",
+      "remove": "Remove",
+      "check": "Test",
+      "checking": "Testing…",
+      "details": "{{dimensions}} dimensions · {{license}}",
+      "confirmRemoveTitle": "Remove this model?",
+      "confirmRemoveBody": "This deletes the downloaded model files. You can download it again later.",
+      "checkTitle": "Test result",
+      "timing": "Load {{load}} ms · embed {{embed}} ms",
+      "similarity": "Similarity",
+      "reference": "Compared with"
+    },
+    "errors": {
+      "load": "Could not read the knowledge base environment: {{message}}",
+      "action": "The action did not finish: {{message}}",
+      "unknown": "Unknown error"
+    },
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "blocked": "Waiting for the gateway",
+    "blockedHint": "The knowledge base environment can be managed once the gateway is running.",
+    "loading": "Reading the environment"
   },
   "pluginRecords": {
     "none": "No plugin recorded anything for this request.",

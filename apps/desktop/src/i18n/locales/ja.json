@@ -158,6 +158,7 @@
     "routing": "ルーティング",
     "providerRouting": "ルーティング",
     "intelligentRouting": "インテリジェントルーティング",
+    "knowledge": "ナレッジ",
     "agentTools": "Agent ツール",
     "settings": "設定",
     "gateway": "ゲートウェイ",
@@ -4115,6 +4116,7 @@
       "unexpectedValue": "予期しない値"
     },
     "plugin": "無効なプラグインデータ（{{path}}）: {{detail}}",
+    "knowledge": "ナレッジベースのデータが無効です（{{path}}）：{{detail}}",
     "metadata": "無効なメタデータ（{{path}}）: {{detail}}"
   },
   "routingGroups": {
@@ -4626,7 +4628,12 @@
     "plugin_unavailable": "プラグインの設定を読み込めないか、保存できませんでした。",
     "metadata_unavailable": "メタデータを読み込めないか、保存できませんでした。",
     "credential_unavailable": "認証情報を保存できませんでした。",
-    "plaintext_consent_required": "サーバーは平文 HTTP です。保存するには「平文 HTTP を許可」をオンにしてください。"
+    "plaintext_consent_required": "サーバーは平文 HTTP です。保存するには「平文 HTTP を許可」をオンにしてください。",
+    "knowledge_busy": "別の操作が進行中です。しばらくしてからもう一度お試しください。",
+    "knowledge_unsupported": "検索エンジンはこの端末に対応していません。",
+    "knowledge_not_installed": "まだインストールされていません。",
+    "knowledge_not_running": "検索エンジンが実行されていません。",
+    "knowledge_timeout": "操作がタイムアウトしました。"
   },
   "webConsole": {
     "title": "AstrLink コンソール",
@@ -5027,6 +5034,91 @@
       }
     },
     "headerHelpLabel": "プラグイン全体の設定について"
+  },
+  "knowledge": {
+    "title": "ナレッジ",
+    "environment": "実行環境",
+    "helpLabel": "ナレッジベースの実行環境について",
+    "help": "ナレッジベースは、この端末の検索エンジンで全文検索とベクトル検索を行い、埋め込みモデルでテキストをベクトルに変換します。どちらもこの端末で動作し、有効にしたときだけダウンロード・起動されます。データは端末の外に出ません。",
+    "runtime": {
+      "title": "検索エンジン",
+      "version": "seekdb {{version}}",
+      "helpLabel": "検索エンジンについて",
+      "help": "OceanBase がオープンソースで公開している seekdb が、中国語の分かち書きに対応した全文検索、ベクトル検索、ハイブリッド検索を提供します。動作中は約 200 MB のメモリを使い、ネットワークポートを開かず、何も送信しません。",
+      "state": {
+        "unsupported": "非対応",
+        "not_installed": "未インストール",
+        "installing": "ダウンロード中",
+        "installed": "インストール済み",
+        "starting": "起動中",
+        "running": "実行中",
+        "failed": "エラー"
+      },
+      "reason": {
+        "platform": "seekdb はこのプラットフォーム向けの実行環境を提供していません。",
+        "macos_version": "macOS 15.6.1 以降が必要です。"
+      },
+      "download": "ダウンロード · {{size}}",
+      "import": "インポート",
+      "start": "起動",
+      "stop": "停止",
+      "check": "セルフテスト",
+      "checking": "テスト中…",
+      "reset": "データを消去",
+      "remove": "エンジンを削除",
+      "data": "データ",
+      "startedAt": "起動時刻",
+      "confirmResetTitle": "検索エンジンのデータを消去しますか？",
+      "confirmResetBody": "検索エンジンを停止し、保存しているすべてのインデックスを削除します。インデックスは作り直す必要があります。",
+      "confirmRemoveTitle": "検索エンジンを削除しますか？",
+      "confirmRemoveBody": "検索エンジンを停止し、プログラムファイルを削除します。データは残り、あとで再ダウンロードできます。",
+      "checkPassed": "セルフテストに合格しました",
+      "checkFailed": "セルフテストに失敗しました",
+      "engine": "エンジン",
+      "steps": {
+        "connect": "接続",
+        "create": "テーブル作成",
+        "write": "書き込み",
+        "full_text": "全文検索",
+        "vector": "ベクトル検索",
+        "hybrid": "ハイブリッド検索"
+      },
+      "indexWait": "インデックス反映 {{ms}} ms"
+    },
+    "models": {
+      "title": "ローカル埋め込みモデル",
+      "helpLabel": "ローカル埋め込みモデルについて",
+      "help": "テキストをベクトルに変換し、意味で検索できるようにします。モデルはこの端末で動作するため、内容がクラウドに送られることはありません。インデックス作成と検索のときだけ読み込まれ（約 750 MB のメモリ）、10 分使われないと解放されます。",
+      "state": {
+        "not_installed": "未インストール",
+        "installing": "ダウンロード中",
+        "installed": "インストール済み",
+        "failed": "エラー"
+      },
+      "loaded": "読み込み済み",
+      "download": "ダウンロード · {{size}}",
+      "import": "インポート",
+      "remove": "削除",
+      "check": "テスト",
+      "checking": "テスト中…",
+      "details": "{{dimensions}} 次元 · {{license}}",
+      "confirmRemoveTitle": "このモデルを削除しますか？",
+      "confirmRemoveBody": "ダウンロードしたモデルファイルを削除します。あとで再ダウンロードできます。",
+      "checkTitle": "テスト結果",
+      "timing": "読み込み {{load}} ms · 埋め込み {{embed}} ms",
+      "similarity": "類似度",
+      "reference": "比較対象"
+    },
+    "errors": {
+      "load": "ナレッジベースの実行環境を読み取れませんでした：{{message}}",
+      "action": "操作が完了しませんでした：{{message}}",
+      "unknown": "不明なエラー"
+    },
+    "confirm": "確認",
+    "cancel": "キャンセル",
+    "blocked": "ゲートウェイの準備を待っています",
+    "blockedHint": "ゲートウェイが起動するとナレッジベースの実行環境を管理できます。",
+    "loading": "実行環境を読み取っています"
   },
   "pluginRecords": {
     "none": "このリクエストにプラグインの記録はありません。",

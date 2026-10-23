@@ -209,6 +209,14 @@ import {
   type SessionPlugin,
 } from "./plugin-model";
 import {
+  parseKnowledgeEmbeddingCheck,
+  parseKnowledgeEnvironment,
+  parseKnowledgeRuntimeCheck,
+  type KnowledgeEmbeddingCheck,
+  type KnowledgeEnvironment,
+  type KnowledgeRuntimeCheck,
+} from "./knowledge-model";
+import {
   parseClientConfigApplyOutcome,
   parseClientConfigCopied,
   parseClientConfigSnippet,
@@ -1392,6 +1400,69 @@ export async function builtinToolAction(
     action,
     input,
   });
+}
+
+/** What the knowledge base runs on, over the host's `knowledge_action` command. */
+export async function getKnowledgeEnvironment(): Promise<KnowledgeEnvironment> {
+  requireNativeBridge();
+  return parseKnowledgeEnvironment(
+    await invoke<unknown>("knowledge_action", { action: "environment" }),
+  );
+}
+
+export type KnowledgeEnvironmentAction =
+  | "install_runtime"
+  | "import_runtime"
+  | "start_runtime"
+  | "stop_runtime"
+  | "reset_runtime_data"
+  | "remove_runtime"
+  | "install_model"
+  | "import_model"
+  | "remove_model";
+
+/** Runs one action on the knowledge base's environment and returns the new state. */
+export async function runKnowledgeAction(
+  action: KnowledgeEnvironmentAction,
+  options: { id?: string; path?: string } = {},
+): Promise<KnowledgeEnvironment> {
+  requireNativeBridge();
+  return parseKnowledgeEnvironment(
+    await invoke<unknown>("knowledge_action", {
+      action,
+      id: options.id,
+      input: options.path === undefined ? undefined : { path: options.path },
+    }),
+  );
+}
+
+/** Runs full-text, vector and hybrid queries on the search engine. */
+export async function checkKnowledgeRuntime(): Promise<KnowledgeRuntimeCheck> {
+  requireNativeBridge();
+  return parseKnowledgeRuntimeCheck(
+    await invoke<unknown>("knowledge_action", { action: "check_runtime" }),
+  );
+}
+
+/** Loads a local embedding model and compares sample texts with it. */
+export async function checkKnowledgeModel(
+  id: string,
+): Promise<KnowledgeEmbeddingCheck> {
+  requireNativeBridge();
+  return parseKnowledgeEmbeddingCheck(
+    await invoke<unknown>("knowledge_action", { action: "check_model", id }),
+  );
+}
+
+/**
+ * Asks for the file or folder to import: the search engine's archive, or a
+ * downloaded embedding model. Only the desktop has the native picker.
+ */
+export async function pickKnowledgePath(
+  kind: "runtime" | "model",
+): Promise<string | null> {
+  if (isWebEdition || !hasNativeBridge()) return null;
+  return (await invoke<string | null>("pick_knowledge_path", { kind })) ?? null;
 }
 
 /** The plugin page, over the host's `plugin_action` command. */

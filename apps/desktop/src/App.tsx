@@ -1,6 +1,7 @@
 import { isWebEdition } from "./edition";
 import { ConsoleLogout } from "./ConsoleEntry";
 import { WebSettings } from "./WebSettings";
+import { KnowledgeBase } from "./KnowledgeBase";
 import { PluginManager } from "./PluginManager";
 import { usePluginLanguageSync } from "./use-plugin-language-sync";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -15,6 +16,7 @@ import {
   Home as House,
   Key as KeyRound,
   Route,
+  ScanText,
   Server,
   Settings,
   ShieldCheck,
@@ -113,6 +115,7 @@ type WorkspacePage =
     }
   | { kind: "agentTools"; preselectSkill?: AgentSkillId }
   | { kind: "plugins" }
+  | { kind: "knowledge" }
   | { kind: "settings" }
   | { kind: "about" }
   | ServiceManagerView;
@@ -126,6 +129,7 @@ type IconName =
   | "home"
   | "key"
   | "route"
+  | "scanText"
   | "server"
   | "settings"
   | "shield";
@@ -251,6 +255,7 @@ const icons: Record<IconName, AnimatedIcon> = {
   home: House,
   key: KeyRound,
   route: Route,
+  scanText: ScanText,
   server: Server,
   settings: Settings,
   shield: ShieldCheck,
@@ -960,6 +965,12 @@ export default function App() {
                 label={t("nav.intelligentRouting")}
                 onClick={() => navigate({ kind: "intelligentRouting" })}
               />
+              <NavButton
+                active={page.kind === "knowledge"}
+                icon="scanText"
+                label={t("nav.knowledge")}
+                onClick={() => navigate({ kind: "knowledge" })}
+              />
             </div>
 
             <Separator className="mx-2 my-2 bg-sidebar-border data-[orientation=horizontal]:w-auto" />
@@ -1067,6 +1078,7 @@ export default function App() {
                 "intelligentRouting",
                 "agentTools",
                 "plugins",
+                "knowledge",
                 "settings",
               ].includes(page.kind)
                 ? "overflow-hidden"
@@ -1233,6 +1245,11 @@ export default function App() {
               <AgentDebugSettings preselectSkill={page.preselectSkill} />
             ) : page.kind === "plugins" ? (
               <PluginManager
+                coreSessionKey={coreSessionKey}
+                isReady={isReady}
+              />
+            ) : page.kind === "knowledge" ? (
+              <KnowledgeBase
                 coreSessionKey={coreSessionKey}
                 isReady={isReady}
               />

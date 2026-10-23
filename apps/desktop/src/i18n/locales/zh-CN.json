@@ -158,6 +158,7 @@
     "routing": "路由",
     "providerRouting": "提供商路由",
     "intelligentRouting": "智能路由",
+    "knowledge": "知识库",
     "agentTools": "Agent 工具",
     "settings": "设置",
     "gateway": "网关",
@@ -4115,6 +4116,7 @@
       "unexpectedValue": "取值无效"
     },
     "plugin": "插件数据无效（{{path}}）：{{detail}}",
+    "knowledge": "知识库数据无效（{{path}}）：{{detail}}",
     "metadata": "元信息数据无效（{{path}}）：{{detail}}"
   },
   "routingGroups": {
@@ -4626,7 +4628,12 @@
     "plugin_unavailable": "无法读取或保存插件设置。",
     "metadata_unavailable": "无法读取或保存元信息。",
     "credential_unavailable": "无法保存凭据。",
-    "plaintext_consent_required": "服务器是明文 HTTP 地址，勾选「允许明文 HTTP」才能保存。"
+    "plaintext_consent_required": "服务器是明文 HTTP 地址，勾选「允许明文 HTTP」才能保存。",
+    "knowledge_busy": "另一个操作正在进行，请稍后再试。",
+    "knowledge_unsupported": "检索引擎在这台设备上不兼容。",
+    "knowledge_not_installed": "还没有安装。",
+    "knowledge_not_running": "检索引擎没有运行。",
+    "knowledge_timeout": "操作超时。"
   },
   "webConsole": {
     "title": "AstrLink 控制台",
@@ -5027,6 +5034,91 @@
       }
     },
     "headerHelpLabel": "关于插件的总设置"
+  },
+  "knowledge": {
+    "title": "知识库",
+    "environment": "运行环境",
+    "helpLabel": "关于知识库的运行环境",
+    "help": "知识库用本机的检索引擎做全文和向量检索，用嵌入模型把文本转换成向量。两者都在本机运行，只在你开启后才下载和启动，数据不出本机。",
+    "runtime": {
+      "title": "检索引擎",
+      "version": "seekdb {{version}}",
+      "helpLabel": "关于检索引擎",
+      "help": "由 OceanBase 开源的 seekdb 提供中文分词的全文检索、向量检索和混合检索。运行时常驻约 200 MB 内存，不开放网络端口，也不上报任何信息。",
+      "state": {
+        "unsupported": "不兼容",
+        "not_installed": "未安装",
+        "installing": "下载中",
+        "installed": "已安装",
+        "starting": "启动中",
+        "running": "运行中",
+        "failed": "出错"
+      },
+      "reason": {
+        "platform": "seekdb 没有提供这个平台的运行环境。",
+        "macos_version": "需要 macOS 15.6.1 或更新的版本。"
+      },
+      "download": "下载 · {{size}}",
+      "import": "导入",
+      "start": "启动",
+      "stop": "停止",
+      "check": "自检",
+      "checking": "自检中…",
+      "reset": "清空数据",
+      "remove": "删除引擎",
+      "data": "数据占用",
+      "startedAt": "启动于",
+      "confirmResetTitle": "清空检索引擎的数据？",
+      "confirmResetBody": "会停止检索引擎并删除它保存的全部索引，之后需要重新建立。",
+      "confirmRemoveTitle": "删除检索引擎？",
+      "confirmRemoveBody": "会停止检索引擎并删除它的程序文件，数据保留，之后可以重新下载。",
+      "checkPassed": "自检通过",
+      "checkFailed": "自检未通过",
+      "engine": "引擎版本",
+      "steps": {
+        "connect": "连接",
+        "create": "建表",
+        "write": "写入",
+        "full_text": "全文检索",
+        "vector": "向量检索",
+        "hybrid": "混合检索"
+      },
+      "indexWait": "索引同步 {{ms}} ms"
+    },
+    "models": {
+      "title": "本地嵌入模型",
+      "helpLabel": "关于本地嵌入模型",
+      "help": "把文本转换成向量，用于按意思检索。模型在本机运行，内容不会发到云端；只在建立索引和检索时加载（约 750 MB 内存），闲置 10 分钟后释放。",
+      "state": {
+        "not_installed": "未安装",
+        "installing": "下载中",
+        "installed": "已安装",
+        "failed": "出错"
+      },
+      "loaded": "已加载",
+      "download": "下载 · {{size}}",
+      "import": "导入",
+      "remove": "删除",
+      "check": "测试",
+      "checking": "测试中…",
+      "details": "{{dimensions}} 维 · {{license}}",
+      "confirmRemoveTitle": "删除这个模型？",
+      "confirmRemoveBody": "会删除下载的模型文件，之后可以重新下载。",
+      "checkTitle": "测试结果",
+      "timing": "加载 {{load}} ms · 嵌入 {{embed}} ms",
+      "similarity": "相似度",
+      "reference": "对比句"
+    },
+    "errors": {
+      "load": "无法读取知识库的运行环境：{{message}}",
+      "action": "操作没有完成：{{message}}",
+      "unknown": "未知错误"
+    },
+    "confirm": "确定",
+    "cancel": "取消",
+    "blocked": "等待网关就绪",
+    "blockedHint": "网关启动后才能管理知识库的运行环境。",
+    "loading": "正在读取运行环境"
   },
   "pluginRecords": {
     "none": "这个请求没有插件记录。",

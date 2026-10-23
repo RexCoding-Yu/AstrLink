@@ -2322,6 +2322,20 @@ impl CoreManager {
         serde_json::from_slice(&body).map_err(|_| "plugins returned invalid JSON".into())
     }
 
+    /// The knowledge base's search engine and local embedding models.
+    pub async fn knowledge_action(
+        &self,
+        action: &str,
+        id: Option<&str>,
+        input: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let (method, path, body) = knowledge_request(action, id, input)?;
+        let (_, body) = self
+            .authenticated_control(method, &path, body, None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "the knowledge base returned invalid JSON".into())
+    }
+
     /// The request attributes of the metadata settings.
     pub async fn metadata_action(
         &self,
@@ -3459,6 +3473,58 @@ fn valid_plugin_name(value: &str, extra: char) -> bool {
 }
 
 /// Translates a plugin page action into the control request it makes.
+fn knowledge_request(
+    action: &str,
+    id: Option<&str>,
+    input: Option<serde_json::Value>,
+) -> Result<(Method, String, Option<serde_json::Value>), String> {
+    let base = "/control/v1/knowledge";
+    let import_body = |input: Option<serde_json::Value>| {
+        let path = input
+            .as_ref()
+            .and_then(|input| input.get("path"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .ok_or("a local path is required")?;
+        Ok::<_, String>(Some(serde_json::json!({ "path": path })))
+    };
+    let runtime = format!("{base}/runtime");
+    match action {
+        "environment" => return Ok((Method::GET, format!("{base}/environment"), None)),
+        "install_runtime" => return Ok((Method::POST, format!("{runtime}/install"), None)),
+        "import_runtime" => {
+            return Ok((
+                Method::POST,
+                format!("{runtime}/import"),
+                import_body(input)?,
+            ))
+        }
+        "start_runtime" => return Ok((Method::POST, format!("{runtime}/start"), None)),
+        "stop_runtime" => return Ok((Method::POST, format!("{runtime}/stop"), None)),
+        "check_runtime" => return Ok((Method::POST, format!("{runtime}/check"), None)),
+        "reset_runtime_data" => return Ok((Method::DELETE, format!("{runtime}/data"), None)),
+        "remove_runtime" => return Ok((Method::DELETE, runtime, None)),
+        _ => {}
+    }
+    let id = id
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+        .ok_or("invalid embedding model")?;
+    let model = format!("{base}/embedding-models/{id}");
+    Ok(match action {
+        "install_model" => (Method::POST, format!("{model}/install"), None),
+        "import_model" => (Method::POST, format!("{model}/import"), import_body(input)?),
+        "check_model" => (Method::POST, format!("{model}/check"), None),
+        "remove_model" => (Method::DELETE, model, None),
+        _ => return Err(format!("unknown knowledge action {action}")),
+    })
+}
+
 fn plugin_request(
     action: &str,
     key: Option<&str>,
@@ -6874,6 +6940,65 @@ mod tests {
             control_request_timeout(&Method::PUT, "/control/v1/sync/config"),
             REQUEST_TIMEOUT
         );
+    }
+
+    #[test]
+    fn knowledge_actions_map_to_their_control_requests() {
+        assert_eq!(
+            knowledge_request("environment", None, None).unwrap(),
+            (
+                Method::GET,
+                "/control/v1/knowledge/environment".into(),
+                None
+            )
+        );
+        assert_eq!(
+            knowledge_request("start_runtime", None, None).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/knowledge/runtime/start".into(),
+                None
+            )
+        );
+        assert_eq!(
+            knowledge_request("reset_runtime_data", None, None).unwrap(),
+            (
+                Method::DELETE,
+                "/control/v1/knowledge/runtime/data".into(),
+                None
+            )
+        );
+        assert_eq!(
+            knowledge_request(
+                "import_runtime",
+                None,
+                Some(serde_json::json!({ "path": "/tmp/bundle.tar.gz", "extra": true }))
+            )
+            .unwrap(),
+            (
+                Method::POST,
+                "/control/v1/knowledge/runtime/import".into(),
+                Some(serde_json::json!({ "path": "/tmp/bundle.tar.gz" }))
+            )
+        );
+        assert_eq!(
+            knowledge_request(
+                "check_model",
+                Some("granite-embedding-107m-multilingual"),
+                None
+            )
+            .unwrap(),
+            (
+                Method::POST,
+                "/control/v1/knowledge/embedding-models/granite-embedding-107m-multilingual/check"
+                    .into(),
+                None
+            )
+        );
+        assert!(knowledge_request("import_runtime", None, None).is_err());
+        assert!(knowledge_request("install_model", Some("../runtime"), None).is_err());
+        assert!(knowledge_request("install_model", None, None).is_err());
+        assert!(knowledge_request("drop_everything", Some("granite"), None).is_err());
     }
 
     #[test]

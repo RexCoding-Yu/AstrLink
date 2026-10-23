@@ -8,7 +8,8 @@ export type DataSubject =
   | "requestRecord"
   | "auditSettings"
   | "plugin"
-  | "metadata";
+  | "metadata"
+  | "knowledge";
 
 /** Why a value was rejected. */
 export type DataProblem =

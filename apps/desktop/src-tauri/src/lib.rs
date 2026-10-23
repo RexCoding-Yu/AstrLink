@@ -1430,6 +1430,44 @@ async fn plugin_action(
 }
 
 #[tauri::command]
+async fn knowledge_action(
+    action: String,
+    id: Option<String>,
+    input: Option<serde_json::Value>,
+    manager: State<'_, Arc<CoreManager>>,
+) -> Result<serde_json::Value, String> {
+    manager
+        .knowledge_action(&action, id.as_deref(), input)
+        .await
+}
+
+/// Picks what the knowledge base imports: the search engine's archive, or the
+/// folder of a downloaded embedding model.
+#[tauri::command]
+async fn pick_knowledge_path(
+    app: tauri::AppHandle,
+    kind: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dialog = app.dialog().file();
+        let picked = match kind.as_str() {
+            "runtime" => dialog
+                .add_filter("seekdb", &["gz", "zip"])
+                .blocking_pick_file(),
+            "model" => dialog.blocking_pick_folder(),
+            _ => return Err("unknown knowledge import".to_owned()),
+        };
+        let Some(picked) = picked else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|error| error.to_string())?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn metadata_action(
     action: String,
     key: Option<String>,
@@ -2597,6 +2635,8 @@ pub fn run() {
             set_raw_password,
             builtin_tool_action,
             plugin_action,
+            knowledge_action,
+            pick_knowledge_path,
             metadata_action,
             access_token_metadata,
             session_metadata,

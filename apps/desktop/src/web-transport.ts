@@ -459,6 +459,40 @@ const commands: Record<string, Command> = {
         throw new Error("Unsupported plugin operation");
     }
   },
+  knowledge_action: (a) => {
+    const runtime = "/knowledge/runtime";
+    switch (a.action) {
+      case "environment":
+        return route("/knowledge/environment")(a);
+      case "install_runtime":
+        return route(`${runtime}/install`, "POST")(a);
+      case "import_runtime":
+        return route(`${runtime}/import`, "POST", input)(a);
+      case "start_runtime":
+        return route(`${runtime}/start`, "POST")(a);
+      case "stop_runtime":
+        return route(`${runtime}/stop`, "POST")(a);
+      case "check_runtime":
+        return route(`${runtime}/check`, "POST")(a);
+      case "reset_runtime_data":
+        return route(`${runtime}/data`, "DELETE")(a);
+      case "remove_runtime":
+        return route(runtime, "DELETE")(a);
+    }
+    const model = `/knowledge/embedding-models/${segment(a.id, /^[a-z0-9-]{1,64}$/)}`;
+    switch (a.action) {
+      case "install_model":
+        return route(`${model}/install`, "POST")(a);
+      case "import_model":
+        return route(`${model}/import`, "POST", input)(a);
+      case "check_model":
+        return route(`${model}/check`, "POST")(a);
+      case "remove_model":
+        return route(model, "DELETE")(a);
+      default:
+        throw new Error("Unsupported knowledge operation");
+    }
+  },
   metadata_action: (a) => {
     const base = "/metadata/attributes";
     switch (a.action) {
