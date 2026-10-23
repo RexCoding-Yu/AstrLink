@@ -5,8 +5,6 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+
+	"github.com/QuantumNous/astrlink/core/internal/download"
 )
 
 const (
@@ -24,7 +23,6 @@ const (
 	// Windows; the caps only stop a hostile archive.
 	maxUnpackedBytes = 1 << 30
 	maxArchiveFiles  = 64
-	downloadTimeout  = 30 * time.Minute
 )
 
 // ErrUnsupported reports a platform seekdb ships no runtime for.
@@ -39,7 +37,7 @@ type Installation struct {
 
 // Progress reports bytes fetched so far against the expected total; total
 // is 0 while a module zip of unknown size downloads.
-type Progress func(done, total int64)
+type Progress = download.Progress
 
 // Installer downloads, verifies and unpacks runtimes under Root, one
 // directory per archive digest.
@@ -171,15 +169,12 @@ func (installer Installer) staging() (string, error) {
 }
 
 func (installer Installer) client() *http.Client {
-	if installer.Client != nil {
-		return installer.Client
-	}
-	return &http.Client{Timeout: downloadTimeout}
+	return download.Client(installer.Client)
 }
 
 func (installer Installer) fetch(ctx context.Context, bundle Bundle, source source, archive string, progress Progress) error {
 	if source.member == "" {
-		if err := installer.download(ctx, source.url, archive+".part", bundle.Size, progress); err != nil {
+		if err := download.File(ctx, installer.client(), source.url, archive+".part", bundle.Size, progress); err != nil {
 			return err
 		}
 		if err := verifyArchive(archive+".part", bundle); err != nil {
@@ -191,7 +186,7 @@ func (installer Installer) fetch(ctx context.Context, bundle Bundle, source sour
 	zipPath := archive + ".zip.part"
 	_ = os.Remove(zipPath)
 	defer os.Remove(zipPath)
-	if err := installer.download(ctx, source.url, zipPath, 0, progress); err != nil {
+	if err := download.File(ctx, installer.client(), source.url, zipPath, 0, progress); err != nil {
 		return err
 	}
 	if err := extractMember(zipPath, source.member, archive); err != nil {
@@ -204,96 +199,12 @@ func (installer Installer) fetch(ctx context.Context, bundle Bundle, source sour
 	return nil
 }
 
-// download writes url to path, resuming from the bytes already there when
-// size is known and the server honours the range.
-func (installer Installer) download(ctx context.Context, url, path string, size int64, progress Progress) error {
-	var offset int64
-	if size > 0 {
-		if info, err := os.Stat(path); err == nil && info.Size() < size {
-			offset = info.Size()
-		} else if err == nil {
-			_ = os.Remove(path)
-		}
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	if offset > 0 {
-		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
-	}
-	response, err := installer.client().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	flags := os.O_CREATE | os.O_WRONLY
-	switch {
-	case offset > 0 && response.StatusCode == http.StatusPartialContent:
-		flags |= os.O_APPEND
-	case response.StatusCode == http.StatusOK:
-		offset = 0
-		flags |= os.O_TRUNC
-	default:
-		return fmt.Errorf("HTTP %d", response.StatusCode)
-	}
-	file, err := os.OpenFile(path, flags, 0o600)
-	if err != nil {
-		return err
-	}
-	total := size
-	if total == 0 && response.ContentLength > 0 {
-		total = response.ContentLength
-	}
-	limit := int64(maxUnpackedBytes)
-	if size > 0 {
-		limit = size - offset
-	}
-	writer := &progressWriter{file: file, done: offset, total: total, report: progress}
-	written, copyErr := io.Copy(writer, io.LimitReader(response.Body, limit+1))
-	closeErr := file.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if written > limit {
-		return fmt.Errorf("download is larger than expected")
-	}
-	return nil
-}
-
-type progressWriter struct {
-	file        *os.File
-	done, total int64
-	report      Progress
-	last        time.Time
-}
-
-func (writer *progressWriter) Write(data []byte) (int, error) {
-	count, err := writer.file.Write(data)
-	writer.done += int64(count)
-	if writer.report != nil && time.Since(writer.last) > 200*time.Millisecond {
-		writer.last = time.Now()
-		writer.report(writer.done, writer.total)
-	}
-	return count, err
-}
-
 func verifyArchive(path string, bundle Bundle) error {
-	file, err := os.Open(path)
-	if err != nil {
+	if err := download.Verify(path, bundle.Size, bundle.SHA256); err != nil {
+		if errors.Is(err, download.ErrMismatch) {
+			return fmt.Errorf("the archive does not match seekdb %s for %s", Version, bundle.Platform)
+		}
 		return err
-	}
-	defer file.Close()
-	hash := sha256.New()
-	size, err := io.Copy(hash, file)
-	if err != nil {
-		return err
-	}
-	if size != bundle.Size || hex.EncodeToString(hash.Sum(nil)) != bundle.SHA256 {
-		return fmt.Errorf("the archive does not match seekdb %s for %s", Version, bundle.Platform)
 	}
 	return nil
 }
