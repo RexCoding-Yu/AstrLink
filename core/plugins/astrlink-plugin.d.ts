@@ -83,6 +83,144 @@ declare namespace AstrLinkPlugin {
     failClosed?: boolean;
     /** apiVersion 2: the intervals onSchedule runs at; needs schedule. At most 8. */
     schedules?: Schedule[];
+    /**
+     * apiVersion 2: the kinds of provider the plugin adapts; needs
+     * provider. At most 4.
+     */
+    providers?: Provider[];
+  }
+
+  /**
+   * A kind of provider the plugin adapts (plugin platform v2, §4). The user
+   * adds providers of it like any other, with an address, a key and models;
+   * the gateway hands buildRequest the request it would have sent upstream
+   * and keeps doing the rest: routing, failover, the privacy check, the
+   * records and the price.
+   */
+  interface Provider {
+    /** A lowercase letter, then up to 31 lowercase letters, digits and -. */
+    id: string;
+    /** What the providers page offers it as; 1 to 64 characters. */
+    name: string;
+    /** The address a new provider of this kind starts with. */
+    baseUrl?: string;
+    /**
+     * How the gateway sends the provider's key, which the plugin never sees:
+     * bearer (Authorization: Bearer), x-api-key, google (X-Goog-Api-Key),
+     * none, or a header of its own.
+     */
+    auth?: "bearer" | "x-api-key" | "google" | "none" | { header: string };
+    /**
+     * The protocols the plugin serves: whole responses unless sync is false,
+     * streams when stream is set. A request the provider cannot serve this
+     * way never reaches it.
+     */
+    protocols: Partial<
+      Record<ProviderProtocol, { stream?: boolean; sync?: boolean }>
+    >;
+    /**
+     * Lets the gateway convert a request in another protocol into the first
+     * of protocols (in the order of ProviderProtocol), and the answer back.
+     */
+    convert?: boolean;
+    /** The models a new provider of this kind starts with. */
+    models?: string[];
+  }
+
+  type ProviderProtocol =
+    | "openai.chat"
+    | "openai.responses"
+    | "anthropic.messages"
+    | "google.generate_content";
+
+  /** What every hook of a provider adapter gets. */
+  interface ProviderContext {
+    /** chat for a request, models for the model list. */
+    purpose: "chat" | "models";
+    /** The id of meta.providers the provider is of. */
+    provider: string;
+    /** The provider's address, as the user set it. */
+    baseUrl: string;
+    /** The plugin's settings. */
+    settings: Record<string, unknown>;
+    service: { id: string; name: string };
+    /** chat: the protocol the body speaks, converted already when convert is set. */
+    protocol?: ProviderProtocol;
+    model?: string;
+    stream?: boolean;
+    /** chat: which attempt of the request this is, from 0. */
+    attempt?: number;
+    /** chat: anthropic-version, anthropic-beta and openai-beta, when the client sent them. */
+    headers?: Record<string, string>;
+    /** chat, buildRequest only: the request body, in protocol. */
+    body?: any;
+  }
+
+  /**
+   * What buildRequest returns: the upstream request. The gateway adds the
+   * key, sends it through the provider's proxy, and keeps it on the
+   * provider's address. For purpose models, null when the provider lists
+   * no models.
+   */
+  interface ProviderRequest {
+    /** POST by default. */
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+    /** A path the provider's address takes, "/chat", or an address on its host. */
+    url: string;
+    /** Never credentials or the gateway's headers, which the gateway drops. */
+    headers?: Record<string, string>;
+    /** JSON, or a string sent as it is. */
+    body?: unknown;
+    /** Whether the upstream answers with a stream: the request's own by default. */
+    stream?: boolean;
+  }
+
+  /** An upstream answer, as parseResponse and parseError get it. */
+  interface ProviderResponse {
+    status: number;
+    /** In lowercase. */
+    headers: Record<string, string>;
+    body: string;
+    /** The body parsed, when it is JSON. */
+    json?: any;
+  }
+
+  /**
+   * What parseResponse returns: the response of ctx.protocol, its usage
+   * where the protocol carries it; for purpose models, { models }.
+   */
+  interface ProviderResult {
+    status?: number;
+    json?: unknown;
+    models?: string[];
+  }
+
+  /** One upstream stream event: server-sent, or a line of JSON. */
+  interface UpstreamEvent {
+    event?: string;
+    data: string;
+    id?: string;
+    json?: any;
+  }
+
+  /**
+   * What parseStreamEvent and finishStream return: events of ctx.protocol,
+   * which the gateway writes as server-sent events (data: a string as it
+   * is, anything else as JSON), the state the next call gets, and done to
+   * stop reading the upstream.
+   */
+  interface StreamStep<State = unknown> {
+    events?: Array<{ event?: string; data: unknown }>;
+    state?: State;
+    done?: boolean;
+  }
+
+  /** What parseError returns: retryable lets another provider serve the request. */
+  interface ProviderError {
+    status?: number;
+    code?: string;
+    message?: string;
+    retryable?: boolean;
   }
 
   /** The extension points with a time limit. */
@@ -97,7 +235,11 @@ declare namespace AstrLinkPlugin {
     | "onEvent"
     | "onSchedule"
     | "onHttp"
-    | "onUiCall";
+    | "onUiCall"
+    /** buildRequest, parseResponse, parseError and finishStream: 1000, at most 5000. */
+    | "provider"
+    /** parseStreamEvent, each event: 50, at most 1000. */
+    | "providerEvent";
 
   interface Schedule {
     /** A lowercase letter, then up to 31 lowercase letters, digits, _ and -. */

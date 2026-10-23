@@ -175,6 +175,11 @@ var knownHooks = []string{
 	HookOnSchedule,
 	HookOnHTTP,
 	HookOnUICall,
+	HookBuildRequest,
+	HookParseResponse,
+	HookParseStreamEvent,
+	HookFinishStream,
+	HookParseError,
 }
 
 // versionOneHooks are those an apiVersion 1 plugin may export.

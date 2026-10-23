@@ -84,6 +84,11 @@ func (plugin *Plugin) Limit(hook string) time.Duration {
 	return time.Duration(min(ms, bounds.MaxMs)) * time.Millisecond
 }
 
+// Config is the configuration the plugin reads: the user's, with the
+// defaults of the fields the user left unset. Nil for a plugin that did
+// not load.
+func (plugin *Plugin) Config() json.RawMessage { return plugin.config }
+
 // UILoads reports whether the plugin's interface code loads: it has some,
 // it is enabled with ui.code granted, and the user did not turn its
 // interface off.
@@ -537,7 +542,11 @@ func (manager *Manager) publish(settings map[string]Settings) {
 			plugin.Meta = result.program.meta
 			plugin.granted = result.program.meta.Granted(current.Capabilities)
 			plugin.config = result.program.meta.WithDefaults(current.Config)
-			plugin.pool = newPool(result.program, manager.limits)
+			limits := manager.limits
+			if len(result.program.meta.Providers) > 0 {
+				limits = providerLimits(limits)
+			}
+			plugin.pool = newPool(result.program, limits)
 		}
 		plugins = append(plugins, plugin)
 	}

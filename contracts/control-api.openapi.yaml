@@ -5267,7 +5267,16 @@ components:
         privacy:
           {
             type: string,
-            enum: ["off", allow, warn, redact, blocked, unavailable, inspection_failed],
+            enum:
+              [
+                "off",
+                allow,
+                warn,
+                redact,
+                blocked,
+                unavailable,
+                inspection_failed,
+              ],
             description: "Privacy preflight outcome for the sample text. blocked, unavailable (the privacy policy could not be read) and inspection_failed call no classifier and answer with fallback_reason privacy_blocked, privacy_policy_unavailable or privacy_inspection_failed.",
           }
         duration_ms: { type: integer, minimum: 0 }
@@ -5673,9 +5682,13 @@ components:
         - gemini
         - openai_compatible
         - custom
+        - plugin
       description: >
         Product-level service type. Codex, Claude and Grok subscriptions use OAuth.
-        Coding plans and other HTTP services use provider-issued API keys.
+        Coding plans and other HTTP services use provider-issued API keys. A plugin
+        service is adapted by the plugin its plugin field names: the plugin builds
+        the upstream request and reads the answer, while the gateway sends it with
+        the service's address and key.
     HTTPServiceConnection:
       type: object
       required: [base_url, auth]
@@ -5863,6 +5876,8 @@ components:
           $ref: "#/components/schemas/HTTPServiceConnection"
         subscription:
           $ref: "#/components/schemas/SubscriptionServiceConnection"
+        plugin:
+          $ref: "#/components/schemas/ServicePlugin"
         created_at:
           type: string
           format: date-time
@@ -5907,6 +5922,20 @@ components:
         credential:
           $ref: "#/components/schemas/CredentialInput"
       additionalProperties: false
+    ServicePlugin:
+      type: object
+      required: [key, provider]
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,31}$"
+          description: The plugin that adapts the service.
+        provider:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,31}$"
+          description: Which of the plugin's meta.providers the service is.
+      additionalProperties: false
+      description: Required for, and only valid with, kind plugin; fixed once the service is created.
     ServiceCreate:
       type: object
       required: [name, kind]
@@ -5950,6 +5979,8 @@ components:
           $ref: "#/components/schemas/ServiceModels"
         http:
           $ref: "#/components/schemas/HTTPServiceConnectionInput"
+        plugin:
+          $ref: "#/components/schemas/ServicePlugin"
         capabilities:
           type: array
           description: Required for HTTP services. Subscription services default to the provider's fixed native capabilities; when supplied, the list must keep those unchanged and may only add native-mode local conversions whose convert_to is a protocol the provider serves (openai.responses for Codex, anthropic.messages for Claude, openai.responses or openai.chat for Grok, anthropic.messages, openai.responses or openai.chat for GitHub Copilot and Factory Droid).
@@ -7804,7 +7835,14 @@ components:
           description: The group's saved configuration version the request was routed under. Absent on records written before versions existed.
         selection_source:
           type: string
-          enum: [rule, default_member, group_binding, response_affinity, websocket_connection]
+          enum:
+            [
+              rule,
+              default_member,
+              group_binding,
+              response_affinity,
+              websocket_connection,
+            ]
           description: What chose the member. group_binding, response_affinity and websocket_connection reuse an earlier choice without judging the rules.
         rule_id:
           type: string
@@ -8000,7 +8038,8 @@ components:
     ModelRoutingPrivacyAttempt:
       type: object
       additionalProperties: false
-      required: [attempt_index, service_id, decision, finding_count, duration_ms]
+      required:
+        [attempt_index, service_id, decision, finding_count, duration_ms]
       properties:
         attempt_index: { type: integer, minimum: 0 }
         service_id:

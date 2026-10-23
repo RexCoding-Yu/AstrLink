@@ -178,6 +178,19 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 	if target.UILoads() {
 		summary.UIVersion = target.ClientHash
 	}
+	if target.Enabled() && target.Can(plugin.CapabilityProvider) {
+		for _, provider := range target.Meta.Providers {
+			offered := contract.PluginProvider{
+				ID: provider.ID, Name: provider.Name, BaseURL: provider.BaseURL, Auth: provider.Auth.Service(),
+				Convert: provider.Convert, Models: slices.Clone(provider.Models), Protocols: []contract.PluginProviderProtocol{},
+			}
+			for _, protocol := range provider.ProtocolOrder() {
+				modes := provider.Protocols[protocol]
+				offered.Protocols = append(offered.Protocols, contract.PluginProviderProtocol{Protocol: protocol, Stream: modes.Stream, Sync: modes.Synchronous()})
+			}
+			summary.Providers = append(summary.Providers, offered)
+		}
+	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed
 		if target.Err != nil {

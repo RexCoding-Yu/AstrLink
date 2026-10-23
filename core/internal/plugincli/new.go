@@ -368,6 +368,84 @@ export async function onHttp(request: AstrLinkPlugin.HttpServeRequest): Promise<
 ]
 `,
 		},
+		"provider": {
+			summary: "A provider adapter: Chat Completions requests to an API of its own, whole and streamed.",
+			plugin: `// {{name}}: serves Chat Completions with an API that takes a prompt and
+// answers text, whole or as a stream of deltas. Change the shapes below to
+// your API's; the gateway sends the key, keeps the requests on the
+// provider's address, and does routing, failover, records and prices.
+
+export const meta = {
+  apiVersion: 2,
+  key: "{{key}}",
+  name: "{{name}}",
+  version: "0.1.0",
+  capabilities: ["provider"],
+  providers: [
+    {
+      id: "{{key}}",
+      name: "{{name}}",
+      baseUrl: "https://api.example.com/v1",
+      auth: "bearer",
+      protocols: { "openai.chat": { stream: true } },
+      // Other protocols reach the plugin converted into Chat Completions.
+      convert: true,
+      models: ["example-1"],
+    },
+  ],
+} satisfies AstrLinkPlugin.Meta;
+
+type Chat = { messages: Array<{ role: string; content: unknown }> };
+
+export async function buildRequest(ctx: AstrLinkPlugin.ProviderContext): Promise<AstrLinkPlugin.ProviderRequest | null> {
+  if (ctx.purpose === "models") return { method: "GET", url: "/models" };
+  const body = ctx.body as Chat;
+  const prompt = body.messages.map((message) => message.role + ": " + String(message.content)).join("\n");
+  return { url: "/generate", body: { model: ctx.model, prompt, stream: ctx.stream } };
+}
+
+export async function parseResponse(ctx: AstrLinkPlugin.ProviderContext, res: AstrLinkPlugin.ProviderResponse): Promise<AstrLinkPlugin.ProviderResult> {
+  if (ctx.purpose === "models") return { models: (res.json.data as Array<{ id: string }>).map((model) => model.id) };
+  return {
+    json: {
+      id: "chatcmpl-" + astrlink.util.sha256(res.body).slice(0, 12),
+      object: "chat.completion",
+      model: ctx.model,
+      choices: [{ index: 0, message: { role: "assistant", content: res.json.output }, finish_reason: "stop" }],
+      usage: { prompt_tokens: res.json.usage.input, completion_tokens: res.json.usage.output, total_tokens: res.json.usage.input + res.json.usage.output },
+    },
+  };
+}
+
+export async function parseStreamEvent(ctx: AstrLinkPlugin.ProviderContext, event: AstrLinkPlugin.UpstreamEvent, state: number | null): Promise<AstrLinkPlugin.StreamStep<number>> {
+  const chunk = (delta: object, finish: string | null) => ({
+    id: "chatcmpl-stream", object: "chat.completion.chunk", model: ctx.model,
+    choices: [{ index: 0, delta, finish_reason: finish }],
+  });
+  if (event.json?.done) return { events: [{ data: chunk({}, "stop") }, { data: "[DONE]" }], done: true };
+  return { events: [{ data: chunk({ content: event.json?.delta ?? "" }, null) }], state: (state ?? 0) + 1 };
+}
+
+export async function parseError(_ctx: AstrLinkPlugin.ProviderContext, res: AstrLinkPlugin.ProviderResponse): Promise<AstrLinkPlugin.ProviderError> {
+  return { status: res.status, message: res.json?.error ?? res.body, retryable: res.status === 429 || res.status >= 500 };
+}
+`,
+			tests: `[
+  {
+    "name": "builds the request",
+    "hook": "buildRequest",
+    "args": [{ "purpose": "chat", "provider": "{{key}}", "baseUrl": "https://api.example.com/v1", "settings": {}, "service": { "id": "s", "name": "S" }, "protocol": "openai.chat", "model": "example-1", "stream": false, "body": { "messages": [{ "role": "user", "content": "hi" }] } }],
+    "expect": { "result": { "url": "/generate", "body": { "model": "example-1", "prompt": "user: hi", "stream": false } } }
+  },
+  {
+    "name": "turns a delta into a chunk",
+    "hook": "parseStreamEvent",
+    "args": [{ "purpose": "chat", "model": "example-1" }, { "data": "{\"delta\":\"he\"}", "json": { "delta": "he" } }, null],
+    "expect": { "match": { "state": 1 } }
+  }
+]
+`,
+		},
 		"ui": {
 			summary: "An interface: a card on the overview and a tab on its plugin page, which ask the plugin's backend for a count.",
 			plugin: `// {{name}}: keeps a count of the turns it saw; its interface shows it.

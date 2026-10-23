@@ -141,19 +141,22 @@ func (function PolicyWarningReporterFunc) ReportPolicyWarning(warning privacy.Wa
 }
 
 type Handler struct {
-	requestMetadata          MetadataResolver
-	plugins                  *pluginhost.Host
-	builtinStates            builtintools.Store
-	searchRefs               searchRefStore
-	codexTurns               codexTurnStore
-	codexModels              codexCatalogModels
-	images                   imagecompress.Compressor
-	proxyCredentials         secretstore.SecretStore
-	affinities               responseAffinities
-	routingVersions          modelRoutingVersions
-	resolver                 endpoint.Resolver
-	authorizer               endpoint.Authorizer
-	forwarder                Forwarder
+	requestMetadata  MetadataResolver
+	plugins          *pluginhost.Host
+	builtinStates    builtintools.Store
+	searchRefs       searchRefStore
+	codexTurns       codexTurnStore
+	codexModels      codexCatalogModels
+	images           imagecompress.Compressor
+	proxyCredentials secretstore.SecretStore
+	affinities       responseAffinities
+	routingVersions  modelRoutingVersions
+	resolver         endpoint.Resolver
+	authorizer       endpoint.Authorizer
+	forwarder        Forwarder
+	// providerTransport sends what a plugin's provider adapter asks for,
+	// as the forwarder sends every attempt.
+	providerTransport        *transport.Forwarder
 	accessTokenAuthenticator AccessTokenAuthenticator
 	privacyFilter            privacy.Filter
 	policyWarningReporter    PolicyWarningReporter
@@ -322,11 +325,16 @@ func NewWithDependencies(dependencies Dependencies) *Handler {
 	if dependencies.Forwarder == nil {
 		dependencies.Forwarder = transport.New(nil)
 	}
+	providerTransport, ok := dependencies.Forwarder.(*transport.Forwarder)
+	if !ok {
+		providerTransport = transport.New(nil)
+	}
 	return &Handler{
-		requestMetadata:  dependencies.Metadata,
-		plugins:          dependencies.Plugins,
-		proxyCredentials: dependencies.ProxyCredentials,
-		resolver:         dependencies.Resolver, authorizer: dependencies.Authorizer, forwarder: dependencies.Forwarder,
+		providerTransport: providerTransport,
+		requestMetadata:   dependencies.Metadata,
+		plugins:           dependencies.Plugins,
+		proxyCredentials:  dependencies.ProxyCredentials,
+		resolver:          dependencies.Resolver, authorizer: dependencies.Authorizer, forwarder: dependencies.Forwarder,
 		accessTokenAuthenticator: dependencies.AccessTokenAuthenticator, privacyFilter: dependencies.PrivacyFilter,
 		policyWarningReporter: dependencies.PolicyWarningReporter,
 		requestRecords:        dependencies.RequestRecords,

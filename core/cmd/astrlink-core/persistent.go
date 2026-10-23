@@ -366,7 +366,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Subscriptions:      subscriptionManager,
 		RateLimits:         resolver,
 		CodingPlans:        codingplan.New(store, nil),
-		ServiceModels:      servicemodel.New(store, subscriptionManager, nil),
+		ServiceModels:      servicemodel.New(store, subscriptionManager, nil).WithPluginProviders(pluginHost),
 		ServiceTester:      servicetest.NewWithDependencies(gatewayDependencies, subscriptionManager.APIBaseURLFor),
 		BuiltinToolTester:  gatewayTester,
 		ModelClassifier:    gatewayTester,

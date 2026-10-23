@@ -47,6 +47,8 @@ type Meta struct {
 	FailClosed bool `json:"failClosed,omitempty"`
 	// Schedules are the intervals onSchedule runs at.
 	Schedules []Schedule `json:"schedules,omitempty"`
+	// Providers are the kinds of provider the plugin adapts.
+	Providers []Provider `json:"providers,omitempty"`
 }
 
 // Schedule is one interval onSchedule runs at, in minutes.
@@ -222,6 +224,9 @@ func validateMeta(meta Meta, key string) error {
 		}
 	}
 	if err := validateTools(meta); err != nil {
+		return invalid("%v", err)
+	}
+	if err := validateProviders(meta); err != nil {
 		return invalid("%v", err)
 	}
 	if err := validateVersionTwo(meta); err != nil {

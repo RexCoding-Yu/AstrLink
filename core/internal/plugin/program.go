@@ -106,6 +106,13 @@ func load(source Source, limits Limits) (*program, error) {
 		}
 		loaded.hooks[name] = hook
 	}
+	exported := make(map[string]bool, len(loaded.hooks))
+	for name := range loaded.hooks {
+		exported[name] = true
+	}
+	if err := checkProviderHooks(meta, exported); err != nil {
+		return nil, &LoadError{Code: CodeInvalidMeta, File: source.File, Message: err.Error()}
+	}
 	return loaded, nil
 }
 

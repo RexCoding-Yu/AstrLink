@@ -312,6 +312,9 @@ type PluginSummary struct {
 	// granted ui.code, and its interface not turned off. It changes with
 	// the code.
 	UIVersion string `json:"ui_version,omitempty"`
+	// Providers are the kinds of provider the plugin adapts, while it is
+	// enabled with provider granted.
+	Providers []PluginProvider `json:"providers,omitempty"`
 }
 
 // PluginUICallRequest is a call of a plugin's interface code to its
