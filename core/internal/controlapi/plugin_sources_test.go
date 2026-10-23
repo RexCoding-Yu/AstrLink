@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugininstall"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 // fakeInstaller stands in for the installer: a preview of "good" stages
@@ -164,5 +165,43 @@ func TestInstallingFromSourceWaitsForConfirmation(t *testing.T) {
 	response = controlRequest(t, handler, http.MethodDelete, PluginsPath+"/hello/source", "", "", "")
 	if response.Code != http.StatusOK || manager.Current().Plugin("hello") != nil {
 		t.Fatalf("uninstall = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAPluginNewHereStartsDisabledWhateverItsKeyLeftBehind(t *testing.T) {
+	store, handler, manager, directory := newPluginHandler(t)
+	fake := &fakeInstaller{t: t, directory: directory}
+	handler.pluginInstaller = fake
+	ctx := context.Background()
+	// A plugin of the key was enabled here once, and is gone.
+	left := storage.NewPluginSettingsRecord("hello")
+	left.Enabled, left.Capabilities, left.Config = true, []string{"storage"}, json.RawMessage(`{"greeting":"hi"}`)
+	if err := store.PutPluginSettings(ctx, left); err != nil {
+		t.Fatal(err)
+	}
+	install := PluginsPath + "/sources/install"
+	if response := approvedRequest(t, handler, http.MethodPost, install, "application/json", `{"token":"token"}`, ""); response.Code != http.StatusOK {
+		t.Fatalf("install = %d %s", response.Code, response.Body.String())
+	}
+	settings, err := store.GetPluginSettings(ctx, "hello")
+	if err != nil || settings.Enabled || string(settings.Config) != `{"greeting":"hi"}` || len(settings.Capabilities) != 1 {
+		t.Fatalf("settings after the install = %+v, %v", settings, err)
+	}
+	if manager.Current().Plugin("hello").Enabled() {
+		t.Fatal("the plugin installed runs before the user enables it")
+	}
+	// Installing over the plugin there is an update: it stays enabled.
+	settings.Enabled = true
+	if err := store.PutPluginSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if response := approvedRequest(t, handler, http.MethodPost, install, "application/json", `{"token":"token"}`, ""); response.Code != http.StatusOK {
+		t.Fatalf("update = %d %s", response.Code, response.Body.String())
+	}
+	if settings, err := store.GetPluginSettings(ctx, "hello"); err != nil || !settings.Enabled || !manager.Current().Plugin("hello").Enabled() {
+		t.Fatalf("settings after the update = %+v, %v", settings, err)
 	}
 }

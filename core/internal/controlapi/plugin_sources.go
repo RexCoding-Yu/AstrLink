@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugininstall"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 // PluginInstaller installs plugins from source; *plugininstall.Installer
@@ -112,12 +113,37 @@ func (handler *Handler) pluginSources(writer http.ResponseWriter, request *http.
 		writeApprovalRequired(writer, contract.PluginApproval{Plugin: review.Key, Name: review.Name, Install: &review})
 		return
 	}
+	// A plugin new to this computer starts disabled, even where a plugin of
+	// its key left settings behind; it keeps their configuration and data
+	// for when the user enables it.
+	if handler.plugins.Current().Plugin(review.Key) == nil {
+		if err := handler.disableLeftSettings(request.Context(), review.Key); err != nil {
+			writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "could not read the plugin's settings")
+			return
+		}
+	}
 	key, err := handler.pluginInstaller.Install(input.Token)
 	if err != nil {
 		writeInstallFailure(writer, err)
 		return
 	}
 	handler.reloadInstalled(writer, request.Context(), key)
+}
+
+// disableLeftSettings turns off the settings a plugin of key left behind.
+func (handler *Handler) disableLeftSettings(ctx context.Context, key string) error {
+	if handler.pluginStore == nil {
+		return nil
+	}
+	settings, err := handler.pluginStore.GetPluginSettings(ctx, key)
+	if errors.Is(err, storage.ErrNotFound) || (err == nil && !settings.Enabled) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	settings.Enabled = false
+	return handler.pluginStore.PutPluginSettings(ctx, settings)
 }
 
 // writeApprovalRequired answers a change that waits for the user's
