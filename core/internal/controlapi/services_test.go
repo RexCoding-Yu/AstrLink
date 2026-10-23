@@ -767,3 +767,21 @@ func TestServiceChangeARoutingGroupDependsOnIsAConflict(t *testing.T) {
 		t.Fatalf("refused changes altered the service: %v", err)
 	}
 }
+
+func TestAPluginProviderNamesItsPlugin(t *testing.T) {
+	_, handler := newServiceHandler(t, "service_acme", "service_bad_one", "service_bad_two", "service_bad_three")
+	service := createServiceForTest(t, handler,
+		`{"name":"Acme","kind":"plugin","plugin":{"key":"acme","provider":"acme"},"http":{"base_url":"https://api.acme.example/v1","auth":{"scheme":"none"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`)
+	if service.Kind != contract.ServiceKindPlugin || service.Plugin == nil || *service.Plugin != (contract.ServicePlugin{Key: "acme", Provider: "acme"}) {
+		t.Fatalf("service = %+v", service)
+	}
+	for _, body := range []string{
+		`{"name":"Acme","kind":"plugin","http":{"base_url":"https://api.acme.example/v1","auth":{"scheme":"none"}},"capabilities":[]}`,
+		`{"name":"Acme","kind":"newapi","plugin":{"key":"acme","provider":"acme"},"http":{"base_url":"https://api.acme.example/v1","auth":{"scheme":"none"}},"capabilities":[]}`,
+		`{"name":"Acme","kind":"plugin","plugin":{"key":"Acme!","provider":"acme"},"http":{"base_url":"https://api.acme.example/v1","auth":{"scheme":"none"}},"capabilities":[]}`,
+	} {
+		if response := serviceRequestForTest(t, handler, http.MethodPost, ServicesPath, "application/json", body, ""); response.Code < 400 {
+			t.Fatalf("POST %s = %d", body, response.Code)
+		}
+	}
+}

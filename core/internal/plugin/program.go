@@ -32,6 +32,22 @@ type program struct {
 	module *moejs.Module
 	meta   Meta
 	hooks  map[string]moejs.Hook
+	// sources maps positions in a built plugin back to the files it was
+	// built from; nil without a source map.
+	sources *sourceMap
+}
+
+// async reports whether the plugin's hooks may return promises: those of
+// apiVersion 2, which run on a loop of their own.
+func (loaded *program) async() bool { return loaded.meta.APIVersion >= 2 }
+
+// mapStack rewrites the positions of a stack trace into the plugin's own
+// sources, when it came with a source map.
+func (loaded *program) mapStack(stack string) string {
+	if loaded == nil || loaded.sources == nil {
+		return stack
+	}
+	return loaded.sources.rewrite(stack)
 }
 
 // load compiles source and loads it once in a runtime of its own, to check
@@ -41,11 +57,11 @@ func load(source Source, limits Limits) (*program, error) {
 	if source.Err != nil {
 		return nil, source.Err
 	}
-	module, err := compile(source.File, source.Text)
+	module, parsed, err := compile(source.File, source.Text)
 	if err != nil {
 		return nil, err
 	}
-	loaded := &program{key: source.Key, file: source.File, module: module, hooks: make(map[string]moejs.Hook)}
+	loaded := &program{key: source.Key, file: source.File, module: module, hooks: make(map[string]moejs.Hook), sources: parseSourceMap(source.SourceMap, source.File)}
 	instance, err := newInstance(loaded, limits)
 	if err != nil {
 		return nil, loadFailure(source.File, err)
@@ -56,9 +72,19 @@ func load(source Source, limits Limits) (*program, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateMeta(meta, source.Key); err != nil {
+	key := source.Key
+	if key == "" {
+		// A plugin checked before it is installed goes by its own key.
+		key = meta.Key
+	}
+	if err := validateMeta(meta, key); err != nil {
 		err.(*LoadError).File = source.File
 		return nil, err
+	}
+	if meta.APIVersion < 2 {
+		if err := checkSynchronous(source.File, parsed); err != nil {
+			return nil, err
+		}
 	}
 	loaded.meta = meta
 	for _, name := range module.Exports() {
@@ -68,6 +94,9 @@ func load(source Source, limits Limits) (*program, error) {
 		if !slices.Contains(knownHooks, name) {
 			return nil, &LoadError{Code: CodeUnknownExport, File: source.File, Message: fmt.Sprintf("exports %q, which is neither meta nor a hook the host calls (%s)", name, strings.Join(knownHooks, ", "))}
 		}
+		if meta.APIVersion < 2 && !slices.Contains(versionOneHooks, name) {
+			return nil, &LoadError{Code: CodeUnknownExport, File: source.File, Message: fmt.Sprintf("exports %q, a hook of apiVersion 2", name)}
+		}
 		hook, err := module.Hook(name)
 		if err != nil {
 			return nil, &LoadError{Code: CodeNotFunction, File: source.File, Message: fmt.Sprintf("the export %q is not a function", name)}
@@ -76,6 +105,13 @@ func load(source Source, limits Limits) (*program, error) {
 			return nil, &LoadError{Code: CodeNotFunction, File: source.File, Message: fmt.Sprintf("the export %q is not a function", name)}
 		}
 		loaded.hooks[name] = hook
+	}
+	exported := make(map[string]bool, len(loaded.hooks))
+	for name := range loaded.hooks {
+		exported[name] = true
+	}
+	if err := checkProviderHooks(meta, exported); err != nil {
+		return nil, &LoadError{Code: CodeInvalidMeta, File: source.File, Message: err.Error()}
 	}
 	return loaded, nil
 }
@@ -239,11 +275,12 @@ func (pool *pool) put(returned *instance) {
 	}
 }
 
-// run calls hook on a runtime of the pool, with c bound for its host
-// functions, and returns the JSON text of the result, nil for undefined. A
-// runtime whose call failed is dropped: the failure may have left its
-// module state half updated.
-func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, arg any) (json.RawMessage, error) {
+// run calls hook with args on a runtime of the pool, with c bound for its
+// host functions, and returns the JSON text of the result, nil for
+// undefined. The hook of an apiVersion 2 plugin may return a promise: the
+// call's loop then runs until it settles. A runtime whose call failed is
+// dropped: the failure may have left its module state half updated.
+func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, args []any) (json.RawMessage, error) {
 	if err := pool.acquire(ctx); err != nil {
 		return nil, err
 	}
@@ -258,6 +295,11 @@ func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, arg any) (j
 		return nil, err
 	}
 	runtime := taken.runtime
+	c.runtime = runtime
+	if pool.program.async() {
+		c.loop = newAsyncLoop()
+		defer c.loop.close()
+	}
 	c.watchdog = &watchdog{runtime: runtime, budget: pool.limits.ScriptTime}
 	taken.current = c
 	interrupted := make(chan struct{})
@@ -266,7 +308,7 @@ func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, arg any) (j
 		close(interrupted)
 	})
 	c.watchdog.start()
-	result, err := invoke(runtime, hook, arg, pool.limits)
+	result, err := invoke(c, runtime, hook, args, pool.limits)
 	c.watchdog.pause()
 	if !stopContext() {
 		<-interrupted
@@ -281,18 +323,23 @@ func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, arg any) (j
 	return result, nil
 }
 
-func invoke(runtime *moejs.Runtime, hook moejs.Hook, arg any, limits Limits) (json.RawMessage, error) {
-	var args []moejs.Value
-	if arg != nil {
+func invoke(c *call, runtime *moejs.Runtime, hook moejs.Hook, args []any, limits Limits) (json.RawMessage, error) {
+	values := make([]moejs.Value, 0, len(args))
+	for _, arg := range args {
 		value, err := runtime.FromGo(arg)
 		if err != nil {
 			return nil, fmt.Errorf("pass the hook's argument: %w", err)
 		}
-		args = append(args, value)
+		values = append(values, value)
 	}
-	value, err := runtime.Call(hook, args...)
+	value, err := runtime.Call(hook, values...)
 	if err != nil {
 		return nil, err
+	}
+	if c.loop != nil && promiseLike(value) {
+		if value, err = c.drive(runtime, value); err != nil {
+			return nil, err
+		}
 	}
 	if value.IsUndefined() {
 		return nil, nil
@@ -432,12 +479,13 @@ func stackPosition(stack, file string) (line, column int) {
 }
 
 // stackSuffix names the first frame with a source position: a host function
-// that threw sits above the plugin's own frame without one.
+// that threw sits above the plugin's own frame without one. The frames of
+// the host's prelude are not the plugin's and are skipped.
 func stackSuffix(stack string) string {
 	first := ""
 	for _, text := range strings.Split(stack, "\n") {
 		text = strings.TrimSpace(text)
-		if !strings.HasPrefix(text, "at ") {
+		if !strings.HasPrefix(text, "at ") || strings.Contains(text, preludeName) {
 			continue
 		}
 		if stackFrame.MatchString(text) {
@@ -451,4 +499,19 @@ func stackSuffix(stack string) string {
 		return ""
 	}
 	return " (" + first + ")"
+}
+
+// withoutPrelude drops the frames of the host's prelude from a stack trace.
+func withoutPrelude(stack string) string {
+	if !strings.Contains(stack, preludeName) {
+		return stack
+	}
+	lines := strings.Split(stack, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !strings.Contains(line, preludeName) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }

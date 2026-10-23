@@ -7,5 +7,5 @@
     "strict": true,
     "noEmit": true
   },
-  "files": ["../astrlink-plugin.d.ts", "plugin.ts"]
+  "files": ["../../../core/plugins/astrlink-plugin.d.ts", "plugin.ts"]
 }

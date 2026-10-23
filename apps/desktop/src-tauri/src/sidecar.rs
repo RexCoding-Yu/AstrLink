@@ -1737,7 +1737,7 @@ impl CoreManager {
         let body = crate::raw_access::decision_body(grant_id, decision, proof)?;
         let path = crate::raw_access::decision_path(grant_id);
         let (status, _, response) = self
-            .authenticated_control_encoded(Method::POST, &path, Some(&body), None)
+            .authenticated_control_encoded(Method::POST, &path, Some(&body), None, false)
             .await?;
         let outcome = crate::raw_access::decision_outcome(status, &response)
             .ok_or_else(|| control_status_error(&Method::POST, &path, status, &response))?;
@@ -1802,7 +1802,7 @@ impl CoreManager {
         body: &[u8],
     ) -> Result<serde_json::Value, String> {
         let (status, _, response) = self
-            .authenticated_control_encoded(Method::POST, path, Some(body), None)
+            .authenticated_control_encoded(Method::POST, path, Some(body), None, false)
             .await?;
         let outcome = crate::raw_access::sealing_outcome(status, &response)
             .ok_or_else(|| control_status_error(&Method::POST, path, status, &response))?;
@@ -2320,6 +2320,107 @@ impl CoreManager {
             .authenticated_control(method, &path, body, None)
             .await?;
         serde_json::from_slice(&body).map_err(|_| "plugins returned invalid JSON".into())
+    }
+
+    /// Saves a plugin's settings. A change that grants the plugin more and
+    /// is not `approved` comes back as `NeedsApproval` with what it grants:
+    /// the user confirms it in the plugin confirmation window, which sends
+    /// it again approved.
+    pub async fn update_plugin(
+        &self,
+        key: &str,
+        input: serde_json::Value,
+        approved: bool,
+    ) -> Result<PluginUpdate, String> {
+        if !valid_plugin_name(key, '-') {
+            return Err("invalid plugin".into());
+        }
+        let path = format!("/control/v1/plugins/{key}");
+        let encoded = serde_json::to_vec(&input)
+            .map_err(|error| format!("unable to encode control request: {error}"))?;
+        let (status, _, body) = self
+            .authenticated_control_encoded(Method::PATCH, &path, Some(&encoded), None, approved)
+            .await?;
+        if status == reqwest::StatusCode::CONFLICT {
+            let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if parsed["error"]["code"] == "approval_required" {
+                return Ok(PluginUpdate::NeedsApproval(parsed["approval"].clone()));
+            }
+        }
+        if !status.is_success() {
+            return Err(control_status_error(&Method::PATCH, &path, status, &body));
+        }
+        serde_json::from_slice(&body)
+            .map(PluginUpdate::Saved)
+            .map_err(|_| "plugins returned invalid JSON".into())
+    }
+
+    /// Installing from source: the review of a GitHub link, the install it
+    /// stages, the update check, the rollback and the uninstall. An install
+    /// or a rollback that is not `approved` comes back as `NeedsApproval`,
+    /// as a change of settings does. Why an install cannot go on comes back
+    /// whole, as Core's JSON, for the page to explain.
+    pub async fn plugin_change(
+        &self,
+        action: &str,
+        key: Option<&str>,
+        input: serde_json::Value,
+        approved: bool,
+    ) -> Result<PluginUpdate, String> {
+        let input = (!input.is_null()).then_some(input);
+        let (method, path, body) = plugin_request(action, key, None, input)?;
+        let encoded = body
+            .map(|body| serde_json::to_vec(&body))
+            .transpose()
+            .map_err(|error| format!("unable to encode control request: {error}"))?;
+        let (status, _, body) = self
+            .authenticated_control_encoded(
+                method.clone(),
+                &path,
+                encoded.as_deref(),
+                None,
+                approved,
+            )
+            .await?;
+        if status.is_success() {
+            return serde_json::from_slice(&body)
+                .map(PluginUpdate::Saved)
+                .map_err(|_| "plugins returned invalid JSON".into());
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        if status == reqwest::StatusCode::CONFLICT && parsed["error"]["code"] == "approval_required"
+        {
+            return Ok(PluginUpdate::NeedsApproval(parsed["approval"].clone()));
+        }
+        if parsed.get("failure").is_some() {
+            return Err(serde_json::json!({
+                "error": parsed["error"],
+                "failure": parsed["failure"],
+            })
+            .to_string());
+        }
+        Err(control_status_error(&method, &path, status, &body))
+    }
+
+    /// A plugin's interface code, or its source map, as Core serves it to
+    /// the main window; the status Core answered when it does not.
+    pub async fn plugin_client(
+        &self,
+        key: &str,
+        file: &str,
+    ) -> Result<Vec<u8>, reqwest::StatusCode> {
+        if !valid_plugin_name(key, '-') || !matches!(file, "client.js" | "client.js.map") {
+            return Err(reqwest::StatusCode::NOT_FOUND);
+        }
+        let path = format!("/control/v1/plugins/{key}/{file}");
+        match self
+            .authenticated_control_encoded(Method::GET, &path, None, None, false)
+            .await
+        {
+            Ok((status, _, body)) if status.is_success() => Ok(body),
+            Ok((status, _, _)) => Err(status),
+            Err(_) => Err(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+        }
     }
 
     /// The request attributes of the metadata settings.
@@ -3088,16 +3189,19 @@ impl CoreManager {
             ),
             None => None,
         };
-        self.authenticated_control_encoded(method, path, encoded_body.as_deref(), if_match)
+        self.authenticated_control_encoded(method, path, encoded_body.as_deref(), if_match, false)
             .await
     }
 
+    /// `approved` marks a change of a plugin's settings the user confirmed
+    /// in the plugin confirmation window.
     async fn authenticated_control_encoded(
         &self,
         method: Method,
         path: &str,
         encoded_body: Option<&[u8]>,
         if_match: Option<&str>,
+        approved: bool,
     ) -> Result<(reqwest::StatusCode, Option<String>, Vec<u8>), String> {
         let (base_url, control_token) = {
             let inner = self.lock_inner();
@@ -3125,7 +3229,7 @@ impl CoreManager {
                     &url,
                     path,
                     encoded_body,
-                    if_match,
+                    ControlHeaders { if_match, approved },
                     &control_token,
                 )
                 .await
@@ -3162,7 +3266,7 @@ impl CoreManager {
         url: &str,
         path: &str,
         encoded_body: Option<&[u8]>,
-        if_match: Option<&str>,
+        headers: ControlHeaders<'_>,
         control_token: &str,
     ) -> Result<(reqwest::StatusCode, Option<String>, Vec<u8>), String> {
         let mut request = self
@@ -3170,7 +3274,10 @@ impl CoreManager {
             .request(method.clone(), url)
             .timeout(control_request_timeout(&method, path))
             .header(header::AUTHORIZATION, format!("Bearer {control_token}"));
-        if let Some(etag) = if_match {
+        if headers.approved {
+            request = request.header(PLUGIN_APPROVAL_HEADER, "confirmed");
+        }
+        if let Some(etag) = headers.if_match {
             request = request.header(header::IF_MATCH, etag);
         }
         if let Some(body) = encoded_body {
@@ -3459,6 +3566,26 @@ fn valid_plugin_name(value: &str, extra: char) -> bool {
 }
 
 /// Translates a plugin page action into the control request it makes.
+/// Marks a plugin change the user confirmed; Core refuses a change that
+/// grants a plugin more without it.
+const PLUGIN_APPROVAL_HEADER: &str = "X-AstrLink-Plugin-Approval";
+
+/// The optional headers of a control request: the ETag a change expects,
+/// and the mark of a plugin change the user confirmed.
+#[derive(Clone, Copy)]
+struct ControlHeaders<'a> {
+    if_match: Option<&'a str>,
+    approved: bool,
+}
+
+/// What saving a plugin's settings came to.
+#[derive(Debug)]
+pub enum PluginUpdate {
+    Saved(serde_json::Value),
+    /// What the change grants, for the user to confirm first.
+    NeedsApproval(serde_json::Value),
+}
+
 fn plugin_request(
     action: &str,
     key: Option<&str>,
@@ -3479,6 +3606,22 @@ fn plugin_request(
                 Some(input.ok_or("plugin host settings are required")?),
             ))
         }
+        // A GitHub link fetched, built and reviewed; the install of what
+        // the review staged.
+        "source_preview" => {
+            return Ok((
+                Method::POST,
+                format!("{base}/sources/preview"),
+                Some(input.ok_or("the link is required")?),
+            ))
+        }
+        "source_install" => {
+            return Ok((
+                Method::POST,
+                format!("{base}/sources/install"),
+                Some(input.ok_or("the review is required")?),
+            ))
+        }
         _ => {}
     }
     let key = key
@@ -3496,6 +3639,21 @@ fn plugin_request(
         "status" => (Method::GET, format!("{plugin}/status"), None),
         // The GitHub stars of the projects the plugin credits.
         "credits" => (Method::GET, format!("{plugin}/credits"), None),
+        // The development tab: the log lines after a sequence number, and a
+        // hook run by hand without the network.
+        "journal" => {
+            let since = input
+                .as_ref()
+                .and_then(|input| input.get("since"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            (Method::GET, format!("{plugin}/journal?since={since}"), None)
+        }
+        "dry_run" => (
+            Method::POST,
+            format!("{plugin}/dry-run"),
+            Some(input.ok_or("the dry run is required")?),
+        ),
         // The plugin's account over its last 1 to 30 days.
         "stats" => {
             let days = input
@@ -3511,6 +3669,19 @@ fn plugin_request(
             format!("{plugin}/actions"),
             Some(input.ok_or("the action is required")?),
         ),
+        "source_check" => (Method::POST, format!("{plugin}/source/check"), None),
+        // A call of the plugin's interface code to its backend part.
+        "ui_call" => (
+            Method::POST,
+            format!("{plugin}/ui-call"),
+            Some(input.ok_or("the call is required")?),
+        ),
+        "source_rollback" => (
+            Method::POST,
+            format!("{plugin}/source/rollback"),
+            Some(input.ok_or("the version is required")?),
+        ),
+        "source_uninstall" => (Method::DELETE, format!("{plugin}/source"), None),
         "clear_workspaces" => (Method::DELETE, format!("{plugin}/workspaces"), None),
         "clear_values" => (Method::DELETE, format!("{plugin}/values"), None),
         // Voids the credentials the model runs the plugin's lookups with.
@@ -3684,6 +3855,18 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     // A sync run does several remote round trips and may retry the merge.
     if method == Method::POST && path == "/control/v1/sync/run" {
         return Duration::from_secs(320);
+    }
+    // Core gives fetching, building and checking a plugin from source three
+    // minutes; an install, an update check or a rollback a minute.
+    if method == Method::POST && path == "/control/v1/plugins/sources/preview" {
+        return Duration::from_secs(200);
+    }
+    if path.starts_with("/control/v1/plugins/")
+        && (path.contains("/source")
+            || path.ends_with("/sources/install")
+            || path.ends_with("/ui-call"))
+    {
+        return Duration::from_secs(75);
     }
     // Core gives a plugin page hook 10 seconds, and a rescan compiles every
     // changed plugin.
@@ -6938,6 +7121,30 @@ mod tests {
             assert!(plugin_request("stats", Some("powercontext"), None, Some(days)).is_err());
         }
         assert_eq!(
+            plugin_request(
+                "journal",
+                Some("notes"),
+                None,
+                Some(serde_json::json!({ "since": 42 }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/notes/journal?since=42".into(),
+                None
+            )
+        );
+        let run = serde_json::json!({ "hook": "describeStatus", "args": [] });
+        assert_eq!(
+            plugin_request("dry_run", Some("notes"), None, Some(run.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/notes/dry-run".into(),
+                Some(run)
+            )
+        );
+        assert!(plugin_request("dry_run", Some("notes"), None, None).is_err());
+        assert_eq!(
             plugin_request("credits", Some("powercontext"), None, None).unwrap(),
             (
                 Method::GET,
@@ -6948,6 +7155,64 @@ mod tests {
         assert_eq!(
             plugin_request("host", None, None, None).unwrap(),
             (Method::GET, "/control/v1/plugin-host".into(), None)
+        );
+        let link = serde_json::json!({ "url": "https://github.com/acme/hello" });
+        assert_eq!(
+            plugin_request("source_preview", None, None, Some(link.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/sources/preview".into(),
+                Some(link)
+            )
+        );
+        let token = serde_json::json!({ "token": "abc" });
+        assert_eq!(
+            plugin_request("source_install", None, None, Some(token.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/sources/install".into(),
+                Some(token)
+            )
+        );
+        assert!(plugin_request("source_install", None, None, None).is_err());
+        assert_eq!(
+            plugin_request("source_check", Some("hello"), None, None).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/hello/source/check".into(),
+                None
+            )
+        );
+        let version = serde_json::json!({ "version": "20261023T120000Z-0000abcd" });
+        assert_eq!(
+            plugin_request(
+                "source_rollback",
+                Some("hello"),
+                None,
+                Some(version.clone())
+            )
+            .unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/hello/source/rollback".into(),
+                Some(version)
+            )
+        );
+        assert_eq!(
+            plugin_request("source_uninstall", Some("hello"), None, None).unwrap(),
+            (
+                Method::DELETE,
+                "/control/v1/plugins/hello/source".into(),
+                None
+            )
+        );
+        assert_eq!(
+            control_request_timeout(&Method::POST, "/control/v1/plugins/sources/preview"),
+            Duration::from_secs(200)
+        );
+        assert_eq!(
+            control_request_timeout(&Method::POST, "/control/v1/plugins/hello/source/rollback"),
+            Duration::from_secs(75)
         );
         let language = serde_json::json!({ "language": "ja" });
         assert_eq!(

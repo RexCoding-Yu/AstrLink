@@ -10,6 +10,8 @@ export class ConsoleError extends Error {
     public status: number,
     public code: string,
     public retryAfter: number,
+    /** The error's body, such as what a change that needs confirming grants. */
+    public body?: unknown,
   ) {
     super(
       code === "oauth_loopback_callback_unavailable"
@@ -25,10 +27,13 @@ export async function consoleRequest(
   method: Method = "GET",
   body?: unknown,
   etag?: string,
+  approved = false,
 ) {
   if (!/^\/(?:control|console)\/v1\//.test(path))
     throw new Error("Invalid console path");
   const headers: Record<string, string> = {};
+  // The console's own dialog confirmed a change that grants a plugin more.
+  if (approved) headers["X-AstrLink-Plugin-Approval"] = "confirmed";
   if (method !== "GET") headers["X-AstrLink-Console"] = "1";
   if (body !== undefined)
     headers["Content-Type"] =
@@ -61,6 +66,7 @@ export async function consoleRequest(
       response.status,
       error?.code ?? `HTTP ${response.status}`,
       Number(retry),
+      value,
     );
   }
   return { value, etag: response.headers.get("ETag") };
@@ -421,13 +427,49 @@ const commands: Record<string, Command> = {
     if (a.action === "reload") return route("/plugins/reload", "POST")(a);
     if (a.action === "host") return route("/plugin-host")(a);
     if (a.action === "update_host")
-      return route("/plugin-host", "PATCH", input)(a);
+      return consoleRequest(
+        "/control/v1/plugin-host",
+        "PATCH",
+        a.input,
+        undefined,
+        a.approved === true,
+      ).then((result) => result.value);
+    if (a.action === "source_preview")
+      return route("/plugins/sources/preview", "POST", input)(a);
+    if (a.action === "source_install")
+      return consoleRequest(
+        "/control/v1/plugins/sources/install",
+        "POST",
+        a.input,
+        undefined,
+        a.approved === true,
+      ).then((result) => result.value);
     const plugin = `/plugins/${segment(a.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
     switch (a.action) {
+      case "source_check":
+        return route(`${plugin}/source/check`, "POST")(a);
+      case "ui_call":
+        return route(`${plugin}/ui-call`, "POST", input)(a);
+      case "source_rollback":
+        return consoleRequest(
+          `/control/v1${plugin}/source/rollback`,
+          "POST",
+          a.input,
+          undefined,
+          a.approved === true,
+        ).then((result) => result.value);
+      case "source_uninstall":
+        return route(`${plugin}/source`, "DELETE")(a);
       case "get":
         return route(plugin)(a);
       case "update":
-        return route(plugin, "PATCH", input)(a);
+        return consoleRequest(
+          `/control/v1${plugin}`,
+          "PATCH",
+          a.input,
+          undefined,
+          a.approved === true,
+        ).then((result) => result.value);
       case "test":
         return route(`${plugin}/test`, "POST")(a);
       case "status":
@@ -436,6 +478,10 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/stats${query(a.input as Args)}`)(a);
       case "credits":
         return route(`${plugin}/credits`)(a);
+      case "journal":
+        return route(`${plugin}/journal${query(a.input as Args)}`)(a);
+      case "dry_run":
+        return route(`${plugin}/dry-run`, "POST", input)(a);
       case "action":
         return route(`${plugin}/actions`, "POST", input)(a);
       case "clear_workspaces":

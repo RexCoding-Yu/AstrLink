@@ -43,6 +43,8 @@ type serviceCreateRequest struct {
 	Models                    json.RawMessage         `json:"models,omitempty"`
 	HTTP                      json.RawMessage         `json:"http,omitempty"`
 	Capabilities              json.RawMessage         `json:"capabilities,omitempty"`
+	// Plugin names the plugin that adapts a provider of kind plugin.
+	Plugin *contract.ServicePlugin `json:"plugin,omitempty"`
 }
 
 type serviceHTTPInput struct {
@@ -301,7 +303,7 @@ func (handler *Handler) createService(writer http.ResponseWriter, request *http.
 	now := time.Now().UTC()
 	service := contract.Service{
 		ID: id, Name: input.Name, Kind: *input.Kind, Enabled: enabled, FailurePolicy: input.FailurePolicy,
-		CreatedAt: now, UpdatedAt: now,
+		Plugin: input.Plugin, CreatedAt: now, UpdatedAt: now,
 	}
 	if input.ResponsesWebSocketEnabled != nil {
 		var enabled bool

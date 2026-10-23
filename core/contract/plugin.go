@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -93,7 +94,27 @@ type PluginHostSettings struct {
 	// Language is the interface language, en, zh-CN or ja. A session takes
 	// it when it starts and keeps it.
 	Language string `json:"language"`
+	// Order lists plugin keys in the order their extension points run:
+	// each plugin gets what the one before it returned. Plugins it does not
+	// list come after, in key order.
+	Order []string `json:"order,omitempty"`
+	// WebUI lets the web console load the interface code of plugins, which
+	// it does not by default: it has no confirmation window of its own.
+	WebUI bool `json:"web_ui,omitempty"`
+	// NpmRegistry is where an install from source fetches the packages a
+	// lock file pins, "" for the npm registry; npmmirror is tried when it
+	// fails. The lock file's hashes check whatever it returns.
+	NpmRegistry string `json:"npm_registry,omitempty"`
 }
+
+// The npm registries an install from source fetches packages from.
+const (
+	DefaultNpmRegistry  = "https://registry.npmjs.org"
+	FallbackNpmRegistry = "https://registry.npmmirror.com"
+)
+
+// MaxPluginOrder bounds the plugins Order lists.
+const MaxPluginOrder = 64
 
 // DefaultPluginHostSettings are the settings of a Core nobody changed them in.
 func DefaultPluginHostSettings() PluginHostSettings {
@@ -107,14 +128,131 @@ func (settings PluginHostSettings) Validate() error {
 	if !ValidPluginLanguage(settings.Language) {
 		return fmt.Errorf("language must be en, zh-CN or ja")
 	}
+	if len(settings.Order) > MaxPluginOrder {
+		return fmt.Errorf("order lists at most %d plugins", MaxPluginOrder)
+	}
+	seen := make(map[string]bool, len(settings.Order))
+	for _, key := range settings.Order {
+		if !ValidPluginKey(key) || seen[key] {
+			return fmt.Errorf("order must list distinct plugin keys")
+		}
+		seen[key] = true
+	}
+	if settings.NpmRegistry != "" && !validRegistry(settings.NpmRegistry) {
+		return fmt.Errorf("npm_registry must be an https address without credentials, query or fragment")
+	}
 	return nil
+}
+
+// validRegistry reports whether text can name an npm registry: https, a
+// host, no credentials, query or fragment.
+func validRegistry(text string) bool {
+	if len(text) > 256 {
+		return false
+	}
+	parsed, err := url.Parse(text)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil &&
+		parsed.RawQuery == "" && parsed.Fragment == "" && !parsed.ForceQuery
 }
 
 // PluginHostSettingsUpdate changes what is set and keeps what is absent.
 type PluginHostSettingsUpdate struct {
-	Paused               *bool   `json:"paused,omitempty"`
-	InjectionBudgetBytes *int    `json:"injection_budget_bytes,omitempty"`
-	Language             *string `json:"language,omitempty"`
+	Paused               *bool     `json:"paused,omitempty"`
+	InjectionBudgetBytes *int      `json:"injection_budget_bytes,omitempty"`
+	Language             *string   `json:"language,omitempty"`
+	Order                *[]string `json:"order,omitempty"`
+	WebUI                *bool     `json:"web_ui,omitempty"`
+	NpmRegistry          *string   `json:"npm_registry,omitempty"`
+}
+
+// Extension points of apiVersion 2 plugins, by the hook that serves them.
+const (
+	PluginHookOnRequest       = "onRequest"
+	PluginHookRoute           = "route"
+	PluginHookBeforeForward   = "beforeForward"
+	PluginHookBeforeUpstream  = "beforeUpstream"
+	PluginHookRewriteResponse = "rewriteResponse"
+	PluginHookOnStreamEvent   = "onStreamEvent"
+	PluginHookOnResponse      = "onResponse"
+	PluginHookObserveTurn     = "observeTurn"
+	PluginHookOnEvent         = "onEvent"
+	PluginHookOnSchedule      = "onSchedule"
+	PluginHookOnHTTP          = "onHttp"
+	PluginHookOnUICall        = "onUiCall"
+	PluginHookProvider        = "provider"
+	PluginHookProviderEvent   = "providerEvent"
+)
+
+// PluginHookLimit bounds how long a request waits for one call of a hook:
+// the default and the most a plugin or the user may set, in milliseconds.
+type PluginHookLimit struct {
+	DefaultMs int `json:"default_ms"`
+	MaxMs     int `json:"max_ms"`
+}
+
+// PluginHookLimits are the time limits of the extension points. A stream
+// event's limit is each event's; providerEvent is each event of a
+// provider's stream.
+var PluginHookLimits = map[string]PluginHookLimit{
+	PluginHookOnRequest:       {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookRoute:           {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookBeforeForward:   {DefaultMs: 2500, MaxMs: 5000},
+	PluginHookBeforeUpstream:  {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookRewriteResponse: {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookOnStreamEvent:   {DefaultMs: 50, MaxMs: 1000},
+	PluginHookOnResponse:      {DefaultMs: 30000, MaxMs: 60000},
+	PluginHookObserveTurn:     {DefaultMs: 30000, MaxMs: 60000},
+	PluginHookOnEvent:         {DefaultMs: 30000, MaxMs: 60000},
+	PluginHookOnSchedule:      {DefaultMs: 60000, MaxMs: 300000},
+	PluginHookOnHTTP:          {DefaultMs: 10000, MaxMs: 30000},
+	PluginHookOnUICall:        {DefaultMs: 10000, MaxMs: 30000},
+	PluginHookProvider:        {DefaultMs: 1000, MaxMs: 5000},
+	PluginHookProviderEvent:   {DefaultMs: 50, MaxMs: 1000},
+}
+
+// PluginHookLimitSetting is one hook's time limit on the plugin page: the
+// bounds, what the plugin asks for, and what the user set (0 for none).
+type PluginHookLimitSetting struct {
+	Hook      string `json:"hook"`
+	DefaultMs int    `json:"default_ms"`
+	MaxMs     int    `json:"max_ms"`
+	// PluginMs is what the plugin's manifest asks for, 0 for the default.
+	PluginMs int `json:"plugin_ms,omitempty"`
+	// Ms is what the user set, 0 to follow the plugin.
+	Ms int `json:"ms,omitempty"`
+	// EffectiveMs is the limit in effect.
+	EffectiveMs int `json:"effective_ms"`
+}
+
+// PluginApprovalHeader marks a change of a plugin's settings the user
+// confirmed where nothing else can click for them: the desktop's
+// confirmation window, or the web console's own dialog. A change that grants
+// a plugin more is refused without it.
+const PluginApprovalHeader = "X-AstrLink-Plugin-Approval"
+
+// PluginApproval describes what a change grants a plugin, for the user to
+// confirm: enabling it, capabilities it did not have, addresses it could not
+// reach (plain http among them), the privacy check skipped, and failing a
+// request when its entry hook fails.
+type PluginApproval struct {
+	Plugin            string   `json:"plugin"`
+	Name              string   `json:"name"`
+	Enable            bool     `json:"enable,omitempty"`
+	AddedCapabilities []string `json:"added_capabilities,omitempty"`
+	AddedOrigins      []string `json:"added_origins,omitempty"`
+	Plaintext         []string `json:"plaintext,omitempty"`
+	Trusted           bool     `json:"trusted,omitempty"`
+	FailClosed        bool     `json:"fail_closed,omitempty"`
+	// Install is the review of the code an install, an update or a
+	// rollback puts in place; Rollback is set for a rollback.
+	Install  *PluginInstallReview `json:"install,omitempty"`
+	Rollback bool                 `json:"rollback,omitempty"`
+}
+
+// Empty reports whether the change grants nothing.
+func (approval PluginApproval) Empty() bool {
+	return !approval.Enable && len(approval.AddedCapabilities) == 0 && len(approval.AddedOrigins) == 0 &&
+		len(approval.Plaintext) == 0 && !approval.Trusted && !approval.FailClosed && approval.Install == nil
 }
 
 // States of a plugin in the plugin list.
@@ -161,6 +299,111 @@ type PluginSummary struct {
 	RequestedCapabilities []string         `json:"requested_capabilities"`
 	GrantedCapabilities   []string         `json:"granted_capabilities"`
 	NeedsNetwork          bool             `json:"needs_network"`
+	// APIVersion is the plugin contract the manifest names, 0 for a plugin
+	// that did not load.
+	APIVersion int `json:"api_version,omitempty"`
+	// Development is set for a plugin astrlink plugin dev keeps built from
+	// a project on this computer.
+	Development *PluginDevelopment `json:"development,omitempty"`
+	// Installed is set for a plugin installed from source: where it came
+	// from.
+	Installed *PluginInstallSource `json:"installed,omitempty"`
+	// UIVersion is set when the plugin's interface code loads: enabled,
+	// granted ui.code, and its interface not turned off. It changes with
+	// the code.
+	UIVersion string `json:"ui_version,omitempty"`
+	// Providers are the kinds of provider the plugin adapts, while it is
+	// enabled with provider granted.
+	Providers []PluginProvider `json:"providers,omitempty"`
+}
+
+// PluginUICallRequest is a call of a plugin's interface code to its
+// backend part, the onUiCall hook.
+type PluginUICallRequest struct {
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+// PluginUICallResult is what onUiCall returned.
+type PluginUICallResult struct {
+	Result json.RawMessage `json:"result"`
+}
+
+// PluginDevelopment is the project a development build comes from.
+type PluginDevelopment struct {
+	Project string `json:"project"`
+	BuiltAt string `json:"built_at,omitempty"`
+}
+
+// PluginJournal is what the development tab of the plugin page shows: the
+// log lines and failures of the plugin's recent calls after a sequence
+// number, and how long each hook took. Latest is the sequence number to ask
+// after next time.
+type PluginJournal struct {
+	Entries []PluginJournalEntry `json:"entries"`
+	Timings []PluginHookTiming   `json:"timings"`
+	Latest  uint64               `json:"latest"`
+	// Breakers are the extension points kept out of requests for now,
+	// after failing too often, and until when.
+	Breakers []PluginBreaker `json:"breakers"`
+}
+
+// PluginBreaker is an extension point kept out of requests until Until, in
+// RFC 3339.
+type PluginBreaker struct {
+	Hook  string `json:"hook"`
+	Until string `json:"until"`
+}
+
+// PluginJournalEntry is one log line or failed call. Reason and Stack are
+// set for a failed call; DryRun marks the lines of a call run by hand.
+type PluginJournalEntry struct {
+	Seq     uint64 `json:"seq"`
+	Time    string `json:"time"`
+	Hook    string `json:"hook"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+	Reason  string `json:"reason,omitempty"`
+	Stack   string `json:"stack,omitempty"`
+	DryRun  bool   `json:"dry_run,omitempty"`
+}
+
+// PluginHookTiming is how long a hook's recent calls took, in
+// milliseconds.
+type PluginHookTiming struct {
+	Hook     string  `json:"hook"`
+	Calls    int     `json:"calls"`
+	Failures int     `json:"failures"`
+	P50Ms    float64 `json:"p50_ms"`
+	P95Ms    float64 `json:"p95_ms"`
+	MaxMs    float64 `json:"max_ms"`
+	ScriptMs float64 `json:"script_ms"`
+}
+
+// PluginDryRunRequest runs one hook of a plugin by hand, without the
+// network: Args are the hook's arguments.
+type PluginDryRunRequest struct {
+	Hook string            `json:"hook"`
+	Args []json.RawMessage `json:"args,omitempty"`
+}
+
+// MaxPluginDryRunBytes bounds a dry run's request.
+const MaxPluginDryRunBytes = 256 << 10
+
+// PluginDryRunResult is what a dry run returned, or why it failed.
+type PluginDryRunResult struct {
+	Result    json.RawMessage      `json:"result,omitempty"`
+	Error     *PluginCallFailure   `json:"error,omitempty"`
+	ElapsedMs float64              `json:"elapsed_ms"`
+	ScriptMs  float64              `json:"script_ms"`
+	Logs      []PluginJournalEntry `json:"logs"`
+}
+
+// PluginCallFailure is why a hook call produced no result.
+type PluginCallFailure struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+	Stack   string `json:"stack,omitempty"`
 }
 
 // PluginLoadError is why a plugin did not load. Line and Column are 0 when
@@ -197,6 +440,17 @@ type PluginDetail struct {
 	// LookupEnabled lets the model run the plugin's queries through the
 	// lookup outlet, once the user granted model.tools.
 	LookupEnabled bool `json:"lookup_enabled"`
+	// Limits are the time limits of the extension points the plugin
+	// serves.
+	Limits []PluginHookLimitSetting `json:"limits"`
+	// FailClosedRequested is set when the plugin asks to fail a request
+	// its entry hook cannot decide; FailClosed when the user agreed.
+	FailClosedRequested bool `json:"fail_closed_requested,omitempty"`
+	FailClosed          bool `json:"fail_closed,omitempty"`
+	// Client is set for a plugin with interface code; UIEnabled when the
+	// user lets it load.
+	Client    bool `json:"client,omitempty"`
+	UIEnabled bool `json:"ui_enabled"`
 	// Tools are the queries the plugin offers the model.
 	Tools       []PluginTool              `json:"tools"`
 	Credentials []PluginCredentialStatus  `json:"credentials"`
@@ -209,6 +463,9 @@ type PluginDetail struct {
 	// HostStorage what the host keeps for it.
 	Storage     []PluginStorageItem `json:"storage"`
 	HostStorage []PluginHostStorage `json:"host_storage"`
+	// Versions are the versions of a plugin installed from source that
+	// later installs replaced, the newest first.
+	Versions []PluginInstalledVersion `json:"versions,omitempty"`
 }
 
 // PluginTool is a query a plugin offers the model, or a report it takes:
@@ -343,6 +600,11 @@ type PluginSettingsUpdate struct {
 	AutoRefresh         *bool                       `json:"auto_refresh,omitempty"`
 	LookupEnabled       *bool                       `json:"lookup_enabled,omitempty"`
 	Config              json.RawMessage             `json:"config,omitempty"`
+	// HookLimitsMs sets the time limits of extension points, by hook; 0
+	// follows the plugin again.
+	HookLimitsMs map[string]int `json:"hook_limits_ms,omitempty"`
+	FailClosed   *bool          `json:"fail_closed,omitempty"`
+	UIEnabled    *bool          `json:"ui_enabled,omitempty"`
 	// PlaintextConsent lists the plain http origins of servers the user
 	// agrees to reach in the clear.
 	PlaintextConsent []string `json:"plaintext_consent,omitempty"`

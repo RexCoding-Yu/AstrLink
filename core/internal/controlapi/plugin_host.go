@@ -2,7 +2,9 @@ package controlapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +34,11 @@ type PluginHost interface {
 	LookupCredentials(plugin string) int
 	RevokeSessionLookups(session string)
 	RevokePluginLookups(plugin string) int
+	// Breakers returns the extension points of plugin kept out of requests
+	// after too many failures, and until when.
+	Breakers(plugin string) map[string]time.Time
+	// UICall answers a call of the plugin's interface code.
+	UICall(ctx context.Context, target *plugin.Plugin, name string, input json.RawMessage) (json.RawMessage, error)
 }
 
 // pluginHostRequiredRole lets observers read the settings of every plugin
@@ -67,6 +74,21 @@ func (handler *Handler) pluginHostResource(writer http.ResponseWriter, request *
 		}
 		if update.Language != nil {
 			merged.Language = *update.Language
+		}
+		if update.Order != nil {
+			merged.Order = slices.Clone(*update.Order)
+		}
+		if update.WebUI != nil {
+			// Plugin code in the web console can do what the console
+			// can, which takes the user's confirmation.
+			if *update.WebUI && !merged.WebUI && request.Header.Get(contract.PluginApprovalHeader) == "" {
+				writeError(writer, http.StatusConflict, "approval_required", "loading plugin interface code in the web console needs the user's confirmation")
+				return
+			}
+			merged.WebUI = *update.WebUI
+		}
+		if update.NpmRegistry != nil {
+			merged.NpmRegistry = strings.TrimRight(*update.NpmRegistry, "/")
 		}
 		if err := merged.Validate(); err != nil {
 			writeError(writer, http.StatusUnprocessableEntity, "invalid_plugin_host_settings", err.Error())

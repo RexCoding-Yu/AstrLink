@@ -1,5 +1,5 @@
 import { isWebEdition } from "./edition";
-import { webInvoke, RAW_CHANGED } from "./web-transport";
+import { ConsoleError, webInvoke, RAW_CHANGED } from "./web-transport";
 import {
   parseServiceTestResult,
   type ServiceTestInput,
@@ -188,6 +188,14 @@ import {
   parsePluginList,
   parsePluginStats,
   parsePluginStatus,
+  parsePluginJournal,
+  parsePluginDryRun,
+  parsePluginApproval,
+  parsePluginInstallFailure,
+  parsePluginInstallReview,
+  parsePluginUpdateCheck,
+  parsePendingPluginApproval,
+  parsePluginApprovalFinished,
   parsePluginTestResult,
   parseSessionMetadata,
   parseSessionPlugins,
@@ -198,6 +206,14 @@ import {
   type PluginClearTarget,
   type PluginCreditStars,
   type PluginDetail,
+  type PluginDryRunResult,
+  type PluginJournal,
+  type PluginApproval,
+  type PluginApprovalFinished,
+  type PluginInstallFailure,
+  type PluginInstallReview,
+  type PluginUpdateCheck,
+  type PendingPluginApproval,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
   type PluginList,
@@ -1417,9 +1433,16 @@ export async function getPlugin(key: string): Promise<PluginDetail> {
   );
 }
 
+/**
+ * Saves a plugin's settings. A change that grants the plugin more waits for
+ * the user: the desktop holds it for its confirmation window and fails with
+ * `approval_pending`; the web console fails with `approval_required` and
+ * sends it again `approved` once its own dialog confirmed it.
+ */
 export async function updatePlugin(
   key: string,
   update: PluginSettingsUpdate,
+  approved = false,
 ): Promise<PluginDetail> {
   requireNativeBridge();
   return parsePluginDetail(
@@ -1427,8 +1450,187 @@ export async function updatePlugin(
       action: "update",
       key,
       input: update,
+      ...(approved ? { approved: true } : {}),
     }),
   );
+}
+
+/** What a change the web console must confirm grants, from its error. */
+export function pluginApprovalOf(error: unknown): PluginApproval | null {
+  if (!(error instanceof ConsoleError) || error.code !== "approval_required")
+    return null;
+  try {
+    return parsePluginApproval(
+      (error.body as { approval?: unknown })?.approval,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** The change waiting in the plugin confirmation window, for that window. */
+export async function pendingPluginApproval(): Promise<PendingPluginApproval | null> {
+  requireNativeBridge();
+  return parsePendingPluginApproval(
+    await invoke<unknown>("plugin_approval_pending"),
+  );
+}
+
+/**
+ * Decides the change waiting for confirmation, from the confirmation window
+ * alone. `kept` are the added capabilities the user left ticked.
+ */
+export async function decidePluginApproval(
+  id: string,
+  approve: boolean,
+  kept?: string[],
+): Promise<void> {
+  requireNativeBridge();
+  await invoke<unknown>("plugin_approval_decide", { id, approve, kept });
+}
+
+/** Brings the confirmation window back; false when nothing waits in it. */
+export async function openPluginApproval(): Promise<boolean> {
+  requireNativeBridge();
+  return Boolean(await invoke<unknown>("open_plugin_approval"));
+}
+
+/** Calls onFinished once the user decided a change in the confirmation window. */
+export async function listenPluginApprovalFinished(
+  onFinished: (finished: PluginApprovalFinished) => void,
+): Promise<() => void> {
+  if (isWebEdition || !hasNativeBridge()) return () => {};
+  return listen("plugin-approval-finished", (event) => {
+    try {
+      onFinished(parsePluginApprovalFinished(event.payload));
+    } catch {
+      // A malformed announcement changes nothing.
+    }
+  });
+}
+
+/** Calls onChange when a newer change replaced the one waiting. */
+export async function listenPluginApprovalChanged(
+  onChange: () => void,
+): Promise<() => void> {
+  if (isWebEdition || !hasNativeBridge()) return () => {};
+  return listen("plugin-approval-changed", () => onChange());
+}
+
+/**
+ * Fetches the plugin a GitHub link names, builds it in Core and checks it,
+ * for the user to review before installing it.
+ */
+export async function previewPluginInstall(
+  url: string,
+): Promise<PluginInstallReview> {
+  requireNativeBridge();
+  return parsePluginInstallReview(
+    await invoke<unknown>("plugin_action", {
+      action: "source_preview",
+      input: { url },
+    }),
+  );
+}
+
+/**
+ * Installs the build a review staged. It waits for the user as a change
+ * that grants a plugin more does: see updatePlugin.
+ */
+export async function installPlugin(
+  token: string,
+  approved = false,
+): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", {
+      action: "source_install",
+      input: { token },
+      ...(approved ? { approved: true } : {}),
+    }),
+  );
+}
+
+/** Looks for a newer version of a plugin installed from source. */
+export async function checkPluginUpdate(
+  key: string,
+): Promise<PluginUpdateCheck> {
+  requireNativeBridge();
+  return parsePluginUpdateCheck(
+    await invoke<unknown>("plugin_action", { action: "source_check", key }),
+  );
+}
+
+/**
+ * Puts back a version a later install replaced, once the user confirmed
+ * it, as installPlugin.
+ */
+export async function rollbackPlugin(
+  key: string,
+  version: string,
+  approved = false,
+): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", {
+      action: "source_rollback",
+      key,
+      input: { version },
+      ...(approved ? { approved: true } : {}),
+    }),
+  );
+}
+
+/**
+ * Runs a plugin's onUiCall hook for its interface code, in its sandbox and
+ * under its grants; resolves with what the hook returned.
+ */
+export async function callPluginUi(
+  key: string,
+  name: string,
+  input?: unknown,
+): Promise<unknown> {
+  requireNativeBridge();
+  const answer = await invoke<unknown>("plugin_action", {
+    action: "ui_call",
+    key,
+    input: { name, ...(input === undefined ? {} : { input }) },
+  });
+  return (answer as { result?: unknown } | null)?.result ?? null;
+}
+
+/** Removes a plugin installed from source; a builtin of its key comes back. */
+export async function uninstallPlugin(key: string): Promise<PluginList> {
+  requireNativeBridge();
+  return parsePluginList(
+    await invoke<unknown>("plugin_action", { action: "source_uninstall", key }),
+  );
+}
+
+/** Why an install could not go on, from its error. */
+export function pluginInstallFailureOf(
+  error: unknown,
+): PluginInstallFailure | null {
+  let body: unknown;
+  if (error instanceof ConsoleError) {
+    body = error.body;
+  } else {
+    const message = error instanceof Error ? error.message : String(error);
+    const start = message.indexOf("{");
+    if (start < 0) return null;
+    try {
+      body = JSON.parse(message.slice(start));
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return parsePluginInstallFailure(
+      (body as { failure?: unknown } | null)?.failure,
+    );
+  } catch {
+    return null;
+  }
 }
 
 export async function testPlugin(key: string): Promise<PluginTestResult> {
@@ -1442,6 +1644,37 @@ export async function getPluginStatus(key: string): Promise<PluginStatus> {
   requireNativeBridge();
   return parsePluginStatus(
     await invoke<unknown>("plugin_action", { action: "status", key }),
+  );
+}
+
+/** The plugin's log lines and failures after `since`, and its hooks' timings. */
+export async function getPluginJournal(
+  key: string,
+  since: number,
+): Promise<PluginJournal> {
+  requireNativeBridge();
+  return parsePluginJournal(
+    await invoke<unknown>("plugin_action", {
+      action: "journal",
+      key,
+      input: { since },
+    }),
+  );
+}
+
+/** Runs one hook by hand, without the network. */
+export async function dryRunPlugin(
+  key: string,
+  hook: string,
+  args: unknown[],
+): Promise<PluginDryRunResult> {
+  requireNativeBridge();
+  return parsePluginDryRun(
+    await invoke<unknown>("plugin_action", {
+      action: "dry_run",
+      key,
+      input: { hook, args },
+    }),
   );
 }
 
@@ -1511,12 +1744,14 @@ export async function getPluginHostSettings(): Promise<PluginHostSettings> {
 
 export async function updatePluginHostSettings(
   update: PluginHostSettingsUpdate,
+  approved = false,
 ): Promise<PluginHostSettings> {
   requireNativeBridge();
   return parsePluginHostSettings(
     await invoke<unknown>("plugin_action", {
       action: "update_host",
       input: update,
+      ...(approved ? { approved: true } : {}),
     }),
   );
 }

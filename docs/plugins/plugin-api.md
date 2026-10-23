@@ -1,52 +1,100 @@
-# AstrLink 插件 API（v1）
+# AstrLink 插件 API（v2）
 
 <!-- markdownlint-configure-file { "MD013": { "tables": false } } -->
 
 AstrLink Core 内嵌 [moejs](https://github.com/Calcium-Ion/moejs)，用来运行插件。
 
-插件用 JavaScript 或 TypeScript 编写，负责策略：查什么、留哪些、怎么排版、在请求记录和插件页上展示什么。
+插件用 JavaScript 或 TypeScript 编写，负责策略：请求放不放行、走哪个提供商、往请求里加什么、怎么改回复、在请求记录和插件页上展示什么。
 
-AstrLink 负责机制：沙箱、预算、网络、存储，以及把插件的结果放到哪里。
+AstrLink 负责机制：沙箱、时间上限、网络、存储、确认，以及把插件的结果放到哪里。
 
-插件碰不到文件、定时器、环境变量和凭据，也没有自己的网络。它能用的只有 AstrLink 提供的
-`astrlink.*` 函数，而且每一项能力都要用户在启用时授予。
+插件碰不到文件、子进程、环境变量和真实密钥。它能用的只有 AstrLink 提供的
+`astrlink.*` 函数和标准的 Web API，而且每一项能力都要用户在启用时授予。
 
-## 放在哪里、怎么写
+## 写一个插件
 
-- 插件放在 `<数据目录>/plugins/<key>/plugin.ts` 或
-  `plugin.js`，目录名就是插件的 key。随版本发布的内置插件可以被目录里同 key 的插件替换。
-- 同一目录里可以放一个 `icon.svg` 或 `icon.png`（最多 64
-  KiB，两个都有时用 SVG），插件页把它当作插件的图标，启用时的连接动画也用它。SVG 不能带脚本；不合要求的图标会被忽略，不影响插件加载。
-- 改了文件后，在「插件」页点「重新扫描」即可，不用重启。正在处理的请求继续用旧的版本跑完。
-- 插件是一个文件、同步执行：不支持 `async`、`await`、`import` 和
-  `export … from`，加载前就会报错并给出行号。多个文件请先用打包工具（例如 esbuild）合成一个文件。源码最多 8
-  MiB。
-- TypeScript 只去掉类型，不做类型检查。`enum`、带值的 `namespace`
-  这类有运行时语义的写法不支持。
-- 需要编辑器提示和类型检查时，把 [astrlink-plugin.d.ts](astrlink-plugin.d.ts)
-  和插件放进同一个 TypeScript 工程，例如示例目录里的
-  [tsconfig.json](team-rules/tsconfig.json)。
-
-一个插件导出清单 `meta` 和若干钩子，此外不能导出别的名字。完整的例子见
+最简单的插件是一个文件：导出清单 `meta`
+和若干钩子，此外不能导出别的名字。完整的例子见
 [team-rules/plugin.ts](team-rules/plugin.ts)：它把配置里的团队规则写进每个会话的系统提示词。
+
+插件多了文件或要用 npm 依赖时，写成一个项目：
+
+```text
+my-plugin/
+├── package.json        # name、version、engines.astrlink，以及 astrlink 字段
+├── package-lock.json   # 有依赖时必需；也认 pnpm-lock.yaml、bun.lock
+├── src/plugin.ts       # 后端入口（必需）
+├── src/client.tsx      # 界面入口（可选）
+└── icon.svg            # 图标（可选）
+```
+
+`package.json` 里写
+`"astrlink": { "plugin": "src/plugin.ts", "client": "src/client.tsx" }`；不写时按
+`src/plugin.ts`、`plugin.ts` 这些惯用的位置找。`engines.astrlink`
+写兼容的 AstrLink 版本范围，不满足时拒绝安装。项目由 AstrLink 内置的构建器打包成单文件，运行时不再加载别的代码；React 和界面组件由宿主提供，不要打进包里。
+
+命令行 `astrlink plugin`
+和 Core 用同一套构建器，本机构建的结果和用户安装时一致：
+
+| 命令                        | 做什么                                                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `astrlink plugin new <key>` | 从模板起项目：`basic`、`gate`、`route`、`forward`、`stream`、`response`、`schedule`、`http`、`provider`、`ui` |
+| `astrlink plugin build`     | 构建出 `plugin.js`、`client.js` 和 source map                                                                 |
+| `astrlink plugin check`     | 构建并在 moejs 里编译，检查清单、能力和不该用的 API                                                           |
+| `astrlink plugin test`      | 按 `tests/` 里的用例跑钩子，可以伪造存储                                                                      |
+| `astrlink plugin dev`       | 监听改动、构建，装进本机 AstrLink 的插件目录并实时输出日志                                                    |
+
+`astrlink plugin new` 会把类型定义放进项目：后端是
+[astrlink-plugin.d.ts](../../core/plugins/astrlink-plugin.d.ts)，界面是
+[astrlink-plugin-client.d.ts](../../core/plugins/astrlink-plugin-client.d.ts)。下文说到的字段以它们为准。
+
+插件装在 `<数据目录>/plugins/<key>/`：`plugin.ts` 或 `plugin.js`（可以带
+`plugin.js.map`），有界面时还有
+`client.js`。随版本发布的内置插件可以被目录里同 key 的插件替换。
+
+- 同一目录里可以放一个 `icon.svg` 或 `icon.png`（最多 64
+  KiB，两个都有时用 SVG），插件页把它当作插件的图标。SVG 不能带脚本；不合要求的图标会被忽略，不影响插件加载。
+- 手动改了文件后，在「插件」页点「重新扫描」即可，不用重启。正在处理的请求继续用旧的版本跑完。
+- 单个 `.ts` 文件由 moejs 去掉类型后直接运行，不做类型检查；`enum`、带值的
+  `namespace` 这类有运行时语义的写法要经过构建。源码最多 8 MiB。
+- apiVersion 1 的插件必须同步执行：不支持
+  `async`、`await`，加载前就会报错并给出行号。
+
+## 从 GitHub 安装
+
+插件页「安装插件」里粘贴 GitHub 链接即可，作者不用另外打包：
+
+- 链接可以是仓库首页（装最新的版本标签，没有标签就装默认分支）、`tree/<分支或标签>/<目录>`（一个仓库放多个插件）、Release 或提交。暂不支持私有仓库。
+- AstrLink 先把链接定到具体的提交，经网关的出网代理下载这个提交的源码。
+- 有依赖时必须有锁文件。依赖按锁文件从 npm 下载，用锁文件里的哈希逐个校验；默认用 npm 官方源，失败时退到 npmmirror，源可以在安装对话框里改。只下载构建实际用到的包，不运行任何安装脚本；带原生模块的包直接报不支持。
+- 构建后在 moejs 里检查，核对
+  `engines.astrlink`，然后显示审查结果：来源、版本、作者、申请的能力、联网用途、有没有界面代码、依赖的个数和大小，以及会替换哪个插件（内置的、开发中的、别处装的）。
+- 安装要在「插件确认」窗口里确认。装好的插件不会自动启用；目录里的
+  `install.json` 记下仓库、提交、子目录、锁文件和构建产物的哈希。
+- 「检查更新」看同一个仓库：装的是标签就看同一前缀的新版本标签（显示 Release 说明），装的是分支就看分支的新提交，装的是固定提交就不跟随。更新同样经过审查和确认，审查里写明新增和去掉的能力、界面代码、联网用途和依赖的变化。
+- 被替换的版本保留最近 3 个，可以回滚；回滚也要确认。卸载会删掉插件文件和保留的版本，插件的设置和存储的数据保留；替换过内置插件的，卸载后内置插件恢复。
 
 ## 清单 meta
 
-| 字段           | 说明                                                                                        |
-| -------------- | ------------------------------------------------------------------------------------------- |
-| `apiVersion`   | 目前是 `1`                                                                                  |
-| `key`          | 小写字母开头，只含小写字母、数字和短横线，最多 32 个字符，与目录名相同                      |
-| `name`         | 界面上显示的名称，最多 64 个字符                                                            |
-| `version`      | 版本号，最多 32 个字符                                                                      |
-| `capabilities` | 申请的能力，见下表                                                                          |
-| `network`      | 申请网络时必填：`{ purpose: "…" }`，启用时展示给用户                                        |
-| `credentials`  | 凭据位：`name`、`label`、`header`、可选的 `scheme`（如 `Bearer`）。需要网络能力             |
-| `metadata`     | 启用时登记的元信息属性：`key`、`label`、`pattern`（以 `^` 开头、`$` 结尾）、可选的 `marker` |
-| `notice`       | 启用提醒，最多 1000 个字符，原样显示在启用确认框里                                          |
-| `settings`     | 插件页「设置」表单的字段，按顺序排列，见下文                                                |
-| `credits`      | 插件依托或对接的开源项目，显示在「概览」里，见下文                                          |
-| `storage`      | 插件在 `astrlink.store` 里存了什么，显示在「概览」的「数据存储」里，见下文                  |
-| `tools`        | 供模型使用的查询和上报，最多 8 个，见「允许 Agent 查询」                                    |
+| 字段           | 说明                                                                                               |
+| -------------- | -------------------------------------------------------------------------------------------------- |
+| `apiVersion`   | `2`；`1` 的插件照常运行，但只能用 v1 的能力和钩子，而且必须同步执行                                |
+| `key`          | 小写字母开头，只含小写字母、数字和短横线，最多 32 个字符，与目录名相同                             |
+| `name`         | 界面上显示的名称，最多 64 个字符                                                                   |
+| `version`      | 版本号，最多 32 个字符                                                                             |
+| `capabilities` | 申请的能力，见下表                                                                                 |
+| `network`      | 申请网络时必填：`{ purpose: "…" }`，启用时展示给用户                                               |
+| `credentials`  | 凭据位：`name`、`label`、`header`、可选的 `scheme`（如 `Bearer`）。需要网络能力                    |
+| `metadata`     | 启用时登记的元信息属性：`key`、`label`、`pattern`（以 `^` 开头、`$` 结尾）、可选的 `marker`        |
+| `notice`       | 启用提醒，最多 1000 个字符，原样显示在启用确认框里                                                 |
+| `settings`     | 插件页「设置」表单的字段，按顺序排列，见下文                                                       |
+| `credits`      | 插件依托或对接的开源项目，显示在「概览」里，见下文                                                 |
+| `storage`      | 插件在 `astrlink.store` 里存了什么，显示在「概览」的「数据存储」里，见下文                         |
+| `tools`        | 供模型使用的查询和上报，最多 8 个，见「允许 Agent 查询」                                           |
+| `limits`       | v2：各扩展点需要的时间上限（毫秒），不能超过网关的上限，见「扩展点」                               |
+| `failClosed`   | v2：`onRequest` 出错或超时时拦下请求而不是放行，需要 `request.gate`，用户同意后才生效              |
+| `schedules`    | v2：`onSchedule` 的运行间隔：`[{ name, everyMinutes }]`，最多 8 个，1～10080 分钟，需要 `schedule` |
+| `providers`    | v2：插件转接的供应商，最多 4 个，需要 `provider`，见「供应商适配器」                               |
 
 清单按严格 JSON 读取：拼错的字段会报错，不会被悄悄忽略。
 
@@ -73,15 +121,17 @@ AstrLink 负责机制：沙箱、预算、网络、存储，以及把插件的�
 
 以 `$` 开头的键放置 AstrLink 自己的设置，只能带 `group` 和 `advanced`：
 
-| 键           | 设置                                               | 条件                  |
-| ------------ | -------------------------------------------------- | --------------------- |
-| `$wait`      | 最长等待                                           |                       |
-| `$trusted`   | 受信任，跳过隐私检查                               |                       |
-| `$origins`   | 其他允许访问的地址                                 | 需要 `network`        |
-| `$clients`   | 对哪些客户端生效，默认全部                         |                       |
-| `$workspace` | 按工作区自动绑定，默认打开，见「元信息」           | 需要 `metadata`       |
-| `$refresh`   | 自动刷新常驻块，默认关闭，见「常驻块什么时候重算」 | 需要 `context.inject` |
-| `$lookup`    | 允许 Agent 查询，默认打开，见「允许 Agent 查询」   | 需要 `tools`          |
+| 键            | 设置                                               | 条件                  |
+| ------------- | -------------------------------------------------- | --------------------- |
+| `$wait`       | 最长等待                                           |                       |
+| `$trusted`    | 受信任，跳过隐私检查                               |                       |
+| `$origins`    | 其他允许访问的地址                                 | 需要 `network`        |
+| `$clients`    | 对哪些客户端生效，默认全部                         |                       |
+| `$workspace`  | 按工作区自动绑定，默认打开，见「元信息」           | 需要 `metadata`       |
+| `$refresh`    | 自动刷新常驻块，默认关闭，见「常驻块什么时候重算」 | 需要 `context.inject` |
+| `$lookup`     | 允许 Agent 查询，默认打开，见「允许 Agent 查询」   | 需要 `tools`          |
+| `$limits`     | 各扩展点的时间上限，见「扩展点」                   | v2                    |
+| `$failClosed` | 入口出错时拦下请求                                 | 需要 `failClosed`     |
 
 插件没有放置的，表单放在「网关」分组，地址放进「更多设置」。
 
@@ -115,10 +165,85 @@ AstrLink 负责机制：沙箱、预算、网络、存储，以及把插件的�
 | `ui.views`       | 钩子可以返回请求记录和插件页里的视图                      |
 | `model.tools`    | 模型可以运行 `tools` 里的查询和上报，由 `callTool` 作答   |
 
-启用插件时，确认框列出插件申请的能力，用户可以取消勾选其中任何一项。调用没有授予的函数会抛出
+apiVersion 2 另有这些能力：
+
+| 能力                | 给插件的东西                                                                   |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `request.write`     | `beforeForward` 可以追加系统提示词、在本轮开头加内容、改生成参数、增删工具     |
+| `request.write.raw` | `beforeForward` 可以替换整个请求体，`beforeUpstream` 可以改每次尝试的请求      |
+| `request.gate`      | `onRequest` 可以拒绝请求                                                       |
+| `routing`           | `route` 可以调整候选提供商的顺序、排除提供商、换模型                           |
+| `response.read`     | `onResponse` 在请求结束后看到回复                                              |
+| `response.write`    | `rewriteResponse` 改整段回复，`onStreamEvent`、`onStreamEnd` 改流式事件        |
+| `events`            | `onEvent` 收到网关里发生的事，不含请求和回复的内容                             |
+| `schedule`          | 按 `meta.schedules` 定时运行 `onSchedule`                                      |
+| `http.serve`        | 推理端口上的 `/plugins/<key>/…` 由 `onHttp` 作答                               |
+| `provider`          | 提供 `meta.providers` 里的供应商，见「供应商适配器」                           |
+| `ui.code`           | 高风险：插件的界面代码在主窗口里运行，和 AstrLink 界面同等权限，见「界面代码」 |
+
+这些操作只在单独的「插件确认」窗口里生效：启用插件、授予它没有的能力、允许新的地址或明文HTTP、设为受信任、出错时拦下请求，以及安装、更新和回滚插件代码。窗口自己弹出、不抢焦点，主窗口里运行的代码点不到它；用户在里面可以取消勾选要授予的能力，`ui.code`
+用红字写明风险。网页控制台没有这个窗口，用它自己的确认框。调用没有授予的函数会抛出
 `TypeError`。
 
-## 钩子
+## 运行时
+
+apiVersion 2 的钩子可以写成
+`async`。网关自己驱动 Promise 和定时器：等网络、存储和定时器的时候不算脚本时间，也不占插件的执行槽位。一直不兑现的 Promise 算失败。
+
+可以用的标准全局：
+
+- `fetch`、`Headers`、`Response`、`AbortController`：等同
+  `astrlink.http.fetch`，受网络授权约束。
+- `URL`、`URLSearchParams`、`TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone`、`queueMicrotask`。
+- `crypto.getRandomValues`、`crypto.randomUUID`、`crypto.subtle.digest`，以及 HMAC 的签名和校验。
+- `setTimeout`、`clearTimeout`、`setInterval`、`clearInterval`，受本次调用的时间上限约束。
+- `console`：写进插件日志。`performance.now()`。
+
+没有 Node 的 `fs`、`process`、`Buffer`
+这些模块，用到它们的库在构建时就会报出来。
+
+`astrlink.textStream({ map?, replace?, maxMatch? })`
+是流式改写的帮手：它认得 Chat
+Completions、Responses、Messages 和 Gemini 的流式格式，把回复文字逐段交给
+`map`，或按 `replace` 的规则替换（跨事件的匹配最多看 `maxMatch`
+个字符），返回现成的 `onStreamEvent` 和 `onStreamEnd`。
+
+## 扩展点
+
+apiVersion 2 的扩展点按请求经过的顺序：
+
+| 扩展点                             | 做什么                                               | 能力                                 | 默认上限 / 最大  | 出错或超时时                                     |
+| ---------------------------------- | ---------------------------------------------------- | ------------------------------------ | ---------------- | ------------------------------------------------ |
+| `onRequest(ctx)`                   | 放行、打标签或拒绝                                   | 拒绝要 `request.gate`                | 1 s / 5 s        | 放行；插件声明 `failClosed` 且用户同意时拦下     |
+| `route(ctx)`                       | 调整候选提供商的顺序、排除提供商、换模型             | `routing`                            | 1 s / 5 s        | 保持原来的顺序                                   |
+| `beforeForward(ctx)`               | 改请求：系统提示词、本轮开头、参数、工具、整个请求体 | `request.write`、`request.write.raw` | 2.5 s / 5 s      | 原样发出                                         |
+| `beforeUpstream(ctx)`              | 改每次尝试发往上游的请求，用提供商的协议             | `request.write.raw`                  | 1 s / 5 s        | 原样发出                                         |
+| `rewriteResponse(ctx)`             | 改整段回复                                           | `response.write`                     | 1 s / 5 s        | 原样返回                                         |
+| `onStreamEvent(ctx, event, state)` | 改流式回复的每条事件                                 | `response.write`                     | 每条 50 ms / 1 s | 这条事件原样放过；同一请求里接连出错就不再交给它 |
+| `onStreamEnd(ctx, state)`          | 流结束时补发最后的事件                               | `response.write`                     | 同上             | 不补发                                           |
+| `onResponse(ctx)`                  | 请求结束后看回复，在请求之外运行                     | `response.read`                      | 30 s / 60 s      | 记一条失败，不影响回复                           |
+| `observeTurn(turn)`                | 每轮结束后，例如写记忆                               | —                                    | 30 s / 60 s      | 同上                                             |
+| `onEvent(event)`                   | 网关里发生的事，不含内容                             | `events`                             | 30 s / 60 s      | 同上                                             |
+| `onSchedule(run)`                  | 按 `meta.schedules` 定时运行                         | `schedule`                           | 60 s / 300 s     | 记进插件日志                                     |
+| `onHttp(request)`                  | 回答推理端口上的 `/plugins/<key>/…`                  | `http.serve`                         | 10 s / 30 s      | 回 502                                           |
+| `onUiCall(call)`                   | 回答插件界面代码的调用                               | `ui.code`                            | 10 s / 30 s      | 调用失败                                         |
+
+- 上限是墙钟时间。插件可以在 `meta.limits`
+  里写它需要多久，不能超过最大值；用户在插件设置里看得到、能调。插件页「运行状态」按扩展点显示耗时分位。
+- 授了
+  `network`，每个扩展点都能联网，网络等待也受上限约束。入口和路由用到的外部数据，最好放进存储做缓存，由定时任务刷新。
+- 多个插件服务同一个扩展点时，按插件页「执行顺序」依次运行，每个插件拿到前一个的结果。
+- 每次执行都写进请求记录：做了什么（打标签、拒绝、调整路由、改请求、改回复）、耗时和失败原因。
+- 看得到请求体的扩展点，拿到的是隐私检查之后的内容：脱敏时是占位符，网关在发往上游前还原；插件被用户标为受信任时才看到原文。
+
+`ctx.request`
+在各扩展点都一样：请求记录的 id、协议、模型、客户端、是否流式、会话和轮次、元信息、已有的标签、界面语言和请求体大小。各钩子的入参和返回见类型定义里的
+`RequestContext`、`RouteContext`、`ForwardEdits`、`UpstreamContext`、`ResponseContext`、`StreamResult`、`ObserveContext`、`GatewayEvent`、`ScheduleRun`、`HttpServeRequest`
+和 `UiCall`。
+
+## 会话钩子
+
+这些钩子 v1 就有，v2 里照样可用，也可以写成 `async`。
 
 | 钩子                      | 什么时候调用                 | 返回                                                             |
 | ------------------------- | ---------------------------- | ---------------------------------------------------------------- |
@@ -321,9 +446,132 @@ curl -s -G http://127.0.0.1:<端口>/tools/<插件>/<查询> \
 
 每次查询或上报都在会话最近一个请求的记录里追加一条插件记录：哪个工具、是不是上报、参数多少字、结果多少字节、几条结果、耗时，被拒绝时写明原因。参数和结果本身不保存。
 
+## 界面代码
+
+插件可以有界面入口（例如 `src/client.tsx`），由构建器打包成
+`client.js`。React、AstrLink 的组件和插件前端 SDK 由宿主提供，所以主题、深色模式、字体和多语言天然一致。
+
+```tsx
+import { useEffect, useState } from "react";
+import {
+  call,
+  Panel,
+  PanelHeader,
+  registerSlot,
+  t,
+} from "@astrlink/plugin/client";
+
+function Count() {
+  const [turns, setTurns] = useState<number | null>(null);
+  useEffect(() => {
+    void call<{ turns: number }>("count").then((answer) =>
+      setTurns(answer.turns),
+    );
+  }, []);
+  return (
+    <p>{t({ en: "{{n}} turns", "zh-CN": "{{n}} 轮" }, { n: turns ?? 0 })}</p>
+  );
+}
+
+registerSlot("overview.widget", () => (
+  <Panel>
+    <PanelHeader size="sm">Count</PanelHeader>
+    <Count />
+  </Panel>
+));
+```
+
+插槽：
+
+| 插槽              | 位置                           | `context`              |
+| ----------------- | ------------------------------ | ---------------------- |
+| `page`            | 侧边栏「插件」下面的独立页面   | —                      |
+| `plugin.tab`      | 插件页里这个插件自己的标签页   | `{ plugin }`           |
+| `overview.widget` | 概览底部的卡片                 | —                      |
+| `request.tab`     | 请求记录里会话详情的标签页     | `{ session, request }` |
+| `session.section` | 会话详情「插件」标签页里的区块 | `{ session }`          |
+| `service.section` | 提供商「连接」标签页里的区块   | `{ service }`          |
+
+SDK 还提供：`call(name, input)` 调用插件后端的
+`onUiCall`（后端仍在沙箱里跑，受它的授权约束）；`getSettings`、`saveSettings`
+读写插件设置；`t()`
+按界面语言取文字；`language()`、`useLanguage()`、`useTheme()`；`navigate()`
+跳到 AstrLink 的页面或插件自己的页面；`toast()` 显示提示条；以及
+`Button`、`Panel`、`Field` 等共用组件。
+
+界面代码和 AstrLink 界面同等权限：能看请求记录、改设置，凡是界面能做的都能做。所以：
+
+- 需要 `ui.code`，启用时用红字确认；安装审查里写明有没有界面代码。
+- 主窗口的 CSP 不放开，界面代码不能直接访问外网；要联网只能经过插件后端的
+  `onUiCall`。
+- 给插件加能力、改网络地址、设为受信任、装新插件，只在「插件确认」窗口里生效，主窗口里的代码点不到它。
+- 每个插件组件外面都有错误边界，出错只影响它自己；一分钟内出错 3 次，就自动关掉这个插件的界面。
+- 每个插件的界面可以在插件页单独关掉；插件页顶部的「插件界面」关掉就是安全模式，所有插件界面都不加载。上次加载插件界面后窗口没能正常运行时，下次启动自动进入安全模式。
+- 代码固定在安装时的提交上，更新要用户看过审查后确认。
+- 网页控制台默认不加载插件界面，要在插件页打开并确认。
+
+## 供应商适配器
+
+插件可以把一种上游 API 接成提供商，社区不改 Core 就能接入新的模型 API。用户添加提供商时多出「插件提供商」一类，之后它和普通提供商一样参与路由、故障切换、统计和隐私检查。
+
+```ts
+export const meta = {
+  apiVersion: 2,
+  key: "acme",
+  name: "Acme",
+  version: "1.0.0",
+  capabilities: ["provider"],
+  providers: [
+    {
+      id: "acme",
+      name: "Acme AI",
+      baseUrl: "https://api.acme.example/v1",
+      auth: "bearer",
+      protocols: { "openai.chat": { stream: true } },
+      convert: true,
+      models: ["acme-1"],
+    },
+  ],
+};
+```
+
+- `protocols` 写插件接哪些协议（Chat
+  Completions、Responses、Messages、Gemini），每种是否支持整段回复（`sync`，默认支持）和流式（`stream`）。客户端要的模式插件不支持时，这个提供商不进候选。
+- `convert: true`
+  让网关先用自己的转换器把其他协议转成插件接的协议，回来时再转回去；不写就不接这类请求。
+- `auth` 写网关怎么发密钥：`bearer`、`x-api-key`、`google`、`none` 或
+  `{ header: "X-Acme-Key" }`。密钥由用户填在提供商上，插件看不到。
+
+钩子：
+
+| 钩子                                  | 做什么                                                                                             |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `buildRequest(ctx)`                   | 返回上游请求：`method`、`url`（基础地址后的路径，或同一主机上的地址）、`headers`、`body`、`stream` |
+| `parseResponse(ctx, res)`             | 整段回复：返回 `{ json }`，即 `ctx.protocol` 的回复，用量放在协议本来的位置                        |
+| `parseStreamEvent(ctx, event, state)` | 流式：每条上游事件调用一次，返回 `{ events, state, done }`                                         |
+| `finishStream(ctx, state)`            | 可选，流结束时补发收尾事件，例如 `[DONE]`                                                          |
+| `parseError(ctx, res)`                | 可选，把上游错误转成 `{ status, code, message, retryable }`；`retryable` 决定能不能故障切换        |
+
+- `ctx.body` 是隐私检查和转发前修改之后、本来要发往上游的请求体，用
+  `ctx.protocol` 的格式；`ctx.settings` 是插件的设置。
+- 网关负责 HTTP、出网代理、超时、故障切换和两边的 SSE 分帧：上游的 SSE 或每行一个 JSON 逐条交给
+  `parseStreamEvent`；插件返回的事件写成 SSE，`data`
+  是字符串时原样写，其余写成 JSON。
+- 请求只能发往提供商地址所在的主机；插件设的凭据头和 `X-AstrLink-*`
+  头一律去掉，上游认不出 AstrLink。
+- 隐私还原、计价（插件只按协议报用量）和请求记录照常由网关完成。
+- 获取模型时，`buildRequest` 收到的 `ctx.purpose` 是
+  `models`：返回列表请求，`parseResponse` 返回 `{ models }`；返回 `null`
+  表示不支持，用户手动填模型。
+- 声明了流式就必须导出
+  `parseStreamEvent`；导出了用不到的适配钩子，插件拒绝加载。
+- 时间上限：构造和解析一次 1 秒（最多 5 秒），流式每条事件 50 毫秒（最多 1 秒）；超时或出错按上游失败处理，可以故障切换。
+
 ## 宿主函数
 
-这些函数只在 AstrLink 调用钩子的时候能用；在模块顶层调用会抛出 `TypeError`。
+这些函数只在 AstrLink 调用钩子的时候能用；在模块顶层调用会抛出
+`TypeError`。apiVersion 2 里，`astrlink.http.fetch`、`astrlink.store.*` 和
+`astrlink.meta.values` 返回 Promise，要 `await`；其余函数照旧同步返回。
 
 ### `astrlink.http.fetch(request)` 或 `astrlink.http.fetch([request, …])`
 
@@ -336,8 +584,11 @@ curl -s -G http://127.0.0.1:<端口>/tools/<插件>/<查询> \
   等请求头；不会发送 `User-Agent`；不跟随重定向，3xx 原样返回。
 - 请求体用 `json`（作为 `application/json` 发送）或 `body`，不能同时有，`GET`
   不带请求体，最多 1 MiB。
-- 传数组时并行执行，一次最多 8 个，每次钩子调用最多 16 个。单个请求默认 10 秒超时，最多 30 秒，钩子的网络预算会更早截止。等网络的时间不计入 200
-  ms 的脚本时间。
+- 传数组时并行执行，一次最多 8 个；v1 的每次钩子调用最多 16 个，v2 的最多 32 个，可以用
+  `Promise.all`
+  同时等。单个请求默认 10 秒超时，最多 30 秒，钩子的时间上限会更早截止。等网络的时间不计入脚本时间。
+- v2 还提供标准的 `fetch(url, init)`，按同样的规则访问网络，返回标准的
+  `Response`；`init.credential` 指定凭据位。
 - 响应：`status`（没收到响应时为 0）、`headers`（每个头的第一个值，键是小写）、`json`
   或 `text`（最多 1 MiB）、`took_ms`，以及出错时的
   `error`：`denied`、`timeout`、`network`、`too_large`、`budget`。HTTP 错误码照常返回，不算
@@ -358,13 +609,15 @@ curl -s -G http://127.0.0.1:<端口>/tools/<插件>/<查询> \
 
 ## 运行限制
 
-| 项       | 限制                                           |
-| -------- | ---------------------------------------------- |
-| 脚本时间 | 每次调用 200 ms，等网络和存储的时间不计        |
-| 内存     | 每次调用 32 MiB                                |
-| 返回值   | 最多 64 KiB、4096 个值                         |
-| 动态代码 | `eval` 和 `new Function` 抛出 `EvalError`      |
-| 内置对象 | 冻结并在所有插件间共享，修改会抛出 `TypeError` |
+| 项       | 限制                                                               |
+| -------- | ------------------------------------------------------------------ |
+| 脚本时间 | 每次调用 200 ms，等网络、存储和定时器的时间不计；供应商适配器 1 秒 |
+| 内存     | 每次调用 32 MiB；供应商适配器 256 MiB                              |
+| 返回值   | 最多 64 KiB、4096 个值；供应商适配器 64 MiB                        |
+| 定时器   | v2 每次调用同时最多 64 个，调用结束时一并取消                      |
+| 时间上限 | 每个扩展点各自的上限，见「扩展点」                                 |
+| 动态代码 | `eval` 和 `new Function` 抛出 `EvalError`                          |
+| 内置对象 | 冻结并在所有插件间共享，修改会抛出 `TypeError`                     |
 
 超出限制时，这次调用的结果被丢弃，请求照常进行。出错的运行时不会再被使用，下次调用用新的。
 
@@ -440,4 +693,15 @@ KiB；表格最多 200 行，单个文字最多 1024 个字符。超出的部分
 
 ## 出错时
 
-插件编译、加载或校验失败时，只有这个插件停用，插件页显示原因和行号，其他插件和请求不受影响。钩子抛错、超时或超出内存时，这一次的结果被丢弃，请求照常发出，请求记录里写明原因。
+插件编译、加载或校验失败时，只有这个插件停用，插件页显示原因和行号，其他插件和请求不受影响。钩子抛错、超时或超出内存时，这一次的结果被丢弃，按「扩展点」表里的方式处理，请求记录里写明原因。
+
+同一个扩展点一分钟内失败 5 次，会熔断一分钟：这段时间里请求不再交给它，插件页「开发」页签写明到什么时候。
+
+## 开发和调试
+
+- 插件页的「开发」页签有插件的实时日志：`console`、`astrlink.log`、失败的调用和调用栈。
+- 同一页签列出每个钩子最近 256 次调用的耗时分位和 JS 时间。
+- 「试运行」选一个钩子、填参数，在沙箱里跑一次，不访问网络，也不写请求记录。
+- 多文件项目构建时生成 source map，出错时调用栈对回 TS 源码的行号。
+- `astrlink plugin dev`
+  构建出的开发版在插件列表里标为「开发版」，源码改了自动重新加载。

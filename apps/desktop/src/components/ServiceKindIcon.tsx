@@ -1,4 +1,4 @@
-import { Connect as Cable } from "@/components/icons";
+import { Blocks, Connect as Cable } from "@/components/icons";
 import { vendorMarks, type Vendor } from "@/components/vendor-marks";
 import type { ReactNode } from "react";
 
@@ -9,7 +9,7 @@ import { DroidIcon } from "./DroidIcon";
 import { MagpieIcon } from "./MagpieIcon";
 import { serviceKindLabel, type ServiceKind } from "../service-model";
 
-type Mark = Vendor | "newapi" | "magpie" | "droid" | "custom";
+type Mark = Vendor | "newapi" | "magpie" | "droid" | "custom" | "plugin";
 
 // Vendor-backed kinds share their logo with the vendor's models through
 // `vendorMarks`; only the gateways and custom endpoints have marks of their own.
@@ -39,6 +39,7 @@ const kindMarks: Record<ServiceKind, Mark> = {
   doubao: "doubao",
   xai: "grok",
   custom: "custom",
+  plugin: "plugin",
 };
 
 function renderMark(mark: Mark, size: number): ReactNode {
@@ -60,6 +61,14 @@ function renderMark(mark: Mark, size: number): ReactNode {
     case "custom":
       return (
         <Cable
+          aria-hidden="true"
+          className="text-muted-foreground"
+          size={size}
+        />
+      );
+    case "plugin":
+      return (
+        <Blocks
           aria-hidden="true"
           className="text-muted-foreground"
           size={size}

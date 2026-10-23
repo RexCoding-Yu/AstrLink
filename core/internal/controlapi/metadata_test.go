@@ -39,13 +39,13 @@ func TestMetadataAttributesOfTheUserAndOfPlugins(t *testing.T) {
 			t.Fatalf("POST %s = %d %s", body, response.Code, response.Body.String())
 		}
 	}
-	response = controlRequest(t, handler, http.MethodPatch, MetadataAttributesPath+"/env", "application/json", `{"label":"部署环境","pattern":"^(dev|prod)$","marker":"deploy-env"}`, "")
+	response = approvedRequest(t, handler, http.MethodPatch, MetadataAttributesPath+"/env", "application/json", `{"label":"部署环境","pattern":"^(dev|prod)$","marker":"deploy-env"}`, "")
 	if updated := decodeBody[contract.MetadataAttributeView](t, response); response.Code != http.StatusOK || updated.Label != "部署环境" || updated.Marker != "deploy-env" {
 		t.Fatalf("PATCH = %d %s", response.Code, response.Body.String())
 	}
 
 	// Enabling the demo plugin registers its project attribute.
-	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/demo", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusOK {
+	if response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/demo", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusOK {
 		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
 	}
 	list := decodeBody[attributeList](t, controlRequest(t, handler, http.MethodGet, MetadataAttributesPath, "", "", ""))
@@ -84,7 +84,7 @@ func TestEnablingAPluginWithATakenAttributeFails(t *testing.T) {
 	if response := controlRequest(t, handler, http.MethodPost, MetadataAttributesPath, "application/json", `{"key":"project","label":"项目","pattern":"^.+$"}`, ""); response.Code != http.StatusCreated {
 		t.Fatalf("create = %d", response.Code)
 	}
-	response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/demo", "application/json", `{"enabled":true}`, "")
+	response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/demo", "application/json", `{"enabled":true}`, "")
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "metadata_attribute_conflict") {
 		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
 	}
@@ -150,7 +150,7 @@ func TestSessionMetadataIsSetByHandAndUnboundToNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/demo", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusOK {
+	if response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/demo", "application/json", `{"enabled":true}`, ""); response.Code != http.StatusOK {
 		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
 	}
 	started := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)

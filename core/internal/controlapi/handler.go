@@ -120,6 +120,9 @@ type Dependencies struct {
 	// PluginHost serves the settings of every plugin and the plugins' part
 	// in each session. Optional; without it those routes report 503.
 	PluginHost PluginHost
+	// PluginInstaller installs plugins from source. Optional; without it
+	// those routes report 503.
+	PluginInstaller PluginInstaller
 }
 
 // RateLimitReleaser restores a service after an operator clears its risk.
@@ -199,6 +202,7 @@ type Handler struct {
 	plugins            PluginRegistry
 	pluginStore        storage.PluginStore
 	pluginHost         PluginHost
+	pluginInstaller    PluginInstaller
 	pluginsMu          sync.Mutex
 	// pluginTests are the last connection test of each plugin.
 	pluginTestsMu sync.Mutex
@@ -282,6 +286,7 @@ func newHandler(version contract.VersionResponse, dependencies Dependencies) (*H
 		plugins:            dependencies.Plugins,
 		pluginStore:        dependencies.PluginStore,
 		pluginHost:         dependencies.PluginHost,
+		pluginInstaller:    dependencies.PluginInstaller,
 		metadata:           dependencies.Metadata,
 		metadataStore:      dependencies.MetadataStore,
 		repoStars:          newRepoStars(githubAPIBaseURL),

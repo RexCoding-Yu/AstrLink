@@ -37,14 +37,21 @@ type PluginSettingsRecord struct {
 	AutoRefresh bool
 	// LookupEnabled lets the model run the plugin's queries.
 	LookupEnabled bool
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// HookLimitsMs are the user's time limits of extension points, by hook.
+	HookLimitsMs map[string]int
+	// FailClosed is the user's consent that a request the plugin's entry
+	// hook cannot decide is refused.
+	FailClosed bool
+	// UIEnabled lets the plugin's interface code load.
+	UIEnabled bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // NewPluginSettingsRecord returns the settings of a plugin the user changed
 // nothing for yet.
 func NewPluginSettingsRecord(key string) PluginSettingsRecord {
-	return PluginSettingsRecord{Key: key, WorkspaceBinding: true, LookupEnabled: true}
+	return PluginSettingsRecord{Key: key, WorkspaceBinding: true, LookupEnabled: true, UIEnabled: true}
 }
 
 // PluginActivity is what the plugins' statistics read of a request record:

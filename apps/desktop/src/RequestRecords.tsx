@@ -1,6 +1,7 @@
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { SessionChannelBindings } from "./SessionChannelBindings";
 import { SessionMemory } from "./SessionMemory";
+import { PluginSlotView, usePluginSlot } from "./plugin-ui";
 import { SessionMetadataChips } from "./SessionMetadata";
 import { RecoveryChain, RecoveryDetails } from "./components/RecoveryDetails";
 import {
@@ -221,7 +222,9 @@ type DetailTab =
   | "audit"
   | "binding"
   | "memory"
-  | "modelRouting";
+  | "modelRouting"
+  /** A tab a plugin's interface registered. */
+  | `plugin:${string}`;
 // Copies started from a menu lose their button when it closes, so their
 // outcome is announced beside the actions instead.
 const MENU_COPY_KEYS: ReadonlySet<string> = new Set([
@@ -2825,20 +2828,23 @@ function RecordDetail({
     "desktop",
   );
   // The memory tab shows once a plugin that loads blocks takes part in the
-  // session.
-  const [memoryAvailable, setMemoryAvailable] = useState(false);
+  // session, or a plugin's interface adds to it.
+  const [pluginsInSession, setPluginsInSession] = useState(false);
+  const sessionSections = usePluginSlot("session.section");
+  const memoryAvailable = pluginsInSession || sessionSections.length > 0;
+  const pluginTabs = usePluginSlot("request.tab");
   useEffect(() => {
     if (discovery) {
-      setMemoryAvailable(false);
+      setPluginsInSession(false);
       return;
     }
     let current = true;
     getSessionPlugins(session.id)
       .then((plugins) => {
-        if (current) setMemoryAvailable(plugins.length > 0);
+        if (current) setPluginsInSession(plugins.length > 0);
       })
       .catch(() => {
-        if (current) setMemoryAvailable(false);
+        if (current) setPluginsInSession(false);
       });
     return () => {
       current = false;
@@ -3189,13 +3195,20 @@ function RecordDetail({
       <Tabs
         className="flex min-h-0 min-w-0 flex-1 flex-col gap-0"
         onValueChange={(value) => {
-          if (DETAIL_TABS.includes(value as DetailTab)) {
+          if (
+            DETAIL_TABS.includes(value as DetailTab) ||
+            pluginTabs.some((entry) => `plugin:${entry.id}` === value)
+          ) {
             setDetailTab(value as DetailTab);
           }
         }}
         // A session no plugin loads for has no memory tab to stay on.
         value={
-          detailTab === "memory" && !memoryAvailable ? "trajectory" : detailTab
+          (detailTab === "memory" && !memoryAvailable) ||
+          (detailTab.startsWith("plugin:") &&
+            !pluginTabs.some((entry) => `plugin:${entry.id}` === detailTab))
+            ? "trajectory"
+            : detailTab
         }
       >
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b py-1.5">
@@ -3247,6 +3260,15 @@ function RecordDetail({
             <TabsTrigger onClick={() => setDetailTab("audit")} value="audit">
               {t("records.tabAudit")}
             </TabsTrigger>
+            {pluginTabs.map((entry) => (
+              <TabsTrigger
+                key={entry.id}
+                onClick={() => setDetailTab(`plugin:${entry.id}`)}
+                value={`plugin:${entry.id}`}
+              >
+                {entry.title ?? entry.pluginName}
+              </TabsTrigger>
+            ))}
           </TabsList>
           <dl
             data-testid="session-performance"
@@ -3398,6 +3420,22 @@ function RecordDetail({
             }}
           />
         </TabsContent>
+
+        {pluginTabs.map((entry) => (
+          <TabsContent
+            className="mt-0 min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-3"
+            data-tab-scroller
+            key={entry.id}
+            value={`plugin:${entry.id}`}
+          >
+            {detailTab === `plugin:${entry.id}` ? (
+              <PluginSlotView
+                context={{ session: session.id, request: record.id }}
+                entry={entry}
+              />
+            ) : null}
+          </TabsContent>
+        ))}
 
         {!discovery && memoryAvailable ? (
           <TabsContent

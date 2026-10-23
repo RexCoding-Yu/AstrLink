@@ -20,6 +20,8 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 	"github.com/QuantumNous/astrlink/core/internal/planner"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/providerapi"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
@@ -119,7 +121,8 @@ func (handler *Handler) executeCandidatesWithTest(
 		return
 	}
 	records := recordSessionFromContext(request.Context())
-	plugins := test == nil && records != nil && records.plugins != nil
+	plugins := test == nil && records != nil && (records.plugins != nil ||
+		records.extensions.Serves(plugin.HookBeforeForward) || records.extensions.Serves(plugin.HookBeforeUpstream))
 	// Plugin blocks go into the body once, so it must be replayable: a
 	// Gemini body is otherwise streamed through.
 	body, err := captureRequestBody(
@@ -147,6 +150,7 @@ func (handler *Handler) executeCandidatesWithTest(
 	defer body.Close()
 	if plugins {
 		records.injectPlugins(body)
+		records.forwardExtensions(request.Context(), body)
 	}
 	if session := recordSessionFromContext(request.Context()); session != nil {
 		session.noteInboundBodyReady(body.Replayable())
@@ -482,6 +486,11 @@ func (handler *Handler) executeCandidatesWithTest(
 			}
 		}
 		records.noteCodexOfficial(clientClass == accountauth.ClientClassOfficial)
+		// Plugins change what this attempt sends, in its provider's protocol;
+		// an official client's request goes out untouched.
+		if test == nil && clientClass != accountauth.ClientClassOfficial {
+			records.upstreamExtensions(request.Context(), attemptRequest, candidate, plan.UpstreamProtocol, upstreamModel, candidateIndex)
+		}
 		var headers http.Header
 		authorizationEndpoint, authorizeErr := candidate.AuthorizationEndpoint()
 		// The recognized class rides the proxy context so the authorizer, which
@@ -606,6 +615,15 @@ func (handler *Handler) executeCandidatesWithTest(
 				privacyResult.toolArguments,
 			)
 			outWriter = restoring
+		}
+		// Plugins rewrite and read the response in the client's protocol,
+		// before the privacy restore.
+		var pluginWriter *pluginResponseWriter
+		if test == nil && recordSession != nil && (recordSession.extensions.RewritesResponses(classified.Streaming) || recordSession.extensions.Observes()) {
+			attemptRequest.Header.Del("Accept-Encoding")
+			pluginWriter = newPluginResponseWriter(request.Context(), outWriter, recordSession.extensions, classified.Protocol, classified.Streaming)
+			recordSession.replyPlugins = pluginWriter
+			outWriter = pluginWriter
 		}
 		if plan.Type == contract.PlanTypeRelayKit {
 			attemptRequest.Header.Del("Accept-Encoding")
@@ -873,7 +891,13 @@ func (handler *Handler) executeCandidatesWithTest(
 			return transport.WriteResponse(startWriter, response)
 		}
 		var forwardErr error
-		if turn := responsesWSTurnFromContext(request.Context()); turn != nil {
+		if candidate.Service.Kind == contract.ServiceKindPlugin {
+			// A plugin adapts this provider: it builds the upstream request
+			// and turns the answer into the attempt's protocol.
+			forwardErr = handler.plugins.ForwardProvider(startWriter, attemptRequest, forwardTarget, pluginhost.ProviderAttempt{
+				Protocol: plan.UpstreamProtocol, Model: upstreamModel, Stream: classified.Streaming, Index: candidateIndex,
+			}, handler.providerTransport.RoundTrip)
+		} else if turn := responsesWSTurnFromContext(request.Context()); turn != nil {
 			forwardErr = turn.forward(startWriter, attemptRequest, forwardTarget, candidate, upstreamModel)
 		} else {
 			forwardErr = handler.forwarder.Forward(startWriter, attemptRequest, forwardTarget)
@@ -916,6 +940,11 @@ func (handler *Handler) executeCandidatesWithTest(
 		}
 		if relayWriter != nil && attemptStarted {
 			recordSession.noteConversionDiagnostics(contract.ConversionDiagnosticPhaseResponse, relayWriter.responseDiagnostics())
+		}
+		if retryHTTP == nil && pluginWriter != nil && (forwardErr == nil || classified.Streaming) {
+			if finishErr := pluginWriter.Finish(); finishErr != nil && forwardErr == nil {
+				forwardErr = transport.NewResponseError(finishErr)
+			}
 		}
 		if retryHTTP == nil && restoring != nil && (forwardErr == nil || classified.Streaming) {
 			if finishErr := restoring.Finish(); finishErr != nil && forwardErr == nil {

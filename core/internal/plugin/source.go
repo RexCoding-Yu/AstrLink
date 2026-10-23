@@ -2,7 +2,10 @@ package plugin
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +19,8 @@ import (
 
 	"github.com/Calcium-Ion/moejs"
 	"github.com/Calcium-Ion/moejs/syntax"
+
+	"github.com/QuantumNous/astrlink/core/contract"
 )
 
 // MaxSourceBytes bounds a plugin's source. Compiling takes about 85 ms and
@@ -96,6 +101,35 @@ type Source struct {
 	Err  *LoadError
 	// Icon is the icon beside the source as a data URL, "" for none.
 	Icon string
+	// SourceMap is the source map beside a built plugin.js, plugin.js.map,
+	// "" for none.
+	SourceMap string
+	// Development is set for a plugin astrlink plugin dev keeps built from
+	// a project on this computer, which DevelopmentMarker names.
+	Development *Development
+	// Installed is set for a plugin installed from source: InstallRecord
+	// beside it says where it came from.
+	Installed *contract.PluginInstallRecord
+	// Client is set for a built plugin with interface code, client.js
+	// beside plugin.js; ClientHash names its content.
+	Client     bool
+	ClientHash string
+}
+
+// InstallRecord is the file an install from source writes beside the
+// plugin it built.
+const InstallRecord = "install.json"
+
+// DevelopmentMarker is the file astrlink plugin dev writes beside the plugin
+// it builds: the host reloads such a plugin when its files change.
+const DevelopmentMarker = ".astrlink-dev.json"
+
+// Development describes a plugin astrlink plugin dev keeps built.
+type Development struct {
+	// Project is the directory of the project it is built from.
+	Project string `json:"project"`
+	// BuiltAt is when it was last built, in RFC 3339.
+	BuiltAt string `json:"built_at"`
 }
 
 // sourceFiles are the names a plugin's source may have, TypeScript first.
@@ -188,7 +222,61 @@ func readSource(fsys fs.FS, key string, origin Origin) Source {
 		return source
 	}
 	source.Text = string(text)
+	if source.File == "plugin.js" {
+		source.SourceMap = readSourceMap(fsys, key)
+		if client, err := fs.ReadFile(fsys, path.Join(key, "client.js")); err == nil {
+			sum := sha256.Sum256(client)
+			source.Client, source.ClientHash = true, hex.EncodeToString(sum[:8])
+		}
+	}
+	if origin != OriginBuiltin {
+		source.Development = readDevelopment(fsys, key)
+		source.Installed = readInstalled(fsys, key)
+	}
 	return source
+}
+
+// readInstalled reads the record of a plugin installed from source, nil
+// when there is none.
+func readInstalled(fsys fs.FS, key string) *contract.PluginInstallRecord {
+	data, err := fs.ReadFile(fsys, path.Join(key, InstallRecord))
+	if err != nil || len(data) > 1<<20 {
+		return nil
+	}
+	var record contract.PluginInstallRecord
+	if json.Unmarshal(data, &record) != nil || record.Source.Repository == "" {
+		return nil
+	}
+	return &record
+}
+
+// readDevelopment reads the marker of a plugin astrlink plugin dev keeps
+// built, nil when there is none.
+func readDevelopment(fsys fs.FS, key string) *Development {
+	data, err := fs.ReadFile(fsys, path.Join(key, DevelopmentMarker))
+	if err != nil || len(data) > 64<<10 {
+		return nil
+	}
+	var marker Development
+	if json.Unmarshal(data, &marker) != nil {
+		return nil
+	}
+	return &marker
+}
+
+// readSourceMap returns the source map beside a plugin.js, "" when there is
+// none it can use. A source map never keeps a plugin from loading.
+func readSourceMap(fsys fs.FS, key string) string {
+	file, err := fsys.Open(path.Join(key, "plugin.js.map"))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, MaxSourceMapBytes+1))
+	if err != nil || len(data) > MaxSourceMapBytes || !utf8.Valid(data) {
+		return ""
+	}
+	return string(data)
 }
 
 // readIcon returns the plugin's icon as a data URL, or "" when it has none
@@ -258,21 +346,22 @@ func (source Source) Path(dir string) string {
 }
 
 // compile checks a plugin's source against what the host runs and compiles
-// it once, for every runtime of its pool to load.
-func compile(file, text string) (*moejs.Module, error) {
+// it once, for every runtime of its pool to load. It returns the parse tree
+// too, for the checks that depend on the plugin's apiVersion.
+func compile(file, text string) (*moejs.Module, *syntax.Module, error) {
 	if len(text) > MaxSourceBytes {
-		return nil, &LoadError{Code: CodeTooLarge, File: file, Message: fmt.Sprintf("the source is larger than %d MiB", MaxSourceBytes>>20)}
+		return nil, nil, &LoadError{Code: CodeTooLarge, File: file, Message: fmt.Sprintf("the source is larger than %d MiB", MaxSourceBytes>>20)}
 	}
 	if !utf8.ValidString(text) {
-		return nil, &LoadError{Code: CodeEncoding, File: file, Message: "the source is not valid UTF-8"}
+		return nil, nil, &LoadError{Code: CodeEncoding, File: file, Message: "the source is not valid UTF-8"}
 	}
 	typescript := strings.HasSuffix(file, ".ts")
 	parsed, err := syntax.ParseModule(file, text, syntax.Options{TypeScript: typescript})
 	if err != nil {
-		return nil, syntaxLoadError(file, err)
+		return nil, nil, syntaxLoadError(file, err)
 	}
-	if err := checkSynchronous(file, parsed); err != nil {
-		return nil, err
+	if err := checkSingleFile(file, parsed); err != nil {
+		return nil, nil, err
 	}
 	var module *moejs.Module
 	if typescript {
@@ -281,48 +370,45 @@ func compile(file, text string) (*moejs.Module, error) {
 		module, err = moejs.Compile(file, text)
 	}
 	if err != nil {
-		return nil, syntaxLoadError(file, err)
+		return nil, nil, syntaxLoadError(file, err)
 	}
 	if requests := module.Requests(); len(requests) > 0 {
-		return nil, &LoadError{Code: CodeImport, File: file, Message: fmt.Sprintf("imports %q; bundle the plugin into one file", requests[0])}
+		return nil, nil, &LoadError{Code: CodeImport, File: file, Message: fmt.Sprintf("imports %q; bundle the plugin into one file", requests[0])}
 	}
-	return module, nil
+	return module, parsed, nil
 }
 
-// checkSynchronous refuses what a synchronous, single-file plugin cannot
-// use: async functions and await, which would need an event loop the host
-// does not run, and imports, which have nothing to resolve to. The parse
-// tree tells code from comments, strings and regular expressions.
-func checkSynchronous(file string, parsed *syntax.Module) error {
+// checkSingleFile refuses imports, which have nothing to resolve to: a
+// plugin made of several files is bundled into one when it is built.
+func checkSingleFile(file string, parsed *syntax.Module) error {
+	return inspectSource(file, parsed, func(node syntax.Node) (string, string) {
+		switch node := node.(type) {
+		case *syntax.ImportDecl, *syntax.ImportCall, *syntax.ImportMeta:
+			return CodeImport, "imports are not supported; bundle the plugin into one file"
+		case *syntax.ExportNamed:
+			if node.Source != nil {
+				return CodeReexport, "export … from is not supported; bundle the plugin into one file"
+			}
+		case *syntax.ExportAll:
+			return CodeReexport, "export * from is not supported; bundle the plugin into one file"
+		}
+		return "", ""
+	})
+}
+
+// inspectSource returns the first node of parsed that check finds fault with,
+// as a LoadError at its position. The parse tree tells code from comments,
+// strings and regular expressions.
+func inspectSource(file string, parsed *syntax.Module, check func(syntax.Node) (code, message string)) error {
 	var found *LoadError
-	at := func(node syntax.Node, code, message string) {
-		pos, _ := node.Range()
-		line, column := parsed.File.Position(pos)
-		found = &LoadError{Code: code, File: file, Line: line, Column: column, Message: message}
-	}
 	syntax.Inspect(parsed, func(node syntax.Node) bool {
 		if found != nil {
 			return false
 		}
-		switch node := node.(type) {
-		case *syntax.Function:
-			if node.IsAsync {
-				at(node, CodeAsync, "async functions are not supported; plugins are synchronous and http.fetch takes an array to run requests in parallel")
-			}
-		case *syntax.AwaitExpr:
-			at(node, CodeAwait, "await is not supported; plugins are synchronous")
-		case *syntax.ForInOfStmt:
-			if node.Await {
-				at(node, CodeAwait, "for await is not supported; plugins are synchronous")
-			}
-		case *syntax.ImportDecl, *syntax.ImportCall, *syntax.ImportMeta:
-			at(node, CodeImport, "imports are not supported; bundle the plugin into one file")
-		case *syntax.ExportNamed:
-			if node.Source != nil {
-				at(node, CodeReexport, "export … from is not supported; bundle the plugin into one file")
-			}
-		case *syntax.ExportAll:
-			at(node, CodeReexport, "export * from is not supported; bundle the plugin into one file")
+		if code, message := check(node); code != "" {
+			pos, _ := node.Range()
+			line, column := parsed.File.Position(pos)
+			found = &LoadError{Code: code, File: file, Line: line, Column: column, Message: message}
 		}
 		return found == nil
 	})
@@ -330,6 +416,27 @@ func checkSynchronous(file string, parsed *syntax.Module) error {
 		return found
 	}
 	return nil
+}
+
+// checkSynchronous refuses what an apiVersion 1 plugin, which is
+// synchronous, cannot use: async functions and await, which need the loop
+// the host runs for apiVersion 2 only.
+func checkSynchronous(file string, parsed *syntax.Module) error {
+	return inspectSource(file, parsed, func(node syntax.Node) (string, string) {
+		switch node := node.(type) {
+		case *syntax.Function:
+			if node.IsAsync {
+				return CodeAsync, "async functions need apiVersion 2; an apiVersion 1 plugin is synchronous and http.fetch takes an array to run requests in parallel"
+			}
+		case *syntax.AwaitExpr:
+			return CodeAwait, "await needs apiVersion 2; an apiVersion 1 plugin is synchronous"
+		case *syntax.ForInOfStmt:
+			if node.Await {
+				return CodeAwait, "for await needs apiVersion 2; an apiVersion 1 plugin is synchronous"
+			}
+		}
+		return "", ""
+	})
 }
 
 func syntaxLoadError(file string, err error) error {

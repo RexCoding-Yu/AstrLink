@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { Blocks, RefreshCw } from "@/components/icons";
+import { Blocks, Plus, RefreshCw } from "@/components/icons";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DataField } from "@/components/DataRow";
 import { EmptyState } from "@/components/EmptyState";
@@ -31,30 +31,57 @@ import {
   clearPluginData,
   deletePluginCredential,
   getPlugin,
+  listenPluginApprovalFinished,
+  openPluginApproval,
+  pluginApprovalOf,
   getPluginCreditStars,
   getPluginHostSettings,
   getPluginStats,
   getPluginStatus,
   listPlugins,
+  pluginInstallFailureOf,
   reloadPlugins,
+  rollbackPlugin,
   savePluginCredential,
   testPlugin,
+  uninstallPlugin,
   updatePlugin,
   updatePluginHostSettings,
 } from "./bridge";
-import { controlErrorMessage } from "./control-error";
+import { controlErrorCode, controlErrorMessage } from "./control-error";
+import { isWebEdition } from "./edition";
+import { PluginApprovalSummary } from "./PluginApprovalSummary";
 import { useT } from "./i18n";
 import { PageHeader } from "./PageHeader";
+import { PluginDevelop } from "./PluginDevelop";
+import { PluginInstallDialog } from "./PluginInstall";
+import {
+  installFailureText,
+  PluginInstallReviewView,
+} from "./PluginInstallReview";
+import { orderedPlugins, PluginOrderDialog } from "./PluginOrder";
+import { PluginSourceCard } from "./PluginSource";
+import {
+  PluginSlotView,
+  refreshPluginUi,
+  setPluginUiSafeMode,
+  usePluginSlot,
+  usePluginUi,
+} from "./plugin-ui";
+import { capabilityLabel } from "./plugin-labels";
 import { PluginOverview } from "./PluginOverview";
 import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
 import {
   MAX_INJECTION_BUDGET_BYTES,
   MIN_INJECTION_BUDGET_BYTES,
+  type PluginApproval,
   type PluginClearTarget,
   type PluginCreditStars,
   type PluginDetail,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
+  type PluginInstalledVersion,
+  type PluginInstallReview,
   type PluginList,
   type PluginLoadError,
   type PluginSettingsUpdate,
@@ -65,7 +92,13 @@ import {
 import { DailyEffects } from "./PluginEffects";
 
 type Translate = ReturnType<typeof useT>;
-type DetailTab = "overview" | "settings" | "status";
+type DetailTab =
+  | "overview"
+  | "settings"
+  | "status"
+  | "develop"
+  /** A tab the plugin's interface registered. */
+  | `plugin:${string}`;
 
 /** The injection budgets the plugin page offers, in KiB. */
 const INJECTION_BUDGETS_KIB = [4, 8, 16, 32, 64].filter(
@@ -75,13 +108,6 @@ const INJECTION_BUDGETS_KIB = [4, 8, 16, 32, 64].filter(
 );
 
 /** i18n keys cannot hold the dots of a capability name. */
-function capabilityLabel(capability: string, t: Translate): string {
-  const key = capability.replace(/\.([a-z])/g, (_, letter: string) =>
-    letter.toUpperCase(),
-  );
-  return t(`plugins.capabilities.${key}`, { defaultValue: capability });
-}
-
 function loadErrorText(error: PluginLoadError, t: Translate): string {
   const reason = t(`plugins.loadErrors.${error.code}`, {
     defaultValue: error.code,
@@ -152,6 +178,37 @@ export function PluginManager({
   const [actionError, setActionError] = useState<string | null>(null);
   const [enabling, setEnabling] = useState<PluginDetail | null>(null);
   const [grants, setGrants] = useState<string[]>([]);
+  // A change that grants a plugin more waits for the user: in the
+  // desktop's confirmation window (awaiting), or in the web console's own
+  // dialog (confirming). afterApproval finishes what the change began, such
+  // as the credentials of a server it added.
+  const [awaiting, setAwaiting] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<{
+    key: string;
+    update: PluginSettingsUpdate;
+    approval: PluginApproval;
+    kept: string[];
+  } | null>(null);
+  const [ordering, setOrdering] = useState(false);
+  const [savingOrder, setSavingOrder] = useState(false);
+  // The install dialog, on the link of an update already.
+  const [installing, setInstalling] = useState<{ link?: string } | null>(null);
+  // A rollback the web console's own dialog confirms.
+  const [confirmingRollback, setConfirmingRollback] = useState<{
+    key: string;
+    version: PluginInstalledVersion;
+    review: PluginInstallReview;
+  } | null>(null);
+  const [uninstalling, setUninstalling] = useState<PluginDetail | null>(null);
+  // Loading plugins' interface code in the web console takes the console's
+  // own confirmation.
+  const [confirmingWebUi, setConfirmingWebUi] = useState(false);
+  const ui = usePluginUi();
+  const afterApproval = useRef<{
+    key: string;
+    run: (detail: PluginDetail | null) => Promise<void>;
+  } | null>(null);
+  const selectedRef = useRef<string | null>(null);
   const [host, setHost] = useState<PluginHostSettings | null>(null);
   const [hostError, setHostError] = useState<string | null>(null);
 
@@ -172,14 +229,32 @@ export function PluginManager({
     }
   }, [t]);
 
-  async function changeHost(update: PluginHostSettingsUpdate) {
+  async function changeHost(
+    update: PluginHostSettingsUpdate,
+    approved = false,
+  ) {
     setHostError(null);
     try {
-      setHost(await updatePluginHostSettings(update));
+      setHost(
+        approved
+          ? await updatePluginHostSettings(update, true)
+          : await updatePluginHostSettings(update),
+      );
+      if (update.web_ui !== undefined) refreshPluginUi();
     } catch (error) {
+      if (update.web_ui && controlErrorCode(error) === "approval_required") {
+        setConfirmingWebUi(true);
+        return;
+      }
       setHostError(controlErrorMessage(error, t("plugins.host.saveFailed")));
     }
   }
+
+  // What the plugins' interfaces load follows the list: a plugin enabled,
+  // turned off, updated or removed.
+  useEffect(() => {
+    if (list) refreshPluginUi();
+  }, [list]);
 
   /** Clears what the host keeps for the plugin, then shows the new counts. */
   async function clearData(key: string, what: PluginClearTarget) {
@@ -295,12 +370,156 @@ export function PluginManager({
     );
   }
 
+  /**
+   * Saves a change of a plugin's settings. One that grants the plugin more
+   * waits for the user, and comes back as "waiting": in the desktop's
+   * confirmation window, or in the web console's own dialog.
+   */
+  async function save(
+    key: string,
+    update: PluginSettingsUpdate,
+    approved = false,
+  ): Promise<PluginDetail | "waiting"> {
+    try {
+      return approved
+        ? await updatePlugin(key, update, true)
+        : await updatePlugin(key, update);
+    } catch (error) {
+      if (controlErrorCode(error) === "approval_pending") {
+        setAwaiting(key);
+        return "waiting";
+      }
+      const approval = pluginApprovalOf(error);
+      if (approval) {
+        setConfirming({
+          key,
+          update,
+          approval,
+          kept: approval.added_capabilities ?? [],
+        });
+        return "waiting";
+      }
+      throw error;
+    }
+  }
+
+  /** Shows a plugin again once a change of it was decided elsewhere. */
+  const reloadDecided = useCallback(
+    async (key: string, approved: boolean) => {
+      void loadList();
+      const pending = afterApproval.current;
+      afterApproval.current = null;
+      if (selectedRef.current !== key) return;
+      const next = await loadDetail(key);
+      if (approved && pending?.key === key) await pending.run(next);
+      if (approved && next?.enabled) {
+        setTab("overview");
+        setLinkPlay((count) => count + 1);
+        if (next.hooks.includes("describeStatus")) void loadStatus(key);
+      }
+    },
+    [loadDetail, loadList, loadStatus],
+  );
+
+  useEffect(() => {
+    selectedRef.current = selectedKey;
+  }, [selectedKey]);
+
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    let stopped = false;
+    void listenPluginApprovalFinished((finished) => {
+      setAwaiting((current) => (current === finished.key ? null : current));
+      if (finished.error) setActionError(finished.error);
+      void reloadDecided(finished.key, finished.approved && !finished.error);
+    }).then((unlisten) => {
+      if (stopped) unlisten();
+      else stop = unlisten;
+    });
+    return () => {
+      stopped = true;
+      stop?.();
+    };
+  }, [reloadDecided]);
+
+  /** Shows the plugin an install put in place. */
+  const showInstalled = useCallback(
+    async (key: string) => {
+      setInstalling(null);
+      void loadList();
+      if (selectedRef.current !== key) {
+        setSelectedKey(key);
+        return;
+      }
+      const next = await loadDetail(key);
+      if (next?.state === "loaded") void loadStatus(key);
+    },
+    [loadDetail, loadList, loadStatus],
+  );
+
+  /**
+   * Puts back a version an install replaced. It waits for the user as an
+   * install does: in the confirmation window, or the web console's dialog.
+   */
+  async function rollback(
+    key: string,
+    version: PluginInstalledVersion,
+    approved = false,
+  ) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      show(await rollbackPlugin(key, version.id, approved));
+      void loadList();
+    } catch (error) {
+      if (controlErrorCode(error) === "approval_pending") {
+        setAwaiting(key);
+        return;
+      }
+      const approval = pluginApprovalOf(error);
+      if (approval?.install) {
+        setConfirmingRollback({ key, version, review: approval.install });
+        return;
+      }
+      const failure = pluginInstallFailureOf(error);
+      setActionError(
+        failure
+          ? installFailureText(failure, t)
+          : controlErrorMessage(error, t("plugins.install.rollbackFailed")),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Removes a plugin installed from source; a builtin of its key comes back. */
+  async function uninstall(key: string) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const next = await uninstallPlugin(key);
+      setList(next);
+      setSelectedKey((current) => keptSelection(current, next));
+      if (next.plugins.some((plugin) => plugin.key === key)) {
+        const reloaded = await loadDetail(key);
+        if (reloaded?.state === "loaded") void loadStatus(key);
+      }
+    } catch (error) {
+      setActionError(
+        controlErrorMessage(error, t("plugins.install.uninstallFailed")),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** Applies a change and refreshes the list row that shows its state. */
-  async function apply(change: () => Promise<PluginDetail>) {
+  async function apply(change: () => Promise<PluginDetail | "waiting">) {
     setBusy(true);
     setActionError(null);
     try {
       const next = await change();
+      if (next === "waiting") return false;
       setDetail(next);
       setRevision((current) => current + 1);
       setList((current) =>
@@ -351,10 +570,8 @@ export function PluginManager({
   ) {
     setBusy(true);
     setActionError(null);
-    try {
-      let next: PluginDetail | null = null;
-      if (Object.keys(update).length > 0)
-        next = await updatePlugin(key, update);
+    const saveCredentials = async (start: PluginDetail | null) => {
+      let next = start;
       for (const credential of credentials) {
         const current = next ?? detail;
         const origin =
@@ -366,6 +583,33 @@ export function PluginManager({
           origin,
         });
       }
+      return next;
+    };
+    try {
+      let next: PluginDetail | null = null;
+      if (Object.keys(update).length > 0) {
+        const saved = await save(key, update);
+        if (saved === "waiting") {
+          // The credentials follow the server the change adds, once the
+          // user confirmed it.
+          afterApproval.current = {
+            key,
+            run: async (confirmed) => {
+              try {
+                const after = await saveCredentials(confirmed);
+                if (after) show(after);
+              } catch (error) {
+                setActionError(
+                  controlErrorMessage(error, t("plugins.saveFailed")),
+                );
+              }
+            },
+          };
+          return false;
+        }
+        next = saved;
+      }
+      next = await saveCredentials(next);
       if (next) show(next);
       void loadStatus(key);
       return true;
@@ -377,7 +621,8 @@ export function PluginManager({
     }
   }
 
-  const plugins = list?.plugins ?? [];
+  // The list shows the plugins in the order their extension points run.
+  const plugins = orderedPlugins(list?.plugins ?? [], host?.order);
   const selected = plugins.find((plugin) => plugin.key === selectedKey) ?? null;
 
   return (
@@ -393,6 +638,12 @@ export function PluginManager({
                 disabled={!isReady}
                 host={host}
                 onChange={(update) => void changeHost(update)}
+                onUi={(on) =>
+                  isWebEdition
+                    ? void changeHost({ web_ui: on })
+                    : setPluginUiSafeMode(!on)
+                }
+                ui={isWebEdition ? host.web_ui === true : ui.safeMode === "off"}
               />
             ) : null}
             {list || host ? (
@@ -412,6 +663,16 @@ export function PluginManager({
                         </h3>
                         <p>{t("plugins.host.budgetHelp")}</p>
                       </section>
+                      <section className="grid gap-1">
+                        <h3 className="text-xs font-medium text-muted-foreground">
+                          {t("plugins.ui.switch")}
+                        </h3>
+                        <p>
+                          {isWebEdition
+                            ? t("plugins.ui.webHelp")
+                            : t("plugins.ui.switchHelp")}
+                        </p>
+                      </section>
                     </>
                   ) : null}
                   {list ? (
@@ -429,6 +690,16 @@ export function PluginManager({
                 </div>
               </HelpPopover>
             ) : null}
+            <Button
+              disabled={!isReady}
+              onClick={() => setInstalling({})}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Plus />
+              {t("plugins.install.open")}
+            </Button>
             <Button
               disabled={!isReady || rescanning}
               onClick={() => void rescan()}
@@ -466,6 +737,23 @@ export function PluginManager({
       {host?.paused ? (
         <FormMessage className="mb-3" tone="notice">
           {t("plugins.host.pausedNotice")}
+        </FormMessage>
+      ) : null}
+      {ui.safeMode === "crashed" ? (
+        <FormMessage
+          className="mb-3 flex flex-wrap items-center gap-2"
+          data-testid="plugin-ui-crashed"
+          tone="warning"
+        >
+          <span className="flex-1">{t("plugins.ui.crashed")}</span>
+          <Button
+            onClick={() => setPluginUiSafeMode(false)}
+            size="xs"
+            type="button"
+            variant="outline"
+          >
+            {t("plugins.ui.load")}
+          </Button>
         </FormMessage>
       ) : null}
       {!isReady && list !== null ? (
@@ -508,6 +796,20 @@ export function PluginManager({
                 </li>
               ))}
             </ul>
+            {plugins.length > 1 && host ? (
+              <div className="shrink-0 border-t p-2">
+                <Button
+                  className="w-full"
+                  disabled={!isReady}
+                  onClick={() => setOrdering(true)}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  {t("plugins.order.open")}
+                </Button>
+              </div>
+            ) : null}
           </Panel>
           <Panel className="flex min-h-0 flex-col overflow-hidden">
             {selected === null ? (
@@ -533,12 +835,37 @@ export function PluginManager({
                   saveSettings(detail.key, update, credentials)
                 }
                 onDisable={() =>
-                  void apply(() => updatePlugin(detail.key, { enabled: false }))
+                  void apply(() => save(detail.key, { enabled: false }))
                 }
                 onEnable={() => {
-                  setGrants(detail.requested_capabilities);
-                  setEnabling(detail);
+                  if (isWebEdition) {
+                    // The web console has no confirmation window: its own
+                    // dialog confirms what enabling grants.
+                    setGrants(detail.requested_capabilities);
+                    setEnabling(detail);
+                    return;
+                  }
+                  // The confirmation window lists the capabilities, each
+                  // one the user may untick.
+                  void apply(() =>
+                    save(detail.key, {
+                      enabled: true,
+                      granted_capabilities: detail.requested_capabilities,
+                    }),
+                  ).then((enabled) => {
+                    if (!enabled) return;
+                    setTab("overview");
+                    setLinkPlay((count) => count + 1);
+                  });
                 }}
+                awaiting={awaiting === detail.key}
+                onOpenApproval={() => void openPluginApproval()}
+                onUpdate={(link) => setInstalling({ link })}
+                onRollback={(version) => void rollback(detail.key, version)}
+                onUninstall={() => setUninstalling(detail)}
+                onUiEnabled={(on) =>
+                  void apply(() => save(detail.key, { ui_enabled: on }))
+                }
                 onRefreshStatus={() => void loadStatus(detail.key)}
                 onTab={setTab}
                 onTest={() => void runTest(detail.key)}
@@ -574,10 +901,11 @@ export function PluginManager({
           setEnabling(null);
           if (target)
             void apply(() =>
-              updatePlugin(target.key, {
-                enabled: true,
-                granted_capabilities: grants,
-              }),
+              save(
+                target.key,
+                { enabled: true, granted_capabilities: grants },
+                true,
+              ),
             ).then((enabled) => {
               if (!enabled) return;
               // Show the plugin joining AstrLink.
@@ -589,6 +917,145 @@ export function PluginManager({
         }}
         open={enabling !== null}
         title={t("plugins.enableDialog.title", { name: enabling?.name ?? "" })}
+      />
+      {installing ? (
+        <PluginInstallDialog
+          host={host}
+          link={installing.link}
+          onClose={() => setInstalling(null)}
+          onHostChange={(update) => void changeHost(update)}
+          onInstalled={(key) => void showInstalled(key)}
+        />
+      ) : null}
+      <ConfirmDialog
+        confirmDisabled={busy}
+        confirmLabel={t("plugins.install.rollbackTo")}
+        description={
+          confirmingRollback ? (
+            <PluginInstallReviewView
+              review={confirmingRollback.review}
+              rollback
+            />
+          ) : null
+        }
+        onCancel={() => setConfirmingRollback(null)}
+        onConfirm={() => {
+          const target = confirmingRollback;
+          setConfirmingRollback(null);
+          if (target) void rollback(target.key, target.version, true);
+        }}
+        open={confirmingRollback !== null}
+        title={t("plugins.install.rollbackTitle", {
+          name: confirmingRollback?.review.name ?? "",
+        })}
+      />
+      <ConfirmDialog
+        confirmLabel={t("plugins.ui.webConfirm")}
+        description={<p>{t("plugins.ui.webConfirmDescription")}</p>}
+        onCancel={() => setConfirmingWebUi(false)}
+        onConfirm={() => {
+          setConfirmingWebUi(false);
+          void changeHost({ web_ui: true }, true);
+        }}
+        open={confirmingWebUi}
+        title={t("plugins.ui.webConfirmTitle")}
+        tone="warning"
+      />
+      <ConfirmDialog
+        confirmDisabled={busy}
+        confirmLabel={t("plugins.install.uninstall")}
+        description={
+          uninstalling ? (
+            <p>
+              {uninstalling.source === "override"
+                ? t("plugins.install.uninstallBuiltin")
+                : t("plugins.install.uninstallDescription")}
+            </p>
+          ) : null
+        }
+        destructive
+        onCancel={() => setUninstalling(null)}
+        onConfirm={() => {
+          const target = uninstalling;
+          setUninstalling(null);
+          if (target) void uninstall(target.key);
+        }}
+        open={uninstalling !== null}
+        title={t("plugins.install.uninstallTitle", {
+          name: uninstalling?.name ?? "",
+        })}
+      />
+      {ordering ? (
+        <PluginOrderDialog
+          onCancel={() => setOrdering(false)}
+          onSave={(order) => {
+            setSavingOrder(true);
+            void updatePluginHostSettings({ order })
+              .then((next) => {
+                setHost(next);
+                setOrdering(false);
+              })
+              .catch((error) =>
+                setHostError(
+                  controlErrorMessage(error, t("plugins.host.saveFailed")),
+                ),
+              )
+              .finally(() => setSavingOrder(false));
+          }}
+          order={host?.order}
+          plugins={plugins}
+          saving={savingOrder}
+        />
+      ) : null}
+      <ConfirmDialog
+        confirmDisabled={busy}
+        confirmLabel={t("plugins.approval.confirm")}
+        description={
+          confirming ? (
+            <PluginApprovalSummary
+              approval={confirming.approval}
+              detail={detail?.key === confirming.key ? detail : null}
+              kept={confirming.kept}
+              onKept={(kept) =>
+                setConfirming((current) =>
+                  current ? { ...current, kept } : current,
+                )
+              }
+            />
+          ) : null
+        }
+        onCancel={() => {
+          setConfirming(null);
+          afterApproval.current = null;
+        }}
+        onConfirm={() => {
+          const target = confirming;
+          setConfirming(null);
+          if (!target) return;
+          const added = target.approval.added_capabilities ?? [];
+          const update = target.update.granted_capabilities
+            ? {
+                ...target.update,
+                granted_capabilities: target.update.granted_capabilities.filter(
+                  (grant) =>
+                    !added.includes(grant) || target.kept.includes(grant),
+                ),
+              }
+            : target.update;
+          void apply(() => save(target.key, update, true)).then((saved) =>
+            reloadDecided(target.key, saved),
+          );
+        }}
+        open={confirming !== null}
+        title={
+          confirming?.approval.enable
+            ? t("plugins.approval.enableTitle", {
+                name: confirming.approval.name,
+              })
+            : t("plugins.approval.grantTitle", {
+                name: confirming?.approval.name ?? "",
+              })
+        }
       />
     </section>
   );
@@ -659,10 +1126,15 @@ function PluginHostControls({
   host,
   disabled,
   onChange,
+  ui,
+  onUi,
 }: {
   host: PluginHostSettings;
   disabled: boolean;
   onChange: (update: PluginHostSettingsUpdate) => void;
+  /** Whether plugins' interfaces load in this window. */
+  ui: boolean;
+  onUi: (on: boolean) => void;
 }) {
   const t = useT();
   const budgetKib = Math.round(host.injection_budget_bytes / 1024);
@@ -682,6 +1154,19 @@ function PluginHostControls({
         />
         <Label className="text-xs font-normal" htmlFor="plugin-host-pause">
           {t("plugins.host.pause")}
+        </Label>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <Switch
+          aria-label={t("plugins.ui.switch")}
+          checked={ui}
+          disabled={disabled}
+          id="plugin-host-ui"
+          onCheckedChange={onUi}
+          size="sm"
+        />
+        <Label className="text-xs font-normal" htmlFor="plugin-host-ui">
+          {t("plugins.ui.switch")}
         </Label>
       </div>
       <div className="flex items-center gap-1.5">
@@ -733,6 +1218,12 @@ function PluginDetailPane({
   onSaveSettings,
   onCredentialClear,
   onClearData,
+  awaiting,
+  onOpenApproval,
+  onUpdate,
+  onRollback,
+  onUninstall,
+  onUiEnabled,
 }: {
   detail: PluginDetail;
   stats: PluginStats | null;
@@ -758,10 +1249,25 @@ function PluginDetailPane({
   ) => Promise<boolean>;
   onCredentialClear: (name: string) => Promise<boolean>;
   onClearData: (what: PluginClearTarget) => Promise<boolean>;
+  awaiting: boolean;
+  onOpenApproval: () => void;
+  onUpdate: (link: string) => void;
+  onRollback: (version: PluginInstalledVersion) => void;
+  onUninstall: () => void;
+  onUiEnabled: (on: boolean) => void;
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
-  const tabs: DetailTab[] = loaded ? ["overview", "settings", "status"] : [];
+  const pluginTabs = usePluginSlot("plugin.tab", detail.key);
+  const tabs: DetailTab[] = loaded
+    ? [
+        "overview",
+        "settings",
+        "status",
+        "develop",
+        ...pluginTabs.map((entry) => `plugin:${entry.id}` as const),
+      ]
+    : [];
   const current = tabs.includes(tab) ? tab : "overview";
   return (
     <>
@@ -769,6 +1275,24 @@ function PluginDetailPane({
         actions={
           loaded ? (
             <>
+              {detail.client ? (
+                <div className="flex items-center gap-1.5">
+                  <Switch
+                    aria-label={t("plugins.ui.pluginSwitch")}
+                    checked={detail.ui_enabled}
+                    disabled={busy}
+                    id="plugin-ui-enabled"
+                    onCheckedChange={onUiEnabled}
+                    size="sm"
+                  />
+                  <Label
+                    className="text-xs font-normal"
+                    htmlFor="plugin-ui-enabled"
+                  >
+                    {t("plugins.ui.pluginSwitchLabel")}
+                  </Label>
+                </div>
+              ) : null}
               {detail.hooks.includes("testConnection") ? (
                 <Button
                   disabled={testing || busy}
@@ -818,7 +1342,14 @@ function PluginDetailPane({
           ) : null}
         </div>
         <p className="truncate pl-7 text-micro text-muted-foreground">
-          {[t(`plugins.source.${detail.source}`), detail.version]
+          {[
+            detail.development
+              ? t("plugins.develop.build")
+              : detail.installed
+                ? t("plugins.source.github")
+                : t(`plugins.source.${detail.source}`),
+            detail.version,
+          ]
             .filter(Boolean)
             .join(" · ")}
         </p>
@@ -826,6 +1357,23 @@ function PluginDetailPane({
       {actionError ? (
         <FormMessage className="m-3 mb-0" tone="error">
           {actionError}
+        </FormMessage>
+      ) : null}
+      {awaiting ? (
+        <FormMessage
+          className="m-3 mb-0 flex flex-wrap items-center gap-2"
+          data-testid="plugin-awaiting-approval"
+          tone="notice"
+        >
+          <span className="flex-1">{t("plugins.approval.waiting")}</span>
+          <Button
+            onClick={onOpenApproval}
+            size="xs"
+            type="button"
+            variant="outline"
+          >
+            {t("plugins.approval.open")}
+          </Button>
         </FormMessage>
       ) : null}
       {!loaded ? (
@@ -851,12 +1399,15 @@ function PluginDetailPane({
             <TabsList aria-label={t("plugins.tabsLabel")} scrollable>
               {tabs.map((item) => (
                 <TabsTrigger key={item} value={item}>
-                  {t(`plugins.tabs.${item}`)}
+                  {item.startsWith("plugin:")
+                    ? (pluginTabs.find((entry) => `plugin:${entry.id}` === item)
+                        ?.title ?? t("plugins.ui.tab"))
+                    : t(`plugins.tabs.${item}`)}
                 </TabsTrigger>
               ))}
             </TabsList>
             <span className="flex-1" />
-            {current !== "settings" ? (
+            {current === "overview" || current === "status" ? (
               <IconButton
                 label={t("common.refresh")}
                 onClick={onRefreshStatus}
@@ -873,6 +1424,18 @@ function PluginDetailPane({
             data-tab-scroller
             value="overview"
           >
+            {detail.installed ? (
+              <div className="mb-3">
+                <PluginSourceCard
+                  busy={busy}
+                  detail={detail}
+                  onRollback={onRollback}
+                  onUninstall={onUninstall}
+                  onUpdate={onUpdate}
+                  source={detail.installed}
+                />
+              </div>
+            ) : null}
             <PluginOverview
               busy={busy}
               detail={detail}
@@ -910,6 +1473,28 @@ function PluginDetailPane({
               statusError={statusError}
             />
           </TabsContent>
+          <TabsContent
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
+            data-tab-scroller
+            value="develop"
+          >
+            {current === "develop" ? <PluginDevelop detail={detail} /> : null}
+          </TabsContent>
+          {pluginTabs.map((entry) => (
+            <TabsContent
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
+              data-tab-scroller
+              key={entry.id}
+              value={`plugin:${entry.id}`}
+            >
+              {current === `plugin:${entry.id}` ? (
+                <PluginSlotView
+                  context={{ plugin: detail.key }}
+                  entry={entry}
+                />
+              ) : null}
+            </TabsContent>
+          ))}
         </Tabs>
       )}
     </>

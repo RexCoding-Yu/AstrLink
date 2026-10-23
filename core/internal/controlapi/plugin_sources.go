@@ -1,0 +1,220 @@
+package controlapi
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"slices"
+
+	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/plugininstall"
+)
+
+// PluginInstaller installs plugins from source; *plugininstall.Installer
+// satisfies it.
+type PluginInstaller interface {
+	Preview(ctx context.Context, link string, existing func(key string) *plugininstall.Existing) (contract.PluginInstallReview, error)
+	Staged(token string) (contract.PluginInstallReview, bool)
+	Install(token string) (string, error)
+	Versions(key string) []contract.PluginInstalledVersion
+	RollbackReview(key, id string, current *plugininstall.Existing) (contract.PluginInstallReview, error)
+	Rollback(key, id string) error
+	Uninstall(key string) error
+	CheckUpdate(ctx context.Context, record contract.PluginInstallRecord) (contract.PluginUpdateCheck, error)
+}
+
+// installFailureEnvelope is the error of an install that cannot go on,
+// with why.
+type installFailureEnvelope struct {
+	Error     controlError                  `json:"error"`
+	RequestID string                        `json:"request_id"`
+	Failure   contract.PluginInstallFailure `json:"failure"`
+}
+
+// writeInstallFailure answers an installer error: why the plugin cannot be
+// installed, the installer being busy, or an error of Core.
+func writeInstallFailure(writer http.ResponseWriter, err error) {
+	var failure *plugininstall.Failure
+	if !errors.As(err, &failure) {
+		writeError(writer, http.StatusInternalServerError, "plugin_install_unavailable", "could not install the plugin")
+		return
+	}
+	status, code := http.StatusUnprocessableEntity, "plugin_install_failed"
+	switch failure.Reason {
+	case contract.PluginInstallBusy:
+		status, code = http.StatusConflict, "plugin_install_busy"
+	case contract.PluginInstallExpired:
+		status, code = http.StatusGone, "plugin_install_expired"
+	}
+	writeJSON(writer, status, installFailureEnvelope{
+		Error:     controlError{Code: code, Message: failure.Error(), Details: []errorDetail{}},
+		RequestID: newRequestID(),
+		Failure:   failure.PluginInstallFailure,
+	})
+}
+
+// existingPlugin describes the plugin key names now, for a review to
+// compare with.
+func (handler *Handler) existingPlugin(key string) *plugininstall.Existing {
+	target := handler.plugins.Current().Plugin(key)
+	if target == nil {
+		return nil
+	}
+	existing := &plugininstall.Existing{
+		Origin: string(target.Origin), Name: target.Key, Development: target.Development != nil,
+		Installed: target.Installed, Client: target.Client,
+	}
+	if target.Loaded() {
+		existing.Loaded = true
+		existing.Name, existing.Version = target.Meta.Name, target.Meta.Version
+		existing.Capabilities = slices.Clone(target.Meta.Capabilities)
+		if target.Meta.Network != nil {
+			existing.NetworkPurpose = target.Meta.Network.Purpose
+		}
+	}
+	return existing
+}
+
+// pluginSources serves /plugins/sources/preview, which fetches, builds and
+// reviews a plugin from a GitHub link, and /plugins/sources/install, which
+// installs what a review staged once the user confirmed it.
+func (handler *Handler) pluginSources(writer http.ResponseWriter, request *http.Request, action string) {
+	if handler.pluginInstaller == nil {
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", "installing plugins is unavailable")
+		return
+	}
+	if action == "preview" {
+		var input contract.PluginInstallPreviewRequest
+		if !decodeControlJSON(writer, request, &input) {
+			return
+		}
+		review, err := handler.pluginInstaller.Preview(request.Context(), input.URL, handler.existingPlugin)
+		if err != nil {
+			writeInstallFailure(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, review)
+		return
+	}
+	var input contract.PluginInstallRequest
+	if !decodeControlJSON(writer, request, &input) {
+		return
+	}
+	review, ok := handler.pluginInstaller.Staged(input.Token)
+	if !ok {
+		writeInstallFailure(writer, &plugininstall.Failure{PluginInstallFailure: contract.PluginInstallFailure{Reason: contract.PluginInstallExpired}})
+		return
+	}
+	// New code in the plugin directory takes the user's confirmation,
+	// where nothing a plugin runs can click for them.
+	if request.Header.Get(contract.PluginApprovalHeader) == "" {
+		writeApprovalRequired(writer, contract.PluginApproval{Plugin: review.Key, Name: review.Name, Install: &review})
+		return
+	}
+	key, err := handler.pluginInstaller.Install(input.Token)
+	if err != nil {
+		writeInstallFailure(writer, err)
+		return
+	}
+	handler.reloadInstalled(writer, request.Context(), key)
+}
+
+// writeApprovalRequired answers a change that waits for the user's
+// confirmation, with what it grants.
+func writeApprovalRequired(writer http.ResponseWriter, approval contract.PluginApproval) {
+	writeJSON(writer, http.StatusConflict, approvalEnvelope{
+		Error:     controlError{Code: "approval_required", Message: "this change needs the user's confirmation", Details: []errorDetail{}},
+		RequestID: newRequestID(),
+		Approval:  approval,
+	})
+}
+
+// reloadInstalled loads what an install or a rollback put in place and
+// answers with the plugin, as the registry now has it.
+func (handler *Handler) reloadInstalled(writer http.ResponseWriter, ctx context.Context, key string) {
+	if err := handler.plugins.Reload(ctx); err != nil {
+		writeError(writer, http.StatusInternalServerError, "plugin_reload_failed", "installed, but the plugins could not be reloaded")
+		return
+	}
+	// An enabled plugin's new manifest may register other attributes.
+	handler.registerEnabledPluginAttributes(ctx)
+	target := handler.plugins.Current().Plugin(key)
+	if target == nil {
+		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "installed, but the plugin is not among the plugins")
+		return
+	}
+	handler.writePluginDetail(writer, ctx, target)
+}
+
+// pluginSource serves a plugin installed from source:
+// POST source/check looks for an update, POST source/rollback puts back a
+// version an install replaced, and DELETE source uninstalls it.
+func (handler *Handler) pluginSource(writer http.ResponseWriter, request *http.Request, target *plugin.Plugin, action string) {
+	if handler.pluginInstaller == nil {
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", "installing plugins is unavailable")
+		return
+	}
+	switch action {
+	case "":
+		if !allowMethods(writer, request, http.MethodDelete) {
+			return
+		}
+		if err := handler.pluginInstaller.Uninstall(target.Key); err != nil {
+			if errors.Is(err, plugininstall.ErrNotInstalled) {
+				writeError(writer, http.StatusConflict, "plugin_not_installed", "the plugin was not installed from source")
+				return
+			}
+			writeError(writer, http.StatusInternalServerError, "plugin_install_unavailable", "could not uninstall the plugin")
+			return
+		}
+		if err := handler.plugins.Reload(request.Context()); err != nil {
+			writeError(writer, http.StatusInternalServerError, "plugin_reload_failed", "uninstalled, but the plugins could not be reloaded")
+			return
+		}
+		handler.writePluginList(writer)
+	case "check":
+		if !allowMethods(writer, request, http.MethodPost) {
+			return
+		}
+		if target.Installed == nil {
+			writeError(writer, http.StatusConflict, "plugin_not_installed", "the plugin was not installed from source")
+			return
+		}
+		check, err := handler.pluginInstaller.CheckUpdate(request.Context(), *target.Installed)
+		if err != nil {
+			writeInstallFailure(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, check)
+	case "rollback":
+		if !allowMethods(writer, request, http.MethodPost) {
+			return
+		}
+		var input contract.PluginRollbackRequest
+		if !decodeControlJSON(writer, request, &input) {
+			return
+		}
+		review, err := handler.pluginInstaller.RollbackReview(target.Key, input.Version, handler.existingPlugin(target.Key))
+		if err != nil {
+			var failure *plugininstall.Failure
+			if errors.As(err, &failure) {
+				writeInstallFailure(writer, err)
+				return
+			}
+			writeError(writer, http.StatusNotFound, "plugin_version_not_found", "the plugin has no such version kept")
+			return
+		}
+		if request.Header.Get(contract.PluginApprovalHeader) == "" {
+			writeApprovalRequired(writer, contract.PluginApproval{Plugin: target.Key, Name: review.Name, Install: &review, Rollback: true})
+			return
+		}
+		if err := handler.pluginInstaller.Rollback(target.Key, input.Version); err != nil {
+			writeError(writer, http.StatusInternalServerError, "plugin_install_unavailable", "could not put the version back")
+			return
+		}
+		handler.reloadInstalled(writer, request.Context(), target.Key)
+	default:
+		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
+	}
+}

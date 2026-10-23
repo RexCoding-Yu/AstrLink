@@ -18,6 +18,17 @@ const bridgeMocks = vi.hoisted(() => ({
   getPluginHostSettings: vi.fn(),
   updatePluginHostSettings: vi.fn(),
   clearPluginData: vi.fn(),
+  getPluginJournal: vi.fn(),
+  dryRunPlugin: vi.fn(),
+  listenPluginApprovalFinished: vi.fn(),
+  openPluginApproval: vi.fn(),
+  pluginApprovalOf: vi.fn(),
+  previewPluginInstall: vi.fn(),
+  installPlugin: vi.fn(),
+  checkPluginUpdate: vi.fn(),
+  rollbackPlugin: vi.fn(),
+  uninstallPlugin: vi.fn(),
+  pluginInstallFailureOf: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -36,6 +47,8 @@ import {
 import { settleClosedLayer } from "./lib/test-layer-settle";
 
 const memory: PluginDetail = {
+  limits: [],
+  ui_enabled: true,
   key: "powercontext",
   name: "PowerContext 记忆",
   version: "1.0.0",
@@ -304,6 +317,33 @@ const list: PluginList = {
   ],
 };
 
+const helloReview = {
+  token: "token-1",
+  expires_at: "2026-10-23T13:00:00Z",
+  source: {
+    kind: "github",
+    repository: "acme/hello",
+    url: "https://github.com/acme/hello",
+    ref: "v1.1.0",
+    ref_kind: "tag" as const,
+    commit: "0123456789abcdef0123456789abcdef01234567",
+    committed_at: "2026-10-01T12:00:00Z",
+  },
+  key: "hello",
+  name: "Hello",
+  version: "1.1.0",
+  api_version: 2,
+  capabilities: ["storage"],
+  hooks: ["prepareTurn"],
+  plugin_bytes: 2048,
+  lockfile: "package-lock.json",
+  dependencies: [
+    { name: "tiny-lib", version: "2.0.0", bytes: 4096, scripts: true },
+  ],
+  dependency_bytes: 4096,
+  warnings: [{ code: "install_scripts_skipped", package: "tiny-lib@2.0.0" }],
+};
+
 function button(label: string, root: ParentNode = document): HTMLButtonElement {
   const match = [...root.querySelectorAll("button")].find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -379,6 +419,8 @@ async function type(
   });
 }
 
+let approvalFinished: ((finished: unknown) => void) | null = null;
+
 describe("PluginManager", () => {
   let container: HTMLDivElement;
   let reactRoot: Root;
@@ -415,10 +457,25 @@ describe("PluginManager", () => {
             tools: [],
             storage: [],
             host_storage: [],
+            limits: [],
+            ui_enabled: true,
           },
     );
     bridgeMocks.getPluginStatus.mockResolvedValue(status);
     bridgeMocks.getPluginStats.mockResolvedValue(stats);
+    bridgeMocks.listenPluginApprovalFinished.mockImplementation(
+      async (handler: (finished: unknown) => void) => {
+        approvalFinished = handler;
+        return () => {
+          approvalFinished = null;
+        };
+      },
+    );
+    bridgeMocks.pluginApprovalOf.mockReturnValue(null);
+    bridgeMocks.pluginInstallFailureOf.mockImplementation(
+      (error: { failure?: unknown }) => error?.failure ?? null,
+    );
+    bridgeMocks.openPluginApproval.mockResolvedValue(true);
     bridgeMocks.getPluginHostSettings.mockResolvedValue({
       paused: false,
       injection_budget_bytes: 16384,
@@ -477,7 +534,9 @@ describe("PluginManager", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]?.textContent).toContain("PowerContext 记忆");
     expect(rows[0]?.textContent).not.toContain("内置");
-    expect(rows[1]?.textContent).toContain("plugin.ts 第 12 行 · 不支持 async");
+    expect(rows[1]?.textContent).toContain(
+      "plugin.ts 第 12 行 · async 需要 apiVersion 2",
+    );
     // The title says where the plugin comes from, never its key.
     expect(document.body.textContent).toContain("内置 · 1.0.0");
     expect(document.body.textContent).not.toContain("powercontext · 1.0.0");
@@ -634,55 +693,386 @@ describe("PluginManager", () => {
     expect(rows[1]?.className).toContain("text-muted-foreground");
   });
 
-  it("grants only the capabilities left ticked when enabling", async () => {
-    bridgeMocks.updatePlugin.mockResolvedValue({
+  it("shows hook timings, the log and a dry run on the develop tab", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
       ...memory,
-      enabled: true,
-      granted_capabilities: [
-        "context.inject",
-        "request.read",
-        "network",
-        "ui.views",
+      development: {
+        project: "/home/me/powercontext",
+        built_at: "2026-10-23T12:00:00Z",
+      },
+    });
+    bridgeMocks.getPluginJournal.mockResolvedValue({
+      entries: [
+        {
+          seq: 1,
+          time: "2026-10-23T12:00:01Z",
+          hook: "prepareTurn",
+          level: "info",
+          message: "recalled 3 memories",
+        },
+        {
+          seq: 2,
+          time: "2026-10-23T12:00:02Z",
+          hook: "observeTurn",
+          level: "error",
+          message: "threw TypeError: x is undefined",
+          reason: "plugin_error",
+          stack:
+            "TypeError: x is undefined\n    at observeTurn (src/plugin.ts:40:3)",
+        },
+      ],
+      timings: [
+        {
+          hook: "prepareTurn",
+          calls: 12,
+          failures: 1,
+          p50_ms: 42.5,
+          p95_ms: 310,
+          max_ms: 1250,
+          script_ms: 3.2,
+        },
+      ],
+      latest: 2,
+      breakers: [{ hook: "onRequest", until: "2026-10-23T12:05:00Z" }],
+    });
+    bridgeMocks.dryRunPlugin.mockResolvedValue({
+      result: [{ type: "text", text: "ok" }],
+      elapsed_ms: 12.3,
+      script_ms: 1.5,
+      logs: [
+        {
+          seq: 0,
+          time: "2026-10-23T12:00:03Z",
+          hook: "describeStatus",
+          level: "info",
+          message: "status read",
+          dry_run: true,
+        },
       ],
     });
     await render();
+    // A development build says so instead of where it came from.
+    expect(document.body.textContent).toContain("开发版 · 1.0.0");
+    await openTab("开发");
+    expect(bridgeMocks.getPluginJournal).toHaveBeenCalledWith(
+      "powercontext",
+      0,
+    );
+    const develop = document.querySelector('[data-testid="plugin-develop"]');
+    expect(
+      develop?.querySelector('[data-testid="plugin-development"]')?.textContent,
+    ).toContain("powercontext");
+    expect(
+      develop?.querySelector('[data-testid="plugin-breaker"]')?.textContent,
+    ).toContain("「入口」最近失败太多");
+    const timings = develop?.querySelector('[data-testid="plugin-timings"]');
+    expect(timings?.textContent).toContain("prepareTurn");
+    expect(timings?.textContent).toContain("43 ms");
+    expect(timings?.textContent).toContain("310 ms");
+    expect(timings?.textContent).toContain("1.25 s");
+    const log = develop?.querySelector('[data-testid="plugin-log"]');
+    const lines = log?.querySelectorAll("li") ?? [];
+    // Newest first, failures with their stack.
+    expect(lines[0]?.textContent).toContain("错误");
+    expect(lines[0]?.textContent).toContain("src/plugin.ts:40:3");
+    expect(lines[1]?.textContent).toContain("recalled 3 memories");
+
+    const run = develop?.querySelector('[data-testid="plugin-dry-run"]');
+    const args = run?.querySelector("textarea") as HTMLTextAreaElement;
+    expect(JSON.parse(args.value)).toEqual([{ language: "zh-CN" }]);
+    await click(button("运行", run as ParentNode));
+    expect(bridgeMocks.dryRunPlugin).toHaveBeenCalledWith(
+      "powercontext",
+      "describeStatus",
+      [{ language: "zh-CN" }],
+    );
+    const outcome = run?.querySelector(
+      '[data-testid="plugin-dry-run-outcome"]',
+    );
+    expect(outcome?.textContent).toContain('"text": "ok"');
+    expect(outcome?.textContent).toContain("status read");
+  });
+
+  it("sets the time limits of the plugin's extension points", async () => {
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      hooks: [...memory.hooks, "onRequest", "onStreamEvent"],
+      limits: [
+        {
+          hook: "onRequest",
+          default_ms: 1000,
+          max_ms: 5000,
+          plugin_ms: 2000,
+          effective_ms: 2000,
+        },
+        {
+          hook: "onStreamEvent",
+          default_ms: 50,
+          max_ms: 1000,
+          ms: 200,
+          effective_ms: 200,
+        },
+      ],
+      fail_closed_requested: true,
+    });
+    bridgeMocks.updatePlugin.mockResolvedValue(memory);
+    await render();
     await openTab("设置");
-    await click(button("启用"));
-    const summary = document.querySelector(
-      '[data-testid="plugin-enable-summary"]',
+    const limits = document.querySelector('[data-testid="plugin-limits"]');
+    const inputs = [...(limits?.querySelectorAll("input") ?? [])];
+    expect(limits?.textContent).toContain("入口");
+    expect(limits?.textContent).toContain("流式改写");
+    expect(inputs.map((input) => [input.placeholder, input.value])).toEqual([
+      ["2000", ""],
+      ["50", "200"],
+    ]);
+    await type(inputs[0] as HTMLInputElement, "3000");
+    await type(inputs[1] as HTMLInputElement, "");
+    const failClosed = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="switch"]'),
+    ].find(
+      (item) =>
+        item
+          .closest("[data-setting-row]")
+          ?.textContent?.includes("出错时拦下请求") ??
+        item.parentElement?.parentElement?.textContent?.includes(
+          "出错时拦下请求",
+        ),
     );
-    expect(summary?.textContent).toContain(
-      "启用后，新会话的前几轮会请模型询问项目。",
-    );
-    expect(summary?.textContent).toContain("会话标记 memory-project");
-    const storage = [
-      ...document.querySelectorAll<HTMLButtonElement>('[role="checkbox"]'),
-    ].find((box) => box.parentElement?.textContent?.includes("插件存储"));
-    if (!storage) throw new Error("Missing the storage capability");
-    await click(storage);
+    if (!failClosed) throw new Error("Missing the fail-closed switch");
+    await click(failClosed);
+    await click(button("保存"));
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+      hook_limits_ms: { onRequest: 3000, onStreamEvent: 0 },
+      fail_closed: true,
+    });
+  });
+
+  it("orders the plugins and lists them in that order", async () => {
+    bridgeMocks.getPluginHostSettings.mockResolvedValue({
+      paused: false,
+      injection_budget_bytes: 16384,
+      language: "zh-CN",
+      order: ["team-rules"],
+    });
+    bridgeMocks.updatePluginHostSettings.mockImplementation(async (update) => ({
+      paused: false,
+      injection_budget_bytes: 16384,
+      language: "zh-CN",
+      ...update,
+    }));
+    await render();
+    const rows = () =>
+      [...document.querySelectorAll('[data-testid="plugin-row"]')].map(
+        (row) => row.getAttribute("data-key") ?? row.textContent,
+      );
+    expect(rows()[0]).toContain("team-rules");
+    await click(button("调整顺序"));
+    const ordered = [
+      ...document.querySelectorAll('[data-testid="plugin-order-row"]'),
+    ];
+    expect(ordered.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("team-rules"),
+      expect.stringContaining("PowerContext 记忆"),
+    ]);
     await click(
-      button(
-        "启用",
-        document.querySelector('[role="alertdialog"]') as HTMLElement,
+      button("保存", document.querySelector('[role="dialog"]') as HTMLElement),
+    );
+    expect(bridgeMocks.updatePluginHostSettings).toHaveBeenCalledWith({
+      order: ["team-rules", "powercontext"],
+    });
+  });
+
+  it("asks the confirmation window to confirm what enabling grants", async () => {
+    bridgeMocks.updatePlugin.mockRejectedValueOnce(
+      new Error(
+        '{"error":{"code":"approval_pending","message":"the change waits"}}',
       ),
     );
-    await finishExitAnimations();
+    await render();
+    await openTab("设置");
+    await click(button("启用"));
+    // The desktop asks no question of its own: the change goes to Core
+    // with every capability, and the confirmation window lets the user
+    // untick some.
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
     expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
       enabled: true,
-      granted_capabilities: [
-        "context.inject",
-        "request.read",
-        "network",
-        "ui.views",
-      ],
+      granted_capabilities: memory.requested_capabilities,
+    });
+    const waiting = document.querySelector(
+      '[data-testid="plugin-awaiting-approval"]',
+    );
+    expect(waiting?.textContent).toContain("插件确认");
+    expect(document.body.textContent).not.toContain("无法保存修改");
+    await click(button("打开确认窗口", waiting as HTMLElement));
+    expect(bridgeMocks.openPluginApproval).toHaveBeenCalled();
+
+    // Once the user confirmed, the plugin shows enabled.
+    bridgeMocks.getPlugin.mockResolvedValue({
+      ...memory,
+      enabled: true,
+      granted_capabilities: ["context.inject", "network"],
+    });
+    await act(async () => {
+      approvalFinished?.({
+        id: "approval-1",
+        key: "powercontext",
+        approved: true,
+      });
     });
     expect(
-      document.querySelector('[data-testid="plugin-row"]')?.textContent,
-    ).toContain("运行中");
-    // Enabling brings the overview back, the plugin joined to AstrLink.
+      document.querySelector('[data-testid="plugin-awaiting-approval"]'),
+    ).toBeNull();
     const link = document.querySelector('[data-testid="plugin-link"]');
-    expect(link).not.toBeNull();
     expect(link?.getAttribute("data-state")).not.toBe("off");
+  });
+
+  it("installs a plugin from a GitHub link once the confirmation window agrees", async () => {
+    bridgeMocks.previewPluginInstall.mockResolvedValue(helloReview);
+    bridgeMocks.installPlugin.mockRejectedValueOnce(
+      new Error('{"error":{"code":"approval_pending","message":"waits"}}'),
+    );
+    await render();
+    await click(button("安装插件"));
+    const dialog = document.querySelector(
+      '[data-testid="plugin-install-dialog"]',
+    ) as HTMLElement;
+    expect(dialog).not.toBeNull();
+    await type(
+      document.getElementById("plugin-install-url") as HTMLInputElement,
+      "https://github.com/acme/hello",
+    );
+    await click(button("检查", dialog));
+    expect(bridgeMocks.previewPluginInstall).toHaveBeenCalledWith(
+      "https://github.com/acme/hello",
+    );
+    expect(dialog.textContent).toContain("标签 v1.1.0");
+    expect(dialog.textContent).toContain("依赖 1 个");
+    expect(dialog.textContent).toContain("没有运行：tiny-lib@2.0.0");
+
+    await click(button("安装", dialog));
+    expect(bridgeMocks.installPlugin).toHaveBeenCalledWith("token-1", false);
+    expect(
+      document.querySelector('[data-testid="plugin-install-waiting"]'),
+    ).not.toBeNull();
+
+    // The confirmation window installed it: the page shows it.
+    const hello = {
+      ...memory,
+      key: "hello",
+      name: "Hello",
+      source: "directory" as const,
+      installed: helloReview.source,
+    };
+    bridgeMocks.listPlugins.mockResolvedValue({
+      ...list,
+      plugins: [...list.plugins, hello],
+    });
+    bridgeMocks.getPlugin.mockResolvedValue(hello);
+    await act(async () => {
+      approvalFinished?.({ id: "approval-1", key: "hello", approved: true });
+    });
+    await act(async () => {});
+    expect(
+      document.querySelector('[data-testid="plugin-install-dialog"]'),
+    ).toBeNull();
+    expect(bridgeMocks.getPlugin).toHaveBeenCalledWith("hello");
+    expect(
+      document.querySelector('[data-testid="plugin-source"]')?.textContent,
+    ).toContain("acme/hello");
+  });
+
+  it("says why a plugin cannot be installed, with the build's messages", async () => {
+    bridgeMocks.previewPluginInstall.mockRejectedValue({
+      failure: {
+        reason: "build_failed",
+        messages: ['src/plugin.ts:3:7: Expected ";"'],
+      },
+    });
+    await render();
+    await click(button("安装插件"));
+    const dialog = document.querySelector(
+      '[data-testid="plugin-install-dialog"]',
+    ) as HTMLElement;
+    await type(
+      document.getElementById("plugin-install-url") as HTMLInputElement,
+      "acme/hello",
+    );
+    await click(button("检查", dialog));
+    expect(dialog.textContent).toContain("构建失败。");
+    expect(dialog.textContent).toContain("src/plugin.ts:3:7");
+    expect(button("安装", dialog).disabled).toBe(true);
+  });
+
+  it("checks a plugin installed from source for updates, and uninstalls it after asking", async () => {
+    const hello = {
+      ...memory,
+      key: "hello",
+      name: "Hello",
+      source: "override" as const,
+      installed: helloReview.source,
+      versions: [
+        {
+          id: "20261020T080000Z-0000abcd",
+          version: "1.0.0",
+          replaced_at: "2026-10-20T08:00:00Z",
+        },
+      ],
+    };
+    bridgeMocks.listPlugins.mockResolvedValue({ ...list, plugins: [hello] });
+    bridgeMocks.getPlugin.mockResolvedValue(hello);
+    bridgeMocks.checkPluginUpdate.mockResolvedValue({
+      available: true,
+      ref: "v1.2.0",
+      ref_kind: "tag",
+      version: "1.2.0",
+      committed_at: "2026-10-22T08:00:00Z",
+      notes: "stores things",
+      url: "https://github.com/acme/hello/tree/v1.2.0",
+    });
+    bridgeMocks.previewPluginInstall.mockResolvedValue(helloReview);
+    bridgeMocks.uninstallPlugin.mockResolvedValue(list);
+    await render();
+    const source = document.querySelector(
+      '[data-testid="plugin-source"]',
+    ) as HTMLElement;
+    expect(source.textContent).toContain("标签 v1.1.0");
+    expect(source.textContent).not.toContain(helloReview.source.commit);
+    await click(button("检查更新", source));
+    expect(bridgeMocks.checkPluginUpdate).toHaveBeenCalledWith("hello");
+    expect(source.textContent).toContain("有新版本：1.2.0");
+    await click(button("查看并更新", source));
+    // The update is reviewed as an install is.
+    expect(bridgeMocks.previewPluginInstall).toHaveBeenCalledWith(
+      "https://github.com/acme/hello/tree/v1.2.0",
+    );
+    await click(button("取消"));
+    await settleClosedLayer();
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[aria-label="更多操作"]')
+        ?.dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            pointerType: "mouse",
+          }),
+        );
+    });
+    const uninstall = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent?.trim() === "卸载");
+    if (!uninstall) throw new Error("Missing the uninstall item");
+    await click(uninstall);
+    const confirm = document.querySelector(
+      '[role="alertdialog"]',
+    ) as HTMLElement;
+    expect(confirm.textContent).toContain("内置的同名插件会恢复");
+    expect(bridgeMocks.uninstallPlugin).not.toHaveBeenCalled();
+    await click(button("卸载", confirm));
+    expect(bridgeMocks.uninstallPlugin).toHaveBeenCalledWith("hello");
   });
 
   it("offers a row of switches as one choice of several", async () => {

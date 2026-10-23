@@ -131,6 +131,7 @@ import {
   getService,
   getServiceAuthorization,
   getServiceUsage,
+  listPlugins,
   logoutService,
   resetServiceUsage,
   openAuthorizationURL,
@@ -166,6 +167,7 @@ import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
 import { decodeModelEditorValue, encodeModelEditorValue } from "./model-editor";
 import { filterModels } from "./model-groups";
+import { PluginSlot } from "./plugin-ui";
 import {
   ServiceModelsEditor,
   type UpstreamModelSnapshot,
@@ -201,9 +203,11 @@ import {
   type ServiceCreateInput,
   type ServiceKind,
   type ServicePatchInput,
+  type ServicePlugin,
   type ServiceRecord,
   type SubscriptionServiceKind,
 } from "./service-model";
+import type { PluginList, PluginProvider } from "./plugin-model";
 import {
   SubscriptionResetButton,
   SubscriptionUsageMeter,
@@ -230,10 +234,34 @@ export type ServiceEditorTab =
   | "protocols"
   | "failure";
 
+/** A kind of provider a plugin adapts, as the add-provider picker offers it. */
+export interface PluginProviderChoice {
+  plugin: string;
+  pluginName: string;
+  provider: PluginProvider;
+}
+
+/** The kinds of provider the enabled plugins adapt. */
+export function pluginProviderChoices(
+  list: PluginList,
+): PluginProviderChoice[] {
+  return list.plugins.flatMap((plugin) =>
+    plugin.enabled &&
+    plugin.granted_capabilities.includes("provider") &&
+    plugin.providers
+      ? plugin.providers.map((provider) => ({
+          plugin: plugin.key,
+          pluginName: plugin.name,
+          provider,
+        }))
+      : [],
+  );
+}
+
 export type ServiceManagerView =
   | { kind: "list" }
   /** The provider type is picked in a dialog before the editor opens. */
-  | { kind: "create"; serviceKind: ServiceKind }
+  | { kind: "create"; serviceKind: ServiceKind; plugin?: PluginProviderChoice }
   | {
       kind: "edit";
       serviceId: string;
@@ -281,6 +309,8 @@ type Draft = {
   capabilities: ServiceCapability[];
   authorizationFlow: AuthorizationFlow | null;
   modelListPath: string;
+  /** The plugin that adapts a provider of kind plugin. */
+  plugin?: ServicePlugin;
 };
 
 type ConfirmAction =
@@ -371,6 +401,11 @@ function serviceKindPickerGroups(): DialogPickerGroup<ServiceKind>[] {
   ];
 }
 
+/** What the picker calls a plugin's provider. */
+function pluginChoiceValue(choice: PluginProviderChoice): string {
+  return `plugin:${choice.plugin}/${choice.provider.id}`;
+}
+
 /** Asks for the provider type before the add-provider editor opens. */
 export function ServiceKindPickerDialog({
   onOpenChange,
@@ -378,20 +413,117 @@ export function ServiceKindPickerDialog({
   open,
 }: {
   onOpenChange: (open: boolean) => void;
-  onSelect: (kind: ServiceKind) => void;
+  /** plugin is set for a provider a plugin adapts. */
+  onSelect: (kind: ServiceKind, plugin?: PluginProviderChoice) => void;
   open: boolean;
 }) {
   const t = useT();
+  // The providers the enabled plugins adapt, read each time the picker opens.
+  const [choices, setChoices] = useState<PluginProviderChoice[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    let current = true;
+    // Without plugins the picker offers the other kinds alone.
+    void Promise.resolve()
+      .then(() => listPlugins())
+      .then((list) => {
+        if (current) setChoices(pluginProviderChoices(list));
+      })
+      .catch(() => {
+        if (current) setChoices([]);
+      });
+    return () => {
+      current = false;
+    };
+  }, [open]);
+  const groups: DialogPickerGroup<string>[] = serviceKindPickerGroups();
+  if (choices.length > 0)
+    groups.push({
+      label: t("services.groupPlugins"),
+      options: choices.map((choice) => ({
+        value: pluginChoiceValue(choice),
+        label: choice.provider.name,
+        description: t("services.kindPickerPluginHint", {
+          plugin: choice.pluginName,
+        }),
+        icon: <ServiceKindIcon kind="plugin" size={20} />,
+      })),
+    });
   return (
     <PickerDialog
       description={t("services.kindPickerDescription")}
-      groups={serviceKindPickerGroups()}
+      groups={groups}
       onOpenChange={onOpenChange}
-      onValueChange={onSelect}
+      onValueChange={(value) => {
+        const choice = choices.find(
+          (candidate) => pluginChoiceValue(candidate) === value,
+        );
+        if (choice) onSelect("plugin", choice);
+        else onSelect(value as ServiceKind);
+      }}
       open={open}
       title={t("services.kindPickerTitle")}
     />
   );
+}
+
+/**
+ * A new provider of a kind a plugin adapts: its address, key, protocols and
+ * models as the plugin declares them, the protocols it does not serve
+ * converted into one it does when it allows that.
+ */
+function pluginProviderDraft(
+  choice: PluginProviderChoice,
+  conversionEngine?: ConversionEngineCapability | null,
+): Draft {
+  const { provider } = choice;
+  const declared = provider.protocols.map((entry) => entry.protocol);
+  const capabilities: ServiceCapability[] = provider.protocols.map((entry) => ({
+    protocol: entry.protocol,
+    mode: "native",
+    streaming: entry.stream,
+  }));
+  if (provider.convert) {
+    for (const protocol of [
+      "openai.responses",
+      "openai.chat",
+      "anthropic.messages",
+      "google.generate_content",
+    ]) {
+      if (declared.includes(protocol)) continue;
+      const target = bestConversionTarget(protocol, declared, conversionEngine);
+      if (target)
+        capabilities.push({
+          protocol,
+          mode: "native",
+          streaming:
+            provider.protocols.find((entry) => entry.protocol === target)
+              ?.stream ?? false,
+          convert_to: target,
+        });
+    }
+  }
+  const scheme = provider.auth.scheme as ServiceAuthScheme;
+  return {
+    kind: "plugin",
+    plugin: { key: choice.plugin, provider: provider.id },
+    name: provider.name,
+    enabled: true,
+    responsesWebSocket: false,
+    privacyTrusted: false,
+    baseURL: provider.base_url ?? "",
+    authScheme: scheme,
+    headerName: provider.auth.header_name ?? "",
+    secret: "",
+    removeCredential: false,
+    proxy: proxyDraft(),
+    models: [...(provider.models ?? [])],
+    modelRedirects: [],
+    modelProtocols: [],
+    capabilities,
+    authorizationFlow: null,
+    modelListPath: "",
+  };
 }
 
 /** The only login transport a single-flow provider offers; null when the user must pick. */
@@ -566,7 +698,9 @@ type ModelPreview = {
 };
 
 function modelDiscoveryProtocols(draft: Draft): ModelDiscoveryProtocol[] {
-  if (isSubscriptionKind(draft.kind)) return ["openai.models"];
+  // A plugin lists its provider's models; Core ignores the protocol.
+  if (isSubscriptionKind(draft.kind) || draft.kind === "plugin")
+    return ["openai.models"];
   return (["openai.models", "google.models"] as const).filter((protocol) =>
     draft.capabilities.some((capability) => capability.protocol === protocol),
   );
@@ -686,6 +820,7 @@ function draftFromRecord(record: ServiceRecord): Draft {
       wireCapability(capability),
     ),
     modelListPath: service.http.model_list_path ?? "",
+    ...(service.plugin ? { plugin: { ...service.plugin } } : {}),
   };
 }
 
@@ -1152,6 +1287,10 @@ export function ServiceManager({
   conversionEngineRef.current = conversionEngine;
   const viewKind = view.kind;
   const createServiceKind = view.kind === "create" ? view.serviceKind : null;
+  const createPlugin = view.kind === "create" ? view.plugin : undefined;
+  const createPluginKey = createPlugin
+    ? `${createPlugin.plugin}/${createPlugin.provider.id}`
+    : "";
   const editingServiceID = view.kind === "edit" ? view.serviceId : null;
   const requestedEditorTab =
     view.kind === "edit" ? (view.tab ?? "connection") : "connection";
@@ -1270,11 +1409,14 @@ export function ServiceManager({
       return;
     }
     if (view.kind === "create") {
-      const next = draftForKind(
-        view.serviceKind,
-        protocolsRef.current,
-        conversionEngineRef.current,
-      );
+      const next =
+        view.serviceKind === "plugin" && view.plugin
+          ? pluginProviderDraft(view.plugin, conversionEngineRef.current)
+          : draftForKind(
+              view.serviceKind,
+              protocolsRef.current,
+              conversionEngineRef.current,
+            );
       setDraft(next);
       setEditing(null);
       setBaseline(draftSignature(next));
@@ -1299,7 +1441,14 @@ export function ServiceManager({
       .finally(() => {
         if (loadGeneration.current === generation) setLoadingRecord(false);
       });
-  }, [createServiceKind, editingServiceID, requestedEditorTab, t, viewKind]);
+  }, [
+    createServiceKind,
+    createPluginKey,
+    editingServiceID,
+    requestedEditorTab,
+    t,
+    viewKind,
+  ]);
 
   const importCodexModelsAfterLogin = useCallback(
     async (service: Service) => {
@@ -1654,7 +1803,7 @@ export function ServiceManager({
     try {
       const attempts = await Promise.allSettled(
         discoveryProtocols.map((protocol) => {
-          if (isSubscriptionKind(draft.kind)) {
+          if (isSubscriptionKind(draft.kind) || draft.kind === "plugin") {
             return probeServiceModels(editing!.service.id, protocol);
           }
           return probeDraftServiceModels({
@@ -1865,6 +2014,9 @@ export function ServiceManager({
                 : {}),
             },
             capabilities: draft.capabilities.map(wireCapability),
+            ...(draft.kind === "plugin" && draft.plugin
+              ? { plugin: draft.plugin }
+              : {}),
           };
         }
         record = await createService(input);
@@ -3182,8 +3334,10 @@ export function ServiceManager({
         }))
       }
       onDiscoverModels={
-        modelDiscoveryProtocols(draft).length > 0 ||
-        (draft.kind === "custom" && draft.modelListPath.trim() !== "")
+        // A plugin's provider lists its models once it is saved.
+        (draft.kind === "plugin" ? editing !== null : true) &&
+        (modelDiscoveryProtocols(draft).length > 0 ||
+          (draft.kind === "custom" && draft.modelListPath.trim() !== ""))
           ? () => void discoverModels()
           : undefined
       }
@@ -3973,6 +4127,14 @@ export function ServiceManager({
                 value="connection"
               >
                 {connectionFields}
+                {/* What plugins' interfaces show of the provider. */}
+                {editingServiceID ? (
+                  <PluginSlot
+                    className="mt-4 grid gap-3"
+                    context={{ service: editingServiceID }}
+                    name="service.section"
+                  />
+                ) : null}
               </TabsContent>
               <TabsContent
                 className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto pr-4 pb-1"

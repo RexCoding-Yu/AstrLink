@@ -1133,7 +1133,7 @@ END`,
     sealed INTEGER NOT NULL DEFAULT 1
 )`,
 		}},
-		{Version: 56, Name: "plugins_and_request_metadata", Statements: []string{
+		{Version: 56, Name: "plugins_request_metadata_and_extension_points", Statements: []string{
 			// The user's choices for each plugin. Plugins come from the
 			// builtin set and the plugin directory; a row exists once the
 			// user changed something, and a plugin without one is disabled.
@@ -1142,7 +1142,11 @@ END`,
 			// workspace had; auto_refresh lets the host swap a session's
 			// resident block when the plugin's data changed; lookup_enabled
 			// lets the model run the plugin's queries through the lookup
-			// outlet.
+			// outlet. hook_limits_json holds the user's time limits of the
+			// plugin's extension points, in milliseconds by hook;
+			// fail_closed the user's consent that a request its entry hook
+			// cannot decide is refused; ui_enabled whether its interface
+			// code loads.
 			`CREATE TABLE plugin_settings (
     plugin_key TEXT PRIMARY KEY CHECK(length(plugin_key) BETWEEN 1 AND 32),
     enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
@@ -1155,6 +1159,9 @@ END`,
     workspace_binding INTEGER NOT NULL DEFAULT 1 CHECK(workspace_binding IN (0, 1)),
     auto_refresh INTEGER NOT NULL DEFAULT 0 CHECK(auto_refresh IN (0, 1)),
     lookup_enabled INTEGER NOT NULL DEFAULT 1 CHECK(lookup_enabled IN (0, 1)),
+    hook_limits_json TEXT NOT NULL DEFAULT '{}' CHECK(length(hook_limits_json) <= 4096),
+    fail_closed INTEGER NOT NULL DEFAULT 0 CHECK(fail_closed IN (0, 1)),
+    ui_enabled INTEGER NOT NULL DEFAULT 1 CHECK(ui_enabled IN (0, 1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )`,

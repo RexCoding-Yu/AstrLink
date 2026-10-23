@@ -1256,7 +1256,9 @@
       "chat": "OpenCode、OpenClaw、ほとんどの互換ツールが使用",
       "messages": "Claude Code が使用",
       "gemini": "Gemini CLI が使用"
-    }
+    },
+    "groupPlugins": "プラグイン",
+    "kindPickerPluginHint": "「{{plugin}}」プラグインが中継"
   },
   "models": {
     "deleteNamed": "{{label}} を削除",
@@ -1401,7 +1403,8 @@
     "xai": "xAI（Grok）API",
     "antigravity_subscription": "Antigravity サブスクリプション",
     "copilot_subscription": "GitHub Copilot サブスクリプション",
-    "droid_subscription": "Droid サブスクリプション"
+    "droid_subscription": "Droid サブスクリプション",
+    "plugin": "プラグインのプロバイダー"
   },
   "subscription": {
     "tag": "サブスク",
@@ -1458,7 +1461,8 @@
     "glmDescription": "/api/paas/v4 経由で従量課金する Zhipu プラットフォームの APIキーです。アカウントで有効なモデル ID を追加してください。",
     "minimaxDescription": "従量課金の MiniMax プラットフォーム APIキーです。プラットフォームの APIキーを使ってください。",
     "doubaoDescription": "従量課金の Volcengine Ark APIキーです。既定は北京です。有効なモデル ID または推論エンドポイント ID（ep-…）を追加してください。",
-    "xaiDescription": "従量課金の xAI プラットフォーム APIキーです。Grok Chat、Responses、モデル検出に対応しています。"
+    "xaiDescription": "従量課金の xAI プラットフォーム APIキーです。Grok Chat、Responses、モデル検出に対応しています。",
+    "pluginDescription": "プラグインが中継するプロバイダー：プラグインがリクエストを組み立てて応答を解析し、送信・キー・フェイルオーバーはゲートウェイが担います。"
   },
   "usage": {
     "allLimits": "すべての利用枠",
@@ -2807,7 +2811,8 @@
     "window": {
       "trajectoryInspector": "AstrLink · 軌跡の呼び出し",
       "trajectoryInspectorPinned": "AstrLink · 軌跡の呼び出し（最前面）",
-      "rawAccessApproval": "AstrLink · 原文アクセス申請"
+      "rawAccessApproval": "AstrLink · 原文アクセス申請",
+      "pluginApproval": "AstrLink · プラグインの確認"
     },
     "rawAccess": {
       "notificationTitle": "Agent が原文の閲覧を申請しています",
@@ -4677,7 +4682,8 @@
     "source": {
       "builtin": "組み込み",
       "directory": "ディレクトリ",
-      "override": "組み込みを置換"
+      "override": "組み込みを置換",
+      "github": "GitHub"
     },
     "state": {
       "running": "実行中",
@@ -4692,7 +4698,8 @@
     "tabs": {
       "overview": "概要",
       "settings": "設定",
-      "status": "稼働状況"
+      "status": "稼働状況",
+      "develop": "開発"
     },
     "testStatus": {
       "ok": "接続 OK",
@@ -4708,7 +4715,18 @@
       "network": "ネットワーク",
       "storage": "プラグインストレージ",
       "uiViews": "ビュー",
-      "modelTools": "エージェントからの検索"
+      "modelTools": "エージェントからの検索",
+      "requestWrite": "リクエストの変更",
+      "requestWriteRaw": "リクエスト本文の書き換え",
+      "requestGate": "リクエストの拒否",
+      "routing": "ルーティングの調整",
+      "responseRead": "レスポンスの読み取り",
+      "responseWrite": "レスポンスの書き換え",
+      "events": "ゲートウェイのイベント",
+      "schedule": "定期実行",
+      "httpServe": "ローカルエンドポイント",
+      "provider": "プロバイダーアダプター",
+      "uiCode": "画面のコード"
     },
     "loadErrors": {
       "not_found": "plugin.ts も plugin.js もありません",
@@ -4716,8 +4734,8 @@
       "too_large": "8 MiB を超えています",
       "encoding": "UTF-8 ではありません",
       "syntax": "構文エラー",
-      "async": "async は使えません",
-      "await": "await は使えません",
+      "async": "async には apiVersion 2 が必要です",
+      "await": "await には apiVersion 2 が必要です",
       "import": "import は使えません",
       "reexport": "export … from は使えません",
       "missing_meta": "meta がエクスポートされていません",
@@ -5026,7 +5044,222 @@
         "without": "その他のセッション"
       }
     },
-    "headerHelpLabel": "プラグイン全体の設定について"
+    "headerHelpLabel": "プラグイン全体の設定について",
+    "develop": {
+      "build": "開発版",
+      "builtAt": "{{time}} にビルド",
+      "loadFailed": "プラグインのログを読み込めません。",
+      "timings": "フックの所要時間",
+      "timingsHelpLabel": "フックの所要時間について",
+      "timingsHelp": "各フックの直近 256 回の呼び出しにかかった時間です。試し実行は含みません。「JS 時間」はスクリプト自体が動いた時間だけで、ネットワークやストレージを待った時間は含みません。Core を再起動すると数え直します。",
+      "noCalls": "まだ呼び出しがありません。",
+      "hook": "フック",
+      "calls": "呼び出し",
+      "failures": "失敗",
+      "p50": "中央値",
+      "p95": "P95",
+      "max": "最長",
+      "script": "JS 時間",
+      "dryRun": "試し実行",
+      "dryRunHelpLabel": "試し実行について",
+      "dryRunHelp": "プラグインの今の設定と許可で、フックをサンドボックス内で一度実行します。試し実行ではネットワークを使えないため、プラグインのリクエストは予算切れで失敗し、リクエスト記録にも残りません。引数はフックに渡す JSON 配列です。",
+      "args": "引数",
+      "argsInvalid": "引数は JSON 配列で書いてください。",
+      "run": "実行",
+      "running": "実行中…",
+      "runFailed": "試し実行が完了しませんでした。",
+      "result": "戻り値",
+      "noResult": "戻り値なし（undefined）",
+      "took": "所要 {{elapsed}}・JS {{script}}",
+      "log": "ログ",
+      "logHelpLabel": "ログについて",
+      "logHelp": "プラグインが console と astrlink.log で書いたログと、失敗した呼び出しとそのスタックです。新しいものが上です。メモリにだけ残り、プラグインごとに最大 400 行、Core を再起動すると消えます。",
+      "noLog": "まだログがありません。",
+      "clear": "クリア",
+      "dryRunTag": "試し実行",
+      "stack": "スタック",
+      "levels": {
+        "debug": "デバッグ",
+        "info": "情報",
+        "warn": "警告",
+        "error": "エラー"
+      },
+      "breaker": "「{{point}}」は最近失敗が多いため、{{time}} までリクエストに参加しません。"
+    },
+    "hooks": {
+      "onRequest": "入口",
+      "route": "ルーティング",
+      "beforeForward": "転送前",
+      "beforeUpstream": "上流への転送前",
+      "rewriteResponse": "レスポンスの書き換え",
+      "onStreamEvent": "ストリームの書き換え",
+      "onResponse": "レスポンスの後",
+      "onEvent": "ゲートウェイのイベント",
+      "onSchedule": "定期実行",
+      "onHttp": "ローカルエンドポイント",
+      "provider": "プロバイダーアダプター",
+      "providerEvent": "アダプターのストリームイベント",
+      "observeTurn": "各ターンの後",
+      "prepareSession": "セッションの読み込み",
+      "prepareTurn": "ターンの補足"
+    },
+    "approval": {
+      "loading": "確認する変更を読み込んでいます…",
+      "nothing": "確認を待っているプラグインの変更はありません",
+      "enableTitle": "「{{name}}」を有効にする",
+      "grantTitle": "「{{name}}」にできることを増やす",
+      "capabilitiesEnable": "プラグインが求める権限です。チェックを外したものは許可されません：",
+      "capabilitiesAdded": "この変更で新たに許可する権限です。チェックを外したものは許可されません：",
+      "noCapabilities": "プラグインは権限を求めていません。",
+      "origins": "新たにアクセスできるアドレス",
+      "plaintext": "平文の HTTP",
+      "plaintextExisting": "平文の HTTP でのアクセスを許可：{{origins}}",
+      "trusted": "信頼済みにする：プライバシーチェックを飛ばし、プラグインは会話をそのまま見ます。",
+      "failClosed": "プラグインの入口フックが失敗またはタイムアウトしたとき、リクエストを通さずに拒否します。",
+      "risk": {
+        "ui_code": "画面のコードは AstrLink の画面と同じ権限を持ちます。リクエスト記録を読み、設定を変えるなど、画面にできることは何でもできます。"
+      },
+      "deny": "拒否",
+      "confirm": "許可",
+      "confirmEnable": "有効にする",
+      "waiting": "この変更は「プラグインの確認」ウィンドウで確認を待っています。",
+      "open": "確認ウィンドウを開く"
+    },
+    "limits": {
+      "label": "拡張ポイントの時間上限",
+      "helpLabel": "拡張ポイントの時間上限について",
+      "help": "リクエストがプラグインの各拡張ポイントを待つ最大時間です。空欄ならプラグインが宣言した値（欄内の薄い数字）、宣言がなければゲートウェイの既定値を使います。超えると、入口は通し、ルーティングは順序を保ち、転送前はそのまま送り、書き換えはレスポンスやイベントをそのまま返します。プラグインが時間を使うほどリクエストは遅くなります。各ポイントの実際の所要時間は「開発」タブで見られます。",
+      "ms": "ミリ秒",
+      "invalid": "{{point}}の時間上限は 1 から {{max}} までの整数ミリ秒にしてください",
+      "failClosed": "失敗時にリクエストを拒否",
+      "failClosedHelpLabel": "失敗時にリクエストを拒否することについて",
+      "failClosedHelp": "プラグインの希望で、入口フックが失敗またはタイムアウトしたリクエストを通さずに拒否します。必ず通すべき審査などに使います。オンにするとプラグインの不調でリクエストが失敗するため、確認ウィンドウで確認します。"
+    },
+    "order": {
+      "open": "順序を変更",
+      "title": "プラグインの実行順序",
+      "description": "各拡張ポイントでプラグインは上から順に実行され、それぞれが上のプラグインの結果を受け取ります。"
+    },
+    "install": {
+      "open": "プラグインをインストール",
+      "title": "GitHub からプラグインをインストール",
+      "helpLabel": "GitHub からのインストールについて",
+      "helpLinks": "リポジトリのトップ（最新のバージョンタグ、タグがなければデフォルトブランチをインストール）、tree/ 以下のブランチ・タグ・ディレクトリ、リリース、コミットのリンクを貼り付けられます。プライベートリポジトリはまだ対応していません。",
+      "helpBuild": "AstrLink はこのコンピューターでロックファイルが固定する依存を npm からダウンロードし、ロックファイルのハッシュと 1 つずつ照合してから、内蔵のバンドラーでビルドします。インストールスクリプトは一切実行しません。ネイティブモジュールを含む依存は使えません。",
+      "helpConfirm": "まずここで審査結果を確認してください。インストールは「プラグインの確認」ウィンドウで確定します。インストールしたプラグインは自動では有効になりません。",
+      "link": "GitHub のリンク",
+      "check": "確認",
+      "previewing": "ダウンロードしてビルドしています…",
+      "failed": "このプラグインはインストールできません。",
+      "checkFailed": "更新を確認できませんでした。",
+      "rollbackFailed": "ロールバックできませんでした。",
+      "uninstallFailed": "アンインストールできませんでした。",
+      "install": "インストール",
+      "update": "更新",
+      "confirm": "インストールする",
+      "confirmWeb": "「{{name}}」をインストールすると、そのコードがプラグインディレクトリに置かれます。インストールしますか？",
+      "waiting": "インストールは「プラグインの確認」ウィンドウであなたの確認を待っています。",
+      "registry": "npm レジストリ",
+      "registryLabel": "依存のダウンロード元",
+      "registryHelp": "空欄なら npm 公式レジストリを使い、失敗したときは npmmirror を使います。どの依存もロックファイルのハッシュと照合するので、レジストリを変えてもインストールされる内容は変わりません。",
+      "installTitle": "「{{name}}」をインストール",
+      "updateTitle": "「{{name}}」を更新",
+      "rollbackTitle": "「{{name}}」をロールバック",
+      "rollbackTo": "ロールバック",
+      "rollback": "以前のバージョンに戻す…",
+      "uninstall": "アンインストール",
+      "uninstallTitle": "「{{name}}」をアンインストール",
+      "uninstallDescription": "プラグインのファイルと保存していた以前のバージョンを削除します。設定と保存データは残るので、再インストール後もそのまま使えます。",
+      "uninstallBuiltin": "プラグインのファイルと保存していた以前のバージョンを削除し、同じ名前の内蔵プラグインに戻ります。設定と保存データは残ります。",
+      "source": "入手元",
+      "openRepository": "GitHub で {{repository}} を開く",
+      "checkUpdate": "更新を確認",
+      "checking": "確認しています…",
+      "more": "その他の操作",
+      "pinned": "固定されたコミットからインストールしたため、追従する新しいバージョンはありません。",
+      "latest": "最新のバージョンです。",
+      "available": "新しいバージョン：{{version}}（{{day}}）",
+      "newCommit": "{{ref}} の新しいコミット",
+      "reviewUpdate": "確認して更新",
+      "notes": "更新内容",
+      "unknownVersion": "バージョン不明",
+      "replacedAt": "{{day}}に置き換え",
+      "ref": {
+        "tag": "タグ {{ref}}",
+        "branch": "ブランチ {{ref}}"
+      },
+      "refCommit": "固定コミット",
+      "refAt": "{{ref}} · {{day}}のコミット",
+      "updateFrom": "{{from}} から {{to}} に更新",
+      "rollbackFrom": "{{from}} から {{to}} に戻す",
+      "replaces": {
+        "builtin": "内蔵プラグイン「{{name}}」を置き換えます。",
+        "source": "{{repository}} からインストールした「{{name}}」を置き換えます。",
+        "development": "開発中の「{{name}}」を置き換えます。",
+        "directory": "プラグインディレクトリの「{{name}}」を置き換えます。"
+      },
+      "client": "画面のコードを含みます：有効にするとメインウィンドウで動き、AstrLink の画面でできることは何でもできます。",
+      "changesTitle": "今回の変更",
+      "changes": {
+        "addedCapability": "新たに要求：{{capability}}",
+        "removedCapability": "要求しなくなった：{{capability}}",
+        "client": {
+          "added": "画面のコードを追加",
+          "removed": "画面のコードを削除"
+        },
+        "network": "ネットワークの用途の説明が変わりました",
+        "dependencies": "依存の変更 {{count}} 件"
+      },
+      "capabilities": "要求する機能",
+      "files": "コードと依存",
+      "code": "ビルド後 {{size}}",
+      "dependencies": "依存 {{count}} 個、合計 {{size}}",
+      "noDependencies": "依存なし",
+      "author": "作者 {{author}}",
+      "dependencyList": "依存の一覧",
+      "scripts": "次の依存のインストールスクリプトは実行していません：{{packages}}",
+      "warnings": {
+        "version_mismatch": "package.json とプラグインの宣言でバージョンが違います（{{detail}}）。",
+        "build_warning": "ビルドの注意：{{detail}}"
+      },
+      "failures": {
+        "invalid_link": "読み取れる GitHub リポジトリのリンクではありません。",
+        "repository_not_found": "リポジトリ {{detail}} が見つからないか、プライベートリポジトリです（まだ対応していません）。",
+        "ref_not_found": "リポジトリに {{detail}} がありません。",
+        "rate_limited": "GitHub API の利用回数の上限に達しました。しばらくしてから再試行してください。",
+        "source_unavailable": "ソースをダウンロードできませんでした：{{detail}}",
+        "too_large": "プラグインまたは依存がサイズの上限を超えています（{{detail}}）。",
+        "no_plugin": "プラグインのエントリーがありません：src/plugin.ts、plugin.ts、または package.json の astrlink.plugin が指すファイル。",
+        "no_lockfile": "依存がありますが、ロックファイル（package-lock.json、pnpm-lock.yaml、bun.lock）がありません。",
+        "lockfile_unsupported": "このロックファイルには対応していません：{{detail}}",
+        "dependency_unsupported": "npm レジストリ以外から取る依存にはまだ対応していません：{{detail}}",
+        "integrity_failed": "{{detail}} のダウンロード内容がロックファイルのハッシュと一致しません。",
+        "registry_unavailable": "npm レジストリから {{detail}} をダウンロードできませんでした。",
+        "native_module": "依存 {{detail}} はネイティブモジュールを含むため、プラグインでは使えません。",
+        "build_failed": "ビルドに失敗しました。",
+        "invalid_plugin": "プラグインがチェックを通りませんでした。",
+        "incompatible": "プラグインは AstrLink {{detail}} を必要とし、このバージョンとは互換性がありません。",
+        "expired": "審査結果の有効期限が切れました。もう一度確認してください。",
+        "busy": "別のプラグインをビルドしています。少し待ってから再試行してください。",
+        "unknown": "インストールできませんでした（{{reason}}）。"
+      }
+    },
+    "ui": {
+      "switch": "プラグインの画面",
+      "switchHelp": "オフにするとセーフモードになり、どのプラグインの画面コードも読み込みません。プラグインのバックエンドはそのまま動きます。前回プラグインの画面を読み込んだあとウィンドウが正常に動かなかった場合、次回の起動は自動でセーフモードになります。",
+      "webHelp": "Web コンソールは既定ではプラグインの画面コードを読み込みません。オンにすると、プラグインの画面はこのページで動き、コンソールでできることは何でもできます。",
+      "webConfirmTitle": "Web コンソールでプラグインの画面を読み込む",
+      "webConfirmDescription": "画面を有効にしたプラグインのコードがこのページで動き、リクエスト記録の閲覧や設定の変更など、コンソールでできることは何でもできます。オンにしますか？",
+      "webConfirm": "オンにする",
+      "crashed": "前回プラグインの画面を読み込んだあとウィンドウが正常に動かなかったため、今回は読み込んでいません。",
+      "load": "プラグインの画面を読み込む",
+      "turnedOff": "「{{name}}」の画面がエラーを繰り返したため、オフにしました。プラグインのページで再びオンにできます。",
+      "failed": "「{{name}}」の画面でエラーが起きました：{{message}}",
+      "pageGone": "このプラグインのページはもうありません",
+      "tab": "プラグイン",
+      "pluginSwitch": "このプラグインの画面を読み込む",
+      "pluginSwitchLabel": "画面"
+    }
   },
   "pluginRecords": {
     "none": "このリクエストにプラグインの記録はありません。",
@@ -5058,7 +5291,18 @@
       "rate_limited": "検索が多すぎます",
       "turn_limit": "このターンの 3 回を使い切りました",
       "unbound": "セッションにまだプロジェクトがありません",
-      "invalid_input": "パラメーターが正しくありません"
+      "invalid_input": "パラメーターが正しくありません",
+      "circuit_open": "失敗が多いため一時停止中",
+      "no_request_gate": "リクエストを拒否しようとしましたが、「リクエストの拒否」が許可されていません",
+      "no_request_write": "リクエストを変えようとしましたが、「リクエストの変更」が許可されていません",
+      "no_request_write_raw": "本文を置き換えようとしましたが、「リクエスト本文の書き換え」が許可されていません",
+      "would_exclude_all": "すべてのプロバイダーを除外しようとしたため、何も除外していません",
+      "invalid_body": "返した本文が不正なため、使っていません",
+      "header_denied": "プラグインが設定できないヘッダーは無視しました",
+      "stream_stopped": "続けて失敗したため、このストリームの残りのイベントは渡していません",
+      "memory_limit": "メモリ上限超過",
+      "canceled": "リクエストは終了していました",
+      "unavailable": "プラグインを使えません"
     },
     "reportSkipReasons": {
       "rate_limited": "報告が多すぎます",
@@ -5147,7 +5391,27 @@
     "lookupHits_other": "{{count}} 件",
     "commands": "付けた検索",
     "usageOnly": "検索の使い方だけ · {{placement}} +{{size}}",
-    "usagePart": "うち検索の使い方 {{size}}"
+    "usagePart": "うち検索の使い方 {{size}}",
+    "effects": {
+      "deny": "リクエストを拒否",
+      "tag": "タグを付与",
+      "tagged": "タグ：{{tags}}",
+      "order": "プロバイダーの順序を変更",
+      "exclude": "一部のプロバイダーを除外",
+      "model": "モデルを変更",
+      "system": "システムプロンプトに追記",
+      "turn": "このターンの前に内容を追加",
+      "params": "パラメーターを変更",
+      "tools": "ツールを変更",
+      "body": "リクエスト本文を置き換え",
+      "headers": "ヘッダーを追加",
+      "rewrite": "レスポンスを書き換え",
+      "stream": "ストリームのイベントを書き換え",
+      "observed": "レスポンスを確認",
+      "separator": "、"
+    },
+    "streamEvents": "{{count}} 件のイベントを処理",
+    "streamEventsFailed": "{{count}} 件のイベントを処理し、失敗した {{failures}} 件はそのまま通しました"
   },
   "metadata": {
     "title": "メタデータ",

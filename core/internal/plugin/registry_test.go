@@ -228,7 +228,7 @@ func TestSandboxOffersNothingAmbient(t *testing.T) {
 	manager := newTestManager(t, map[string]string{
 		"demo": pluginSource("demo", nil, `
 export function prepareTurn() {
-  return [typeof setTimeout, typeof setInterval, typeof fetch, typeof require, typeof process, typeof XMLHttpRequest, typeof WebSocket];
+  return [typeof require, typeof process, typeof XMLHttpRequest, typeof WebSocket, typeof Deno, typeof Bun, typeof __astrlinkHost];
 }
 export function describeStatus() { return eval("1 + 1"); }
 export function testConnection() { return new Function("return 1")(); }

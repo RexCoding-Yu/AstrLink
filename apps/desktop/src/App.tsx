@@ -25,6 +25,7 @@ import { WorkspaceSnapshotProvider } from "./workspace-snapshots";
 import { ValueTransition } from "./components/ValueTransition";
 import { AppShell } from "@/components/AppShell";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "@/components/EmptyState";
 import { StatusDot } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,6 +83,13 @@ import {
   type ServiceManagerView,
 } from "./ServiceManager";
 import { ProviderImportDialog } from "./ProviderImportDialog";
+import {
+  pluginUiPages,
+  PluginSlotView,
+  PluginUiLoader,
+  usePluginSlot,
+  type PluginNavigation,
+} from "./plugin-ui";
 import { useProviderImport } from "./use-provider-import";
 import { notify } from "./notify";
 import type { Service } from "./service-model";
@@ -113,6 +121,8 @@ type WorkspacePage =
     }
   | { kind: "agentTools"; preselectSkill?: AgentSkillId }
   | { kind: "plugins" }
+  /** A page a plugin's interface registered, by its registration. */
+  | { kind: "pluginPage"; entry: string }
   | { kind: "settings" }
   | { kind: "about" }
   | ServiceManagerView;
@@ -318,6 +328,37 @@ function NavButton({
         </Badge>
       ) : null}
     </Button>
+  );
+}
+
+/** Where a plugin's interface sends the window. */
+function pluginTarget(plugin: string, to: PluginNavigation): WorkspacePage {
+  if (to.page !== "plugin") return { kind: to.page };
+  const pages = pluginUiPages().filter((entry) => entry.plugin === plugin);
+  const entry = pages.find((page) => page.id === to.entry) ?? pages[0];
+  return entry ? { kind: "pluginPage", entry: entry.id } : { kind: "plugins" };
+}
+
+/** A page a plugin's interface registered, scrolling within the workspace. */
+function PluginPage({ entry: id }: { entry: string }) {
+  const t = useT();
+  const entry = usePluginSlot("page").find((page) => page.id === id);
+  if (!entry)
+    return (
+      <EmptyState
+        className="flex-1"
+        title={t("plugins.ui.pageGone")}
+        variant="page"
+      />
+    );
+  return (
+    <div
+      className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+      data-plugin={entry.plugin}
+      data-testid="plugin-page"
+    >
+      <PluginSlotView entry={entry} />
+    </div>
   );
 }
 
@@ -700,6 +741,7 @@ export default function App() {
     }
   };
 
+  const pluginPages = usePluginSlot("page");
   const navigate = useCallback(
     (next: WorkspacePage) => {
       const leavingServiceEditor =
@@ -983,6 +1025,17 @@ export default function App() {
                 label={t("nav.plugins")}
                 onClick={() => navigate({ kind: "plugins" })}
               />
+              {pluginPages.map((entry) => (
+                <NavButton
+                  active={page.kind === "pluginPage" && page.entry === entry.id}
+                  icon="blocks"
+                  key={entry.id}
+                  label={entry.title ?? entry.pluginName}
+                  onClick={() =>
+                    navigate({ kind: "pluginPage", entry: entry.id })
+                  }
+                />
+              ))}
               <NavButton
                 active={page.kind === "settings"}
                 icon="settings"
@@ -1067,6 +1120,7 @@ export default function App() {
                 "intelligentRouting",
                 "agentTools",
                 "plugins",
+                "pluginPage",
                 "settings",
               ].includes(page.kind)
                 ? "overflow-hidden"
@@ -1236,6 +1290,8 @@ export default function App() {
                 coreSessionKey={coreSessionKey}
                 isReady={isReady}
               />
+            ) : page.kind === "pluginPage" ? (
+              <PluginPage entry={page.entry} />
             ) : page.kind === "about" ? (
               <About
                 snapshot={updates.snapshot}
@@ -1279,9 +1335,20 @@ export default function App() {
           </main>
         </ValueTransition>
       </WorkspaceSnapshotProvider>
+      <PluginUiLoader
+        isReady={isReady}
+        onNavigate={(plugin, to) => navigate(pluginTarget(plugin, to))}
+        sessionKey={coreSessionKey}
+      />
       <ServiceKindPickerDialog
         onOpenChange={setServiceKindPickerOpen}
-        onSelect={(serviceKind) => navigate({ kind: "create", serviceKind })}
+        onSelect={(serviceKind, plugin) =>
+          navigate({
+            kind: "create",
+            serviceKind,
+            ...(plugin ? { plugin } : {}),
+          })
+        }
         open={serviceKindPickerOpen}
       />
       <ConfirmDialog

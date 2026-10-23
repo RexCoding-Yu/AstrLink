@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/accesstoken"
 	"github.com/QuantumNous/astrlink/core/internal/accountauth"
+	"github.com/QuantumNous/astrlink/core/internal/buildinfo"
 	"github.com/QuantumNous/astrlink/core/internal/codingplan"
 	"github.com/QuantumNous/astrlink/core/internal/controlapi"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
@@ -22,6 +23,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/hostapi"
 	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
+	"github.com/QuantumNous/astrlink/core/internal/plugininstall"
 	"github.com/QuantumNous/astrlink/core/internal/pricing"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/privacymodel"
@@ -324,6 +326,21 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	if err := pluginHost.LoadSettings(ctx); err != nil {
 		logf("load the settings of the plugins: %v", err)
 	}
+	// Plugins installed from source come through the outbound proxy, with
+	// their packages from the registry the plugin page names, else npm,
+	// then npmmirror.
+	pluginInstaller := plugininstall.New(plugininstall.Options{
+		Dir:    pluginDirectory,
+		Client: networkproxy.WrapClient(&http.Client{}),
+		Registries: func() []string {
+			registries := []string{contract.DefaultNpmRegistry, contract.FallbackNpmRegistry}
+			if registry := pluginHost.Settings().NpmRegistry; registry != "" {
+				registries = append([]string{registry}, registries...)
+			}
+			return registries
+		},
+		Version: buildinfo.Version,
+	})
 	gatewayDependencies.Plugins = pluginHost
 	// One shared inference handler backs both control-plane seams: the builtin
 	// tool tester and the model classification caller used by the classifier
@@ -349,7 +366,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Subscriptions:      subscriptionManager,
 		RateLimits:         resolver,
 		CodingPlans:        codingplan.New(store, nil),
-		ServiceModels:      servicemodel.New(store, subscriptionManager, nil),
+		ServiceModels:      servicemodel.New(store, subscriptionManager, nil).WithPluginProviders(pluginHost),
 		ServiceTester:      servicetest.NewWithDependencies(gatewayDependencies, subscriptionManager.APIBaseURLFor),
 		BuiltinToolTester:  gatewayTester,
 		ModelClassifier:    gatewayTester,
@@ -364,13 +381,14 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		Metadata:           requestMetadata,
 		MetadataStore:      store,
 		PluginHost:         pluginHost,
+		PluginInstaller:    pluginInstaller,
 	})
 	if err != nil {
 		return fail("configure persistent control API: %w", err)
 	}
 	monitorCtx, stopMonitors := context.WithCancel(ctx)
 	var monitors sync.WaitGroup
-	monitors.Add(5)
+	monitors.Add(6)
 	go func() {
 		defer monitors.Done()
 		if err := pluginManager.Reload(monitorCtx); err != nil {
@@ -379,16 +397,22 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		}
 		// An enabled plugin's manifest may have changed since it registered
 		// its attributes.
-		for _, loaded := range pluginManager.Current().Plugins() {
-			if !loaded.Enabled() {
-				continue
-			}
-			if err := requestMetadata.RegisterPlugin(monitorCtx, loaded.Key, loaded.Attributes()); err != nil {
-				logf("register metadata of plugin %s: %v", loaded.Key, err)
+		registerAttributes := func() {
+			for _, loaded := range pluginManager.Current().Plugins() {
+				if !loaded.Enabled() {
+					continue
+				}
+				if err := requestMetadata.RegisterPlugin(monitorCtx, loaded.Key, loaded.Attributes()); err != nil {
+					logf("register metadata of plugin %s: %v", loaded.Key, err)
+				}
 			}
 		}
+		registerAttributes()
+		// A plugin astrlink plugin dev keeps built reloads as it changes.
+		pluginManager.WatchDevelopment(monitorCtx, time.Second, registerAttributes)
 	}()
 	go func() { defer monitors.Done(); pricingManager.Run(monitorCtx, logf) }()
+	go func() { defer monitors.Done(); pluginHost.RunSchedules(monitorCtx) }()
 	go func() { defer monitors.Done(); subscriptionManager.RunUsageMonitor(monitorCtx) }()
 	go func() { defer monitors.Done(); rawVault.Run(monitorCtx) }()
 	go func() { defer monitors.Done(); syncEngine.Run(monitorCtx, logf) }()

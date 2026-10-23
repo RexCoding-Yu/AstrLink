@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,7 +22,10 @@ import (
 
 // Budgets of astrlink.http.fetch within one hook call.
 const (
-	maxFetchesPerCall  = 16
+	maxFetchesPerCall = 16
+	// maxAsyncFetches is the count of an apiVersion 2 call, whose requests
+	// may overlap.
+	maxAsyncFetches    = 32
 	maxParallelFetches = 8
 	// MaxFetchTimeout bounds one request; the call's network budget and
 	// deadline bound it further.
@@ -65,10 +69,15 @@ type HTTPRequest struct {
 	Method  string            `json:"method"`
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers,omitempty"`
-	// JSON is sent as an application/json body; Body as text. A request
-	// has at most one of them.
-	JSON json.RawMessage `json:"json,omitempty"`
-	Body *string         `json:"body,omitempty"`
+	// JSON is sent as an application/json body; Body as text; BodyBase64,
+	// which fetch sends for binary bodies, as the bytes it encodes. A
+	// request has at most one of them.
+	JSON       json.RawMessage `json:"json,omitempty"`
+	Body       *string         `json:"body,omitempty"`
+	BodyBase64 *string         `json:"bodyBase64,omitempty"`
+	// BodyBytes are the bytes of BodyBase64, decoded once the request is
+	// checked.
+	BodyBytes []byte `json:"-"`
 	// Credential names a slot of meta.credentials, which the host writes
 	// into the request when it goes to the address the slot is bound to.
 	Credential string `json:"credential,omitempty"`
@@ -169,8 +178,12 @@ type CallOptions struct {
 	// Request is what astrlink.request.info returns; nil outside a request.
 	Request *RequestInfo
 	// NetworkBudget bounds the time the call may wait on http.fetch in all;
-	// zero allows none.
+	// zero allows none. An apiVersion 2 call's requests may overlap: it
+	// bounds how long after the call started they may still run.
 	NetworkBudget time.Duration
+	// DryRun marks a call the plugin page runs by hand: its journal lines
+	// say so, and it does not count in the hook's timing.
+	DryRun bool
 }
 
 // CallInfo is what the host observed during a call, for request records and
@@ -203,18 +216,28 @@ type LogEntry struct {
 // call is the state of one hook call, which the host functions read: what
 // the plugin may do, its settings and budgets, and what it did.
 type call struct {
-	ctx      context.Context
-	plugin   *Plugin
+	ctx    context.Context
+	plugin *Plugin
+	// hook names the hook the call runs.
+	hook     string
 	options  CallOptions
 	pool     *pool
+	runtime  *moejs.Runtime
 	watchdog *watchdog
+	// loop runs the continuations of an apiVersion 2 call; nil for an
+	// apiVersion 1 call, whose host functions return their results.
+	loop *asyncLoop
 	// slot is whether the call holds an execution slot of its pool, which
 	// it gives up while it waits on the host.
 	slot bool
 
 	networkLeft time.Duration
-	fetched     int
-	info        CallInfo
+	// networkDeadline ends the requests of an apiVersion 2 call, which may
+	// overlap; fetchSlots bounds how many run at once.
+	networkDeadline time.Time
+	fetchSlots      chan struct{}
+	fetched         int
+	info            CallInfo
 }
 
 func (c *call) granted(capability string) bool { return slices.Contains(c.plugin.granted, capability) }
@@ -243,6 +266,19 @@ func (c *call) wait(fn func()) error {
 	return nil
 }
 
+// io runs work, which waits on the host, and returns how it settles: at once
+// in an apiVersion 1 call, as a promise in an apiVersion 2 call.
+func (c *call) io(work func(ctx context.Context) settle) (moejs.Value, error) {
+	if c.loop != nil {
+		return c.async(work), nil
+	}
+	var result settle
+	if err := c.wait(func() { result = work(c.ctx) }); err != nil {
+		return moejs.Undefined(), err
+	}
+	return result(c.runtime)
+}
+
 type hostFunc func(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error)
 
 // install sets the astrlink global. Its functions work only while the host
@@ -259,7 +295,7 @@ func (bound *instance) install() error {
 			return fn(c, realm, args)
 		})
 	}
-	return runtime.SetGlobal("astrlink", map[string]any{
+	err := runtime.SetGlobal("astrlink", map[string]any{
 		"request": map[string]any{"info": define("request.info", 0, hostRequestInfo)},
 		"http":    map[string]any{"fetch": define("http.fetch", 1, hostFetch)},
 		"store": map[string]any{
@@ -277,6 +313,10 @@ func (bound *instance) install() error {
 			"offset": define("clock.offset", 1, hostClockOffset),
 		},
 	})
+	if err != nil {
+		return err
+	}
+	return bound.installWeb()
 }
 
 func hostRequestInfo(c *call, realm *moejs.Realm, _ []moejs.Value) (moejs.Value, error) {
@@ -316,17 +356,18 @@ func hostMetaValues(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Valu
 		}
 		limit = int(number)
 	}
-	var stats []ValueStat
-	if waitErr := c.wait(func() { stats, err = c.plugin.services.Metadata.ValueStats(c.ctx, key, limit) }); waitErr != nil {
-		return moejs.Undefined(), waitErr
-	}
-	if err != nil {
-		return moejs.Undefined(), fmt.Errorf("astrlink.meta.values: %w", err)
-	}
-	if stats == nil {
-		stats = []ValueStat{}
-	}
-	return realm.FromGo(stats)
+	return c.io(func(ctx context.Context) settle {
+		stats, err := c.plugin.services.Metadata.ValueStats(ctx, key, limit)
+		return func(runtime *moejs.Runtime) (moejs.Value, error) {
+			if err != nil {
+				return moejs.Undefined(), fmt.Errorf("astrlink.meta.values: %w", err)
+			}
+			if stats == nil {
+				stats = []ValueStat{}
+			}
+			return runtime.Realm().FromGo(stats)
+		}
+	})
 }
 
 func hostConfigGet(c *call, realm *moejs.Realm, _ []moejs.Value) (moejs.Value, error) {
@@ -407,18 +448,18 @@ func hostStoreGet(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value,
 	if err != nil {
 		return moejs.Undefined(), err
 	}
-	var value json.RawMessage
-	var found bool
-	if err := c.wait(func() { value, found, err = store.Get(c.ctx, c.plugin.Key, key) }); err != nil {
-		return moejs.Undefined(), err
-	}
-	if err != nil {
-		return moejs.Undefined(), fmt.Errorf("astrlink.store.get: %w", err)
-	}
-	if !found {
-		return moejs.Null(), nil
-	}
-	return realm.JSONParseGoString(string(value))
+	return c.io(func(ctx context.Context) settle {
+		value, found, err := store.Get(ctx, c.plugin.Key, key)
+		return func(runtime *moejs.Runtime) (moejs.Value, error) {
+			if err != nil {
+				return moejs.Undefined(), fmt.Errorf("astrlink.store.get: %w", err)
+			}
+			if !found {
+				return moejs.Null(), nil
+			}
+			return runtime.Realm().JSONParseGoString(string(value))
+		}
+	})
 }
 
 func hostStoreSet(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
@@ -438,13 +479,15 @@ func hostStoreSet(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value,
 	if err != nil || len(value) > MaxStoreValueBytes {
 		return moejs.Undefined(), realm.RangeError("astrlink.store.set value must be JSON of at most %d KiB", MaxStoreValueBytes>>10)
 	}
-	if err := c.wait(func() { err = store.Set(c.ctx, c.plugin.Key, key, value) }); err != nil {
-		return moejs.Undefined(), err
-	}
-	if err != nil {
-		return moejs.Undefined(), fmt.Errorf("astrlink.store.set: %w", err)
-	}
-	return moejs.Undefined(), nil
+	return c.io(func(ctx context.Context) settle {
+		err := store.Set(ctx, c.plugin.Key, key, value)
+		return func(*moejs.Runtime) (moejs.Value, error) {
+			if err != nil {
+				return moejs.Undefined(), fmt.Errorf("astrlink.store.set: %w", err)
+			}
+			return moejs.Undefined(), nil
+		}
+	})
 }
 
 func hostStoreDelete(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
@@ -452,13 +495,15 @@ func hostStoreDelete(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Val
 	if err != nil {
 		return moejs.Undefined(), err
 	}
-	if err := c.wait(func() { err = store.Delete(c.ctx, c.plugin.Key, key) }); err != nil {
-		return moejs.Undefined(), err
-	}
-	if err != nil {
-		return moejs.Undefined(), fmt.Errorf("astrlink.store.delete: %w", err)
-	}
-	return moejs.Undefined(), nil
+	return c.io(func(ctx context.Context) settle {
+		err := store.Delete(ctx, c.plugin.Key, key)
+		return func(*moejs.Runtime) (moejs.Value, error) {
+			if err != nil {
+				return moejs.Undefined(), fmt.Errorf("astrlink.store.delete: %w", err)
+			}
+			return moejs.Undefined(), nil
+		}
+	})
 }
 
 func hostStoreKeys(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
@@ -475,18 +520,18 @@ func hostStoreKeys(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value
 			return moejs.Undefined(), err
 		}
 	}
-	var keys []string
-	var err error
-	if waitErr := c.wait(func() { keys, err = c.plugin.services.Store.Keys(c.ctx, c.plugin.Key, prefix) }); waitErr != nil {
-		return moejs.Undefined(), waitErr
-	}
-	if err != nil {
-		return moejs.Undefined(), fmt.Errorf("astrlink.store.keys: %w", err)
-	}
-	if keys == nil {
-		keys = []string{}
-	}
-	return realm.FromGo(keys)
+	return c.io(func(ctx context.Context) settle {
+		keys, err := c.plugin.services.Store.Keys(ctx, c.plugin.Key, prefix)
+		return func(runtime *moejs.Runtime) (moejs.Value, error) {
+			if err != nil {
+				return moejs.Undefined(), fmt.Errorf("astrlink.store.keys: %w", err)
+			}
+			if keys == nil {
+				keys = []string{}
+			}
+			return runtime.Realm().FromGo(keys)
+		}
+	})
 }
 
 func storeKey(c *call, realm *moejs.Realm, args []moejs.Value) (Store, string, error) {
@@ -535,18 +580,58 @@ func hostFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, er
 			return moejs.Undefined(), realm.TypeError("astrlink.http.fetch: %v", err)
 		}
 	}
+	render := func(realm *moejs.Realm, responses []HTTPResponse) (moejs.Value, error) {
+		values := make([]any, len(responses))
+		for index, response := range responses {
+			values[index] = responseValue(response)
+		}
+		if batch {
+			return realm.FromGo(values)
+		}
+		return realm.FromGo(values[0])
+	}
+	if c.loop != nil {
+		return c.fetchAsync(requests, render), nil
+	}
 	var responses []HTTPResponse
 	if err := c.wait(func() { responses = c.fetch(requests) }); err != nil {
 		return moejs.Undefined(), err
 	}
-	values := make([]any, len(responses))
-	for index, response := range responses {
-		values[index] = responseValue(response)
+	return render(realm, responses)
+}
+
+// hostRawFetch serves the fetch of prelude.js: one request, whose response
+// body comes back as base64 for Response to read as text or bytes.
+func hostRawFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
+	if !c.granted(CapabilityNetwork) {
+		return moejs.Undefined(), realm.TypeError("fetch needs the %s capability", CapabilityNetwork)
 	}
-	if batch {
-		return realm.FromGo(values)
+	if c.plugin.services.Fetcher == nil {
+		return moejs.Undefined(), realm.TypeError("fetch is unavailable")
 	}
-	return realm.FromGo(values[0])
+	data, err := plainArg(realm, moejs.Arg(args, 0), MaxFetchBodyBytes*2+64<<10, "request")
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	request, err := decodeRequest(c, data)
+	if err != nil {
+		return moejs.Undefined(), realm.TypeError("fetch: %v", err)
+	}
+	return c.fetchAsync([]HTTPRequest{request}, func(realm *moejs.Realm, responses []HTTPResponse) (moejs.Value, error) {
+		response := responses[0]
+		header := response.Header
+		if header == nil {
+			header = map[string]string{}
+		}
+		value := map[string]any{"status": response.Status, "headers": header}
+		if response.Error != "" {
+			value["error"] = response.Error
+		}
+		if len(response.Body) > 0 {
+			value["body"] = base64.StdEncoding.EncodeToString(response.Body)
+		}
+		return realm.FromGo(value)
+	}), nil
 }
 
 // decodeRequest reads one request strictly and checks its shape. What the
@@ -564,8 +649,12 @@ func decodeRequest(c *call, item any) (HTTPRequest, error) {
 	}
 	switch request.Method {
 	case "GET", "POST", "PUT", "PATCH", "DELETE":
+	case "HEAD", "OPTIONS":
+		if c.loop == nil {
+			return HTTPRequest{}, fmt.Errorf("method %q is not one of GET, POST, PUT, PATCH, DELETE", request.Method)
+		}
 	default:
-		return HTTPRequest{}, fmt.Errorf("method %q is not one of GET, POST, PUT, PATCH, DELETE", request.Method)
+		return HTTPRequest{}, fmt.Errorf("method %q is not one of GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE", request.Method)
 	}
 	target, err := url.Parse(request.URL)
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" || target.User != nil {
@@ -576,13 +665,26 @@ func decodeRequest(c *call, item any) (HTTPRequest, error) {
 			return HTTPRequest{}, fmt.Errorf("header %q is not a valid header", name)
 		}
 	}
-	if len(request.JSON) > 0 && request.Body != nil {
-		return HTTPRequest{}, errors.New("a request has json or body, not both")
+	bodies := 0
+	for _, set := range []bool{len(request.JSON) > 0, request.Body != nil, request.BodyBase64 != nil} {
+		if set {
+			bodies++
+		}
 	}
-	if request.Method == "GET" && (len(request.JSON) > 0 || request.Body != nil) {
-		return HTTPRequest{}, errors.New("a GET request has no body")
+	if bodies > 1 {
+		return HTTPRequest{}, errors.New("a request has one of json, body and bodyBase64")
 	}
-	if len(request.JSON) > MaxFetchBodyBytes || (request.Body != nil && len(*request.Body) > MaxFetchBodyBytes) {
+	if (request.Method == "GET" || request.Method == "HEAD") && bodies > 0 {
+		return HTTPRequest{}, fmt.Errorf("a %s request has no body", request.Method)
+	}
+	if request.BodyBase64 != nil {
+		decoded, err := base64.StdEncoding.DecodeString(*request.BodyBase64)
+		if err != nil {
+			return HTTPRequest{}, errors.New("bodyBase64 is not base64")
+		}
+		request.BodyBytes = decoded
+	}
+	if len(request.JSON) > MaxFetchBodyBytes || (request.Body != nil && len(*request.Body) > MaxFetchBodyBytes) || len(request.BodyBytes) > MaxFetchBodyBytes {
 		return HTTPRequest{}, fmt.Errorf("the body is larger than %d MiB", MaxFetchBodyBytes>>20)
 	}
 	if request.Credential != "" {
@@ -594,6 +696,82 @@ func decodeRequest(c *call, item any) (HTTPRequest, error) {
 		return HTTPRequest{}, fmt.Errorf("timeoutMs must be between 1 and %d", MaxFetchTimeout.Milliseconds())
 	}
 	return request, nil
+}
+
+// fetchAsync sends the requests of an apiVersion 2 call and returns the
+// promise of what render makes of their responses. The call's request count
+// and network deadline bound them; at most maxParallelFetches of a call run
+// at once, and a request past a budget answers FetchBudget.
+func (c *call) fetchAsync(requests []HTTPRequest, render func(*moejs.Realm, []HTTPResponse) (moejs.Value, error)) moejs.Value {
+	responses := make([]HTTPResponse, len(requests))
+	var sent []int
+	for index, request := range requests {
+		switch {
+		case c.fetched >= maxAsyncFetches || !time.Now().Before(c.networkDeadline):
+			responses[index] = HTTPResponse{Error: FetchBudget}
+		case deniedHeader(request.Headers) != "":
+			responses[index] = HTTPResponse{Error: FetchDenied}
+		default:
+			c.fetched++
+			sent = append(sent, index)
+		}
+	}
+	return c.async(func(ctx context.Context) settle {
+		started := time.Now()
+		if len(sent) > 0 {
+			ctx, cancel := context.WithDeadlineCause(ctx, c.networkDeadline, errNetworkBudget)
+			var group sync.WaitGroup
+			for _, index := range sent {
+				group.Go(func() {
+					select {
+					case c.fetchSlots <- struct{}{}:
+					case <-ctx.Done():
+						responses[index] = HTTPResponse{Error: FetchBudget}
+						return
+					}
+					defer func() { <-c.fetchSlots }()
+					responses[index] = c.send(ctx, requests[index])
+				})
+			}
+			group.Wait()
+			cancel()
+		}
+		elapsed := time.Since(started)
+		return func(runtime *moejs.Runtime) (moejs.Value, error) {
+			c.count(responses, elapsed)
+			return render(runtime.Realm(), responses)
+		}
+	})
+}
+
+// send sends one request within ctx and its own timeout.
+func (c *call) send(ctx context.Context, request HTTPRequest) HTTPResponse {
+	timeout := defaultFetchTimeout
+	if request.TimeoutMS > 0 {
+		timeout = time.Duration(request.TimeoutMS) * time.Millisecond
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	response := c.plugin.services.Fetcher.Fetch(requestCtx, c.plugin, request)
+	if response.Error == FetchTimeout && errors.Is(context.Cause(ctx), errNetworkBudget) {
+		response.Error = FetchBudget
+	}
+	return response
+}
+
+// count adds a batch of requests to what the call did.
+func (c *call) count(responses []HTTPResponse, elapsed time.Duration) {
+	c.info.Network.Wait += elapsed
+	c.info.Network.Requests += len(responses)
+	for _, response := range responses {
+		switch response.Error {
+		case "":
+		case FetchDenied:
+			c.info.Network.Denied++
+		default:
+			c.info.Network.Errors++
+		}
+	}
 }
 
 // fetch runs requests in parallel within what is left of the call's
@@ -617,37 +795,14 @@ func (c *call) fetch(requests []HTTPRequest) []HTTPResponse {
 		ctx, cancel := context.WithTimeoutCause(c.ctx, c.networkLeft, errNetworkBudget)
 		var group sync.WaitGroup
 		for _, index := range sent {
-			group.Go(func() {
-				request := requests[index]
-				timeout := defaultFetchTimeout
-				if request.TimeoutMS > 0 {
-					timeout = time.Duration(request.TimeoutMS) * time.Millisecond
-				}
-				requestCtx, cancelRequest := context.WithTimeout(ctx, timeout)
-				defer cancelRequest()
-				response := c.plugin.services.Fetcher.Fetch(requestCtx, c.plugin, request)
-				if response.Error == FetchTimeout && errors.Is(context.Cause(ctx), errNetworkBudget) {
-					response.Error = FetchBudget
-				}
-				responses[index] = response
-			})
+			group.Go(func() { responses[index] = c.send(ctx, requests[index]) })
 		}
 		group.Wait()
 		cancel()
 	}
 	elapsed := time.Since(started)
 	c.networkLeft -= elapsed
-	c.info.Network.Wait += elapsed
-	c.info.Network.Requests += len(requests)
-	for _, response := range responses {
-		switch response.Error {
-		case "":
-		case FetchDenied:
-			c.info.Network.Denied++
-		default:
-			c.info.Network.Errors++
-		}
-	}
+	c.count(responses, elapsed)
 	return responses
 }
 

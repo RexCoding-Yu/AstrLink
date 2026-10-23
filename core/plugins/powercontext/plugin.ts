@@ -70,10 +70,10 @@ type Language = AstrLinkPlugin.Language;
 const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 export const meta = {
-  apiVersion: 1,
+  apiVersion: 2,
   key: "powercontext",
   name: "PowerContext 记忆",
-  version: "2.1.1",
+  version: "3.0.0",
   capabilities: [
     "context.inject",
     "request.read",
@@ -1053,8 +1053,8 @@ function supported(version: string): boolean {
 
 // 1.4 searches atomic memory by words alone unless asked otherwise, and cuts
 // Han text into words instead of characters and pairs.
-function modern(): boolean {
-  return atLeast(knownVersion() ?? "", 1, 4);
+async function modern(): Promise<boolean> {
+  return atLeast((await knownVersion()) ?? "", 1, 4);
 }
 
 // The versions the plugin was run against end to end: 1.3, and 1.4 on a
@@ -1064,8 +1064,8 @@ function verified(version: string): boolean {
 }
 
 // The version the server reported in the last 10 minutes, if any.
-function knownVersion(): string | null {
-  const cached = astrlink.store.get("server") as {
+async function knownVersion(): Promise<string | null> {
+  const cached = (await astrlink.store.get("server")) as {
     version: string;
     at: number;
   } | null;
@@ -1093,27 +1093,29 @@ function answered<T>(
 
 // Keeps the version a server-info response reports; false when the server
 // did not answer or is older than 1.3.
-function noteVersion(response: AstrLinkPlugin.HttpResponse): boolean {
+async function noteVersion(
+  response: AstrLinkPlugin.HttpResponse,
+): Promise<boolean> {
   const info = answered<{ package_version?: string }>(response);
   if (info === null) return false;
   const version = String(info.package_version ?? "");
-  astrlink.store.set("server", { version, at: astrlink.clock.now() });
+  await astrlink.store.set("server", { version, at: astrlink.clock.now() });
   return supported(version);
 }
 
 // serverProblem says why the server cannot serve: no address, no answer, or
 // a version older than 1.3. null when it can; the version it reports is kept
 // for 10 minutes.
-function serverProblem(cfg: Config, text: Texts): string | null {
+async function serverProblem(cfg: Config, text: Texts): Promise<string | null> {
   if (!cfg.serverUrl) return text.needServer;
-  let version = knownVersion();
+  let version = await knownVersion();
   if (version === null) {
-    const response = astrlink.http.fetch(
+    const response = await astrlink.http.fetch(
       request(cfg, "GET", "/v1/server-info"),
     );
     if (response.status !== 200) return failure(text, response);
-    noteVersion(response);
-    version = knownVersion() ?? "";
+    await noteVersion(response);
+    version = (await knownVersion()) ?? "";
   }
   return supported(version) ? null : text.tooOld(version);
 }
@@ -1136,14 +1138,15 @@ function failure(text: Texts, response: AstrLinkPlugin.HttpResponse): string {
 // fetchAll sends requests at once. PowerContext 1.4 makes a new scope's
 // access bindings on first use, and concurrent first reads race there: the
 // losers answer 409 idempotency-key. Those are sent again, one at a time.
-function fetchAll(
+async function fetchAll(
   requests: AstrLinkPlugin.HttpRequest[],
-): AstrLinkPlugin.HttpResponse[] {
-  return astrlink.http
-    .fetch(requests)
-    .map((response, index) =>
-      response.status === 409 ? astrlink.http.fetch(requests[index]) : response,
-    );
+): Promise<AstrLinkPlugin.HttpResponse[]> {
+  const responses = await astrlink.http.fetch(requests);
+  for (let index = 0; index < responses.length; index++) {
+    if (responses[index].status === 409)
+      responses[index] = await astrlink.http.fetch(requests[index]);
+  }
+  return responses;
 }
 
 // gone reports whether the server no longer knows a scope the plugin kept,
@@ -1156,19 +1159,22 @@ function gone(response: AstrLinkPlugin.HttpResponse): boolean {
 
 // forget drops what the plugin kept of a project's scope, which the server
 // no longer knows: the next call finds or makes it again.
-function forget(project: string): void {
-  const kept = astrlink.store.get("scope:" + project);
-  if (typeof kept === "string") astrlink.store.delete("policy:" + kept);
-  astrlink.store.delete("scope:" + project);
+async function forget(project: string): Promise<void> {
+  const kept = await astrlink.store.get("scope:" + project);
+  if (typeof kept === "string") await astrlink.store.delete("policy:" + kept);
+  await astrlink.store.delete("scope:" + project);
 }
 
 // findScope finds the scope a project has on the server by its title, which
 // another computer or tool may have made: its id, undefined when the server
 // has none, null when the server did not answer.
-function findScope(cfg: Config, project: string): string | null | undefined {
-  const cached = astrlink.store.get("scope:" + project);
+async function findScope(
+  cfg: Config,
+  project: string,
+): Promise<string | null | undefined> {
+  const cached = await astrlink.store.get("scope:" + project);
   if (typeof cached === "string") return cached;
-  const found = astrlink.http.fetch(
+  const found = await astrlink.http.fetch(
     request(
       cfg,
       "GET",
@@ -1183,16 +1189,16 @@ function findScope(cfg: Config, project: string): string | null | undefined {
     (item) => item.title === project,
   )?.scope_id;
   if (typeof scope !== "string" || scope === "") return undefined;
-  astrlink.store.set("scope:" + project, scope);
+  await astrlink.store.set("scope:" + project, scope);
   return scope;
 }
 
 // Project → scope, made when the server has none, with an idempotency key of
 // the name alone, so every computer that picks the name gets one scope.
-function scopeFor(cfg: Config, project: string): string | null {
-  const found = findScope(cfg, project);
+async function scopeFor(cfg: Config, project: string): Promise<string | null> {
+  const found = await findScope(cfg, project);
   if (typeof found === "string") return found;
-  const created = astrlink.http.fetch(
+  const created = await astrlink.http.fetch(
     request(cfg, "POST", "/v1/scopes", {
       title: project,
       summary: "项目 " + project + " 的记忆",
@@ -1201,32 +1207,32 @@ function scopeFor(cfg: Config, project: string): string | null {
   );
   const scope = answered<{ scope_id?: string }>(created, 200, 201)?.scope_id;
   if (typeof scope !== "string" || scope === "") return null;
-  astrlink.store.set("scope:" + project, scope);
+  await astrlink.store.set("scope:" + project, scope);
   return scope;
 }
 
 // Profiles are the server's to generate, on its own schedule, for the scopes
 // whose policy allows it: the first time the plugin uses a scope it turns the
 // policy on. A policy someone set before stays as it is.
-function policyRequests(
+async function policyRequests(
   cfg: Config,
   scope: string,
-): AstrLinkPlugin.HttpRequest[] {
-  if (astrlink.store.get("policy:" + scope) !== null) return [];
+): Promise<AstrLinkPlugin.HttpRequest[]> {
+  if ((await astrlink.store.get("policy:" + scope)) !== null) return [];
   return [request(cfg, "GET", "/v1/scopes/" + scope + "/profile-policy")];
 }
 
-function settlePolicy(
+async function settlePolicy(
   cfg: Config,
   scope: string,
   response: AstrLinkPlugin.HttpResponse,
-): void {
+): Promise<void> {
   if (response.status === 200) {
-    astrlink.store.set("policy:" + scope, true);
+    await astrlink.store.set("policy:" + scope, true);
     return;
   }
   if (response.status !== 404) return;
-  const created = astrlink.http.fetch(
+  const created = await astrlink.http.fetch(
     request(cfg, "PUT", "/v1/scopes/" + scope + "/profile-policy", {
       generation_enabled: true,
       activation_mode: "automatic",
@@ -1235,7 +1241,7 @@ function settlePolicy(
   );
   // 409: another computer set it in the meantime.
   if (created.status === 200 || created.status === 409)
-    astrlink.store.set("policy:" + scope, true);
+    await astrlink.store.set("policy:" + scope, true);
 }
 
 function skipped(
@@ -1248,16 +1254,16 @@ function skipped(
 // Computed when a session gets its project, and again only after a compacted
 // history, a refresh, or a change of the settings: the same data renders the
 // same bytes, so the prompt cache holds.
-export function prepareSession(
+export async function prepareSession(
   view: AstrLinkPlugin.SessionView,
-): AstrLinkPlugin.PrepareSessionResult {
+): Promise<AstrLinkPlugin.PrepareSessionResult> {
   const cfg = config();
   const text = texts(view.language);
   const project = view.meta.project;
   if (project === undefined) return skipped(text, text.noProject);
   if (project.value === "none") return skipped(text, text.declined);
   if (cfg.resident === false) return skipped(text, text.residentOff);
-  const problem = serverProblem(cfg, text);
+  const problem = await serverProblem(cfg, text);
   if (problem !== null) return skipped(text, text.serverDown(problem));
   let scope: string | null = null;
   let policy: AstrLinkPlugin.HttpRequest[] = [];
@@ -1265,26 +1271,26 @@ export function prepareSession(
   // A scope kept from before the server started over is gone: the plugin
   // forgets it and finds or makes the project's scope again, once.
   for (let attempt = 0; attempt < 2; attempt++) {
-    scope = scopeFor(cfg, project.value);
+    scope = await scopeFor(cfg, project.value);
     if (scope === null)
       return skipped(text, text.serverDown(text.fetch.network));
     const base = "/v1/scopes/" + scope + "/artifacts/";
-    policy = policyRequests(cfg, scope);
+    policy = await policyRequests(cfg, scope);
     // The profile is one artifact, read whole: its list item carries no
     // text. A project without one answers 503 artifact_owner_pending on
     // 1.3, as an artifact nobody owns yet; no profile is no profile.
-    responses = fetchAll([
+    responses = await fetchAll([
       request(cfg, "GET", base + "profile/profile"),
       request(cfg, "GET", base + "topic-memory?limit=100"),
       ...policy,
     ]);
     if (attempt > 0 || !responses.some(gone)) break;
-    forget(project.value);
+    await forget(project.value);
   }
   if (scope === null) return skipped(text, text.serverDown(text.fetch.network));
   const base = "/v1/scopes/" + scope + "/artifacts/";
   const [profileResponse, topicResponse] = responses;
-  if (policy.length > 0) settlePolicy(cfg, scope, responses[2]);
+  if (policy.length > 0) await settlePolicy(cfg, scope, responses[2]);
   if (profileResponse.status !== 200 && topicResponse.status !== 200)
     return skipped(text, text.serverDown(failure(text, topicResponse)));
   const profile =
@@ -1296,7 +1302,7 @@ export function prepareSession(
     if (listed === null) break;
     topics.push(...(listed.items ?? []));
     if (!listed.next_cursor || pages === TOPIC_PAGES) break;
-    page = astrlink.http.fetch(
+    page = await astrlink.http.fetch(
       request(
         cfg,
         "GET",
@@ -1445,14 +1451,14 @@ function fold(name: string): string {
 // listProjects gathers the projects to offer: those this computer used, the
 // most recent first, then the others the server has, by name. A project named
 // like the working directory goes first.
-function listProjects(
+async function listProjects(
   cfg: Config,
   limit: number,
   workspace: string | undefined,
-): Listing {
+): Promise<Listing> {
   let stats: AstrLinkPlugin.ValueStat[] = [];
   try {
-    stats = astrlink.meta.values("project", 200);
+    stats = await astrlink.meta.values("project", 200);
   } catch {
     // Without request.read the plugin knows no local project.
   }
@@ -1463,11 +1469,11 @@ function listProjects(
   const remote: Candidate[] = [];
   let more = false;
   if (cfg.serverUrl) {
-    const known = knownVersion();
+    const known = await knownVersion();
     const batch = [request(cfg, "GET", "/v1/scopes?limit=100")];
     if (known === null) batch.push(request(cfg, "GET", "/v1/server-info"));
-    const [scopes, info] = astrlink.http.fetch(batch);
-    const ready = known === null ? noteVersion(info) : supported(known);
+    const [scopes, info] = await astrlink.http.fetch(batch);
+    const ready = known === null ? await noteVersion(info) : supported(known);
     const page = ready ? answered<Page<Scope>>(scopes) : null;
     if (page !== null) {
       more = !!page.next_cursor;
@@ -1513,9 +1519,9 @@ function date(text: Texts, at: number): string {
 // the system prompt, which every later turn would carry. The host puts the
 // same words back on later requests, and binds the session at once when the
 // user's whole answer is one of the names offered.
-export function prepareTurn(
+export async function prepareTurn(
   turn: AstrLinkPlugin.TurnView,
-): AstrLinkPlugin.PrepareTurnResult {
+): Promise<AstrLinkPlugin.PrepareTurnResult> {
   const cfg = config();
   const text = texts(turn.language);
   // A turn the plugin adds nothing to still gets its own title in the
@@ -1529,7 +1535,7 @@ export function prepareTurn(
   const limit = Math.min(Math.max(cfg.listProjects ?? 20, 0), 50);
   const listing: Listing =
     limit > 0
-      ? listProjects(cfg, limit, turn.workspace?.name)
+      ? await listProjects(cfg, limit, turn.workspace?.name)
       : { shown: [], total: 0, more: false, current: null };
   const lines: string[] = [];
   if (listing.shown.length === 0) {
@@ -1595,9 +1601,9 @@ export function prepareTurn(
 // injected. The host calls it after its privacy check, with the checked text,
 // and for a session without a project only once the reply bound one. The
 // server turns what it receives into memory on its own schedule.
-export function observeTurn(
+export async function observeTurn(
   turn: AstrLinkPlugin.TurnView,
-): AstrLinkPlugin.ObserveTurnResult | undefined {
+): Promise<AstrLinkPlugin.ObserveTurnResult | undefined> {
   const cfg = config();
   const text = texts(turn.language);
   const project = turn.meta.project;
@@ -1609,10 +1615,10 @@ export function observeTurn(
     typed.startsWith("/")
   )
     return undefined;
-  const problem = serverProblem(cfg, text);
+  const problem = await serverProblem(cfg, text);
   if (problem !== null)
     return written(text, project.value, "failed", text.writeFailed(problem));
-  const failed = writeSource(cfg, text, project.value, {
+  const failed = await writeSource(cfg, text, project.value, {
     // A retry of the same turn is idempotent; the same words in another turn
     // are another source.
     id:
@@ -1649,12 +1655,12 @@ export function observeTurn(
 // when the server has none. It returns "" when the content was written, else
 // why not. A scope kept from before the server started over is gone: the
 // content goes to the project's scope as the server knows it now.
-function writeSource(
+async function writeSource(
   cfg: Config,
   text: Texts,
   project: string,
   source: { id: string; content: string; metadata: Record<string, unknown> },
-): string {
+): Promise<string> {
   const write = (scope: string) =>
     astrlink.http.fetch(
       request(
@@ -1670,12 +1676,12 @@ function writeSource(
         10000,
       ),
     );
-  let scope = scopeFor(cfg, project);
-  let response = scope === null ? null : write(scope);
+  let scope = await scopeFor(cfg, project);
+  let response = scope === null ? null : await write(scope);
   if (response !== null && gone(response)) {
-    forget(project);
-    scope = scopeFor(cfg, project);
-    response = scope === null ? null : write(scope);
+    await forget(project);
+    scope = await scopeFor(cfg, project);
+    response = scope === null ? null : await write(scope);
   }
   if (response === null) return text.fetch.network;
   if (response.status < 200 || response.status >= 300)
@@ -1684,12 +1690,12 @@ function writeSource(
 }
 
 // keepLastWrite keeps what the overview says of the last write.
-function keepLastWrite(
+async function keepLastWrite(
   project: string,
   status: "ok" | "failed",
   summary: string,
-): void {
-  astrlink.store.set("last-write", {
+): Promise<void> {
+  await astrlink.store.set("last-write", {
     at: astrlink.clock.now(),
     project,
     status,
@@ -1698,13 +1704,13 @@ function keepLastWrite(
 }
 
 // written is the capture's record, and what the overview says of the last one.
-function written(
+async function written(
   text: Texts,
   project: string,
   status: "ok" | "failed",
   summary: string,
-): AstrLinkPlugin.ObserveTurnResult {
-  keepLastWrite(project, status, summary);
+): Promise<AstrLinkPlugin.ObserveTurnResult> {
+  await keepLastWrite(project, status, summary);
   return {
     record: {
       title: text.writeTitle,
@@ -1746,9 +1752,8 @@ function cost(
 
 // bound keeps a topic search within limit terms, the only kind of memory
 // that counts them: the text's start, and its end, where a long sentence
-// often says what it asks.
-function bound(text: string, limit: number): string {
-  const pairs = !modern();
+// often says what it asks. pairs is how 1.3 counts Han text.
+function bound(text: string, limit: number, pairs: boolean): string {
   let head = 0;
   let used = 0;
   let run = "";
@@ -1782,16 +1787,16 @@ function bound(text: string, limit: number): string {
 // note keeps what the model reported about the session's project as a
 // source, like a turn: the server turns it into memory and the profile on
 // its own schedule. The same words in one session are one source.
-function note(
+async function note(
   cfg: Config,
   text: Texts,
   view: AstrLinkPlugin.ToolView,
-): AstrLinkPlugin.ToolResult {
+): Promise<AstrLinkPlugin.ToolResult> {
   const project = view.meta.project;
   if (project === undefined || project.value === "none")
     return reported(text, text.noProject, "skipped", text.noProject);
   const content = String(view.input.text ?? "").trim();
-  const failed = writeSource(cfg, text, project.value, {
+  const failed = await writeSource(cfg, text, project.value, {
     id:
       "astrlink:" +
       project.value +
@@ -1810,11 +1815,11 @@ function note(
   });
   if (failed !== "") {
     const summary = text.noteFailed(failed);
-    keepLastWrite(project.value, "failed", summary);
+    await keepLastWrite(project.value, "failed", summary);
     return reported(text, summary, "failed", summary);
   }
   const summary = text.noteSummary(Array.from(content).length);
-  keepLastWrite(project.value, "ok", summary);
+  await keepLastWrite(project.value, "ok", summary);
   return reported(text, text.noted(project.value), "ok", summary);
 }
 
@@ -1883,25 +1888,27 @@ function hitText(
 // takes their results in turns, rank by rank: the kinds' scores do not
 // compare. A full search not back in time gives way to the search by words
 // beside it. null when the server no longer knows the scope.
-function searchMemory(
+async function searchMemory(
   cfg: Config,
   text: Texts,
   scope: string,
   query: string,
   limit: number,
-): AstrLinkPlugin.ToolResult | null {
+): Promise<AstrLinkPlugin.ToolResult | null> {
   const families = FAMILIES.filter(([, setting]) => cfg[setting] !== false).map(
     ([family]) => family,
   );
   if (families.length === 0)
     return looked(text, text.searchOff, 0, "skipped", text.searchOff);
   // 1.4 searches atomic memory by words alone unless asked for both.
-  const hybrid = modern();
+  const hybrid = await modern();
   const batch: AstrLinkPlugin.HttpRequest[] = [];
   const searches = families.map((family) => {
     const path = "/v1/scopes/" + scope + "/artifacts/" + family + "/search";
     const topics = family === "topic-memory";
-    const terms = topics ? bound(query, MAX_QUERY_TERMS) : query.trim();
+    const terms = topics
+      ? bound(query, MAX_QUERY_TERMS, !hybrid)
+      : query.trim();
     const size = topics ? Math.min(limit, SEARCH_TOPICS) : limit;
     const full: Record<string, unknown> = { query: terms, limit: size };
     if (family === "atomic-memory" && hybrid) full.mode = "hybrid";
@@ -1920,7 +1927,7 @@ function searchMemory(
       : -1;
     return { family, at, wordsAt };
   });
-  const responses = fetchAll(batch);
+  const responses = await fetchAll(batch);
   if (responses.some(gone)) return null;
   const found: Array<{ family: string; items: SearchItem[] }> = [];
   let failed = 0;
@@ -1972,19 +1979,20 @@ function searchMemory(
 // readTopic finds a topic by a search of its title, words alone: the one
 // titled so, or else the closest, with its whole text within the bytes a
 // lookup returns. null when the server no longer knows the scope.
-function readTopic(
+async function readTopic(
   cfg: Config,
   text: Texts,
   scope: string,
   title: string,
-): AstrLinkPlugin.ToolResult | null {
-  const response = astrlink.http.fetch(
+): Promise<AstrLinkPlugin.ToolResult | null> {
+  const pairs = !(await modern());
+  const response = await astrlink.http.fetch(
     request(
       cfg,
       "POST",
       "/v1/scopes/" + scope + "/artifacts/topic-memory/search",
       {
-        query: bound(title, MAX_QUERY_TERMS),
+        query: bound(title, MAX_QUERY_TERMS, pairs),
         limit: READ_CANDIDATES,
         mode: "text",
       },
@@ -2035,18 +2043,18 @@ function readTopic(
 // listAllProjects lists the projects on the server whose names contain a
 // keyword, a page at a time; the first page leads with the ones this
 // computer used.
-function listAllProjects(
+async function listAllProjects(
   cfg: Config,
   text: Texts,
   input: Record<string, string | number>,
-): AstrLinkPlugin.ToolResult {
+): Promise<AstrLinkPlugin.ToolResult> {
   const query = typeof input.query === "string" ? input.query.trim() : "";
   const cursor = typeof input.cursor === "string" ? input.cursor : "";
   let path = "/v1/scopes?limit=100";
   if (query !== "")
     path += "&query=" + encodeURIComponent(query) + "&query_field=title";
   if (cursor !== "") path += "&cursor=" + encodeURIComponent(cursor);
-  const response = astrlink.http.fetch(request(cfg, "GET", path));
+  const response = await astrlink.http.fetch(request(cfg, "GET", path));
   if (response.status !== 200) {
     const summary = text.serverDown(failure(text, response));
     return looked(text, summary, 0, "failed", summary);
@@ -2059,7 +2067,7 @@ function listAllProjects(
   if (cursor === "") {
     let stats: AstrLinkPlugin.ValueStat[] = [];
     try {
-      stats = astrlink.meta.values("project", 200);
+      stats = await astrlink.meta.values("project", 200);
     } catch {
       // Without request.read the plugin knows no local project.
     }
@@ -2091,12 +2099,12 @@ function listAllProjects(
 // its session's credential: search and read look in the session's project,
 // projects lists the projects, and note keeps what the model reports about
 // the project, as observeTurn keeps the turns.
-export function callTool(
+export async function callTool(
   view: AstrLinkPlugin.ToolView,
-): AstrLinkPlugin.ToolResult {
+): Promise<AstrLinkPlugin.ToolResult> {
   const cfg = config();
   const text = texts(view.language);
-  const problem = serverProblem(cfg, text);
+  const problem = await serverProblem(cfg, text);
   if (problem !== null) {
     const summary = text.serverDown(problem);
     return view.name === "note"
@@ -2118,7 +2126,7 @@ export function callTool(
   // no memory yet. A scope kept from before the server started over is
   // forgotten and found again, once.
   for (let attempt = 0; attempt < 2; attempt++) {
-    const scope = findScope(cfg, project.value);
+    const scope = await findScope(cfg, project.value);
     if (scope === null) {
       const summary = text.serverDown(text.fetch.network);
       return looked(text, summary, 0, "failed", summary);
@@ -2126,10 +2134,16 @@ export function callTool(
     if (scope === undefined) break;
     const result =
       view.name === "read"
-        ? readTopic(cfg, text, scope, String(view.input.topic ?? ""))
-        : searchMemory(cfg, text, scope, String(view.input.query ?? ""), limit);
+        ? await readTopic(cfg, text, scope, String(view.input.topic ?? ""))
+        : await searchMemory(
+            cfg,
+            text,
+            scope,
+            String(view.input.query ?? ""),
+            limit,
+          );
     if (result !== null) return result;
-    forget(project.value);
+    await forget(project.value);
   }
   return looked(text, text.noMemory, 0, "ok", text.noMemory);
 }
@@ -2183,9 +2197,9 @@ function moment(text: Texts, iso: string): string {
 // The plugin page's own part of the overview: whether the server processes
 // what the plugin writes, and the last write. The host shows the server, the
 // bound projects and the credits itself.
-export function describeStatus(
+export async function describeStatus(
   view: AstrLinkPlugin.PageView,
-): AstrLinkPlugin.ViewBlock[] {
+): Promise<AstrLinkPlugin.ViewBlock[]> {
   const cfg = config();
   const text = texts(view?.language);
   const items: Array<{ label: string; value: string; mono?: boolean }> = [];
@@ -2193,12 +2207,12 @@ export function describeStatus(
     items.push(
       ...processingItems(
         text,
-        astrlink.http.fetch(
+        await astrlink.http.fetch(
           request(cfg, "GET", "/v1/capabilities", undefined, 3000),
         ),
       ),
     );
-  const last = astrlink.store.get("last-write") as {
+  const last = (await astrlink.store.get("last-write")) as {
     at: number;
     project: string;
     summary: string;
@@ -2216,13 +2230,13 @@ export function describeStatus(
   return items.length > 0 ? [{ type: "kv", items }] : [];
 }
 
-export function testConnection(
+export async function testConnection(
   view: AstrLinkPlugin.PageView,
-): AstrLinkPlugin.TestConnectionResult {
+): Promise<AstrLinkPlugin.TestConnectionResult> {
   const cfg = config();
   const text = texts(view?.language);
   if (!cfg.serverUrl) return { status: "error", summary: text.needServer };
-  const [info, capabilities] = astrlink.http.fetch([
+  const [info, capabilities] = await astrlink.http.fetch([
     request(cfg, "GET", "/v1/server-info", undefined, 3000),
     request(cfg, "GET", "/v1/capabilities", undefined, 3000),
   ]);
@@ -2231,7 +2245,7 @@ export function testConnection(
   const version = String(served.package_version ?? "");
   if (!supported(version))
     return { status: "error", summary: text.tooOld(version) };
-  noteVersion(info);
+  await noteVersion(info);
   // What the server can search, when it said.
   const families = answered<{ artifact_families?: string[] }>(
     capabilities,

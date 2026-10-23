@@ -232,7 +232,14 @@ type recordSession struct {
 	metadata contract.RequestMetadata
 	// plugins is the plugins' part in the request, nil when none takes part;
 	// pluginRecords is what they reported.
-	plugins       *pluginhost.Run
+	plugins *pluginhost.Run
+	// extensions runs the extension points of apiVersion 2 plugins;
+	// replyPlugins is the latest attempt's writer of their response hooks,
+	// which keeps the reply's text for onResponse, and servedName the name
+	// of the provider that served the request.
+	extensions    *pluginhost.Extensions
+	replyPlugins  *pluginResponseWriter
+	servedName    string
 	pluginRecords []contract.RequestPluginRecord
 	// requestExposure is the label of the stored client body; empty until
 	// it is stored.
@@ -780,6 +787,7 @@ func (session *recordSession) noteSelected(candidate endpoint.Resolved, plan con
 	session.recovery.UpstreamModel = model
 	endpointID := candidate.Service.ID
 	session.endpointID = &endpointID
+	session.servedName = candidate.CanonicalService().Name
 	planCopy := plan
 	session.plan = &planCopy
 }

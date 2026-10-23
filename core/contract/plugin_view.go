@@ -273,8 +273,9 @@ func (record PluginRecord) Validate() error {
 	return ValidatePluginView(record.View)
 }
 
-// MaxRequestPluginRecords bounds the plugin records kept with one request.
-const MaxRequestPluginRecords = 16
+// MaxRequestPluginRecords bounds the plugin records kept with one request:
+// a few for each plugin's part in it.
+const MaxRequestPluginRecords = 48
 
 // Why a plugin hook gave a request nothing: the plugin's own reasons, such
 // as no_project or short_query, and the host's.
@@ -353,7 +354,40 @@ type RequestPluginRecord struct {
 	// Commands name the plugin's queries whose commands its turn block
 	// carried, as an ask that offers the model a look at every project.
 	Commands []string `json:"commands,omitempty"`
+	// Effects say what an extension point's call did to the request or
+	// its response, as PluginEffect codes; Tags are the tags onRequest
+	// gave the request.
+	Effects []string `json:"effects,omitempty"`
+	Tags    []string `json:"tags,omitempty"`
+	// Events counts the stream events a stream hook saw, and Failures
+	// those it failed on, which went on as they came.
+	Events   int `json:"events,omitempty"`
+	Failures int `json:"failures,omitempty"`
 }
+
+// What an extension point's call did, in RequestPluginRecord.Effects.
+const (
+	PluginEffectDeny     = "deny"
+	PluginEffectTag      = "tag"
+	PluginEffectOrder    = "order"
+	PluginEffectExclude  = "exclude"
+	PluginEffectModel    = "model"
+	PluginEffectSystem   = "system"
+	PluginEffectTurn     = "turn"
+	PluginEffectParams   = "params"
+	PluginEffectTools    = "tools"
+	PluginEffectBody     = "body"
+	PluginEffectHeaders  = "headers"
+	PluginEffectRewrite  = "rewrite"
+	PluginEffectStream   = "stream"
+	PluginEffectObserved = "observed"
+)
+
+// Bounds of the tags onRequest gives a request.
+const (
+	MaxPluginTags     = 8
+	MaxPluginTagRunes = 32
+)
 
 // PluginLookup is a query the model ran, or a report it made: which, how
 // long its input was in characters, how many bytes of result it got, and
@@ -405,6 +439,19 @@ func (record RequestPluginRecord) Validate() error {
 	}
 	if record.ElapsedMs < 0 || record.Network.Requests < 0 || record.Network.Denied < 0 || record.Network.Errors < 0 || record.Network.WaitMs < 0 {
 		return fmt.Errorf("plugin record counts must be non-negative")
+	}
+	if len(record.Effects) > 16 || len(record.Tags) > MaxPluginTags || record.Events < 0 || record.Failures < 0 {
+		return fmt.Errorf("plugin record has too many effects or tags")
+	}
+	for _, effect := range record.Effects {
+		if err := validateBoundedText("plugin effect", effect, 16, false); err != nil {
+			return err
+		}
+	}
+	for _, tag := range record.Tags {
+		if err := validateBoundedText("plugin tag", tag, MaxPluginTagRunes, false); err != nil {
+			return err
+		}
 	}
 	if len(record.Commands) > MaxPluginRecordCommands {
 		return fmt.Errorf("plugin record names more than %d commands", MaxPluginRecordCommands)

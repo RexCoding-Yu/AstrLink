@@ -19,6 +19,8 @@ import App from "./App";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { getPreferences } from "./bridge";
 import { applyLocale, i18n, isLocale, useT } from "./i18n";
+import { PluginApprovalWindow } from "./PluginApprovalWindow";
+import { isPluginApprovalWindow } from "./plugin-approval-window";
 import { RawAccessApprovalWindow } from "./RawAccessApprovalWindow";
 import { isRawAccessApprovalWindow } from "./raw-access-approval-window";
 import { TrajectoryInspectorWindow } from "./TrajectoryInspectorWindow";
@@ -113,6 +115,8 @@ const surface = isWebEdition ? (
   <TrajectoryInspectorWindow />
 ) : isRawAccessApprovalWindow() ? (
   <RawAccessApprovalWindow />
+) : isPluginApprovalWindow() ? (
+  <PluginApprovalWindow />
 ) : (
   <App />
 );

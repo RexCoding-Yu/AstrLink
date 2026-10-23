@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -56,6 +58,10 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		return
 	}
 	key, action, _ := strings.Cut(rest, "/")
+	if key == "sources" && (action == "preview" || action == "install") && request.Method == http.MethodPost {
+		handler.pluginSources(writer, request, action)
+		return
+	}
 	if key == "reload" && action == "" && request.Method == http.MethodPost {
 		if err := handler.plugins.Reload(request.Context()); err != nil {
 			writeError(writer, http.StatusInternalServerError, "plugin_reload_failed", err.Error())
@@ -109,6 +115,24 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodGet) {
 			handler.pluginCredits(writer, request.Context(), target)
 		}
+	case action == "journal":
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.pluginJournal(writer, request, target)
+		}
+	case action == "dry-run":
+		if allowMethods(writer, request, http.MethodPost) {
+			handler.pluginDryRun(writer, request, target)
+		}
+	case action == "client.js" || action == "client.js.map":
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.pluginClient(writer, target, action)
+		}
+	case action == "ui-call":
+		if allowMethods(writer, request, http.MethodPost) {
+			handler.pluginUICall(writer, request, target)
+		}
+	case action == "source" || strings.HasPrefix(action, "source/"):
+		handler.pluginSource(writer, request, target, strings.TrimPrefix(strings.TrimPrefix(action, "source"), "/"))
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
 	}
@@ -144,6 +168,29 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 		RequestedCapabilities: []string{},
 		GrantedCapabilities:   []string{},
 	}
+	if development := target.Development; development != nil {
+		summary.Development = &contract.PluginDevelopment{Project: development.Project, BuiltAt: development.BuiltAt}
+	}
+	if installed := target.Installed; installed != nil {
+		source := installed.Source
+		summary.Installed = &source
+	}
+	if target.UILoads() {
+		summary.UIVersion = target.ClientHash
+	}
+	if target.Enabled() && target.Can(plugin.CapabilityProvider) {
+		for _, provider := range target.Meta.Providers {
+			offered := contract.PluginProvider{
+				ID: provider.ID, Name: provider.Name, BaseURL: provider.BaseURL, Auth: provider.Auth.Service(),
+				Convert: provider.Convert, Models: slices.Clone(provider.Models), Protocols: []contract.PluginProviderProtocol{},
+			}
+			for _, protocol := range provider.ProtocolOrder() {
+				modes := provider.Protocols[protocol]
+				offered.Protocols = append(offered.Protocols, contract.PluginProviderProtocol{Protocol: protocol, Stream: modes.Stream, Sync: modes.Synchronous()})
+			}
+			summary.Providers = append(summary.Providers, offered)
+		}
+	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed
 		if target.Err != nil {
@@ -152,10 +199,41 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 		return summary
 	}
 	summary.Name, summary.Version = target.Meta.Name, target.Meta.Version
+	summary.APIVersion = target.Meta.APIVersion
 	summary.RequestedCapabilities = append(summary.RequestedCapabilities, target.Meta.Capabilities...)
 	summary.GrantedCapabilities = append(summary.GrantedCapabilities, target.Granted()...)
 	summary.NeedsNetwork = target.Meta.NeedsNetwork()
 	return summary
+}
+
+// hookLimits lists the time limits of the extension points the plugin
+// serves, with the user's settings.
+func hookLimits(target *plugin.Plugin, set map[string]int) []contract.PluginHookLimitSetting {
+	limits := []contract.PluginHookLimitSetting{}
+	for _, hook := range limitedHooks(target) {
+		bounds := contract.PluginHookLimits[hook]
+		limits = append(limits, contract.PluginHookLimitSetting{
+			Hook: hook, DefaultMs: bounds.DefaultMs, MaxMs: bounds.MaxMs,
+			PluginMs: target.Meta.Limits[hook], Ms: set[hook], EffectiveMs: int(target.Limit(hook).Milliseconds()),
+		})
+	}
+	return limits
+}
+
+// limitedHooks are the extension points with a time limit the plugin
+// serves, in the order a request meets them.
+func limitedHooks(target *plugin.Plugin) []string {
+	var hooks []string
+	for _, hook := range []string{
+		contract.PluginHookOnRequest, contract.PluginHookRoute, contract.PluginHookBeforeForward, contract.PluginHookBeforeUpstream,
+		contract.PluginHookRewriteResponse, contract.PluginHookOnStreamEvent, contract.PluginHookOnResponse, contract.PluginHookOnEvent,
+		contract.PluginHookOnSchedule, contract.PluginHookOnHTTP, contract.PluginHookOnUICall,
+	} {
+		if target.Has(hook) {
+			hooks = append(hooks, hook)
+		}
+	}
+	return hooks
 }
 
 func (handler *Handler) writePluginDetail(writer http.ResponseWriter, ctx context.Context, target *plugin.Plugin) {
@@ -180,11 +258,7 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	if target.Meta.Network != nil {
 		detail.NetworkPurpose = target.Meta.Network.Purpose
 	}
-	for _, hook := range []string{plugin.HookPrepareSession, plugin.HookPrepareTurn, plugin.HookObserveTurn, plugin.HookDescribeStatus, plugin.HookTestConnection, plugin.HookOnAction} {
-		if target.Has(hook) {
-			detail.Hooks = append(detail.Hooks, hook)
-		}
-	}
+	detail.Hooks = append(detail.Hooks, target.Hooks()...)
 	settings, err := handler.pluginStore.GetPluginSettings(ctx, target.Key)
 	if errors.Is(err, storage.ErrNotFound) {
 		settings, err = storage.NewPluginSettingsRecord(target.Key), nil
@@ -196,6 +270,14 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 		detail.Config = settings.Config
 	}
 	detail.PrivacyTrusted = settings.Trusted
+	detail.Limits = hookLimits(target, settings.HookLimitsMs)
+	detail.FailClosedRequested = target.Meta.FailClosed
+	detail.FailClosed = settings.FailClosed && target.Meta.FailClosed
+	detail.Client = target.Client
+	detail.UIEnabled = settings.UIEnabled
+	if handler.pluginInstaller != nil && target.Origin != plugin.OriginBuiltin {
+		detail.Versions = handler.pluginInstaller.Versions(target.Key)
+	}
 	detail.TurnWaitMs = settings.TurnWaitMs
 	if detail.TurnWaitMs == 0 {
 		detail.TurnWaitMs = contract.DefaultPluginTurnWaitMs
@@ -315,23 +397,13 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 	invalid := func(message string) {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_plugin_settings", message)
 	}
+	previous := settings
+	previous.Capabilities = slices.Clone(settings.Capabilities)
 	stored := slices.Clone(settings.Origins)
 	if update.Enabled != nil {
 		if *update.Enabled && !target.Loaded() {
 			invalid("a plugin that did not load cannot be enabled")
 			return
-		}
-		// Enabling registers the plugin's attributes; one whose key or
-		// marker another owner holds keeps the plugin off.
-		if *update.Enabled && handler.metadata != nil {
-			if err := handler.metadata.RegisterPlugin(ctx, target.Key, target.Attributes()); err != nil {
-				if errors.Is(err, storage.ErrConflict) {
-					writeError(writer, http.StatusConflict, "metadata_attribute_conflict", "an attribute this plugin registers has the key or marker of another attribute")
-					return
-				}
-				writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not register the plugin's attributes")
-				return
-			}
 		}
 		settings.Enabled = *update.Enabled
 	}
@@ -400,6 +472,39 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 	if update.LookupEnabled != nil {
 		settings.LookupEnabled = *update.LookupEnabled
 	}
+	if update.HookLimitsMs != nil {
+		limits := maps.Clone(settings.HookLimitsMs)
+		if limits == nil {
+			limits = map[string]int{}
+		}
+		for hook, ms := range update.HookLimitsMs {
+			bounds, known := contract.PluginHookLimits[hook]
+			if !known {
+				invalid("no extension point " + hook + " has a time limit")
+				return
+			}
+			if ms == 0 {
+				delete(limits, hook)
+				continue
+			}
+			if ms < 1 || ms > bounds.MaxMs {
+				invalid(fmt.Sprintf("the time limit of %s is 1 to %d ms", hook, bounds.MaxMs))
+				return
+			}
+			limits[hook] = ms
+		}
+		settings.HookLimitsMs = limits
+	}
+	if update.FailClosed != nil {
+		if *update.FailClosed && !target.Meta.FailClosed {
+			invalid("the plugin does not ask to refuse requests it cannot decide")
+			return
+		}
+		settings.FailClosed = *update.FailClosed
+	}
+	if update.UIEnabled != nil {
+		settings.UIEnabled = *update.UIEnabled
+	}
 	if update.Config != nil {
 		config := bytes.TrimSpace(update.Config)
 		if len(config) > contract.MaxPluginConfigBytes || !json.Valid(config) || config[0] != '{' {
@@ -430,6 +535,28 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 		}
 		settings.Origins, binds = origins, credentials
 	}
+	// What grants the plugin more takes the user's confirmation, where
+	// nothing the plugin runs can click for them.
+	if approval := pluginApproval(target, previous, settings); !approval.Empty() && request.Header.Get(contract.PluginApprovalHeader) == "" {
+		writeJSON(writer, http.StatusConflict, approvalEnvelope{
+			Error:     controlError{Code: "approval_required", Message: "this change grants the plugin more and needs the user's confirmation", Details: []errorDetail{}},
+			RequestID: newRequestID(),
+			Approval:  approval,
+		})
+		return
+	}
+	// Enabling registers the plugin's attributes; one whose key or marker
+	// another owner holds keeps the plugin off.
+	if settings.Enabled && !previous.Enabled && handler.metadata != nil {
+		if err := handler.metadata.RegisterPlugin(ctx, target.Key, target.Attributes()); err != nil {
+			if errors.Is(err, storage.ErrConflict) {
+				writeError(writer, http.StatusConflict, "metadata_attribute_conflict", "an attribute this plugin registers has the key or marker of another attribute")
+				return
+			}
+			writeError(writer, http.StatusInternalServerError, "metadata_unavailable", "could not register the plugin's attributes")
+			return
+		}
+	}
 	if err := handler.pluginStore.PutPluginSettings(ctx, settings); err != nil {
 		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "could not save the plugin's settings")
 		return
@@ -451,6 +578,45 @@ func (handler *Handler) updatePluginSettings(writer http.ResponseWriter, request
 		handler.pluginHost.RevokePluginLookups(target.Key)
 	}
 	handler.writePluginDetail(writer, ctx, current)
+}
+
+// approvalEnvelope is the error of a change that needs the user's
+// confirmation, with what it grants.
+type approvalEnvelope struct {
+	Error     controlError            `json:"error"`
+	RequestID string                  `json:"request_id"`
+	Approval  contract.PluginApproval `json:"approval"`
+}
+
+// pluginApproval describes what a change of settings grants the plugin
+// beyond what it had: being enabled, capabilities, addresses, plain http,
+// the privacy check skipped, and refusing requests its entry hook cannot
+// decide. Enabling counts every capability it then has.
+func pluginApproval(target *plugin.Plugin, previous, next storage.PluginSettingsRecord) contract.PluginApproval {
+	approval := contract.PluginApproval{Plugin: target.Key, Name: target.Meta.Name}
+	if approval.Name == "" {
+		approval.Name = target.Key
+	}
+	approval.Enable = next.Enabled && !previous.Enabled
+	if next.Enabled {
+		for _, capability := range target.Meta.Granted(next.Capabilities) {
+			if approval.Enable || !slices.Contains(previous.Capabilities, capability) {
+				approval.AddedCapabilities = append(approval.AddedCapabilities, capability)
+			}
+		}
+	}
+	for _, origin := range next.Origins {
+		index := slices.IndexFunc(previous.Origins, func(existing storage.PluginOrigin) bool { return existing.Origin == origin.Origin })
+		if index < 0 {
+			approval.AddedOrigins = append(approval.AddedOrigins, origin.Origin)
+		}
+		if origin.AllowPlaintext && (index < 0 || !previous.Origins[index].AllowPlaintext) {
+			approval.Plaintext = append(approval.Plaintext, origin.Origin)
+		}
+	}
+	approval.Trusted = next.Trusted && !previous.Trusted
+	approval.FailClosed = next.FailClosed && !previous.FailClosed
+	return approval
 }
 
 // currentPlugin returns the plugin as the newest generation has it.

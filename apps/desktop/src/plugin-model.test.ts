@@ -7,7 +7,9 @@ import {
   parsePluginActionResult,
   parsePluginClearResult,
   parsePluginDetail,
+  parsePluginDryRun,
   parsePluginHostSettings,
+  parsePluginJournal,
   parsePluginList,
   parsePluginStatus,
   parsePluginTestResult,
@@ -461,6 +463,93 @@ describe("plugin model", () => {
         "$.view",
       ),
     ).toThrow("$.view[0].rows[0][0]");
+  });
+
+  it("reads a development build, the journal and a dry run", () => {
+    const list = parsePluginList({
+      directory: "/data/plugins",
+      plugins: [
+        {
+          ...summary,
+          api_version: 2,
+          development: {
+            project: "/home/me/memory",
+            built_at: "2026-10-23T12:00:00Z",
+          },
+        },
+      ],
+    });
+    expect(list.plugins[0]?.api_version).toBe(2);
+    expect(list.plugins[0]?.development).toEqual({
+      project: "/home/me/memory",
+      built_at: "2026-10-23T12:00:00Z",
+    });
+    const journal = parsePluginJournal({
+      entries: [
+        {
+          seq: 3,
+          time: "2026-10-23T12:00:01Z",
+          hook: "observeTurn",
+          level: "error",
+          message: "threw",
+          reason: "plugin_error",
+          stack: "at observeTurn (src/plugin.ts:4:1)",
+          dry_run: true,
+        },
+      ],
+      timings: [
+        {
+          hook: "observeTurn",
+          calls: 2,
+          failures: 1,
+          p50_ms: 1.5,
+          p95_ms: 9,
+          max_ms: 9,
+          script_ms: 0.4,
+        },
+      ],
+      latest: 3,
+    });
+    expect(journal.entries[0]?.stack).toContain("src/plugin.ts:4:1");
+    expect(journal.timings[0]?.p95_ms).toBe(9);
+    expect(journal.latest).toBe(3);
+    expect(() =>
+      parsePluginJournal({
+        entries: [],
+        timings: [
+          {
+            hook: "x",
+            calls: 1,
+            failures: 0,
+            p50_ms: -1,
+            p95_ms: 0,
+            max_ms: 0,
+            script_ms: 0,
+          },
+        ],
+        latest: 0,
+      }),
+    ).toThrow();
+    const run = parsePluginDryRun({
+      error: { reason: "timeout", message: "ran out of time" },
+      elapsed_ms: 10000,
+      script_ms: 2,
+      logs: [
+        {
+          time: "2026-10-23T12:00:01Z",
+          hook: "describeStatus",
+          level: "info",
+          message: "hi",
+          dry_run: true,
+        },
+      ],
+    });
+    expect(run.error).toEqual({
+      reason: "timeout",
+      message: "ran out of time",
+    });
+    expect(run.result).toBeUndefined();
+    expect(run.logs[0]?.message).toBe("hi");
   });
 
   it("reads test results and status", () => {
