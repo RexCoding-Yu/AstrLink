@@ -104,7 +104,7 @@ func projectFiles(key string, chosen template) map[string]string {
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "astrlink": ">=0.1.0" },
+  "engines": { "astrlink": ">=0.1.0-0" },
   "astrlink": { ` + entries + ` }` + devDependencies + `
 }
 `),

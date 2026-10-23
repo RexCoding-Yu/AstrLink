@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/pluginbuild"
 )
 
 func run(t *testing.T, env Environment, args ...string) (int, string, string) {
@@ -52,6 +53,19 @@ func TestNewTestCheckAndBuildAProject(t *testing.T) {
 	}
 	if code, _, stderr := run(t, Environment{}, "new", "Bad_Key"); code != 2 || !strings.Contains(stderr, "cannot be a plugin key") {
 		t.Fatalf("new with a bad key = %d: %s", code, stderr)
+	}
+}
+
+func TestANewProjectInstallsOnTheDevelopmentBuilds(t *testing.T) {
+	var manifest pluginbuild.Manifest
+	if err := json.Unmarshal([]byte(projectFiles("demo", templates()["basic"])["package.json"]), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"0.1.0-dev.1", "0.1.0", "0.2.3"} {
+		current, _ := pluginbuild.ParseVersion(version)
+		if compatible, err := pluginbuild.Satisfies(current, manifest.EngineRange()); err != nil || !compatible {
+			t.Errorf("AstrLink %s is outside engines.astrlink %q (%v)", version, manifest.EngineRange(), err)
+		}
 	}
 }
 
@@ -102,6 +116,72 @@ export async function testConnection() {
 	}
 	if code, _, stderr := run(t, Environment{}, "test", dir, "--run", "reads"); code != 0 {
 		t.Fatalf("test --run = %d: %s", code, stderr)
+	}
+}
+
+func TestCasesShareASetupAndScriptTheServer(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"plugin.ts": `export const meta = {
+  apiVersion: 2, key: "scripted", name: "Scripted", version: "1.0.0",
+  capabilities: ["network", "storage", "request.read"], network: { purpose: "test" },
+  metadata: [{ key: "project", label: "Project", pattern: "^[a-z]+$" }],
+};
+export async function describeStatus() {
+  const first = await astrlink.http.fetch({ method: "POST", url: "https://api.example/items", json: { name: "a", version: 0 } });
+  const second = first.status === 409
+    ? await astrlink.http.fetch({ method: "POST", url: "https://api.example/items", json: { name: "a", version: 1 } })
+    : first;
+  const projects = await astrlink.meta.values("project");
+  await astrlink.store.delete("stale");
+  const now = astrlink.clock.now();
+  const local = new Date(now + astrlink.clock.offset(now) * 60000).toISOString().slice(0, 16);
+  return [{ type: "text", text: [first.status, second.status, second.took_ms, projects.map((p) => p.value).join(","), local].join(" ") }];
+}
+`,
+		"tests/server.json": `{
+  "now": "2026-10-21T03:04:00Z",
+  "timeZone": "America/New_York",
+  "metaValues": { "project": [{ "value": "paseo", "sessions": 3, "lastUsedAt": 1 }, { "value": "notes", "sessions": 1, "lastUsedAt": 0 }] },
+  "store": { "stale": true },
+  "fetch": [{ "method": "POST", "url": "https://api.example/items", "body": { "version": 1 }, "status": 201, "delayMs": 3, "json": {} }],
+  "cases": [
+    { "name": "a conflict, then the shared answer", "hook": "describeStatus",
+      "fetch": [{ "method": "POST", "url": "https://api.example/items", "body": { "version": 0 }, "times": 1, "status": 409, "json": {} }],
+      "expect": { "result": [{ "type": "text", "text": "409 201 3 paseo,notes 2026-10-20T23:04" }], "store": { "stale": null } } },
+    { "name": "its own clock and values", "hook": "describeStatus", "timeZone": "Asia/Shanghai", "metaValues": {},
+      "fetch": [{ "method": "POST", "url": "https://api.example/items", "times": 1, "status": 409, "json": {} }],
+      "expect": { "match": [{ "text": "409 201 3  2026-10-21T11:04" }] } },
+    { "name": "fewer requests than the times", "hook": "describeStatus",
+      "fetch": [{ "method": "POST", "url": "https://api.example/items", "body": { "version": 0 }, "times": 2, "status": 409, "json": {} }],
+      "expect": { "match": [{ "type": "text" }] } },
+    { "name": "a body no response takes", "hook": "describeStatus",
+      "expect": { "match": [{ "type": "text" }] } }
+  ]
+}`,
+	}
+	for name, text := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, stdout, stderr := run(t, Environment{}, "test", dir)
+	if code != 1 || !strings.Contains(stdout, `"passed": 2`) || !strings.Contains(stdout, `"failed": 2`) {
+		t.Fatalf("test = %d: %s %s", code, stdout, stderr)
+	}
+	for _, want := range []string{
+		"PASS  a conflict, then the shared answer",
+		"PASS  its own clock and values",
+		"FAIL  fewer requests than the times\n      POST https://api.example/items answered 1 of the 2 requests it expects",
+		`FAIL  a body no response takes` + "\n" + `      made a request no fixture answers: POST https://api.example/items {"name":"a","version":0}`,
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
 	}
 }
 

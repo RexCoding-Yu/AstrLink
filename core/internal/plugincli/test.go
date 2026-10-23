@@ -10,22 +10,33 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"testing/fstest"
 	"time"
+	// A case's time zone loads on computers without a zone database too.
+	_ "time/tzdata"
 
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 )
 
 // fixture is one case of a project's tests directory: a hook to call with
-// arguments, the settings and stored values it runs with, the responses its
-// requests get, and what it must return.
+// arguments, what it runs with, and what it must return.
 type fixture struct {
 	Name string            `json:"name"`
 	Hook string            `json:"hook"`
 	Args []json.RawMessage `json:"args"`
+	setup
+	Expect expectation `json:"expect"`
+	file   string
+}
+
+// setup is what a case runs with: the settings and stored values, the
+// responses its requests get, the clock, and the sessions' use of the
+// plugin's attributes. A file of cases may give it to all of them.
+type setup struct {
 	// Config is the plugin's configuration; Capabilities are those granted,
 	// all the plugin asks for when absent.
 	Config       json.RawMessage `json:"config"`
@@ -34,27 +45,84 @@ type fixture struct {
 	Request *plugin.RequestInfo        `json:"request"`
 	Store   map[string]json.RawMessage `json:"store"`
 	Fetch   []fakeResponse             `json:"fetch"`
-	Expect  expectation                `json:"expect"`
-	file    string
+	// Now is the time the clock says, in RFC 3339; the real time when
+	// absent. TimeZone names the zone astrlink.clock.offset follows, such as
+	// America/New_York; the computer's when absent.
+	Now      string `json:"now"`
+	TimeZone string `json:"timeZone"`
+	// MetaValues are what astrlink.meta.values returns, by attribute key.
+	MetaValues map[string][]plugin.ValueStat `json:"metaValues"`
+}
+
+// fixtureFile is a file of cases that share a setup: a case takes the
+// file's value of what it does not set itself, and its requests get its own
+// responses first, then the file's.
+type fixtureFile struct {
+	setup
+	Cases []fixture `json:"cases"`
+}
+
+// within returns the case's setup completed from the file's.
+func (own setup) within(file setup) setup {
+	if own.Config == nil {
+		own.Config = file.Config
+	}
+	if own.Capabilities == nil {
+		own.Capabilities = file.Capabilities
+	}
+	if own.Request == nil {
+		own.Request = file.Request
+	}
+	if own.Store == nil {
+		own.Store = file.Store
+	}
+	if own.Now == "" {
+		own.Now = file.Now
+	}
+	if own.TimeZone == "" {
+		own.TimeZone = file.TimeZone
+	}
+	if own.MetaValues == nil {
+		own.MetaValues = file.MetaValues
+	}
+	own.Fetch = append(slices.Clip(own.Fetch), file.Fetch...)
+	return own
 }
 
 // fakeResponse answers the requests whose method and address match: the
 // address exactly, or as a prefix when it ends with *.
 type fakeResponse struct {
-	Method  string            `json:"method"`
-	URL     string            `json:"url"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+	// Body, when set, answers only a request whose JSON body holds these
+	// members with these values.
+	Body json.RawMessage `json:"body"`
+	// Times, when set, is how many requests the response answers: later ones
+	// go to the next response that matches, and a case that makes fewer
+	// fails.
+	Times   int               `json:"times"`
 	Status  int               `json:"status"`
 	Headers map[string]string `json:"headers"`
 	JSON    json.RawMessage   `json:"json"`
 	Text    *string           `json:"text"`
 	// Error fails the request as the host would: denied, timeout, network.
 	Error string `json:"error"`
-	// DelayMs holds the response back.
+	// DelayMs holds the response back, and is the time the request took.
 	DelayMs int `json:"delayMs"`
 }
 
+// describe names a response in a failure.
+func (response fakeResponse) describe() string {
+	method := response.Method
+	if method == "" {
+		method = "any"
+	}
+	return method + " " + response.URL
+}
+
 // expectation is what a case checks: the result in full or in part, or the
-// failure, and the stored values after the call.
+// failure, and the stored values after the call, null for a key that holds
+// none.
 type expectation struct {
 	Result json.RawMessage            `json:"result"`
 	Match  json.RawMessage            `json:"match"`
@@ -123,8 +191,8 @@ func runTest(ctx context.Context, env Environment, args []string) int {
 	return 0
 }
 
-// readFixtures reads every case of the *.json files in dir, each file one
-// case or an array of them.
+// readFixtures reads every case of the *.json files in dir: a file holds
+// one case, an array of them, or an object whose cases share its setup.
 func readFixtures(dir string) ([]fixture, error) {
 	names, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {
@@ -137,15 +205,7 @@ func readFixtures(dir string) ([]fixture, error) {
 		if err != nil {
 			return nil, err
 		}
-		data = bytes.TrimSpace(data)
-		var cases []fixture
-		if bytes.HasPrefix(data, []byte("[")) {
-			err = json.Unmarshal(data, &cases)
-		} else {
-			var single fixture
-			err = json.Unmarshal(data, &single)
-			cases = []fixture{single}
-		}
+		cases, err := parseFixtures(bytes.TrimSpace(data))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %v", filepath.Base(name), err)
 		}
@@ -163,47 +223,112 @@ func readFixtures(dir string) ([]fixture, error) {
 	return fixtures, nil
 }
 
-// runner runs cases against one build of the plugin.
+func parseFixtures(data []byte) ([]fixture, error) {
+	if bytes.HasPrefix(data, []byte("[")) {
+		var cases []fixture
+		err := json.Unmarshal(data, &cases)
+		return cases, err
+	}
+	var shape struct {
+		Cases json.RawMessage `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &shape); err != nil {
+		return nil, err
+	}
+	if shape.Cases == nil {
+		var single fixture
+		err := json.Unmarshal(data, &single)
+		return []fixture{single}, err
+	}
+	var file fixtureFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, err
+	}
+	for index := range file.Cases {
+		file.Cases[index].setup = file.Cases[index].setup.within(file.setup)
+	}
+	return file.Cases, nil
+}
+
+// runner runs cases against one build of the plugin, each in a registry of
+// its own.
 type runner struct {
-	key     string
-	manager *plugin.Manager
-	// settings and the services are the current case's.
+	key   string
+	files fstest.MapFS
+	// settings, the responses and the store are the current case's;
+	// answered counts the requests each response answered.
 	mutex      sync.Mutex
 	settings   plugin.Settings
 	responses  []fakeResponse
+	answered   []int
 	unexpected []string
 	store      *memoryStore
 }
 
 func newRunner(project *built) *runner {
 	current := &runner{key: project.checked.Meta.Key}
-	files := fstest.MapFS{current.key + "/plugin.js": &fstest.MapFile{Data: project.result.Plugin}}
+	current.files = fstest.MapFS{current.key + "/plugin.js": &fstest.MapFile{Data: project.result.Plugin}}
 	if project.result.SourceMap != nil {
-		files[current.key+"/plugin.js.map"] = &fstest.MapFile{Data: project.result.SourceMap}
+		current.files[current.key+"/plugin.js.map"] = &fstest.MapFile{Data: project.result.SourceMap}
 	}
-	current.manager = plugin.NewManager(plugin.ManagerOptions{
-		Builtin:  files,
-		Settings: settingsFunc(func() map[string]plugin.Settings { return map[string]plugin.Settings{current.key: current.settings} }),
-		Services: plugin.Services{Fetcher: current, Store: storeFunc(func() *memoryStore { return current.store })},
-	})
 	return current
+}
+
+// services are what the host serves the plugin in a case.
+func (current *runner) services(each fixture) (plugin.Services, error) {
+	services := plugin.Services{
+		Fetcher:  current,
+		Store:    storeFunc(func() *memoryStore { return current.store }),
+		Metadata: metaValues(each.MetaValues),
+	}
+	if each.Now != "" {
+		now, err := time.Parse(time.RFC3339Nano, each.Now)
+		if err != nil {
+			return services, fmt.Errorf("now %q is not an RFC 3339 time", each.Now)
+		}
+		services.Now = func() time.Time { return now }
+	}
+	if each.TimeZone != "" {
+		zone, err := time.LoadLocation(each.TimeZone)
+		if err != nil {
+			return services, fmt.Errorf("timeZone %q: %v", each.TimeZone, err)
+		}
+		services.Zone = zone
+	}
+	return services, nil
 }
 
 func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 	outcome := caseOutcome{Name: each.Name, File: each.file}
+	services, err := current.services(each)
+	if err != nil {
+		outcome.Message = err.Error()
+		return outcome
+	}
 	current.mutex.Lock()
+	current.settings = plugin.Settings{}
 	current.responses = each.Fetch
+	current.answered = make([]int, len(each.Fetch))
 	current.unexpected = nil
 	current.store = &memoryStore{values: map[string]json.RawMessage{}}
 	for key, value := range each.Store {
 		current.store.values[key] = value
 	}
 	current.mutex.Unlock()
-	if err := current.manager.Reload(ctx); err != nil {
+	manager := plugin.NewManager(plugin.ManagerOptions{
+		Builtin: current.files,
+		Settings: settingsFunc(func() map[string]plugin.Settings {
+			current.mutex.Lock()
+			defer current.mutex.Unlock()
+			return map[string]plugin.Settings{current.key: current.settings}
+		}),
+		Services: services,
+	})
+	if err := manager.Reload(ctx); err != nil {
 		outcome.Message = err.Error()
 		return outcome
 	}
-	loaded := current.manager.Current().Plugin(current.key)
+	loaded := manager.Current().Plugin(current.key)
 	if loaded == nil || !loaded.Loaded() {
 		outcome.Message = "the plugin did not load"
 		return outcome
@@ -212,12 +337,14 @@ func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 	if capabilities == nil {
 		capabilities = loaded.Meta.Capabilities
 	}
+	current.mutex.Lock()
 	current.settings = plugin.Settings{Enabled: true, Capabilities: capabilities, Config: each.Config}
-	if err := current.manager.Refresh(ctx); err != nil {
+	current.mutex.Unlock()
+	if err := manager.Refresh(ctx); err != nil {
 		outcome.Message = err.Error()
 		return outcome
 	}
-	loaded = current.manager.Current().Plugin(current.key)
+	loaded = manager.Current().Plugin(current.key)
 	args := make([]any, 0, len(each.Args))
 	for _, arg := range each.Args {
 		args = append(args, arg)
@@ -228,6 +355,11 @@ func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 	var problems []string
 	current.mutex.Lock()
 	problems = append(problems, current.unexpected...)
+	for index, response := range current.responses {
+		if response.Times > 0 && current.answered[index] < response.Times {
+			problems = append(problems, fmt.Sprintf("%s answered %d of the %d requests it expects", response.describe(), current.answered[index], response.Times))
+		}
+	}
 	current.mutex.Unlock()
 	var failure *plugin.CallError
 	switch {
@@ -257,6 +389,9 @@ func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 	}
 	for key, want := range each.Expect.Store {
 		got, found := current.store.values[key]
+		if !found && string(want) == "null" {
+			continue
+		}
 		if !found || !jsonEqual(got, want) {
 			problems = append(problems, fmt.Sprintf("stored %s = %s, want %s", key, orUndefined(got), compact(want)))
 		}
@@ -275,10 +410,51 @@ func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 
 // Fetch answers a request with the first fake response that matches it.
 func (current *runner) Fetch(ctx context.Context, _ *plugin.Plugin, request plugin.HTTPRequest) plugin.HTTPResponse {
+	response, found := current.answer(request)
+	if !found {
+		return plugin.HTTPResponse{Error: plugin.FetchNetwork}
+	}
+	took := time.Duration(response.DelayMs) * time.Millisecond
+	if took > 0 {
+		select {
+		case <-time.After(took):
+		case <-ctx.Done():
+			return plugin.HTTPResponse{Error: plugin.FetchTimeout, Took: took}
+		}
+	}
+	if response.Error != "" {
+		return plugin.HTTPResponse{Status: response.Status, Error: response.Error, Took: took}
+	}
+	status := response.Status
+	if status == 0 {
+		status = 200
+	}
+	header := map[string]string{}
+	for name, value := range response.Headers {
+		header[strings.ToLower(name)] = value
+	}
+	var body []byte
+	switch {
+	case len(response.JSON) > 0:
+		body = response.JSON
+		if header["content-type"] == "" {
+			header["content-type"] = "application/json"
+		}
+	case response.Text != nil:
+		body = []byte(*response.Text)
+	}
+	return plugin.HTTPResponse{Status: status, Header: header, Body: body, Took: took}
+}
+
+// answer picks the first response that matches the request and has
+// answers left, and counts the answer.
+func (current *runner) answer(request plugin.HTTPRequest) (fakeResponse, bool) {
 	current.mutex.Lock()
-	responses := current.responses
-	current.mutex.Unlock()
-	for _, response := range responses {
+	defer current.mutex.Unlock()
+	for index, response := range current.responses {
+		if response.Times > 0 && current.answered[index] >= response.Times {
+			continue
+		}
 		if response.Method != "" && !strings.EqualFold(response.Method, request.Method) {
 			continue
 		}
@@ -286,40 +462,22 @@ func (current *runner) Fetch(ctx context.Context, _ *plugin.Plugin, request plug
 		if (!wildcard && response.URL != request.URL) || (wildcard && !strings.HasPrefix(request.URL, prefix)) {
 			continue
 		}
-		if response.DelayMs > 0 {
-			select {
-			case <-time.After(time.Duration(response.DelayMs) * time.Millisecond):
-			case <-ctx.Done():
-				return plugin.HTTPResponse{Error: plugin.FetchTimeout}
-			}
+		if len(response.Body) > 0 && (len(request.JSON) == 0 || !jsonMatches(request.JSON, response.Body)) {
+			continue
 		}
-		if response.Error != "" {
-			return plugin.HTTPResponse{Status: response.Status, Error: response.Error}
-		}
-		status := response.Status
-		if status == 0 {
-			status = 200
-		}
-		header := map[string]string{}
-		for name, value := range response.Headers {
-			header[strings.ToLower(name)] = value
-		}
-		var body []byte
-		switch {
-		case len(response.JSON) > 0:
-			body = response.JSON
-			if header["content-type"] == "" {
-				header["content-type"] = "application/json"
-			}
-		case response.Text != nil:
-			body = []byte(*response.Text)
-		}
-		return plugin.HTTPResponse{Status: status, Header: header, Body: body}
+		current.answered[index]++
+		return response, true
 	}
-	current.mutex.Lock()
-	current.unexpected = append(current.unexpected, fmt.Sprintf("made a request no fixture answers: %s %s", request.Method, request.URL))
-	current.mutex.Unlock()
-	return plugin.HTTPResponse{Error: plugin.FetchNetwork}
+	unexpected := fmt.Sprintf("made a request no fixture answers: %s %s", request.Method, request.URL)
+	if len(request.JSON) > 0 {
+		sent := compact(request.JSON)
+		if runes := []rune(sent); len(runes) > 300 {
+			sent = string(runes[:300]) + "…"
+		}
+		unexpected += " " + sent
+	}
+	current.unexpected = append(current.unexpected, unexpected)
+	return fakeResponse{}, false
 }
 
 func orUndefined(value json.RawMessage) string {
@@ -381,6 +539,14 @@ func subset(got, want any) bool {
 		return true
 	}
 	return reflect.DeepEqual(got, want)
+}
+
+// metaValues answers astrlink.meta.values with a case's values.
+type metaValues map[string][]plugin.ValueStat
+
+func (values metaValues) ValueStats(_ context.Context, key string, limit int) ([]plugin.ValueStat, error) {
+	stats := values[key]
+	return stats[:min(len(stats), limit)], nil
 }
 
 type settingsFunc func() map[string]plugin.Settings

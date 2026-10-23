@@ -41,7 +41,7 @@ my-plugin/
 | `astrlink plugin new <key>` | 从模板起项目：`basic`、`gate`、`route`、`forward`、`stream`、`response`、`schedule`、`http`、`provider`、`ui` |
 | `astrlink plugin build`     | 构建出 `plugin.js`、`client.js` 和 source map                                                                 |
 | `astrlink plugin check`     | 构建并在 moejs 里编译，检查清单、能力和不该用的 API                                                           |
-| `astrlink plugin test`      | 按 `tests/` 里的用例跑钩子，可以伪造存储                                                                      |
+| `astrlink plugin test`      | 按 `tests/` 里的用例跑钩子，可以伪造存储、网络应答和时钟                                                      |
 | `astrlink plugin dev`       | 监听改动、构建，装进本机 AstrLink 的插件目录并实时输出日志                                                    |
 
 `astrlink plugin new` 会把类型定义放进项目：后端是
@@ -705,3 +705,28 @@ KiB；表格最多 200 行，单个文字最多 1024 个字符。超出的部分
 - 多文件项目构建时生成 source map，出错时调用栈对回 TS 源码的行号。
 - `astrlink plugin dev`
   构建出的开发版在插件列表里标为「开发版」，源码改了自动重新加载。
+
+### 测试用例
+
+`astrlink plugin test` 跑 `tests/*.json`
+里的用例。一个文件可以是一个用例、用例数组，或者带 `cases`
+的对象：对象里的其他字段是这些用例共用的设置，用例自己写了的字段以自己的为准。
+
+| 字段                     | 说明                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------- |
+| `name`、`hook`、`args`   | 用例名、要调的钩子和参数                                                              |
+| `config`、`capabilities` | 插件的设置；授予的能力，不写时授予插件申请的全部能力                                  |
+| `request`                | `astrlink.request.info` 的返回值                                                      |
+| `store`                  | 调用前存储里的值                                                                      |
+| `now`、`timeZone`        | 时钟的时间（RFC 3339）和时区（如 `America/New_York`），不写时用真实时间和本机时区     |
+| `metaValues`             | `astrlink.meta.values` 按属性返回的值                                                 |
+| `fetch`                  | 伪造的应答，见下；用例自己的先匹配，再匹配文件共用的                                  |
+| `expect`                 | `result` 要求结果相等，`match` 要求包含；`error` 要求失败；`store` 是调用后存储里的值 |
+
+- `fetch` 的每一项按 `method` 和 `url`（以 `*` 结尾时按前缀）匹配请求；写了
+  `body` 时，请求的 JSON 正文还要包含这些字段。
+- 应答写 `status`、`headers`、`json` 或 `text`；`error`
+  按宿主的方式让请求失败；`delayMs` 推迟应答，也是请求的耗时。
+- 写了 `times`
+  的一项正好应答这么多次：之后的请求交给下一个匹配的项，次数不够时用例失败。同一地址先失败后成功、只许请求一次，都这样写。
+- 没有任何一项应答的请求让用例失败。`expect.store` 里写 `null` 表示没有这个键。
