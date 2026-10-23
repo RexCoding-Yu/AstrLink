@@ -161,6 +161,79 @@ type PluginSummary struct {
 	RequestedCapabilities []string         `json:"requested_capabilities"`
 	GrantedCapabilities   []string         `json:"granted_capabilities"`
 	NeedsNetwork          bool             `json:"needs_network"`
+	// APIVersion is the plugin contract the manifest names, 0 for a plugin
+	// that did not load.
+	APIVersion int `json:"api_version,omitempty"`
+	// Development is set for a plugin astrlink plugin dev keeps built from
+	// a project on this computer.
+	Development *PluginDevelopment `json:"development,omitempty"`
+}
+
+// PluginDevelopment is the project a development build comes from.
+type PluginDevelopment struct {
+	Project string `json:"project"`
+	BuiltAt string `json:"built_at,omitempty"`
+}
+
+// PluginJournal is what the development tab of the plugin page shows: the
+// log lines and failures of the plugin's recent calls after a sequence
+// number, and how long each hook took. Latest is the sequence number to ask
+// after next time.
+type PluginJournal struct {
+	Entries []PluginJournalEntry `json:"entries"`
+	Timings []PluginHookTiming   `json:"timings"`
+	Latest  uint64               `json:"latest"`
+}
+
+// PluginJournalEntry is one log line or failed call. Reason and Stack are
+// set for a failed call; DryRun marks the lines of a call run by hand.
+type PluginJournalEntry struct {
+	Seq     uint64 `json:"seq"`
+	Time    string `json:"time"`
+	Hook    string `json:"hook"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+	Reason  string `json:"reason,omitempty"`
+	Stack   string `json:"stack,omitempty"`
+	DryRun  bool   `json:"dry_run,omitempty"`
+}
+
+// PluginHookTiming is how long a hook's recent calls took, in
+// milliseconds.
+type PluginHookTiming struct {
+	Hook     string  `json:"hook"`
+	Calls    int     `json:"calls"`
+	Failures int     `json:"failures"`
+	P50Ms    float64 `json:"p50_ms"`
+	P95Ms    float64 `json:"p95_ms"`
+	MaxMs    float64 `json:"max_ms"`
+	ScriptMs float64 `json:"script_ms"`
+}
+
+// PluginDryRunRequest runs one hook of a plugin by hand, without the
+// network: Args are the hook's arguments.
+type PluginDryRunRequest struct {
+	Hook string            `json:"hook"`
+	Args []json.RawMessage `json:"args,omitempty"`
+}
+
+// MaxPluginDryRunBytes bounds a dry run's request.
+const MaxPluginDryRunBytes = 256 << 10
+
+// PluginDryRunResult is what a dry run returned, or why it failed.
+type PluginDryRunResult struct {
+	Result    json.RawMessage      `json:"result,omitempty"`
+	Error     *PluginCallFailure   `json:"error,omitempty"`
+	ElapsedMs float64              `json:"elapsed_ms"`
+	ScriptMs  float64              `json:"script_ms"`
+	Logs      []PluginJournalEntry `json:"logs"`
+}
+
+// PluginCallFailure is why a hook call produced no result.
+type PluginCallFailure struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+	Stack   string `json:"stack,omitempty"`
 }
 
 // PluginLoadError is why a plugin did not load. Line and Column are 0 when

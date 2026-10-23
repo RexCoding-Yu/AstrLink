@@ -10,12 +10,16 @@ import (
 	"maps"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Calcium-Ion/moejs"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 )
@@ -132,6 +136,8 @@ type Plugin struct {
 	File   string
 	// Icon is the plugin's icon as a data URL, "" for none.
 	Icon string
+	// Development is set for a plugin astrlink plugin dev keeps built.
+	Development *Development
 	// Meta is the manifest, zero when the plugin did not load.
 	Meta Meta
 	// Err is why the plugin did not load, nil when it did.
@@ -157,8 +163,9 @@ type Stats struct {
 }
 
 type counter struct {
-	mutex sync.Mutex
-	stats Stats
+	mutex   sync.Mutex
+	stats   Stats
+	journal journal
 }
 
 func (count *counter) record(info CallInfo, err error) {
@@ -205,6 +212,19 @@ func (plugin *Plugin) Granted() []string { return slices.Clone(plugin.granted) }
 // Can reports whether capability is in effect.
 func (plugin *Plugin) Can(capability string) bool { return slices.Contains(plugin.granted, capability) }
 
+// Hooks returns the hooks the plugin exports, in name order.
+func (plugin *Plugin) Hooks() []string {
+	if plugin.program == nil {
+		return nil
+	}
+	hooks := make([]string, 0, len(plugin.program.hooks))
+	for name := range plugin.program.hooks {
+		hooks = append(hooks, name)
+	}
+	slices.Sort(hooks)
+	return hooks
+}
+
 // Has reports whether the plugin exports hook.
 func (plugin *Plugin) Has(hook string) bool {
 	if plugin.program == nil {
@@ -220,7 +240,15 @@ func (plugin *Plugin) Has(hook string) bool {
 // the plugin page may test one first. Any failure is a *CallError; the
 // CallInfo is filled either way.
 func (plugin *Plugin) Call(ctx context.Context, hook string, arg any, options CallOptions) (json.RawMessage, CallInfo, error) {
-	started := time.Now()
+	var args []any
+	if arg != nil {
+		args = []any{arg}
+	}
+	return plugin.CallArgs(ctx, hook, args, options)
+}
+
+// CallArgs runs hook with args, Go values, as Call does.
+func (plugin *Plugin) CallArgs(ctx context.Context, hook string, args []any, options CallOptions) (json.RawMessage, CallInfo, error) {
 	if plugin.program == nil {
 		return nil, CallInfo{}, &CallError{Reason: ReasonUnavailable, Message: "the plugin did not load"}
 	}
@@ -228,19 +256,62 @@ func (plugin *Plugin) Call(ctx context.Context, hook string, arg any, options Ca
 	if !ok {
 		return nil, CallInfo{}, &CallError{Reason: ReasonUnavailable, Message: fmt.Sprintf("the plugin does not export %s", hook)}
 	}
-	c := &call{ctx: ctx, plugin: plugin, options: options, pool: plugin.pool, networkLeft: options.NetworkBudget}
-	result, err := plugin.pool.run(ctx, c, exported, arg)
+	return plugin.invoke(ctx, hook, exported, args, options)
+}
+
+// invoke runs exported, the hook named name, on the plugin's pool.
+func (plugin *Plugin) invoke(ctx context.Context, name string, exported moejs.Hook, args []any, options CallOptions) (json.RawMessage, CallInfo, error) {
+	started := time.Now()
+	// Work a call started on other goroutines ends with it.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(errCallEnded)
+	c := &call{ctx: ctx, plugin: plugin, hook: name, options: options, pool: plugin.pool, networkLeft: options.NetworkBudget}
+	if plugin.program.async() {
+		c.networkDeadline = started.Add(options.NetworkBudget)
+		c.fetchSlots = make(chan struct{}, maxParallelFetches)
+	}
+	result, err := plugin.pool.run(ctx, c, exported, args)
 	c.info.Elapsed = time.Since(started)
 	if c.watchdog != nil {
 		c.info.Script = c.watchdog.used()
 	}
 	if err != nil {
 		failure := classify(err, plugin.pool.limits)
+		failure.Message = plugin.program.mapStack(failure.Message)
 		plugin.counter.record(c.info, failure)
+		plugin.note(name, c.info, failure, options.DryRun)
 		return nil, c.info, failure
 	}
 	plugin.counter.record(c.info, nil)
+	plugin.note(name, c.info, nil, options.DryRun)
 	return result, c.info, nil
+}
+
+// errCallEnded cancels what a call started once the call returned.
+var errCallEnded = errors.New("the plugin call ended")
+
+// Checked is a plugin that compiled and passed its checks before it is
+// installed: its manifest and the hooks it exports.
+type Checked struct {
+	Meta  Meta
+	Hooks []string
+}
+
+// Check compiles a plugin's source as the host would load it, under the key
+// its manifest names, and returns what it declares. Any failure is a
+// *LoadError.
+func Check(source Source) (*Checked, error) {
+	source.Key = ""
+	loaded, err := load(source, DefaultLimits())
+	if err != nil {
+		return nil, asLoadError(source, err)
+	}
+	checked := &Checked{Meta: loaded.meta}
+	for name := range loaded.hooks {
+		checked.Hooks = append(checked.Hooks, name)
+	}
+	slices.Sort(checked.Hooks)
+	return checked, nil
 }
 
 // Generation is the registry at one moment: every plugin found, loaded or
@@ -404,7 +475,7 @@ func (manager *Manager) publish(settings map[string]Settings) {
 	for _, source := range manager.sources {
 		result := manager.programs[sourceIdentity(source)]
 		current := settings[source.Key]
-		if kept := previous.Plugin(source.Key); kept != nil && kept.Origin == source.Origin && kept.Icon == source.Icon && kept.program == result.program && kept.Err == result.err && reflect.DeepEqual(kept.Settings, current) {
+		if kept := previous.Plugin(source.Key); kept != nil && kept.Origin == source.Origin && kept.Icon == source.Icon && reflect.DeepEqual(kept.Development, source.Development) && kept.program == result.program && kept.Err == result.err && reflect.DeepEqual(kept.Settings, current) {
 			plugins = append(plugins, kept)
 			continue
 		}
@@ -413,7 +484,7 @@ func (manager *Manager) publish(settings map[string]Settings) {
 			count = &counter{}
 			manager.counters[source.Key] = count
 		}
-		plugin := &Plugin{Key: source.Key, Origin: source.Origin, File: source.File, Icon: source.Icon, Settings: current, services: manager.services, counter: count}
+		plugin := &Plugin{Key: source.Key, Origin: source.Origin, File: source.File, Icon: source.Icon, Development: source.Development, Settings: current, services: manager.services, counter: count}
 		if result.program == nil {
 			plugin.Err = result.err
 		} else {
@@ -426,6 +497,59 @@ func (manager *Manager) publish(settings map[string]Settings) {
 		plugins = append(plugins, plugin)
 	}
 	manager.current.Store(&Generation{plugins: plugins})
+}
+
+// WatchDevelopment reloads the plugins when one that astrlink plugin dev
+// keeps built changes on disk, checking every interval until ctx ends.
+// reloaded runs after each such reload.
+func (manager *Manager) WatchDevelopment(ctx context.Context, interval time.Duration, reloaded func()) {
+	if manager.dir == "" {
+		return
+	}
+	last := developmentFingerprint(manager.dir)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		current := developmentFingerprint(manager.dir)
+		if current == last {
+			continue
+		}
+		last = current
+		if err := manager.Reload(ctx); err == nil && reloaded != nil {
+			reloaded()
+		}
+	}
+}
+
+// developmentFingerprint sums the names, sizes and times of the files of
+// the plugins in dir that astrlink plugin dev keeps built.
+func developmentFingerprint(dir string) [sha256.Size]byte {
+	hash := sha256.New()
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		if !ValidPluginKey(entry.Name()) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, entry.Name(), DevelopmentMarker)); err != nil {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(dir, entry.Name()))
+		for _, file := range files {
+			info, err := file.Info()
+			if err != nil || info.IsDir() {
+				continue
+			}
+			fmt.Fprintf(hash, "%s/%s\x00%d\x00%d\x00", entry.Name(), file.Name(), info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	var sum [sha256.Size]byte
+	hash.Sum(sum[:0])
+	return sum
 }
 
 // sourceIdentity tells whether a source changed since its last compile.

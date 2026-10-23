@@ -13,6 +13,16 @@ import (
 const testMeta = `export const meta = { apiVersion: 1, key: "demo", name: "Demo", version: "1.0.0", capabilities: [] };
 `
 
+// compileChecked compiles text and checks it as load checks an apiVersion 1
+// plugin, which testMeta declares.
+func compileChecked(file, text string) error {
+	_, parsed, err := compile(file, text)
+	if err != nil {
+		return err
+	}
+	return checkSynchronous(file, parsed)
+}
+
 func TestCompileRejectsWhatSynchronousPluginsCannotUse(t *testing.T) {
 	for _, test := range []struct {
 		name, file, body, code string
@@ -31,7 +41,7 @@ func TestCompileRejectsWhatSynchronousPluginsCannotUse(t *testing.T) {
 		{"export star", "plugin.js", `export * from "./helper.js";`, CodeReexport, 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := compile(test.file, testMeta+test.body)
+			err := compileChecked(test.file, testMeta+test.body)
 			var loadErr *LoadError
 			if !errors.As(err, &loadErr) {
 				t.Fatalf("compile error = %v, want a LoadError", err)
@@ -53,7 +63,7 @@ const asyncValue = 1, awaitCount = 2;
 const table = { import: 1, await: 2, async: 3 };
 export function prepareTurn() { return [words, pattern.test("import"), asyncValue + awaitCount, table.import]; }
 `
-	if _, err := compile("plugin.js", source); err != nil {
+	if err := compileChecked("plugin.js", source); err != nil {
 		t.Fatalf("compile: %v", err)
 	}
 }
@@ -67,13 +77,13 @@ export function prepareTurn(turn: TurnView): { skip: string } {
   return { skip: config.serverUrl ?? "none" };
 }
 `
-	if _, err := compile("plugin.ts", source); err != nil {
+	if err := compileChecked("plugin.ts", source); err != nil {
 		t.Fatalf("compile: %v", err)
 	}
 }
 
 func TestCompileReportsSyntaxErrorsWithPosition(t *testing.T) {
-	_, err := compile("plugin.ts", testMeta+"export function prepareTurn() {\n  return {;\n}\n")
+	err := compileChecked("plugin.ts", testMeta+"export function prepareTurn() {\n  return {;\n}\n")
 	var loadErr *LoadError
 	if !errors.As(err, &loadErr) || loadErr.Code != CodeSyntax || loadErr.Line != 3 {
 		t.Fatalf("compile error = %#v, want a syntax error on line 3", err)
@@ -84,7 +94,7 @@ func TestCompileReportsSyntaxErrorsWithPosition(t *testing.T) {
 }
 
 func TestCompileRejectsTypeScriptWithRuntimeSemantics(t *testing.T) {
-	_, err := compile("plugin.ts", testMeta+"enum Family { Memory }\n")
+	_, _, err := compile("plugin.ts", testMeta+"enum Family { Memory }\n")
 	var loadErr *LoadError
 	if !errors.As(err, &loadErr) || loadErr.Code != CodeSyntax {
 		t.Fatalf("compile error = %#v, want a syntax error for enum", err)
@@ -94,10 +104,10 @@ func TestCompileRejectsTypeScriptWithRuntimeSemantics(t *testing.T) {
 func TestCompileBoundsTheSource(t *testing.T) {
 	large := testMeta + "//" + strings.Repeat("x", MaxSourceBytes)
 	var loadErr *LoadError
-	if _, err := compile("plugin.js", large); !errors.As(err, &loadErr) || loadErr.Code != CodeTooLarge {
+	if _, _, err := compile("plugin.js", large); !errors.As(err, &loadErr) || loadErr.Code != CodeTooLarge {
 		t.Fatalf("compile of %d bytes = %v, want too_large", len(large), err)
 	}
-	if _, err := compile("plugin.js", testMeta+"const text = \"\xff\";"); !errors.As(err, &loadErr) || loadErr.Code != CodeEncoding {
+	if _, _, err := compile("plugin.js", testMeta+"const text = \"\xff\";"); !errors.As(err, &loadErr) || loadErr.Code != CodeEncoding {
 		t.Fatalf("compile of invalid UTF-8 = %v, want encoding", err)
 	}
 }

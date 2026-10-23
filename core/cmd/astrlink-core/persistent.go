@@ -379,14 +379,19 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		}
 		// An enabled plugin's manifest may have changed since it registered
 		// its attributes.
-		for _, loaded := range pluginManager.Current().Plugins() {
-			if !loaded.Enabled() {
-				continue
-			}
-			if err := requestMetadata.RegisterPlugin(monitorCtx, loaded.Key, loaded.Attributes()); err != nil {
-				logf("register metadata of plugin %s: %v", loaded.Key, err)
+		registerAttributes := func() {
+			for _, loaded := range pluginManager.Current().Plugins() {
+				if !loaded.Enabled() {
+					continue
+				}
+				if err := requestMetadata.RegisterPlugin(monitorCtx, loaded.Key, loaded.Attributes()); err != nil {
+					logf("register metadata of plugin %s: %v", loaded.Key, err)
+				}
 			}
 		}
+		registerAttributes()
+		// A plugin astrlink plugin dev keeps built reloads as it changes.
+		pluginManager.WatchDevelopment(monitorCtx, time.Second, registerAttributes)
 	}()
 	go func() { defer monitors.Done(); pricingManager.Run(monitorCtx, logf) }()
 	go func() { defer monitors.Done(); subscriptionManager.RunUsageMonitor(monitorCtx) }()

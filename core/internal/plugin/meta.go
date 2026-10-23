@@ -111,8 +111,8 @@ func validateMeta(meta Meta, key string) error {
 	invalid := func(format string, args ...any) error {
 		return &LoadError{Code: CodeInvalidMeta, Message: fmt.Sprintf(format, args...)}
 	}
-	if meta.APIVersion != APIVersion {
-		return invalid("meta.apiVersion %d is not supported; this host implements %d", meta.APIVersion, APIVersion)
+	if meta.APIVersion < 1 || meta.APIVersion > APIVersion {
+		return invalid("meta.apiVersion %d is not supported; this host implements 1 to %d", meta.APIVersion, APIVersion)
 	}
 	if !ValidPluginKey(meta.Key) {
 		return invalid("meta.key %q must be a lowercase letter followed by up to 31 lowercase letters, digits or hyphens", meta.Key)

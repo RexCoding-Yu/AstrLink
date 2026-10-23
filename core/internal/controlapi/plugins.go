@@ -109,6 +109,14 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodGet) {
 			handler.pluginCredits(writer, request.Context(), target)
 		}
+	case action == "journal":
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.pluginJournal(writer, request, target)
+		}
+	case action == "dry-run":
+		if allowMethods(writer, request, http.MethodPost) {
+			handler.pluginDryRun(writer, request, target)
+		}
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
 	}
@@ -144,6 +152,9 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 		RequestedCapabilities: []string{},
 		GrantedCapabilities:   []string{},
 	}
+	if development := target.Development; development != nil {
+		summary.Development = &contract.PluginDevelopment{Project: development.Project, BuiltAt: development.BuiltAt}
+	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed
 		if target.Err != nil {
@@ -152,6 +163,7 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 		return summary
 	}
 	summary.Name, summary.Version = target.Meta.Name, target.Meta.Version
+	summary.APIVersion = target.Meta.APIVersion
 	summary.RequestedCapabilities = append(summary.RequestedCapabilities, target.Meta.Capabilities...)
 	summary.GrantedCapabilities = append(summary.GrantedCapabilities, target.Granted()...)
 	summary.NeedsNetwork = target.Meta.NeedsNetwork()
@@ -180,11 +192,7 @@ func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin)
 	if target.Meta.Network != nil {
 		detail.NetworkPurpose = target.Meta.Network.Purpose
 	}
-	for _, hook := range []string{plugin.HookPrepareSession, plugin.HookPrepareTurn, plugin.HookObserveTurn, plugin.HookDescribeStatus, plugin.HookTestConnection, plugin.HookOnAction} {
-		if target.Has(hook) {
-			detail.Hooks = append(detail.Hooks, hook)
-		}
-	}
+	detail.Hooks = append(detail.Hooks, target.Hooks()...)
 	settings, err := handler.pluginStore.GetPluginSettings(ctx, target.Key)
 	if errors.Is(err, storage.ErrNotFound) {
 		settings, err = storage.NewPluginSettingsRecord(target.Key), nil

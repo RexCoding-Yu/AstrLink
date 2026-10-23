@@ -9,3 +9,9 @@ import "embed"
 //
 //go:embed */plugin.ts */icon.png
 var Builtin embed.FS
+
+// TypeDefinitions is astrlink-plugin.d.ts, the types of the plugin API,
+// which astrlink plugin new puts in a new project.
+//
+//go:embed astrlink-plugin.d.ts
+var TypeDefinitions string

@@ -52,7 +52,7 @@ func newPluginHandler(t *testing.T) (*sqlite.Store, *Handler, *plugin.Manager, s
 	t.Cleanup(func() { _ = store.Close() })
 	directory := t.TempDir()
 	writePlugin(t, directory, "demo", "plugin.js", demoPlugin)
-	writePlugin(t, directory, "broken", "plugin.ts", "export const meta = {};\nexport async function prepareTurn() {}\n")
+	writePlugin(t, directory, "broken", "plugin.ts", "export const meta = { apiVersion: 1, key: \"broken\", name: \"Broken\", version: \"1.0.0\", capabilities: [] };\nexport async function prepareTurn() {}\n")
 	manager := plugin.NewManager(plugin.ManagerOptions{
 		Dir:      directory,
 		Settings: hostapi.Settings{Store: store},

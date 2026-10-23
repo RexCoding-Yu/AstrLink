@@ -37,7 +37,7 @@ func TestValidateMetaRejects(t *testing.T) {
 		change func(*Meta)
 		want   string
 	}{
-		{"another contract", func(meta *Meta) { meta.APIVersion = 2 }, "apiVersion 2"},
+		{"another contract", func(meta *Meta) { meta.APIVersion = 3 }, "apiVersion 3"},
 		{"bad key", func(meta *Meta) { meta.Key = "Power_Context" }, "meta.key"},
 		{"key of another directory", func(meta *Meta) { meta.Key = "memory" }, "does not match"},
 		{"empty name", func(meta *Meta) { meta.Name = "" }, "meta.name"},

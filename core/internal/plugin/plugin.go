@@ -17,9 +17,11 @@ import (
 	"unicode/utf8"
 )
 
-// APIVersion is the plugin contract this host implements; a plugin states
-// the one it was written for in meta.apiVersion.
-const APIVersion = 1
+// APIVersion is the newest plugin contract this host implements; a plugin
+// states the one it was written for in meta.apiVersion. Version 1 plugins
+// are synchronous; version 2 hooks may be async, and the host functions
+// that wait on the host return promises.
+const APIVersion = 2
 
 // Capabilities a plugin asks for in meta.capabilities. None is in effect
 // until the user grants it when enabling the plugin.

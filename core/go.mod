@@ -7,6 +7,7 @@ require (
 	github.com/QuantumNous/astrlink/convo v0.0.0
 	github.com/QuantumNous/new-api/relaykit v0.3.1
 	github.com/deepteams/webp v1.2.8
+	github.com/evanw/esbuild v0.28.2
 	github.com/expr-lang/expr v1.17.8
 	github.com/gorilla/websocket v1.5.3
 	github.com/tidwall/gjson v1.19.0
