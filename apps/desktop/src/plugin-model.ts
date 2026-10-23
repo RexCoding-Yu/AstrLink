@@ -39,6 +39,119 @@ export interface PluginApproval {
   plaintext?: string[];
   trusted?: boolean;
   fail_closed?: boolean;
+  /** The review of the code an install, an update or a rollback puts in place. */
+  install?: PluginInstallReview;
+  /** Set for a rollback. */
+  rollback?: boolean;
+}
+
+/** Where a plugin installed from source came from. */
+export interface PluginInstallSource {
+  kind: string;
+  /** owner/name on GitHub. */
+  repository: string;
+  url: string;
+  /** The tag or branch installed; absent for a commit. */
+  ref?: string;
+  ref_kind: "tag" | "branch" | "commit";
+  commit: string;
+  committed_at?: string;
+  /** The plugin's directory in the repository. */
+  subdir?: string;
+}
+
+/** A package a build took from the lock file. */
+export interface PluginDependency {
+  name: string;
+  version: string;
+  bytes: number;
+  /** It has install scripts, which never ran. */
+  scripts?: boolean;
+}
+
+export interface PluginInstallWarning {
+  code: string;
+  package?: string;
+  detail?: string;
+}
+
+/** The plugin an install replaces. */
+export interface PluginInstallReplace {
+  origin: "builtin" | "source" | "development" | "directory";
+  name: string;
+  version?: string;
+  /** The repository of a plugin installed from source. */
+  repository?: string;
+}
+
+/** What an install changes of the plugin it replaces. */
+export interface PluginInstallChanges {
+  from_version?: string;
+  added_capabilities?: string[];
+  removed_capabilities?: string[];
+  client?: "added" | "removed";
+  network_purpose_changed?: boolean;
+  added_dependencies?: string[];
+  removed_dependencies?: string[];
+  changed_dependencies?: string[];
+}
+
+/** What the user reviews before a plugin is installed from source. */
+export interface PluginInstallReview {
+  /** Names the build waiting to be installed; empty for a rollback. */
+  token: string;
+  expires_at: string;
+  source: PluginInstallSource;
+  key: string;
+  name: string;
+  version: string;
+  description?: string;
+  author?: string;
+  api_version: number;
+  capabilities: string[];
+  network_purpose?: string;
+  hooks: string[];
+  /** The plugin brings interface code. */
+  client?: boolean;
+  plugin_bytes: number;
+  client_bytes?: number;
+  lockfile?: string;
+  dependencies: PluginDependency[];
+  dependency_bytes: number;
+  engines?: string;
+  warnings?: PluginInstallWarning[];
+  replaces?: PluginInstallReplace;
+  changes?: PluginInstallChanges;
+}
+
+/** Why a plugin could not be fetched, built or installed. */
+export interface PluginInstallFailure {
+  reason: string;
+  detail?: string;
+  messages?: string[];
+}
+
+/** What checking an installed plugin's repository found. */
+export interface PluginUpdateCheck {
+  /** Installed from a commit: there is nothing newer to follow. */
+  pinned?: boolean;
+  available: boolean;
+  ref?: string;
+  ref_kind?: "tag" | "branch" | "commit";
+  commit?: string;
+  committed_at?: string;
+  version?: string;
+  notes?: string;
+  /** The link to review the update with. */
+  url?: string;
+}
+
+/** A version a later install replaced, kept to go back to. */
+export interface PluginInstalledVersion {
+  id: string;
+  version?: string;
+  source?: PluginInstallSource;
+  replaced_at: string;
 }
 
 /** A change waiting in the plugin confirmation window. */
@@ -86,6 +199,8 @@ export interface PluginSummary {
   api_version?: number;
   /** Set for a plugin `astrlink plugin dev` keeps built from a project on this computer. */
   development?: PluginDevelopment;
+  /** Set for a plugin installed from source. */
+  installed?: PluginInstallSource;
 }
 
 /** The project a development build comes from. */
@@ -204,6 +319,8 @@ export interface PluginDetail extends PluginSummary {
   client?: boolean;
   /** The user lets its interface code load. */
   ui_enabled: boolean;
+  /** Versions of a plugin installed from source that later installs replaced. */
+  versions?: PluginInstalledVersion[];
 }
 
 /** One extension point's time limit: its bounds, the plugin's own and the user's, in ms. */
@@ -284,6 +401,8 @@ export interface PluginHostSettings {
   /** What all plugins together may inject into one request. */
   injection_budget_bytes: number;
   language: PluginLanguage;
+  /** Where installs fetch packages; absent for the npm registry. */
+  npm_registry?: string;
 }
 
 export const DEFAULT_INJECTION_BUDGET_BYTES = 16 * 1024;
@@ -296,6 +415,7 @@ export interface PluginHostSettingsUpdate {
   paused?: boolean;
   injection_budget_bytes?: number;
   language?: PluginLanguage;
+  npm_registry?: string;
 }
 
 /** The median and the slowest 5% of some durations, in milliseconds. */
@@ -797,6 +917,196 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
       summary.development === undefined
         ? undefined
         : parseDevelopment(summary.development, `${path}.development`),
+    installed:
+      summary.installed === undefined
+        ? undefined
+        : parseInstallSource(summary.installed, `${path}.installed`),
+  });
+}
+
+const refKinds = ["tag", "branch", "commit"] as const;
+
+function parseInstallSource(value: unknown, path: string): PluginInstallSource {
+  const source = plugin.object(value, path);
+  return defined({
+    kind: plugin.string(source.kind, `${path}.kind`),
+    repository: plugin.string(source.repository, `${path}.repository`),
+    url: plugin.string(source.url, `${path}.url`),
+    ref: plugin.optionalString(source.ref, `${path}.ref`),
+    ref_kind: plugin.oneOf(source.ref_kind, refKinds, `${path}.ref_kind`),
+    commit: plugin.string(source.commit, `${path}.commit`),
+    committed_at: plugin.optionalString(
+      source.committed_at,
+      `${path}.committed_at`,
+    ),
+    subdir: plugin.optionalString(source.subdir, `${path}.subdir`),
+  });
+}
+
+function optionalStrings(value: unknown, path: string): string[] | undefined {
+  return value === undefined ? undefined : plugin.strings(value, path);
+}
+
+export function parsePluginInstallReview(
+  value: unknown,
+  path = "$",
+): PluginInstallReview {
+  const review = plugin.object(value, path);
+  const changes =
+    review.changes === undefined
+      ? undefined
+      : plugin.object(review.changes, `${path}.changes`);
+  const replaces =
+    review.replaces === undefined
+      ? undefined
+      : plugin.object(review.replaces, `${path}.replaces`);
+  return defined({
+    token: plugin.string(review.token, `${path}.token`),
+    expires_at: plugin.string(review.expires_at, `${path}.expires_at`),
+    source: parseInstallSource(review.source, `${path}.source`),
+    key: plugin.string(review.key, `${path}.key`),
+    name: plugin.string(review.name, `${path}.name`),
+    version: plugin.string(review.version, `${path}.version`),
+    description: plugin.optionalString(
+      review.description,
+      `${path}.description`,
+    ),
+    author: plugin.optionalString(review.author, `${path}.author`),
+    api_version: plugin.integer(review.api_version, `${path}.api_version`),
+    capabilities: plugin.strings(review.capabilities, `${path}.capabilities`),
+    network_purpose: plugin.optionalString(
+      review.network_purpose,
+      `${path}.network_purpose`,
+    ),
+    hooks: plugin.strings(review.hooks, `${path}.hooks`),
+    client: plugin.optionalBoolean(review.client, `${path}.client`),
+    plugin_bytes: plugin.integer(review.plugin_bytes, `${path}.plugin_bytes`),
+    client_bytes: plugin.optionalInteger(
+      review.client_bytes,
+      `${path}.client_bytes`,
+    ),
+    lockfile: plugin.optionalString(review.lockfile, `${path}.lockfile`),
+    dependencies: plugin
+      .array(review.dependencies, `${path}.dependencies`)
+      .map((item, index) => {
+        const at = `${path}.dependencies[${index}]`;
+        const dependency = plugin.object(item, at);
+        return defined({
+          name: plugin.string(dependency.name, `${at}.name`),
+          version: plugin.string(dependency.version, `${at}.version`),
+          bytes: plugin.integer(dependency.bytes, `${at}.bytes`),
+          scripts: plugin.optionalBoolean(dependency.scripts, `${at}.scripts`),
+        });
+      }),
+    dependency_bytes: plugin.integer(
+      review.dependency_bytes,
+      `${path}.dependency_bytes`,
+    ),
+    engines: plugin.optionalString(review.engines, `${path}.engines`),
+    warnings:
+      review.warnings === undefined
+        ? undefined
+        : plugin
+            .array(review.warnings, `${path}.warnings`)
+            .map((item, index) => {
+              const at = `${path}.warnings[${index}]`;
+              const warning = plugin.object(item, at);
+              return defined({
+                code: plugin.string(warning.code, `${at}.code`),
+                package: plugin.optionalString(
+                  warning.package,
+                  `${at}.package`,
+                ),
+                detail: plugin.optionalString(warning.detail, `${at}.detail`),
+              });
+            }),
+    replaces: replaces
+      ? defined({
+          origin: plugin.oneOf(
+            replaces.origin,
+            ["builtin", "source", "development", "directory"] as const,
+            `${path}.replaces.origin`,
+          ),
+          name: plugin.string(replaces.name, `${path}.replaces.name`),
+          version: plugin.optionalString(
+            replaces.version,
+            `${path}.replaces.version`,
+          ),
+          repository: plugin.optionalString(
+            replaces.repository,
+            `${path}.replaces.repository`,
+          ),
+        })
+      : undefined,
+    changes: changes
+      ? defined({
+          from_version: plugin.optionalString(
+            changes.from_version,
+            `${path}.changes.from_version`,
+          ),
+          added_capabilities: optionalStrings(
+            changes.added_capabilities,
+            `${path}.changes.added_capabilities`,
+          ),
+          removed_capabilities: optionalStrings(
+            changes.removed_capabilities,
+            `${path}.changes.removed_capabilities`,
+          ),
+          client:
+            changes.client === undefined
+              ? undefined
+              : plugin.oneOf(
+                  changes.client,
+                  ["added", "removed"] as const,
+                  `${path}.changes.client`,
+                ),
+          network_purpose_changed: plugin.optionalBoolean(
+            changes.network_purpose_changed,
+            `${path}.changes.network_purpose_changed`,
+          ),
+          added_dependencies: optionalStrings(
+            changes.added_dependencies,
+            `${path}.changes.added_dependencies`,
+          ),
+          removed_dependencies: optionalStrings(
+            changes.removed_dependencies,
+            `${path}.changes.removed_dependencies`,
+          ),
+          changed_dependencies: optionalStrings(
+            changes.changed_dependencies,
+            `${path}.changes.changed_dependencies`,
+          ),
+        })
+      : undefined,
+  });
+}
+
+export function parsePluginInstallFailure(
+  value: unknown,
+): PluginInstallFailure {
+  const failure = plugin.object(value, "$");
+  return defined({
+    reason: plugin.string(failure.reason, "$.reason"),
+    detail: plugin.optionalString(failure.detail, "$.detail"),
+    messages: optionalStrings(failure.messages, "$.messages"),
+  });
+}
+
+export function parsePluginUpdateCheck(value: unknown): PluginUpdateCheck {
+  const check = plugin.object(value, "$");
+  return defined({
+    pinned: plugin.optionalBoolean(check.pinned, "$.pinned"),
+    available: plugin.boolean(check.available, "$.available"),
+    ref: plugin.optionalString(check.ref, "$.ref"),
+    ref_kind:
+      check.ref_kind === undefined
+        ? undefined
+        : plugin.oneOf(check.ref_kind, refKinds, "$.ref_kind"),
+    commit: plugin.optionalString(check.commit, "$.commit"),
+    committed_at: plugin.optionalString(check.committed_at, "$.committed_at"),
+    version: plugin.optionalString(check.version, "$.version"),
+    notes: plugin.optionalString(check.notes, "$.notes"),
+    url: plugin.optionalString(check.url, "$.url"),
   });
 }
 
@@ -850,6 +1160,11 @@ export function parsePluginApproval(
       approval.fail_closed,
       `${path}.fail_closed`,
     ),
+    install:
+      approval.install === undefined
+        ? undefined
+        : parsePluginInstallReview(approval.install, `${path}.install`),
+    rollback: plugin.optionalBoolean(approval.rollback, `${path}.rollback`),
   });
 }
 
@@ -1064,6 +1379,28 @@ export function parsePluginDetail(value: unknown): PluginDetail {
     client: plugin.optionalBoolean(detail.client, "$.client"),
     ui_enabled:
       plugin.optionalBoolean(detail.ui_enabled, "$.ui_enabled") ?? true,
+    versions:
+      detail.versions === undefined
+        ? undefined
+        : plugin.array(detail.versions, "$.versions").map((item, index) => {
+            const path = `$.versions[${index}]`;
+            const version = plugin.object(item, path);
+            return defined({
+              id: plugin.string(version.id, `${path}.id`),
+              version: plugin.optionalString(
+                version.version,
+                `${path}.version`,
+              ),
+              source:
+                version.source === undefined
+                  ? undefined
+                  : parseInstallSource(version.source, `${path}.source`),
+              replaced_at: plugin.string(
+                version.replaced_at,
+                `${path}.replaced_at`,
+              ),
+            });
+          }),
     tools: (detail.tools === undefined
       ? []
       : plugin.array(detail.tools, "$.tools")
@@ -1125,6 +1462,11 @@ export function parsePluginHostSettings(value: unknown): PluginHostSettings {
     ...(settings.web_ui === undefined
       ? {}
       : { web_ui: plugin.boolean(settings.web_ui, "$.web_ui") }),
+    ...(settings.npm_registry === undefined
+      ? {}
+      : {
+          npm_registry: plugin.string(settings.npm_registry, "$.npm_registry"),
+        }),
   };
 }
 

@@ -97,6 +97,58 @@ describe("PluginApprovalWindow", () => {
     );
   });
 
+  it("shows the review of an install and confirms it as a whole", async () => {
+    mocks.pendingPluginApproval.mockResolvedValue({
+      id: "approval-2",
+      key: "powercontext",
+      approval: {
+        plugin: "powercontext",
+        name: "Memory",
+        install: {
+          token: "token",
+          expires_at: "2026-10-23T13:00:00Z",
+          source: {
+            kind: "github",
+            repository: "acme/memory",
+            url: "https://github.com/acme/memory",
+            ref: "v2.0.0",
+            ref_kind: "tag",
+            commit: "0123456789abcdef0123456789abcdef01234567",
+            committed_at: "2026-10-01T12:00:00Z",
+          },
+          key: "powercontext",
+          name: "Memory",
+          version: "2.0.0",
+          api_version: 2,
+          capabilities: ["network", "ui.code"],
+          hooks: ["prepareTurn"],
+          client: true,
+          plugin_bytes: 4096,
+          dependencies: [{ name: "zod", version: "3.22.4", bytes: 600000 }],
+          dependency_bytes: 600000,
+          replaces: { origin: "builtin", name: "PowerContext 记忆" },
+        },
+      },
+    });
+    await render();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("安装「Memory」");
+    expect(text).toContain("acme/memory");
+    expect(text).toContain("标签 v2.0.0");
+    expect(text).toContain("将替换内置插件「PowerContext 记忆」");
+    expect(text).toContain("带界面代码");
+    expect(text).toContain("依赖 1 个");
+    expect(text).not.toContain("0123456789abcdef");
+    // No capability to untick: an install grants nothing by itself.
+    expect(document.querySelectorAll('[role="checkbox"]')).toHaveLength(0);
+    await act(async () => button("安装").click());
+    expect(mocks.decidePluginApproval).toHaveBeenCalledWith(
+      "approval-2",
+      true,
+      undefined,
+    );
+  });
+
   it("says so when nothing waits", async () => {
     mocks.pendingPluginApproval.mockResolvedValue(null);
     await render();

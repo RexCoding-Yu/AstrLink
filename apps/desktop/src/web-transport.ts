@@ -428,8 +428,30 @@ const commands: Record<string, Command> = {
     if (a.action === "host") return route("/plugin-host")(a);
     if (a.action === "update_host")
       return route("/plugin-host", "PATCH", input)(a);
+    if (a.action === "source_preview")
+      return route("/plugins/sources/preview", "POST", input)(a);
+    if (a.action === "source_install")
+      return consoleRequest(
+        "/control/v1/plugins/sources/install",
+        "POST",
+        a.input,
+        undefined,
+        a.approved === true,
+      ).then((result) => result.value);
     const plugin = `/plugins/${segment(a.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
     switch (a.action) {
+      case "source_check":
+        return route(`${plugin}/source/check`, "POST")(a);
+      case "source_rollback":
+        return consoleRequest(
+          `/control/v1${plugin}/source/rollback`,
+          "POST",
+          a.input,
+          undefined,
+          a.approved === true,
+        ).then((result) => result.value);
+      case "source_uninstall":
+        return route(`${plugin}/source`, "DELETE")(a);
       case "get":
         return route(plugin)(a);
       case "update":

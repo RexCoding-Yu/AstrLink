@@ -2355,6 +2355,53 @@ impl CoreManager {
             .map_err(|_| "plugins returned invalid JSON".into())
     }
 
+    /// Installing from source: the review of a GitHub link, the install it
+    /// stages, the update check, the rollback and the uninstall. An install
+    /// or a rollback that is not `approved` comes back as `NeedsApproval`,
+    /// as a change of settings does. Why an install cannot go on comes back
+    /// whole, as Core's JSON, for the page to explain.
+    pub async fn plugin_change(
+        &self,
+        action: &str,
+        key: Option<&str>,
+        input: serde_json::Value,
+        approved: bool,
+    ) -> Result<PluginUpdate, String> {
+        let input = (!input.is_null()).then_some(input);
+        let (method, path, body) = plugin_request(action, key, None, input)?;
+        let encoded = body
+            .map(|body| serde_json::to_vec(&body))
+            .transpose()
+            .map_err(|error| format!("unable to encode control request: {error}"))?;
+        let (status, _, body) = self
+            .authenticated_control_encoded(
+                method.clone(),
+                &path,
+                encoded.as_deref(),
+                None,
+                approved,
+            )
+            .await?;
+        if status.is_success() {
+            return serde_json::from_slice(&body)
+                .map(PluginUpdate::Saved)
+                .map_err(|_| "plugins returned invalid JSON".into());
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        if status == reqwest::StatusCode::CONFLICT && parsed["error"]["code"] == "approval_required"
+        {
+            return Ok(PluginUpdate::NeedsApproval(parsed["approval"].clone()));
+        }
+        if parsed.get("failure").is_some() {
+            return Err(serde_json::json!({
+                "error": parsed["error"],
+                "failure": parsed["failure"],
+            })
+            .to_string());
+        }
+        Err(control_status_error(&method, &path, status, &body))
+    }
+
     /// The request attributes of the metadata settings.
     pub async fn metadata_action(
         &self,
@@ -3538,6 +3585,22 @@ fn plugin_request(
                 Some(input.ok_or("plugin host settings are required")?),
             ))
         }
+        // A GitHub link fetched, built and reviewed; the install of what
+        // the review staged.
+        "source_preview" => {
+            return Ok((
+                Method::POST,
+                format!("{base}/sources/preview"),
+                Some(input.ok_or("the link is required")?),
+            ))
+        }
+        "source_install" => {
+            return Ok((
+                Method::POST,
+                format!("{base}/sources/install"),
+                Some(input.ok_or("the review is required")?),
+            ))
+        }
         _ => {}
     }
     let key = key
@@ -3585,6 +3648,13 @@ fn plugin_request(
             format!("{plugin}/actions"),
             Some(input.ok_or("the action is required")?),
         ),
+        "source_check" => (Method::POST, format!("{plugin}/source/check"), None),
+        "source_rollback" => (
+            Method::POST,
+            format!("{plugin}/source/rollback"),
+            Some(input.ok_or("the version is required")?),
+        ),
+        "source_uninstall" => (Method::DELETE, format!("{plugin}/source"), None),
         "clear_workspaces" => (Method::DELETE, format!("{plugin}/workspaces"), None),
         "clear_values" => (Method::DELETE, format!("{plugin}/values"), None),
         // Voids the credentials the model runs the plugin's lookups with.
@@ -3758,6 +3828,16 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     // A sync run does several remote round trips and may retry the merge.
     if method == Method::POST && path == "/control/v1/sync/run" {
         return Duration::from_secs(320);
+    }
+    // Core gives fetching, building and checking a plugin from source three
+    // minutes; an install, an update check or a rollback a minute.
+    if method == Method::POST && path == "/control/v1/plugins/sources/preview" {
+        return Duration::from_secs(200);
+    }
+    if path.starts_with("/control/v1/plugins/")
+        && (path.contains("/source") || path.ends_with("/sources/install"))
+    {
+        return Duration::from_secs(75);
     }
     // Core gives a plugin page hook 10 seconds, and a rescan compiles every
     // changed plugin.
@@ -7046,6 +7126,64 @@ mod tests {
         assert_eq!(
             plugin_request("host", None, None, None).unwrap(),
             (Method::GET, "/control/v1/plugin-host".into(), None)
+        );
+        let link = serde_json::json!({ "url": "https://github.com/acme/hello" });
+        assert_eq!(
+            plugin_request("source_preview", None, None, Some(link.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/sources/preview".into(),
+                Some(link)
+            )
+        );
+        let token = serde_json::json!({ "token": "abc" });
+        assert_eq!(
+            plugin_request("source_install", None, None, Some(token.clone())).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/sources/install".into(),
+                Some(token)
+            )
+        );
+        assert!(plugin_request("source_install", None, None, None).is_err());
+        assert_eq!(
+            plugin_request("source_check", Some("hello"), None, None).unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/hello/source/check".into(),
+                None
+            )
+        );
+        let version = serde_json::json!({ "version": "20261023T120000Z-0000abcd" });
+        assert_eq!(
+            plugin_request(
+                "source_rollback",
+                Some("hello"),
+                None,
+                Some(version.clone())
+            )
+            .unwrap(),
+            (
+                Method::POST,
+                "/control/v1/plugins/hello/source/rollback".into(),
+                Some(version)
+            )
+        );
+        assert_eq!(
+            plugin_request("source_uninstall", Some("hello"), None, None).unwrap(),
+            (
+                Method::DELETE,
+                "/control/v1/plugins/hello/source".into(),
+                None
+            )
+        );
+        assert_eq!(
+            control_request_timeout(&Method::POST, "/control/v1/plugins/sources/preview"),
+            Duration::from_secs(200)
+        );
+        assert_eq!(
+            control_request_timeout(&Method::POST, "/control/v1/plugins/hello/source/rollback"),
+            Duration::from_secs(75)
         );
         let language = serde_json::json!({ "language": "ja" });
         assert_eq!(

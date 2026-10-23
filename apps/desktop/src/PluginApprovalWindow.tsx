@@ -14,12 +14,14 @@ import {
 } from "./bridge";
 import { useT } from "./i18n";
 import { PluginApprovalSummary } from "./PluginApprovalSummary";
+import { PluginInstallReviewView } from "./PluginInstallReview";
 import type { PendingPluginApproval, PluginDetail } from "./plugin-model";
 
 /**
  * The one place a change that grants a plugin more is confirmed (plugin
  * platform v2, §2.4): enabling it, capabilities, addresses, plain HTTP, the
- * privacy check skipped. The host opens this window without focus when the
+ * privacy check skipped, and new code, as an install from source, an update
+ * or a rollback puts in place. The host opens this window without focus when the
  * main window asks for such a change; plugin interface code runs in the
  * main window and can click nothing here. There is no form, so Enter
  * confirms nothing; closing the window decides nothing.
@@ -75,7 +77,7 @@ export function PluginApprovalWindow() {
       await decidePluginApproval(
         pending.id,
         approve,
-        approve ? kept : undefined,
+        approve && !pending.approval.install ? kept : undefined,
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -98,6 +100,28 @@ export function PluginApprovalWindow() {
       </main>
     );
   const { approval } = pending;
+  const install = approval.install;
+  const update =
+    install?.replaces?.origin === "source" &&
+    install.replaces.repository === install.source.repository;
+  const title = install
+    ? approval.rollback
+      ? t("plugins.install.rollbackTitle", { name: approval.name })
+      : update
+        ? t("plugins.install.updateTitle", { name: approval.name })
+        : t("plugins.install.installTitle", { name: approval.name })
+    : approval.enable
+      ? t("plugins.approval.enableTitle", { name: approval.name })
+      : t("plugins.approval.grantTitle", { name: approval.name });
+  const confirm = install
+    ? approval.rollback
+      ? t("plugins.install.rollbackTo")
+      : update
+        ? t("plugins.install.update")
+        : t("plugins.install.install")
+    : approval.enable
+      ? t("plugins.approval.confirmEnable")
+      : t("plugins.approval.confirm");
   return (
     <main
       className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4"
@@ -105,18 +129,21 @@ export function PluginApprovalWindow() {
     >
       <header className="flex items-center gap-2">
         <PluginIcon icon={detail?.icon} />
-        <h1 className="text-sm font-semibold">
-          {approval.enable
-            ? t("plugins.approval.enableTitle", { name: approval.name })
-            : t("plugins.approval.grantTitle", { name: approval.name })}
-        </h1>
+        <h1 className="text-sm font-semibold">{title}</h1>
       </header>
-      <PluginApprovalSummary
-        approval={approval}
-        detail={detail}
-        kept={kept}
-        onKept={setKept}
-      />
+      {install ? (
+        <PluginInstallReviewView
+          review={install}
+          rollback={approval.rollback}
+        />
+      ) : (
+        <PluginApprovalSummary
+          approval={approval}
+          detail={detail}
+          kept={kept}
+          onKept={setKept}
+        />
+      )}
       {error ? <FormMessage tone="error">{error}</FormMessage> : null}
       <footer className="mt-auto flex justify-end gap-2">
         <Button
@@ -134,9 +161,7 @@ export function PluginApprovalWindow() {
           size="sm"
           type="button"
         >
-          {approval.enable
-            ? t("plugins.approval.confirmEnable")
-            : t("plugins.approval.confirm")}
+          {confirm}
         </Button>
       </footer>
     </main>

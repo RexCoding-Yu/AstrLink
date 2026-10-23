@@ -1,7 +1,8 @@
 //! The plugin confirmation window (plugin platform v2, §2.4). A change that
 //! grants a plugin more takes effect only from this small window: enabling
 //! it, capabilities it did not have, addresses it could not reach, plain
-//! HTTP, the privacy check skipped, refusing requests it cannot decide.
+//! HTTP, the privacy check skipped, refusing requests it cannot decide, and
+//! new code: an install from source, an update, a rollback.
 //! The main window's change stops at Core with `approval_required`; the host
 //! keeps it here and opens this window without taking focus; only a decision
 //! made in this window sends it again, confirmed. Plugin interface code runs
@@ -23,8 +24,21 @@ const HEIGHT: f64 = 600.0;
 const MIN_WIDTH: f64 = 380.0;
 const MIN_HEIGHT: f64 = 420.0;
 
+/// What a confirmed change sends again.
+#[derive(Clone, Debug)]
+pub enum PendingChange {
+    /// The plugin's settings.
+    Settings(serde_json::Value),
+    /// A plugin page action, `source_install` or `source_rollback`, with
+    /// its input.
+    Action {
+        action: String,
+        input: serde_json::Value,
+    },
+}
+
 /// A change waiting for the user: the plugin, what Core said it grants,
-/// and the settings to send again once confirmed.
+/// and the change to send again once confirmed.
 #[derive(Clone, Debug, Serialize)]
 pub struct PendingApproval {
     pub id: String,
@@ -32,7 +46,7 @@ pub struct PendingApproval {
     /// Core's description of what the change grants.
     pub approval: serde_json::Value,
     #[serde(skip)]
-    pub input: serde_json::Value,
+    pub change: PendingChange,
 }
 
 /// The one change waiting for confirmation; a newer one replaces it.
@@ -42,12 +56,7 @@ pub struct Approvals {
 }
 
 impl Approvals {
-    pub fn hold(
-        &self,
-        key: String,
-        approval: serde_json::Value,
-        input: serde_json::Value,
-    ) -> String {
+    pub fn hold(&self, key: String, approval: serde_json::Value, change: PendingChange) -> String {
         let id = random_id();
         let mut pending = self
             .pending
@@ -57,7 +66,7 @@ impl Approvals {
             id: id.clone(),
             key,
             approval,
-            input,
+            change,
         });
         id
     }
@@ -191,7 +200,7 @@ mod tests {
         let id = approvals.hold(
             "gate".into(),
             serde_json::json!({ "enable": true }),
-            serde_json::json!({ "enabled": true }),
+            PendingChange::Settings(serde_json::json!({ "enabled": true })),
         );
         assert_eq!(
             approvals.current().map(|held| held.key),

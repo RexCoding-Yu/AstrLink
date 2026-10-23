@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { Blocks, RefreshCw } from "@/components/icons";
+import { Blocks, Plus, RefreshCw } from "@/components/icons";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DataField } from "@/components/DataRow";
 import { EmptyState } from "@/components/EmptyState";
@@ -39,9 +39,12 @@ import {
   getPluginStats,
   getPluginStatus,
   listPlugins,
+  pluginInstallFailureOf,
   reloadPlugins,
+  rollbackPlugin,
   savePluginCredential,
   testPlugin,
+  uninstallPlugin,
   updatePlugin,
   updatePluginHostSettings,
 } from "./bridge";
@@ -51,7 +54,13 @@ import { PluginApprovalSummary } from "./PluginApprovalSummary";
 import { useT } from "./i18n";
 import { PageHeader } from "./PageHeader";
 import { PluginDevelop } from "./PluginDevelop";
+import { PluginInstallDialog } from "./PluginInstall";
+import {
+  installFailureText,
+  PluginInstallReviewView,
+} from "./PluginInstallReview";
 import { orderedPlugins, PluginOrderDialog } from "./PluginOrder";
+import { PluginSourceCard } from "./PluginSource";
 import { capabilityLabel } from "./plugin-labels";
 import { PluginOverview } from "./PluginOverview";
 import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
@@ -64,6 +73,8 @@ import {
   type PluginDetail,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
+  type PluginInstalledVersion,
+  type PluginInstallReview,
   type PluginList,
   type PluginLoadError,
   type PluginSettingsUpdate,
@@ -167,6 +178,15 @@ export function PluginManager({
   } | null>(null);
   const [ordering, setOrdering] = useState(false);
   const [savingOrder, setSavingOrder] = useState(false);
+  // The install dialog, on the link of an update already.
+  const [installing, setInstalling] = useState<{ link?: string } | null>(null);
+  // A rollback the web console's own dialog confirms.
+  const [confirmingRollback, setConfirmingRollback] = useState<{
+    key: string;
+    version: PluginInstalledVersion;
+    review: PluginInstallReview;
+  } | null>(null);
+  const [uninstalling, setUninstalling] = useState<PluginDetail | null>(null);
   const afterApproval = useRef<{
     key: string;
     run: (detail: PluginDetail | null) => Promise<void>;
@@ -387,6 +407,77 @@ export function PluginManager({
     };
   }, [reloadDecided]);
 
+  /** Shows the plugin an install put in place. */
+  const showInstalled = useCallback(
+    async (key: string) => {
+      setInstalling(null);
+      void loadList();
+      if (selectedRef.current !== key) {
+        setSelectedKey(key);
+        return;
+      }
+      const next = await loadDetail(key);
+      if (next?.state === "loaded") void loadStatus(key);
+    },
+    [loadDetail, loadList, loadStatus],
+  );
+
+  /**
+   * Puts back a version an install replaced. It waits for the user as an
+   * install does: in the confirmation window, or the web console's dialog.
+   */
+  async function rollback(
+    key: string,
+    version: PluginInstalledVersion,
+    approved = false,
+  ) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      show(await rollbackPlugin(key, version.id, approved));
+      void loadList();
+    } catch (error) {
+      if (controlErrorCode(error) === "approval_pending") {
+        setAwaiting(key);
+        return;
+      }
+      const approval = pluginApprovalOf(error);
+      if (approval?.install) {
+        setConfirmingRollback({ key, version, review: approval.install });
+        return;
+      }
+      const failure = pluginInstallFailureOf(error);
+      setActionError(
+        failure
+          ? installFailureText(failure, t)
+          : controlErrorMessage(error, t("plugins.install.rollbackFailed")),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Removes a plugin installed from source; a builtin of its key comes back. */
+  async function uninstall(key: string) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const next = await uninstallPlugin(key);
+      setList(next);
+      setSelectedKey((current) => keptSelection(current, next));
+      if (next.plugins.some((plugin) => plugin.key === key)) {
+        const reloaded = await loadDetail(key);
+        if (reloaded?.state === "loaded") void loadStatus(key);
+      }
+    } catch (error) {
+      setActionError(
+        controlErrorMessage(error, t("plugins.install.uninstallFailed")),
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   /** Applies a change and refreshes the list row that shows its state. */
   async function apply(change: () => Promise<PluginDetail | "waiting">) {
     setBusy(true);
@@ -549,6 +640,16 @@ export function PluginManager({
               </HelpPopover>
             ) : null}
             <Button
+              disabled={!isReady}
+              onClick={() => setInstalling({})}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Plus />
+              {t("plugins.install.open")}
+            </Button>
+            <Button
               disabled={!isReady || rescanning}
               onClick={() => void rescan()}
               size="sm"
@@ -691,6 +792,9 @@ export function PluginManager({
                 }}
                 awaiting={awaiting === detail.key}
                 onOpenApproval={() => void openPluginApproval()}
+                onUpdate={(link) => setInstalling({ link })}
+                onRollback={(version) => void rollback(detail.key, version)}
+                onUninstall={() => setUninstalling(detail)}
                 onRefreshStatus={() => void loadStatus(detail.key)}
                 onTab={setTab}
                 onTest={() => void runTest(detail.key)}
@@ -742,6 +846,61 @@ export function PluginManager({
         }}
         open={enabling !== null}
         title={t("plugins.enableDialog.title", { name: enabling?.name ?? "" })}
+      />
+      {installing ? (
+        <PluginInstallDialog
+          host={host}
+          link={installing.link}
+          onClose={() => setInstalling(null)}
+          onHostChange={(update) => void changeHost(update)}
+          onInstalled={(key) => void showInstalled(key)}
+        />
+      ) : null}
+      <ConfirmDialog
+        confirmDisabled={busy}
+        confirmLabel={t("plugins.install.rollbackTo")}
+        description={
+          confirmingRollback ? (
+            <PluginInstallReviewView
+              review={confirmingRollback.review}
+              rollback
+            />
+          ) : null
+        }
+        onCancel={() => setConfirmingRollback(null)}
+        onConfirm={() => {
+          const target = confirmingRollback;
+          setConfirmingRollback(null);
+          if (target) void rollback(target.key, target.version, true);
+        }}
+        open={confirmingRollback !== null}
+        title={t("plugins.install.rollbackTitle", {
+          name: confirmingRollback?.review.name ?? "",
+        })}
+      />
+      <ConfirmDialog
+        confirmDisabled={busy}
+        confirmLabel={t("plugins.install.uninstall")}
+        description={
+          uninstalling ? (
+            <p>
+              {uninstalling.source === "override"
+                ? t("plugins.install.uninstallBuiltin")
+                : t("plugins.install.uninstallDescription")}
+            </p>
+          ) : null
+        }
+        destructive
+        onCancel={() => setUninstalling(null)}
+        onConfirm={() => {
+          const target = uninstalling;
+          setUninstalling(null);
+          if (target) void uninstall(target.key);
+        }}
+        open={uninstalling !== null}
+        title={t("plugins.install.uninstallTitle", {
+          name: uninstalling?.name ?? "",
+        })}
       />
       {ordering ? (
         <PluginOrderDialog
@@ -960,6 +1119,9 @@ function PluginDetailPane({
   onClearData,
   awaiting,
   onOpenApproval,
+  onUpdate,
+  onRollback,
+  onUninstall,
 }: {
   detail: PluginDetail;
   stats: PluginStats | null;
@@ -987,6 +1149,9 @@ function PluginDetailPane({
   onClearData: (what: PluginClearTarget) => Promise<boolean>;
   awaiting: boolean;
   onOpenApproval: () => void;
+  onUpdate: (link: string) => void;
+  onRollback: (version: PluginInstalledVersion) => void;
+  onUninstall: () => void;
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
@@ -1052,7 +1217,9 @@ function PluginDetailPane({
           {[
             detail.development
               ? t("plugins.develop.build")
-              : t(`plugins.source.${detail.source}`),
+              : detail.installed
+                ? t("plugins.source.github")
+                : t(`plugins.source.${detail.source}`),
             detail.version,
           ]
             .filter(Boolean)
@@ -1126,6 +1293,18 @@ function PluginDetailPane({
             data-tab-scroller
             value="overview"
           >
+            {detail.installed ? (
+              <div className="mb-3">
+                <PluginSourceCard
+                  busy={busy}
+                  detail={detail}
+                  onRollback={onRollback}
+                  onUninstall={onUninstall}
+                  onUpdate={onUpdate}
+                  source={detail.installed}
+                />
+              </div>
+            ) : null}
             <PluginOverview
               busy={busy}
               detail={detail}

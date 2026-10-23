@@ -191,6 +191,9 @@ import {
   parsePluginJournal,
   parsePluginDryRun,
   parsePluginApproval,
+  parsePluginInstallFailure,
+  parsePluginInstallReview,
+  parsePluginUpdateCheck,
   parsePendingPluginApproval,
   parsePluginApprovalFinished,
   parsePluginTestResult,
@@ -207,6 +210,9 @@ import {
   type PluginJournal,
   type PluginApproval,
   type PluginApprovalFinished,
+  type PluginInstallFailure,
+  type PluginInstallReview,
+  type PluginUpdateCheck,
   type PendingPluginApproval,
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
@@ -1509,6 +1515,104 @@ export async function listenPluginApprovalChanged(
 ): Promise<() => void> {
   if (isWebEdition || !hasNativeBridge()) return () => {};
   return listen("plugin-approval-changed", () => onChange());
+}
+
+/**
+ * Fetches the plugin a GitHub link names, builds it in Core and checks it,
+ * for the user to review before installing it.
+ */
+export async function previewPluginInstall(
+  url: string,
+): Promise<PluginInstallReview> {
+  requireNativeBridge();
+  return parsePluginInstallReview(
+    await invoke<unknown>("plugin_action", {
+      action: "source_preview",
+      input: { url },
+    }),
+  );
+}
+
+/**
+ * Installs the build a review staged. It waits for the user as a change
+ * that grants a plugin more does: see updatePlugin.
+ */
+export async function installPlugin(
+  token: string,
+  approved = false,
+): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", {
+      action: "source_install",
+      input: { token },
+      ...(approved ? { approved: true } : {}),
+    }),
+  );
+}
+
+/** Looks for a newer version of a plugin installed from source. */
+export async function checkPluginUpdate(
+  key: string,
+): Promise<PluginUpdateCheck> {
+  requireNativeBridge();
+  return parsePluginUpdateCheck(
+    await invoke<unknown>("plugin_action", { action: "source_check", key }),
+  );
+}
+
+/**
+ * Puts back a version a later install replaced, once the user confirmed
+ * it, as installPlugin.
+ */
+export async function rollbackPlugin(
+  key: string,
+  version: string,
+  approved = false,
+): Promise<PluginDetail> {
+  requireNativeBridge();
+  return parsePluginDetail(
+    await invoke<unknown>("plugin_action", {
+      action: "source_rollback",
+      key,
+      input: { version },
+      ...(approved ? { approved: true } : {}),
+    }),
+  );
+}
+
+/** Removes a plugin installed from source; a builtin of its key comes back. */
+export async function uninstallPlugin(key: string): Promise<PluginList> {
+  requireNativeBridge();
+  return parsePluginList(
+    await invoke<unknown>("plugin_action", { action: "source_uninstall", key }),
+  );
+}
+
+/** Why an install could not go on, from its error. */
+export function pluginInstallFailureOf(
+  error: unknown,
+): PluginInstallFailure | null {
+  let body: unknown;
+  if (error instanceof ConsoleError) {
+    body = error.body;
+  } else {
+    const message = error instanceof Error ? error.message : String(error);
+    const start = message.indexOf("{");
+    if (start < 0) return null;
+    try {
+      body = JSON.parse(message.slice(start));
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return parsePluginInstallFailure(
+      (body as { failure?: unknown } | null)?.failure,
+    );
+  } catch {
+    return null;
+  }
 }
 
 export async function testPlugin(key: string): Promise<PluginTestResult> {

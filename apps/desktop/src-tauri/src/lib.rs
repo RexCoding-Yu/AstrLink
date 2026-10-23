@@ -1435,7 +1435,36 @@ async fn plugin_action(
         return match manager.update_plugin(&key, input.clone(), false).await? {
             sidecar::PluginUpdate::Saved(detail) => Ok(detail),
             sidecar::PluginUpdate::NeedsApproval(approval) => {
-                approvals.hold(key, approval, input);
+                approvals.hold(
+                    key,
+                    approval,
+                    plugin_approval::PendingChange::Settings(input),
+                );
+                plugin_approval::open(&app, false)?;
+                Err(plugin_approval::pending_error())
+            }
+        };
+    }
+    // Installing from source: an install or a rollback puts new code in
+    // place, which waits for the confirmation window too.
+    if action.starts_with("source_") {
+        let input = input.unwrap_or(serde_json::Value::Null);
+        return match manager
+            .plugin_change(&action, key.as_deref(), input.clone(), false)
+            .await?
+        {
+            sidecar::PluginUpdate::Saved(value) => Ok(value),
+            sidecar::PluginUpdate::NeedsApproval(approval) => {
+                let key = approval["plugin"]
+                    .as_str()
+                    .map(str::to_string)
+                    .or(key)
+                    .ok_or("invalid plugin")?;
+                approvals.hold(
+                    key,
+                    approval,
+                    plugin_approval::PendingChange::Action { action, input },
+                );
                 plugin_approval::open(&app, false)?;
                 Err(plugin_approval::pending_error())
             }
@@ -1485,20 +1514,30 @@ async fn plugin_approval_decide(
         error: None,
     };
     if approve {
-        let mut input = pending.input.clone();
-        if let Some(kept) = kept {
-            let added: Vec<String> = pending.approval["added_capabilities"]
-                .as_array()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            plugin_approval::narrow_grants(&mut input, &added, &kept);
-        }
-        match manager.update_plugin(&pending.key, input, true).await {
+        let sent = match &pending.change {
+            plugin_approval::PendingChange::Settings(input) => {
+                let mut input = input.clone();
+                if let Some(kept) = kept {
+                    let added: Vec<String> = pending.approval["added_capabilities"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    plugin_approval::narrow_grants(&mut input, &added, &kept);
+                }
+                manager.update_plugin(&pending.key, input, true).await
+            }
+            plugin_approval::PendingChange::Action { action, input } => {
+                manager
+                    .plugin_change(action, Some(&pending.key), input.clone(), true)
+                    .await
+            }
+        };
+        match sent {
             Ok(sidecar::PluginUpdate::Saved(_)) => {}
             Ok(sidecar::PluginUpdate::NeedsApproval(_)) => {
                 finished.error = Some("Core asked for the confirmation again".into());

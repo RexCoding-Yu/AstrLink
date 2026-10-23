@@ -23,6 +23,12 @@ const bridgeMocks = vi.hoisted(() => ({
   listenPluginApprovalFinished: vi.fn(),
   openPluginApproval: vi.fn(),
   pluginApprovalOf: vi.fn(),
+  previewPluginInstall: vi.fn(),
+  installPlugin: vi.fn(),
+  checkPluginUpdate: vi.fn(),
+  rollbackPlugin: vi.fn(),
+  uninstallPlugin: vi.fn(),
+  pluginInstallFailureOf: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -311,6 +317,33 @@ const list: PluginList = {
   ],
 };
 
+const helloReview = {
+  token: "token-1",
+  expires_at: "2026-10-23T13:00:00Z",
+  source: {
+    kind: "github",
+    repository: "acme/hello",
+    url: "https://github.com/acme/hello",
+    ref: "v1.1.0",
+    ref_kind: "tag" as const,
+    commit: "0123456789abcdef0123456789abcdef01234567",
+    committed_at: "2026-10-01T12:00:00Z",
+  },
+  key: "hello",
+  name: "Hello",
+  version: "1.1.0",
+  api_version: 2,
+  capabilities: ["storage"],
+  hooks: ["prepareTurn"],
+  plugin_bytes: 2048,
+  lockfile: "package-lock.json",
+  dependencies: [
+    { name: "tiny-lib", version: "2.0.0", bytes: 4096, scripts: true },
+  ],
+  dependency_bytes: 4096,
+  warnings: [{ code: "install_scripts_skipped", package: "tiny-lib@2.0.0" }],
+};
+
 function button(label: string, root: ParentNode = document): HTMLButtonElement {
   const match = [...root.querySelectorAll("button")].find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -439,6 +472,9 @@ describe("PluginManager", () => {
       },
     );
     bridgeMocks.pluginApprovalOf.mockReturnValue(null);
+    bridgeMocks.pluginInstallFailureOf.mockImplementation(
+      (error: { failure?: unknown }) => error?.failure ?? null,
+    );
     bridgeMocks.openPluginApproval.mockResolvedValue(true);
     bridgeMocks.getPluginHostSettings.mockResolvedValue({
       paused: false,
@@ -890,6 +926,153 @@ describe("PluginManager", () => {
     ).toBeNull();
     const link = document.querySelector('[data-testid="plugin-link"]');
     expect(link?.getAttribute("data-state")).not.toBe("off");
+  });
+
+  it("installs a plugin from a GitHub link once the confirmation window agrees", async () => {
+    bridgeMocks.previewPluginInstall.mockResolvedValue(helloReview);
+    bridgeMocks.installPlugin.mockRejectedValueOnce(
+      new Error('{"error":{"code":"approval_pending","message":"waits"}}'),
+    );
+    await render();
+    await click(button("安装插件"));
+    const dialog = document.querySelector(
+      '[data-testid="plugin-install-dialog"]',
+    ) as HTMLElement;
+    expect(dialog).not.toBeNull();
+    await type(
+      document.getElementById("plugin-install-url") as HTMLInputElement,
+      "https://github.com/acme/hello",
+    );
+    await click(button("检查", dialog));
+    expect(bridgeMocks.previewPluginInstall).toHaveBeenCalledWith(
+      "https://github.com/acme/hello",
+    );
+    expect(dialog.textContent).toContain("标签 v1.1.0");
+    expect(dialog.textContent).toContain("依赖 1 个");
+    expect(dialog.textContent).toContain("没有运行：tiny-lib@2.0.0");
+
+    await click(button("安装", dialog));
+    expect(bridgeMocks.installPlugin).toHaveBeenCalledWith("token-1", false);
+    expect(
+      document.querySelector('[data-testid="plugin-install-waiting"]'),
+    ).not.toBeNull();
+
+    // The confirmation window installed it: the page shows it.
+    const hello = {
+      ...memory,
+      key: "hello",
+      name: "Hello",
+      source: "directory" as const,
+      installed: helloReview.source,
+    };
+    bridgeMocks.listPlugins.mockResolvedValue({
+      ...list,
+      plugins: [...list.plugins, hello],
+    });
+    bridgeMocks.getPlugin.mockResolvedValue(hello);
+    await act(async () => {
+      approvalFinished?.({ id: "approval-1", key: "hello", approved: true });
+    });
+    await act(async () => {});
+    expect(
+      document.querySelector('[data-testid="plugin-install-dialog"]'),
+    ).toBeNull();
+    expect(bridgeMocks.getPlugin).toHaveBeenCalledWith("hello");
+    expect(
+      document.querySelector('[data-testid="plugin-source"]')?.textContent,
+    ).toContain("acme/hello");
+  });
+
+  it("says why a plugin cannot be installed, with the build's messages", async () => {
+    bridgeMocks.previewPluginInstall.mockRejectedValue({
+      failure: {
+        reason: "build_failed",
+        messages: ['src/plugin.ts:3:7: Expected ";"'],
+      },
+    });
+    await render();
+    await click(button("安装插件"));
+    const dialog = document.querySelector(
+      '[data-testid="plugin-install-dialog"]',
+    ) as HTMLElement;
+    await type(
+      document.getElementById("plugin-install-url") as HTMLInputElement,
+      "acme/hello",
+    );
+    await click(button("检查", dialog));
+    expect(dialog.textContent).toContain("构建失败。");
+    expect(dialog.textContent).toContain("src/plugin.ts:3:7");
+    expect(button("安装", dialog).disabled).toBe(true);
+  });
+
+  it("checks a plugin installed from source for updates, and uninstalls it after asking", async () => {
+    const hello = {
+      ...memory,
+      key: "hello",
+      name: "Hello",
+      source: "override" as const,
+      installed: helloReview.source,
+      versions: [
+        {
+          id: "20261020T080000Z-0000abcd",
+          version: "1.0.0",
+          replaced_at: "2026-10-20T08:00:00Z",
+        },
+      ],
+    };
+    bridgeMocks.listPlugins.mockResolvedValue({ ...list, plugins: [hello] });
+    bridgeMocks.getPlugin.mockResolvedValue(hello);
+    bridgeMocks.checkPluginUpdate.mockResolvedValue({
+      available: true,
+      ref: "v1.2.0",
+      ref_kind: "tag",
+      version: "1.2.0",
+      committed_at: "2026-10-22T08:00:00Z",
+      notes: "stores things",
+      url: "https://github.com/acme/hello/tree/v1.2.0",
+    });
+    bridgeMocks.previewPluginInstall.mockResolvedValue(helloReview);
+    bridgeMocks.uninstallPlugin.mockResolvedValue(list);
+    await render();
+    const source = document.querySelector(
+      '[data-testid="plugin-source"]',
+    ) as HTMLElement;
+    expect(source.textContent).toContain("标签 v1.1.0");
+    expect(source.textContent).not.toContain(helloReview.source.commit);
+    await click(button("检查更新", source));
+    expect(bridgeMocks.checkPluginUpdate).toHaveBeenCalledWith("hello");
+    expect(source.textContent).toContain("有新版本：1.2.0");
+    await click(button("查看并更新", source));
+    // The update is reviewed as an install is.
+    expect(bridgeMocks.previewPluginInstall).toHaveBeenCalledWith(
+      "https://github.com/acme/hello/tree/v1.2.0",
+    );
+    await click(button("取消"));
+    await settleClosedLayer();
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[aria-label="更多操作"]')
+        ?.dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            pointerType: "mouse",
+          }),
+        );
+    });
+    const uninstall = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent?.trim() === "卸载");
+    if (!uninstall) throw new Error("Missing the uninstall item");
+    await click(uninstall);
+    const confirm = document.querySelector(
+      '[role="alertdialog"]',
+    ) as HTMLElement;
+    expect(confirm.textContent).toContain("内置的同名插件会恢复");
+    expect(bridgeMocks.uninstallPlugin).not.toHaveBeenCalled();
+    await click(button("卸载", confirm));
+    expect(bridgeMocks.uninstallPlugin).toHaveBeenCalledWith("hello");
   });
 
   it("offers a row of switches as one choice of several", async () => {
