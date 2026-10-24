@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -257,6 +258,49 @@ func (plugin *Plugin) Loaded() bool { return plugin.program != nil }
 func (plugin *Plugin) Enabled() bool { return plugin.program != nil && plugin.Settings.Enabled }
 
 // Granted returns the capabilities in effect.
+// DataFiles counts the files of the plugin's own data directory and what
+// they hold; zero for a plugin that has none or did not load.
+func (plugin *Plugin) DataFiles() (files int, bytes int64) {
+	if plugin.program == nil {
+		return 0, 0
+	}
+	_ = filepath.WalkDir(plugin.program.dirs.data, func(_ string, entry os.DirEntry, err error) error {
+		if err == nil && entry.Type().IsRegular() {
+			if info, err := entry.Info(); err == nil {
+				files++
+				bytes += info.Size()
+			}
+		}
+		return nil
+	})
+	return files, bytes
+}
+
+// ClearData removes the files of the plugin's own data directory and
+// returns how many there were. The directory stays, empty.
+func (plugin *Plugin) ClearData() (int, error) {
+	if plugin.program == nil {
+		return 0, nil
+	}
+	dirs := plugin.program.dirs
+	files, _ := plugin.DataFiles()
+	entries, err := os.ReadDir(dirs.data)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(dirs.data, entry.Name())); err != nil {
+			return 0, err
+		}
+	}
+	_ = os.Mkdir(dirs.tmp(), 0o700)
+	dirs.released()
+	return files, nil
+}
+
 func (plugin *Plugin) Granted() []string { return slices.Clone(plugin.granted) }
 
 // Can reports whether capability is in effect.
@@ -348,11 +392,14 @@ type Checked struct {
 }
 
 // Check compiles a plugin's source as the host would load it, under the key
-// its manifest names, and returns what it declares. Any failure is a
-// *LoadError.
+// its manifest names, and returns what it declares. Its node:fs reaches
+// source.Dir and a data directory of its own, which goes when the check
+// ends. Any failure is a *LoadError.
 func Check(source Source) (*Checked, error) {
 	source.Key = ""
-	loaded, err := load(source, DefaultLimits())
+	dirs := temporaryDirs(canonicalDir(source.Dir, false))
+	defer dirs.close()
+	loaded, err := load(source, DefaultLimits(), dirs)
 	if err != nil {
 		return nil, asLoadError(source, err)
 	}
@@ -407,7 +454,11 @@ type ManagerOptions struct {
 	// Builtin holds the plugins compiled into Core as <key>/plugin.ts.
 	Builtin fs.FS
 	// Dir is the plugin directory, <data-dir>/plugins.
-	Dir      string
+	Dir string
+	// DataDir holds the plugins' own directories, which their node:fs
+	// reads and writes: <data-dir>/plugin-data. Without one, each plugin
+	// gets a temporary directory.
+	DataDir  string
 	Settings SettingsSource
 	Services Services
 	Limits   Limits
@@ -418,11 +469,15 @@ type ManagerOptions struct {
 // that changed, and requests read the current generation without waiting
 // for either.
 type Manager struct {
-	builtin  fs.FS
-	dir      string
-	settings SettingsSource
-	services *Services
-	limits   Limits
+	builtin fs.FS
+	dir     string
+	// installRoot and dataRoot are dir and the data directory without
+	// symbolic links above them, as node:fs gives paths.
+	installRoot string
+	dataRoot    string
+	settings    SettingsSource
+	services    *Services
+	limits      Limits
 
 	mutex    sync.Mutex
 	sources  []Source
@@ -440,16 +495,35 @@ type loadResult struct {
 func NewManager(options ManagerOptions) *Manager {
 	services := options.Services
 	manager := &Manager{
-		builtin:  options.Builtin,
-		dir:      options.Dir,
-		settings: options.Settings,
-		services: &services,
-		limits:   options.Limits.withDefaults(),
-		programs: make(map[[sha256.Size]byte]loadResult),
-		counters: make(map[string]*counter),
+		builtin:     options.Builtin,
+		dir:         options.Dir,
+		installRoot: canonicalDir(options.Dir, false),
+		dataRoot:    canonicalDir(options.DataDir, true),
+		settings:    options.Settings,
+		services:    &services,
+		limits:      options.Limits.withDefaults(),
+		programs:    make(map[[sha256.Size]byte]loadResult),
+		counters:    make(map[string]*counter),
 	}
 	manager.current.Store(&Generation{})
 	return manager
+}
+
+// dirsFor returns the directories a plugin's node:fs reaches: its own under
+// the data directory, and the one its files are in.
+func (manager *Manager) dirsFor(source Source) *pluginDirs {
+	install := ""
+	if source.Origin != OriginBuiltin && manager.installRoot != "" {
+		install = filepath.Join(manager.installRoot, source.Key)
+	} else if source.Dir != "" {
+		install = canonicalDir(source.Dir, false)
+	}
+	if manager.dataRoot == "" {
+		dirs := temporaryDirs(install)
+		goruntime.AddCleanup(dirs, func(data string) { _ = os.RemoveAll(data) }, dirs.data)
+		return dirs
+	}
+	return newPluginDirs(filepath.Join(manager.dataRoot, source.Key), install, manager.limits.DataBytes)
 }
 
 // Current returns the generation in effect.
@@ -478,7 +552,7 @@ func (manager *Manager) Reload(ctx context.Context) error {
 		identity := sourceIdentity(source)
 		result, compiled := manager.programs[identity]
 		if !compiled {
-			loaded, err := load(source, manager.limits)
+			loaded, err := load(source, manager.limits, manager.dirsFor(source))
 			if err != nil {
 				result.err = asLoadError(source, err)
 			} else {
@@ -540,7 +614,9 @@ func (manager *Manager) publish(settings map[string]Settings) {
 		} else {
 			plugin.program = result.program
 			plugin.Meta = result.program.meta
-			plugin.granted = result.program.meta.Granted(current.Capabilities)
+			// A plugin has every capability it declares: the install review
+			// lists them, and enabling the plugin grants them all.
+			plugin.granted = slices.Clone(result.program.meta.Capabilities)
 			plugin.config = result.program.meta.WithDefaults(current.Config)
 			limits := manager.limits
 			if len(result.program.meta.Providers) > 0 {

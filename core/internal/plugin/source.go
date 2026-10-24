@@ -114,6 +114,10 @@ type Source struct {
 	// beside plugin.js; ClientHash names its content.
 	Client     bool
 	ClientHash string
+	// Dir is the directory the plugin's files are in, which its node:fs
+	// reads; "" when they are not on disk. A directory plugin's is under
+	// the plugin directory.
+	Dir string
 }
 
 // InstallRecord is the file an install from source writes beside the
@@ -159,6 +163,7 @@ func Discover(builtin fs.FS, dir string) ([]Source, error) {
 			if _, builtin := byKey[source.Key]; builtin {
 				source.Origin = OriginOverride
 			}
+			source.Dir = filepath.Join(dir, source.Key)
 			byKey[source.Key] = source
 		}
 	}
@@ -372,27 +377,52 @@ func compile(file, text string) (*moejs.Module, *syntax.Module, error) {
 	if err != nil {
 		return nil, nil, syntaxLoadError(file, err)
 	}
-	if requests := module.Requests(); len(requests) > 0 {
-		return nil, nil, &LoadError{Code: CodeImport, File: file, Message: fmt.Sprintf("imports %q; bundle the plugin into one file", requests[0])}
+	if len(module.Requests()) > 0 {
+		linked, err := moejs.Link(module, resolveNode)
+		if err != nil {
+			return nil, nil, &LoadError{Code: CodeImport, File: file, Message: cleanText(linkMessage(err), maxMessageRunes, "")}
+		}
+		module = linked
 	}
 	return module, parsed, nil
 }
 
-// checkSingleFile refuses imports, which have nothing to resolve to: a
-// plugin made of several files is bundled into one when it is built.
+// linkMessage is what linking a plugin with the modules of Node failed
+// with.
+func linkMessage(err error) string {
+	var resolve *moejs.ResolveError
+	if errors.As(err, &resolve) && resolve.Err != nil {
+		return resolve.Err.Error()
+	}
+	return err.Error()
+}
+
+// checkSingleFile refuses imports of anything but the modules of Node,
+// which the host provides: a plugin made of several files, or with
+// packages, is bundled into one when it is built.
 func checkSingleFile(file string, parsed *syntax.Module) error {
 	return inspectSource(file, parsed, func(node syntax.Node) (string, string) {
+		var source *syntax.StringLit
+		code := CodeImport
 		switch node := node.(type) {
-		case *syntax.ImportDecl, *syntax.ImportCall, *syntax.ImportMeta:
-			return CodeImport, "imports are not supported; bundle the plugin into one file"
-		case *syntax.ExportNamed:
-			if node.Source != nil {
-				return CodeReexport, "export … from is not supported; bundle the plugin into one file"
+		case *syntax.ImportDecl:
+			source = node.Source
+		case *syntax.ImportCall:
+			if literal, ok := node.Source.(*syntax.StringLit); ok {
+				source = literal
 			}
+		case *syntax.ExportNamed:
+			source, code = node.Source, CodeReexport
 		case *syntax.ExportAll:
-			return CodeReexport, "export * from is not supported; bundle the plugin into one file"
+			source, code = node.Source, CodeReexport
 		}
-		return "", ""
+		if source == nil {
+			return "", ""
+		}
+		if _, _, found := NodeBuiltin(source.Value); found {
+			return "", ""
+		}
+		return code, fmt.Sprintf("imports %q; a plugin imports only the modules of Node, so bundle it and its packages into one file", source.Value)
 	})
 }
 

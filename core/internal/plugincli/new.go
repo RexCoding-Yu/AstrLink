@@ -2,8 +2,10 @@ package plugincli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,6 +24,11 @@ type template struct {
 	plugin  string
 	tests   string
 	client  string
+	// keeps are files the plugin reads beside its code, by path, which
+	// package.json lists in astrlink.files; node gives the editor the
+	// types of Node's modules.
+	keeps map[string]string
+	node  bool
 }
 
 func runNew(_ context.Context, env Environment, args []string) int {
@@ -89,14 +96,28 @@ func projectFiles(key string, chosen template) map[string]string {
 	if chosen.client != "" {
 		entries += `, "client": "src/client.tsx"`
 	}
-	// The interface's React types are for the editor alone: the window
-	// provides React.
+	if len(chosen.keeps) > 0 {
+		kept := map[string]bool{}
+		for name := range chosen.keeps {
+			kept[strings.Split(name, "/")[0]] = true
+		}
+		names, _ := json.Marshal(slices.Sorted(maps.Keys(kept)))
+		entries += `, "files": ` + strings.ReplaceAll(string(names), ",", ", ")
+	}
+	// The interface's React types and Node's are for the editor alone: the
+	// window provides React, and the gateway Node's modules.
 	devDependencies := ""
+	types := `[]`
 	include := `"src", "astrlink-plugin.d.ts"`
 	if chosen.client != "" {
 		devDependencies = `,
   "devDependencies": { "@types/react": "^19.1.0" }`
 		include += `, "astrlink-plugin-client.d.ts"`
+	}
+	if chosen.node {
+		devDependencies = `,
+  "devDependencies": { "@types/node": "^22.0.0" }`
+		types = `["node"]`
 	}
 	files := map[string]string{
 		"package.json": replace.Replace(`{
@@ -115,7 +136,7 @@ func projectFiles(key string, chosen template) map[string]string {
     "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM"],
     "jsx": "react-jsx",
-    "types": [],
+    "types": ` + types + `,
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true
@@ -136,6 +157,9 @@ func projectFiles(key string, chosen template) map[string]string {
 	if chosen.client != "" {
 		files["src/client.tsx"] = replace.Replace(chosen.client)
 		files["astrlink-plugin-client.d.ts"] = builtinplugins.ClientTypeDefinitions
+	}
+	for name, text := range chosen.keeps {
+		files[name] = replace.Replace(text)
 	}
 	return files
 }
@@ -501,6 +525,63 @@ registerSlot("plugin.tab", Count, { title: t({ en: "Count", "zh-CN": "统计" })
     "args": [{ "name": "count", "input": null, "language": "en" }],
     "store": { "turns": 4 },
     "expect": { "result": { "turns": 4 } }
+  }
+]
+`,
+		},
+		"files": {
+			summary: "Node's modules: a journal in the plugin's own directory, and a file it carries beside its code.",
+			node:    true,
+			keeps:   map[string]string{"assets/greeting.txt": "Hello from {{name}}\n"},
+			plugin: `// {{name}}: keeps a journal of the turns it sees in its own directory, and
+// shows the greeting it carries beside its code.
+import { appendFile, readFile } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
+import { createInterface } from "node:readline";
+import { createHash } from "node:crypto";
+import path from "node:path";
+
+export const meta = {
+  apiVersion: 2,
+  key: "{{key}}",
+  name: "{{name}}",
+  version: "0.1.0",
+  capabilities: [],
+} satisfies AstrLinkPlugin.Meta;
+
+// A relative path is in the plugin's data directory, its working
+// directory; node:fs reaches nothing outside its own directories.
+const journal = "journal.jsonl";
+
+export async function observeTurn(turn: AstrLinkPlugin.TurnView) {
+  const digest = createHash("sha256").update(turn.user.text).digest("hex").slice(0, 12);
+  await appendFile(journal, JSON.stringify({ session: turn.session.id, turn: turn.session.turn, digest }) + "\n");
+}
+
+export async function describeStatus(): Promise<AstrLinkPlugin.ViewBlock[]> {
+  // package.json lists assets in astrlink.files, which the install puts
+  // beside the code, in import.meta.dirname.
+  const greeting = await readFile(path.join(import.meta.dirname, "assets", "greeting.txt"), "utf8");
+  let turns = 0;
+  if (existsSync(journal)) {
+    for await (const line of createInterface({ input: createReadStream(journal) })) if (line) turns++;
+  }
+  return [{ type: "kv", items: [{ label: "Greeting", value: greeting.trim() }, { label: "Turns in the journal", value: String(turns) }] }];
+}
+`,
+			tests: `[
+  {
+    "name": "writes a turn to the journal",
+    "hook": "observeTurn",
+    "args": [{ "session": { "id": "s1", "turn": 1 }, "user": { "text": "hello", "typed": "hello" } }],
+    "files": { "journal.jsonl": "{\"session\":\"s0\",\"turn\":1,\"digest\":\"000000000000\"}\n" },
+    "expect": { "files": { "journal.jsonl": "{\"session\":\"s0\",\"turn\":1,\"digest\":\"000000000000\"}\n{\"session\":\"s1\",\"turn\":1,\"digest\":\"2cf24dba5fb0\"}\n" } }
+  },
+  {
+    "name": "shows the greeting and the turns",
+    "hook": "describeStatus",
+    "files": { "journal.jsonl": "{}\n{}\n" },
+    "expect": { "result": [{ "type": "kv", "items": [{ "label": "Greeting", "value": "Hello from {{name}}" }, { "label": "Turns in the journal", "value": "2" }] }] }
   }
 ]
 `,

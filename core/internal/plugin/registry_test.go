@@ -224,32 +224,44 @@ func TestContextDeadlineInterruptsTheCall(t *testing.T) {
 	callError(t, outcome, ReasonTimeout, "ran out of time")
 }
 
-func TestSandboxOffersNothingAmbient(t *testing.T) {
+func TestPluginsGetNodeAndNoOtherHost(t *testing.T) {
 	manager := newTestManager(t, map[string]string{
 		"demo": pluginSource("demo", nil, `
 export function prepareTurn() {
-  return [typeof require, typeof process, typeof XMLHttpRequest, typeof WebSocket, typeof Deno, typeof Bun, typeof __astrlinkHost];
+  return [typeof require, typeof process, typeof Buffer, typeof XMLHttpRequest, typeof WebSocket, typeof Deno, typeof Bun, typeof __astrlinkHost, typeof __astrlinkNode];
 }
 export function describeStatus() { return eval("1 + 1"); }
 export function testConnection() { return new Function("return 1")(); }
 export function observeTurn() { Array.prototype.injected = 1; return [].injected; }
 `),
-	}, settingsMap{"demo": enabled()}, Services{}, Limits{})
+		"other": pluginSource("other", nil, `export function observeTurn() { return [typeof [].injected]; }`),
+	}, settingsMap{"demo": enabled(), "other": enabled()}, Services{}, Limits{})
 	plugin := loadedPlugin(t, manager, "demo")
 	outcome := callWithin(t, context.Background(), plugin, HookPrepareTurn, nil, CallOptions{})
-	if outcome.err != nil || strings.Count(string(outcome.result), `"undefined"`) != 7 {
-		t.Fatalf("ambient globals = %s, %v", outcome.result, outcome.err)
+	if outcome.err != nil || string(outcome.result) != `["function","object","function","undefined","undefined","undefined","undefined","undefined","undefined"]` {
+		t.Fatalf("globals = %s, %v", outcome.result, outcome.err)
 	}
-	callError(t, callWithin(t, context.Background(), plugin, HookDescribeStatus, nil, CallOptions{}), ReasonPluginError, "EvalError")
-	callError(t, callWithin(t, context.Background(), plugin, HookTestConnection, nil, CallOptions{}), ReasonPluginError, "EvalError")
-	// Builtins are frozen and shared by every plugin.
-	callError(t, callWithin(t, context.Background(), plugin, HookObserveTurn, nil, CallOptions{}), ReasonPluginError, "TypeError")
+	// Plugins are trusted code, as Node's packages are: eval works, and a
+	// plugin may change its own builtins, which no other runtime shares.
+	if outcome := callWithin(t, context.Background(), plugin, HookDescribeStatus, nil, CallOptions{}); outcome.err != nil || string(outcome.result) != "2" {
+		t.Fatalf("eval = %s, %v", outcome.result, outcome.err)
+	}
+	if outcome := callWithin(t, context.Background(), plugin, HookTestConnection, nil, CallOptions{}); outcome.err != nil || string(outcome.result) != "1" {
+		t.Fatalf("new Function = %s, %v", outcome.result, outcome.err)
+	}
+	if outcome := callWithin(t, context.Background(), plugin, HookObserveTurn, nil, CallOptions{}); outcome.err != nil || string(outcome.result) != "1" {
+		t.Fatalf("a changed builtin = %s, %v", outcome.result, outcome.err)
+	}
+	if outcome := callWithin(t, context.Background(), loadedPlugin(t, manager, "other"), HookObserveTurn, nil, CallOptions{}); outcome.err != nil || string(outcome.result) != `["undefined"]` {
+		t.Fatalf("another plugin's builtin = %s, %v", outcome.result, outcome.err)
+	}
 }
 
 func TestHostFunctionsNeedTheirCapability(t *testing.T) {
-	requested := []string{CapabilityNetwork, CapabilityStorage, CapabilityRequest}
+	// A plugin has the capabilities it declares, all of them once enabled;
+	// this one declares none.
 	manager := newTestManager(t, map[string]string{
-		"demo": pluginSource("demo", requested, `
+		"demo": pluginSource("demo", nil, `
 export function prepareTurn() {
   const messages = [];
   for (const use of [
@@ -385,9 +397,9 @@ export function prepareTurn() {
 }
 
 func TestFetchRunsBatchesInParallelWithinItsBudgets(t *testing.T) {
-	var reached sync.Map
+	var sentHeaders sync.Map
 	fetcher := fetcherFunc(func(ctx context.Context, _ *Plugin, request HTTPRequest) HTTPResponse {
-		reached.Store(request.URL, true)
+		sentHeaders.Store(request.URL, request.Headers)
 		delay := 200 * time.Millisecond
 		if strings.HasSuffix(request.URL, "/slow") {
 			delay = time.Minute
@@ -404,10 +416,10 @@ func TestFetchRunsBatchesInParallelWithinItsBudgets(t *testing.T) {
 const get = (path, extra) => ({ method: "GET", url: "https://memory.test/" + path, ...extra });
 export function prepareTurn() {
   const batch = astrlink.http.fetch(["a", "b", "c", "d", "e", "f", "g", "h"].map((path) => get(path)));
-  const denied = astrlink.http.fetch(get("denied", { headers: { Authorization: "Bearer stolen" } }));
+  const own = astrlink.http.fetch(get("own", { headers: { Authorization: "Bearer own", Host: "elsewhere.test", "X-AstrLink-Meta-Project": "secret" } }));
   const more = astrlink.http.fetch(["i", "j", "k", "l", "m", "n", "o", "p"].map((path) => get(path)));
   const over = astrlink.http.fetch(get("q"));
-  return { batch: batch.map((response) => response.text), denied: denied.error, deniedStatus: denied.status, more: more.map((response) => response.text), over: over.error };
+  return { batch: batch.map((response) => response.text), own: own.text, more: more.map((response) => response.text), over: over.error };
 }
 export function observeTurn() {
   const slow = astrlink.http.fetch(get("slow"));
@@ -425,15 +437,18 @@ export function observeTurn() {
 	if elapsed := time.Since(started); elapsed >= 1500*time.Millisecond {
 		t.Fatalf("two batches of eight 200 ms requests took %s, want them parallel", elapsed)
 	}
-	// A call sends at most 16 requests; the denied one was never sent.
-	want := `{"batch":["a","b","c","d","e","f","g","h"],"denied":"denied","deniedStatus":0,"more":["i","j","k","l","m","n","o","p"],"over":"budget"}`
+	// A call sends at most 16 requests; the seventeenth answers budget.
+	want := `{"batch":["a","b","c","d","e","f","g","h"],"own":"own","more":["i","j","k","l","m","n","o",null],"over":"budget"}`
 	if string(outcome.result) != want {
 		t.Fatalf("Call = %s\nwant %s", outcome.result, want)
 	}
-	if _, sent := reached.Load("https://memory.test/denied"); sent {
-		t.Fatal("a request with its own Authorization header reached the fetcher")
+	// A plugin sets its own Authorization; the host keeps the transport's
+	// headers and its own.
+	headers, _ := sentHeaders.Load("https://memory.test/own")
+	if got := headers.(map[string]string); got["Authorization"] != "Bearer own" || got["Host"] != "" || got["X-AstrLink-Meta-Project"] != "" {
+		t.Fatalf("headers sent = %v", got)
 	}
-	if network := outcome.info.Network; network.Requests != 18 || network.Denied != 1 || network.Errors != 1 {
+	if network := outcome.info.Network; network.Requests != 18 || network.Denied != 0 || network.Errors != 2 {
 		t.Fatalf("NetworkStats = %+v", network)
 	}
 	outcome = callWithin(t, context.Background(), plugin, HookObserveTurn, nil, CallOptions{NetworkBudget: 300 * time.Millisecond})
@@ -536,8 +551,8 @@ export function prepareTurn() {
 	if len(stats.limits) != 2 || stats.limits[0] != defaultMetaValues || stats.limits[1] != 5 {
 		t.Fatalf("limits = %v", stats.limits)
 	}
-	// Without request.read the values stay out of reach.
-	manager = newTestManager(t, map[string]string{"demo": source}, settingsMap{"demo": enabled()}, Services{Metadata: stats}, Limits{})
+	// Without request.read declared the values stay out of reach.
+	manager = newTestManager(t, map[string]string{"demo": strings.Replace(source, `capabilities: ["request.read"]`, `capabilities: []`, 1)}, settingsMap{"demo": enabled()}, Services{Metadata: stats}, Limits{})
 	outcome = callWithin(t, context.Background(), loadedPlugin(t, manager, "demo"), HookPrepareTurn, nil, CallOptions{})
 	callError(t, outcome, ReasonPluginError, "needs the request.read capability")
 }

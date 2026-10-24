@@ -22,7 +22,7 @@ export async function onUiCall(call) {
 }
 `
 
-func TestAPluginsInterfaceLoadsOnlyOnceGrantedAndCallsItsBackend(t *testing.T) {
+func TestAPluginsInterfaceLoadsOnlyOnceEnabledAndCallsItsBackend(t *testing.T) {
 	fixture := buildPluginHostFixture(t, map[string]string{"panel": panelPlugin})
 	handler := fixture.handler
 	client := "(() => {\n  console.log(\"hello\");\n})();\n//# sourceMappingURL=client.js.map\n"
@@ -52,15 +52,15 @@ func TestAPluginsInterfaceLoadsOnlyOnceGrantedAndCallsItsBackend(t *testing.T) {
 	if response := controlRequest(t, handler, http.MethodGet, code, "", "", ""); response.Code != http.StatusNotFound || summary().UIVersion != "" {
 		t.Fatalf("the code of a disabled plugin = %d", response.Code)
 	}
-	// Enabled without ui.code, the interface stays out.
-	if response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/panel", "application/json", `{"enabled":true,"granted_capabilities":["storage"]}`, ""); response.Code != http.StatusOK {
+	// Enabled with its interface turned off, the interface stays out.
+	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/panel", "application/json", `{"enabled":true,"ui_enabled":false}`, ""); response.Code != http.StatusOK {
 		t.Fatalf("enable = %d %s", response.Code, response.Body.String())
 	}
 	if response := controlRequest(t, handler, http.MethodGet, code, "", "", ""); response.Code != http.StatusNotFound {
-		t.Fatalf("the code without ui.code = %d", response.Code)
+		t.Fatalf("the code with the interface off = %d", response.Code)
 	}
-	if response := approvedRequest(t, handler, http.MethodPatch, PluginsPath+"/panel", "application/json", `{"granted_capabilities":["storage","ui.code"]}`, ""); response.Code != http.StatusOK {
-		t.Fatalf("grant ui.code = %d %s", response.Code, response.Body.String())
+	if response := controlRequest(t, handler, http.MethodPatch, PluginsPath+"/panel", "application/json", `{"ui_enabled":true}`, ""); response.Code != http.StatusOK {
+		t.Fatalf("turn the interface on = %d %s", response.Code, response.Body.String())
 	}
 	version := summary().UIVersion
 	if version == "" {

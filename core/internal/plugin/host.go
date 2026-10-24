@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -89,16 +91,17 @@ type HTTPRequest struct {
 type HTTPResponse struct {
 	Status int
 	// Header holds the first value of each response header, keyed in
-	// lowercase.
+	// lowercase, and Values all of them, for fetch and node:http.
 	Header map[string]string
+	Values map[string][]string
 	Body   []byte
 	Error  string
 	Took   time.Duration
 }
 
 // Fetcher sends the HTTP requests of a plugin. The host has checked their
-// shape; the Fetcher enforces what the user allowed: the addresses, the
-// binding of credentials to them, and the transport rules.
+// shape; the Fetcher enforces the binding of credentials to the servers
+// the user gave them and the transport rules.
 type Fetcher interface {
 	Fetch(ctx context.Context, plugin *Plugin, request HTTPRequest) HTTPResponse
 }
@@ -619,11 +622,7 @@ func hostRawFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value,
 	}
 	return c.fetchAsync([]HTTPRequest{request}, func(realm *moejs.Realm, responses []HTTPResponse) (moejs.Value, error) {
 		response := responses[0]
-		header := response.Header
-		if header == nil {
-			header = map[string]string{}
-		}
-		value := map[string]any{"status": response.Status, "headers": header}
+		value := map[string]any{"status": response.Status, "statusText": http.StatusText(response.Status), "headers": headerPairs(response)}
 		if response.Error != "" {
 			value["error"] = response.Error
 		}
@@ -632,6 +631,25 @@ func hostRawFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value,
 		}
 		return realm.FromGo(value)
 	}), nil
+}
+
+// headerPairs lists a response's headers as [name, value] pairs, each
+// value of a header repeated in its own pair.
+func headerPairs(response HTTPResponse) []any {
+	pairs := []any{}
+	if len(response.Values) > 0 {
+		names := slices.Sorted(maps.Keys(response.Values))
+		for _, name := range names {
+			for _, value := range response.Values[name] {
+				pairs = append(pairs, []any{name, value})
+			}
+		}
+		return pairs
+	}
+	for _, name := range slices.Sorted(maps.Keys(response.Header)) {
+		pairs = append(pairs, []any{name, response.Header[name]})
+	}
+	return pairs
 }
 
 // decodeRequest reads one request strictly and checks its shape. What the
@@ -706,11 +724,10 @@ func (c *call) fetchAsync(requests []HTTPRequest, render func(*moejs.Realm, []HT
 	responses := make([]HTTPResponse, len(requests))
 	var sent []int
 	for index, request := range requests {
+		requests[index].Headers = ownHeaders(request.Headers)
 		switch {
 		case c.fetched >= maxAsyncFetches || !time.Now().Before(c.networkDeadline):
 			responses[index] = HTTPResponse{Error: FetchBudget}
-		case deniedHeader(request.Headers) != "":
-			responses[index] = HTTPResponse{Error: FetchDenied}
 		default:
 			c.fetched++
 			sent = append(sent, index)
@@ -780,11 +797,10 @@ func (c *call) fetch(requests []HTTPRequest) []HTTPResponse {
 	responses := make([]HTTPResponse, len(requests))
 	var sent []int
 	for index, request := range requests {
+		requests[index].Headers = ownHeaders(request.Headers)
 		switch {
 		case c.fetched == maxFetchesPerCall || c.networkLeft <= 0:
 			responses[index] = HTTPResponse{Error: FetchBudget}
-		case deniedHeader(request.Headers) != "":
-			responses[index] = HTTPResponse{Error: FetchDenied}
 		default:
 			c.fetched++
 			sent = append(sent, index)
@@ -808,16 +824,17 @@ func (c *call) fetch(requests []HTTPRequest) []HTTPResponse {
 
 var errNetworkBudget = errors.New("plugin network budget exhausted")
 
-// deniedHeader returns a header the plugin may not set itself: the host owns
-// the transport's headers, and credentials only ever come from a slot.
-func deniedHeader(headers map[string]string) string {
+// ownHeaders drops the headers of a plugin's request that the host keeps
+// for itself: the transport's, the proxy's, and the gateway's own, which
+// upstream must not see. A plugin sets the rest, User-Agent and
+// Authorization included; a credential's header goes over the plugin's.
+func ownHeaders(headers map[string]string) map[string]string {
 	for name := range headers {
-		lower := strings.ToLower(name)
-		if hostOwnedHeader(name) || lower == "authorization" || lower == "cookie" {
-			return name
+		if transportHeader(name) {
+			delete(headers, name)
 		}
 	}
-	return ""
+	return headers
 }
 
 func responseValue(response HTTPResponse) map[string]any {

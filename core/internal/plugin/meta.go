@@ -122,6 +122,18 @@ func credentialHeaderAllowed(header string) bool {
 	return !hostOwnedHeader(header)
 }
 
+// transportHeader is a header the host keeps for itself on a plugin's
+// request: the transport's, the proxy's and the gateway's own.
+func transportHeader(header string) bool {
+	lower := strings.ToLower(header)
+	switch lower {
+	case "host", "content-length", "connection", "keep-alive", "transfer-encoding",
+		"te", "trailer", "upgrade", "expect":
+		return true
+	}
+	return strings.HasPrefix(lower, "proxy-") || strings.HasPrefix(lower, "x-astrlink-")
+}
+
 // hostOwnedHeader is a header that only the host sets on a plugin's request,
 // or never sends.
 func hostOwnedHeader(header string) bool {

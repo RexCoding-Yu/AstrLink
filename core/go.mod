@@ -6,6 +6,7 @@ require (
 	github.com/Calcium-Ion/moejs v0.1.0-alpha.9
 	github.com/QuantumNous/astrlink/convo v0.0.0
 	github.com/QuantumNous/new-api/relaykit v0.3.1
+	github.com/andybalholm/brotli v1.2.5
 	github.com/deepteams/webp v1.2.8
 	github.com/evanw/esbuild v0.28.2
 	github.com/expr-lang/expr v1.17.8

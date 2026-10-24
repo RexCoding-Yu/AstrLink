@@ -204,8 +204,9 @@ func (handler *Handler) pluginAction(writer http.ResponseWriter, request *http.R
 }
 
 // clearPluginData removes what the host keeps for a plugin: the workspaces
-// bound to its attributes' values, its own values, or the credentials of
-// its lookups, which each session's next request issues anew.
+// bound to its attributes' values, its own values, the files of its own
+// directory, or the credentials of its lookups, which each session's next
+// request issues anew.
 func (handler *Handler) clearPluginData(writer http.ResponseWriter, request *http.Request, target *plugin.Plugin, what string) {
 	if !allowMethods(writer, request, http.MethodDelete) {
 		return
@@ -222,6 +223,8 @@ func (handler *Handler) clearPluginData(writer http.ResponseWriter, request *htt
 		removed, err = handler.metadataStore.DeleteWorkspaceValues(ctx, pluginAttributeKeys(target))
 	case "values":
 		removed, err = handler.pluginStore.DeletePluginValues(ctx, target.Key)
+	case "files":
+		removed, err = target.ClearData()
 	case "lookup-credentials":
 		if handler.pluginHost == nil {
 			writeError(writer, http.StatusServiceUnavailable, "unavailable", "plugins are unavailable")

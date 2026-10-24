@@ -23,11 +23,12 @@ type CredentialReader interface {
 	PluginCredential(ctx context.Context, plugin, name string) (secret []byte, origin string, err error)
 }
 
-// Fetcher sends plugin requests on the user's terms: only to the origins the
-// user allowed, with plain http beyond this machine only where the user
-// allowed it for that origin, and each credential only to the origin it is
-// bound to. It follows no redirect, sends no User-Agent and nothing of the
-// gateway's, and reads at most plugin.MaxFetchResponseBytes of a response.
+// Fetcher sends plugin requests. Plugins are trusted code and reach any
+// address; what stays the user's is the credentials the gateway keeps, which
+// go only to the server each is bound to, over plain http beyond this
+// machine only where the user allowed it for that server. It follows no
+// redirect, sends no User-Agent of its own and nothing of the gateway's,
+// and reads at most plugin.MaxFetchResponseBytes of a response.
 type Fetcher struct {
 	Credentials CredentialReader
 	// Client sends the requests; nil uses the gateway's proxy settings.
@@ -40,7 +41,7 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 		return plugin.HTTPResponse{Status: status, Error: reason, Took: time.Since(started)}
 	}
 	origin, err := plugin.NormalizeOrigin(request.URL)
-	if err != nil || !allowed(target.Settings.Origins, origin) {
+	if err != nil {
 		return fail(plugin.FetchDenied, 0)
 	}
 	var body io.Reader
@@ -50,6 +51,8 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 		body, contentType = bytes.NewReader(request.JSON), "application/json"
 	case request.Body != nil:
 		body, contentType = strings.NewReader(*request.Body), "text/plain; charset=utf-8"
+	case request.BodyBytes != nil:
+		body, contentType = bytes.NewReader(request.BodyBytes), "application/octet-stream"
 	}
 	outgoing, err := http.NewRequestWithContext(ctx, request.Method, request.URL, body)
 	if err != nil {
@@ -63,7 +66,7 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 	}
 	if request.Credential != "" {
 		slot, declared := target.Meta.Credential(request.Credential)
-		if !declared || fetcher.Credentials == nil {
+		if !declared || fetcher.Credentials == nil || !allowed(target.Settings.Origins, origin) {
 			return fail(plugin.FetchDenied, 0)
 		}
 		secret, bound, err := fetcher.Credentials.PluginCredential(ctx, target.Key, slot.Name)
@@ -80,8 +83,10 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 		}
 		outgoing.Header.Set(slot.Header, value)
 	}
-	// An empty value keeps net/http from adding its own.
-	outgoing.Header.Set("User-Agent", "")
+	if outgoing.Header.Get("User-Agent") == "" {
+		// An empty value keeps net/http from adding its own.
+		outgoing.Header.Set("User-Agent", "")
+	}
 	client := fetcher.Client
 	if client == nil {
 		client = networkproxy.WrapClient(&http.Client{})
@@ -101,14 +106,19 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 		return fail(plugin.FetchTooLarge, response.StatusCode)
 	}
 	header := make(map[string]string, len(response.Header))
-	for name, values := range response.Header {
-		if len(values) > 0 {
-			header[strings.ToLower(name)] = values[0]
+	values := make(map[string][]string, len(response.Header))
+	for name, list := range response.Header {
+		if len(list) > 0 {
+			header[strings.ToLower(name)] = list[0]
+			values[strings.ToLower(name)] = list
 		}
 	}
-	return plugin.HTTPResponse{Status: response.StatusCode, Header: header, Body: data, Took: time.Since(started)}
+	return plugin.HTTPResponse{Status: response.StatusCode, Header: header, Values: values, Body: data, Took: time.Since(started)}
 }
 
+// allowed reports whether a credential may go to origin: one of the
+// servers of the plugin's settings, over plain http beyond this machine only
+// with the user's consent.
 func allowed(origins []plugin.NetworkOrigin, origin string) bool {
 	for _, granted := range origins {
 		if granted.Origin == origin {

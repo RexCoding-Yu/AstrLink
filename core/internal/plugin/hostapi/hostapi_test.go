@@ -69,7 +69,7 @@ func origin(t *testing.T, raw string) string {
 	return normalized
 }
 
-func TestFetcherSendsToAllowedOriginsOnly(t *testing.T) {
+func TestFetcherReachesAnyAddressAndSendsCredentialsOnlyToTheirServer(t *testing.T) {
 	seen := &received{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		seen.add(request)
@@ -87,7 +87,7 @@ func TestFetcherSendsToAllowedOriginsOnly(t *testing.T) {
 		Method: "POST", URL: server.URL + "/v1/sources/content", JSON: json.RawMessage(`{"content":"hi"}`),
 		Headers: map[string]string{"Accept": "application/json"}, Credential: "token",
 	})
-	if response.Error != "" || response.Status != 200 || string(response.Body) != `{"package_version":"1.3.0"}` || response.Header["x-trace"] != "first" {
+	if response.Error != "" || response.Status != 200 || string(response.Body) != `{"package_version":"1.3.0"}` || response.Header["x-trace"] != "first" || strings.Join(response.Values["x-trace"], ",") != "first,second" {
 		t.Fatalf("Fetch = %+v", response)
 	}
 	request := seen.requests[0]
@@ -106,13 +106,27 @@ func TestFetcherSendsToAllowedOriginsOnly(t *testing.T) {
 		t.Fatalf("sent %s %s", request.URL.Path, seen.bodies[0])
 	}
 
+	// Plugins are trusted code: without a credential a request reaches
+	// any address, with the plugin's own headers and bytes.
+	elsewhere := testPlugin()
+	response = fetcher.Fetch(context.Background(), elsewhere, plugin.HTTPRequest{
+		Method: "PUT", URL: server.URL + "/upload", BodyBytes: []byte{0, 1, 2},
+		Headers: map[string]string{"User-Agent": "sdk/1.0", "Authorization": "Bearer own"},
+	})
+	if response.Error != "" || response.Status != 200 {
+		t.Fatalf("Fetch without a credential = %+v", response)
+	}
+	request, body := seen.requests[1], seen.bodies[1]
+	if body != "\x00\x01\x02" || request.Header.Get("Content-Type") != "application/octet-stream" || request.Header.Get("User-Agent") != "sdk/1.0" || request.Header.Get("Authorization") != "Bearer own" {
+		t.Fatalf("sent %q with %v", body, request.Header)
+	}
+
 	for _, test := range []struct {
 		name    string
 		target  *plugin.Plugin
 		request plugin.HTTPRequest
 	}{
-		{"an origin that is not allowed", target, plugin.HTTPRequest{Method: "GET", URL: "http://127.0.0.1:1/"}},
-		{"the same host on another port", testPlugin(plugin.NetworkOrigin{Origin: allowedOrigin + "1"}), plugin.HTTPRequest{Method: "GET", URL: server.URL}},
+		{"a credential to an address that is not one of its servers", testPlugin(plugin.NetworkOrigin{Origin: allowedOrigin + "1"}), plugin.HTTPRequest{Method: "GET", URL: server.URL, Credential: "token"}},
 		{"a credential bound elsewhere", target, plugin.HTTPRequest{Method: "GET", URL: server.URL, Credential: "key"}},
 		{"a credential not stored", target, plugin.HTTPRequest{Method: "GET", URL: server.URL, Credential: "missing"}},
 	} {
@@ -132,12 +146,12 @@ func TestFetcherSendsToAllowedOriginsOnly(t *testing.T) {
 	}
 }
 
-func TestFetcherAllowsPlaintextBeyondThisMachineOnlyWhenAsked(t *testing.T) {
+func TestFetcherSendsCredentialsOverPlaintextBeyondThisMachineOnlyWhenAsked(t *testing.T) {
 	remote := origin(t, "http://192.0.2.1:9090")
-	fetcher := &Fetcher{}
-	response := fetcher.Fetch(context.Background(), testPlugin(plugin.NetworkOrigin{Origin: remote}), plugin.HTTPRequest{Method: "GET", URL: "http://192.0.2.1:9090/v1/server-info"})
+	fetcher := &Fetcher{Credentials: credentials{"demo/token": {secret: "s", origin: remote}}}
+	response := fetcher.Fetch(context.Background(), testPlugin(plugin.NetworkOrigin{Origin: remote}), plugin.HTTPRequest{Method: "GET", URL: "http://192.0.2.1:9090/v1/server-info", Credential: "token"})
 	if response.Error != plugin.FetchDenied {
-		t.Fatalf("plain http without the user's consent = %+v", response)
+		t.Fatalf("a credential over plain http without the user's consent = %+v", response)
 	}
 	for _, local := range []string{"http://127.0.0.1:9090", "http://localhost:9090", "http://[::1]:9090", "https://192.0.2.1:9090"} {
 		if plugin.Plaintext(origin(t, local)) {
@@ -147,13 +161,22 @@ func TestFetcherAllowsPlaintextBeyondThisMachineOnlyWhenAsked(t *testing.T) {
 	if !plugin.Plaintext(remote) {
 		t.Fatalf("%s does not count as plaintext", remote)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	// 192.0.2.1 is TEST-NET-1, routed nowhere: allowed, the request
-	// leaves and times out instead of being denied.
-	response = fetcher.Fetch(ctx, testPlugin(plugin.NetworkOrigin{Origin: remote, AllowPlaintext: true}), plugin.HTTPRequest{Method: "GET", URL: "http://192.0.2.1:9090/v1/server-info"})
-	if response.Error == plugin.FetchDenied {
-		t.Fatalf("plain http with the user's consent = %+v", response)
+	// 192.0.2.1 is TEST-NET-1, routed nowhere: allowed, the request leaves
+	// and times out instead of being denied.
+	for _, test := range []struct {
+		name    string
+		target  *plugin.Plugin
+		request plugin.HTTPRequest
+	}{
+		{"with the user's consent", testPlugin(plugin.NetworkOrigin{Origin: remote, AllowPlaintext: true}), plugin.HTTPRequest{Method: "GET", URL: "http://192.0.2.1:9090/v1/server-info", Credential: "token"}},
+		{"without a credential", testPlugin(), plugin.HTTPRequest{Method: "GET", URL: "http://192.0.2.1:9090/v1/server-info"}},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		response = fetcher.Fetch(ctx, test.target, test.request)
+		cancel()
+		if response.Error == plugin.FetchDenied {
+			t.Fatalf("plain http %s = %+v", test.name, response)
+		}
 	}
 }
 

@@ -638,6 +638,7 @@
       raw.body ? Uint8Array.fromBase64(raw.body) : null,
       {
         status: raw.status,
+        statusText: raw.statusText ?? "",
         headers: raw.headers,
       },
     );

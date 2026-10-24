@@ -111,12 +111,60 @@ export function greet(name: string, mood: Mood): string {
 	}
 }
 
+func TestBuildLeavesTheModulesOfNodeToTheHost(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"package.json": `{ "name": "demo", "version": "1.0.0", "dependencies": { "spawner": "1.0.0" } }`,
+		"plugin.ts": `import { createHash } from "crypto";
+import path from "node:path";
+import spawner from "spawner";
+export const meta = { apiVersion: 2, key: "demo", name: "Demo", version: "1.0.0", capabilities: [] };
+export async function prepareTurn() {
+  return { digest: createHash("sha1").update("abc").digest("hex"), joined: path.join("a", "b"), spawner: spawner() };
+}
+`,
+		"node_modules/spawner/package.json": `{ "name": "spawner", "version": "1.0.0", "main": "index.js" }`,
+		"node_modules/spawner/index.js": `const { EventEmitter } = require("events");
+module.exports = function spawner() {
+  if (typeof EventEmitter !== "function") return "no events";
+  try { require("child_process").spawn("ls"); return "spawned"; } catch (error) { return error.code; }
+};
+`,
+	})
+	result, err := Build(dir)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	code := string(result.Plugin)
+	if !strings.Contains(code, `from "node:crypto"`) || !strings.Contains(code, `from "node:path"`) || !strings.Contains(code, `"node:child_process"`) || strings.Contains(code, "function EventEmitter") {
+		t.Fatalf("plugin.js leaves Node's modules out:\n%s", code)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0].Text, "node:child_process is not available to plugins") || !strings.HasPrefix(result.Warnings[0].File, "node_modules/spawner/") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+	manager := plugin.NewManager(plugin.ManagerOptions{
+		Builtin:  fstest.MapFS{"demo/plugin.js": &fstest.MapFile{Data: result.Plugin}},
+		Settings: settings{"demo": {Enabled: true}},
+	})
+	if err := manager.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loaded := manager.Current().Plugin("demo")
+	if loaded == nil || !loaded.Loaded() {
+		t.Fatalf("plugin = %+v", loaded.Err)
+	}
+	output, _, err := loaded.Call(context.Background(), plugin.HookPrepareTurn, nil, plugin.CallOptions{})
+	if err != nil || string(output) != `{"digest":"a9993e364706816aba3e25717850c26c9cd0d89d","joined":"a/b","spawner":"ERR_ACCESS_DENIED"}` {
+		t.Fatalf("prepareTurn = %s, %v", output, err)
+	}
+}
+
 func TestBuildExplainsWhatPluginsCannotUse(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
-		"plugin.ts": `import { readFileSync } from "fs";
+		"plugin.ts": `import { spawn } from "child_process";
 export const meta = { apiVersion: 2, key: "demo", name: "Demo", version: "1.0.0", capabilities: [] };
-export function prepareTurn() { return readFileSync("/etc/hosts", "utf8"); }
+export function prepareTurn() { return spawn("ls"); }
 `,
 	})
 	_, err := Build(dir)
@@ -125,7 +173,7 @@ export function prepareTurn() { return readFileSync("/etc/hosts", "utf8"); }
 		t.Fatalf("Build = %v", err)
 	}
 	message := failure.Messages[0]
-	if message.File != "plugin.ts" || message.Line != 1 || !strings.Contains(message.Text, "without Node") {
+	if message.File != "plugin.ts" || message.Line != 1 || !strings.Contains(message.Text, "node:child_process is not available to plugins: plugins cannot start processes") {
 		t.Fatalf("message = %+v", message)
 	}
 }

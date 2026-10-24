@@ -1,14 +1,20 @@
 package pluginbuild
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/evanw/esbuild/pkg/api"
+
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
 )
 
 // Bounds of what a build produces.
@@ -17,7 +23,15 @@ const (
 	MaxPluginBytes = 8 << 20
 	// MaxClientBytes bounds an interface's code.
 	MaxClientBytes = 4 << 20
+	// MaxFilesBytes and MaxFiles bound the files a plugin keeps beside its
+	// code.
+	MaxFilesBytes = 32 << 20
+	MaxFiles      = 1000
 )
+
+// reservedFiles are the names of the install directory that are the
+// host's, which a plugin's own files may not take.
+var reservedFiles = []string{"plugin.js", "plugin.js.map", "plugin.ts", "client.js", "client.js.map", "icon.svg", "icon.png", "install.json", ".astrlink-dev.json"}
 
 // Result is a project built: the files the gateway loads, and what the
 // build read.
@@ -35,6 +49,42 @@ type Result struct {
 	// Inputs are the project's files the build read, relative to its root
 	// and with forward slashes; dependencies under node_modules left out.
 	Inputs []string
+	// Files are the files the plugin keeps beside its code, by their path
+	// in the install directory, with forward slashes.
+	Files map[string][]byte
+}
+
+// Outputs are the files a build puts in a plugin's install directory, by
+// their path there: plugin.js, the interface, their source maps and the
+// plugin's own files.
+func (result *Result) Outputs() map[string][]byte {
+	outputs := map[string][]byte{"plugin.js": result.Plugin}
+	for name, data := range map[string][]byte{"plugin.js.map": result.SourceMap, "client.js": result.Client, "client.js.map": result.ClientMap} {
+		if data != nil {
+			outputs[name] = data
+		}
+	}
+	for name, data := range result.Files {
+		outputs[name] = data
+	}
+	return outputs
+}
+
+// Write writes the outputs into dir and returns the sha256 of each.
+func (result *Result) Write(dir string) (map[string]string, error) {
+	sums := map[string]string{}
+	for name, data := range result.Outputs() {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(data)
+		sums[name] = hex.EncodeToString(sum[:])
+	}
+	return sums, nil
 }
 
 // Message is a problem the build found, at a position of a project file
@@ -146,11 +196,72 @@ func BuildWith(dir string, options Options) (*Result, error) {
 		result.Client, result.ClientMap = client, clientMap
 		result.Warnings = append(result.Warnings, warnings...)
 	}
+	if result.Files, err = readFiles(dir, entries.Files, inputs); err != nil {
+		return nil, &Error{Messages: []Message{{Text: err.Error()}}}
+	}
 	for input := range inputs {
 		result.Inputs = append(result.Inputs, input)
 	}
 	slices.Sort(result.Inputs)
 	return result, nil
+}
+
+// readFiles reads the files and the files under the directories that names
+// lists, relative to the project in dir, noting each in inputs.
+func readFiles(dir string, names []string, inputs map[string]bool) (map[string][]byte, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	files := map[string][]byte{}
+	total := 0
+	add := func(rel string) error {
+		name := filepath.ToSlash(rel)
+		if _, taken := files[name]; taken {
+			return nil
+		}
+		if slices.Contains(reservedFiles, name) {
+			return fmt.Errorf("the file %q has the name of a file the host writes", name)
+		}
+		if len(files) == MaxFiles {
+			return fmt.Errorf("a plugin keeps at most %d files beside its code", MaxFiles)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			return err
+		}
+		if total += len(data); total > MaxFilesBytes {
+			return fmt.Errorf("the files a plugin keeps beside its code hold at most %d MiB", MaxFilesBytes>>20)
+		}
+		files[name] = data
+		inputs[name] = true
+		return nil
+	}
+	for _, name := range names {
+		rel, err := insideProject(dir, name)
+		if err != nil {
+			return nil, err
+		}
+		err = filepath.WalkDir(filepath.Join(dir, rel), func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() && entry.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			if !entry.Type().IsRegular() {
+				return nil
+			}
+			inner, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			return add(inner)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
 }
 
 // bundle builds one entry into an output named out and its source map.
@@ -183,7 +294,11 @@ func bundle(dir, entry, out string, client bool, inputs map[string]bool, with Op
 		options.Format = api.FormatESModule
 	}
 	// The host's modules resolve first: an interface never bundles its own
-	// React.
+	// React, and a plugin leaves Node's modules to the host, as Node
+	// prefers them to packages of the same name.
+	if !client {
+		options.Plugins = append(options.Plugins, nodeModulesPlugin(dir))
+	}
 	if with.Packages != nil {
 		options.Plugins = append(options.Plugins, packagesPlugin(with.Packages))
 	}
@@ -236,6 +351,42 @@ func hostModulePlugin() api.Plugin {
 			return api.OnLoadResult{Contents: &contents, Loader: api.LoaderJS}, nil
 		})
 	}}
+}
+
+// nodeModulesPlugin leaves the modules of Node to the host: an import of
+// one stays in plugin.js as node:<name>, which the host resolves when it
+// loads the plugin. A module whose functions throw for plugins, such as
+// node:child_process, is an error when the project's own code imports it,
+// and a warning when a dependency does, which may never call it.
+func nodeModulesPlugin(dir string) api.Plugin {
+	return api.Plugin{Name: "astrlink-node", Setup: func(build api.PluginBuild) {
+		build.OnResolve(api.OnResolveOptions{Filter: `^(node:)?[a-z_0-9]+(/[a-z_]+)?$`}, func(args api.OnResolveArgs) (api.OnResolveResult, error) {
+			name, usable, found := plugin.NodeBuiltin(args.Path)
+			if !found {
+				return api.OnResolveResult{}, nil
+			}
+			result := api.OnResolveResult{Path: "node:" + name, External: true}
+			if usable {
+				return result, nil
+			}
+			text := fmt.Sprintf("node:%s is not available to plugins: %s", name, plugin.NodeUnavailable(name))
+			if ownCode(dir, args.Importer) {
+				return api.OnResolveResult{Errors: []api.Message{{Text: text}}}, nil
+			}
+			result.Warnings = []api.Message{{Text: text + "; the plugin loads, and what calls it throws"}}
+			return result, nil
+		})
+	}}
+}
+
+// ownCode reports whether file is the project's own code rather than a
+// dependency's.
+func ownCode(dir, file string) bool {
+	rel, err := filepath.Rel(dir, file)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false
+	}
+	return !slices.Contains(strings.Split(filepath.ToSlash(rel), "/"), "node_modules")
 }
 
 // locating marks the resolution packagesPlugin asks the bundler for, which
@@ -320,7 +471,7 @@ func metafileInputs(metafile string) []string {
 }
 
 // messages turns the bundler's messages into the build's, explaining the
-// ones a plugin author meets because plugins run without Node.
+// ones a plugin author meets because plugins run in moejs.
 func messages(dir string, found []api.Message) []Message {
 	converted := make([]Message, 0, len(found))
 	for _, message := range found {
@@ -331,7 +482,7 @@ func messages(dir string, found []api.Message) []Message {
 		}
 		switch {
 		case builtin:
-			text += ": plugins run in moejs, without Node's modules; use the web APIs the host provides, such as fetch, URL and crypto"
+			text += ": the host does not provide this module of Node to plugins"
 		case strings.Contains(text, `No loader is configured for ".node" files`):
 			text = "a dependency uses a native module, which plugins cannot load"
 		}

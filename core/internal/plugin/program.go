@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,6 +36,10 @@ type program struct {
 	// sources maps positions in a built plugin back to the files it was
 	// built from; nil without a source map.
 	sources *sourceMap
+	// dirs are the directories the plugin reaches through node:fs.
+	dirs *pluginDirs
+	// importer serves import() and import.meta in the program's runtimes.
+	importer *moejs.Importer
 }
 
 // async reports whether the plugin's hooks may return promises: those of
@@ -52,8 +57,9 @@ func (loaded *program) mapStack(stack string) string {
 
 // load compiles source and loads it once in a runtime of its own, to check
 // that its top level runs, that it exports a valid manifest, and that every
-// other export is a hook the host calls.
-func load(source Source, limits Limits) (*program, error) {
+// other export is a hook the host calls. dirs are the directories its
+// node:fs reaches.
+func load(source Source, limits Limits, dirs *pluginDirs) (*program, error) {
 	if source.Err != nil {
 		return nil, source.Err
 	}
@@ -61,11 +67,13 @@ func load(source Source, limits Limits) (*program, error) {
 	if err != nil {
 		return nil, err
 	}
-	loaded := &program{key: source.Key, file: source.File, module: module, hooks: make(map[string]moejs.Hook), sources: parseSourceMap(source.SourceMap, source.File)}
+	loaded := &program{key: source.Key, file: source.File, module: module, hooks: make(map[string]moejs.Hook), sources: parseSourceMap(source.SourceMap, source.File), dirs: dirs}
+	loaded.importer = &moejs.Importer{Resolve: resolveNode, Meta: loaded.importMeta}
 	instance, err := newInstance(loaded, limits)
 	if err != nil {
 		return nil, loadFailure(source.File, err)
 	}
+	defer instance.resources.close()
 	stop := interruptAfter(instance.runtime, loadTime, errLoadTime)
 	defer stop()
 	meta, err := readMeta(instance.runtime, source.File)
@@ -159,22 +167,37 @@ func loadFailure(file string, err error) error {
 type instance struct {
 	runtime *moejs.Runtime
 	current *call
+	program *program
+	node    nodeState
+	// resources are the files and databases the runtime has open; a
+	// cleanup closes them once the runtime is gone.
+	resources *nodeResources
 }
 
+// newInstance loads the program in a new runtime. Plugins are trusted
+// code, as Node's packages are: each runtime has builtins of its own that
+// the plugin may change, and eval and new Function work.
 func newInstance(loaded *program, limits Limits) (*instance, error) {
 	runtime := moejs.NewRuntime(moejs.Options{
-		MemoryLimit:        limits.Memory,
-		DisableDynamicCode: true,
-		TimeZone:           time.UTC,
+		MemoryLimit:       limits.Memory,
+		MutableIntrinsics: true,
+		TimeZone:          time.UTC,
+		Importer:          loaded.importer,
 	})
-	created := &instance{runtime: runtime}
+	created := &instance{runtime: runtime, program: loaded, resources: &nodeResources{}}
+	goruntime.AddCleanup(created, (*nodeResources).close, created.resources)
 	if err := created.install(); err != nil {
+		return nil, err
+	}
+	if err := created.installNode(); err != nil {
 		return nil, err
 	}
 	stop := interruptAfter(runtime, loadTime, errLoadTime)
 	err := runtime.Load(loaded.module)
 	stop()
+	created.resources.endCall()
 	if err != nil {
+		created.resources.close()
 		return nil, withStack(runtime, err)
 	}
 	runtime.ClearInterrupt()
@@ -272,6 +295,7 @@ func (pool *pool) put(returned *instance) {
 	select {
 	case pool.idle <- returned:
 	default:
+		returned.resources.close()
 	}
 }
 
@@ -314,7 +338,9 @@ func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, args []any)
 		<-interrupted
 	}
 	taken.current = nil
+	taken.resources.endCall()
 	if err != nil {
+		taken.resources.close()
 		return nil, withStack(runtime, err)
 	}
 	runtime.ClearInterrupt()

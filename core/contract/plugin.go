@@ -508,13 +508,18 @@ const (
 	PluginStoredValues = "plugin_values"
 	// The resident block a session carries, in memory only.
 	PluginStoredResidentBlock = "resident_block"
+	// The files of the plugin's own data directory, which its node:fs
+	// reads and writes; they stay when the plugin is removed.
+	PluginStoredFiles = "plugin_files"
 )
 
 // PluginHostStorage is one kind of thing the host keeps for a plugin, and
-// how many it keeps now when it counts them.
+// how many it keeps now when it counts them; Bytes is their size where the
+// host measures it.
 type PluginHostStorage struct {
 	Kind  string `json:"kind"`
 	Count *int   `json:"count,omitempty"`
+	Bytes *int64 `json:"bytes,omitempty"`
 }
 
 // PluginSetting is a field of a plugin's settings form, as its manifest

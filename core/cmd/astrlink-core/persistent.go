@@ -308,8 +308,11 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	if err := os.MkdirAll(pluginDirectory, 0o700); err != nil {
 		logf("create plugin directory: %v", err)
 	}
+	// Each plugin reads and writes its own directory under
+	// <data-dir>/plugin-data through node:fs.
 	pluginManager := plugin.NewManager(plugin.ManagerOptions{
 		Dir:      pluginDirectory,
+		DataDir:  filepath.Join(options.dataDirectory, "plugin-data"),
 		Settings: hostapi.Settings{Store: store},
 		Services: plugin.Services{
 			Fetcher:  &hostapi.Fetcher{Credentials: store},

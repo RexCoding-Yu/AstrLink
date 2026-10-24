@@ -53,6 +53,11 @@ func (bound *instance) installWeb() error {
 	}
 	timer := func(name string, repeat bool) moejs.Value {
 		return runtime.Function(name, 2, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			if bound.current == nil {
+				// A timer set outside a call, as by a module's top level,
+				// never fires: no loop runs for it. Its id is 0.
+				return moejs.Number(0), nil
+			}
 			c, err := current(realm, name)
 			if err != nil {
 				return moejs.Undefined(), err

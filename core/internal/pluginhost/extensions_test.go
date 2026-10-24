@@ -164,8 +164,8 @@ export async function onHttp(request) {
 	if _, found := host.ServePluginHTTP(context.Background(), "other", PluginHTTPRequest{Method: "GET", Path: "/"}); found {
 		t.Fatal("a plugin that does not exist answered")
 	}
-	ungranted := extensionHost(t, "web", source, plugin.Settings{Enabled: true})
-	if _, found := ungranted.ServePluginHTTP(context.Background(), "web", PluginHTTPRequest{Method: "GET", Path: "/"}); found {
+	undeclared := extensionHost(t, "web", strings.Replace(source, `capabilities: ["http.serve"]`, `capabilities: []`, 1), plugin.Settings{Enabled: true})
+	if _, found := undeclared.ServePluginHTTP(context.Background(), "web", PluginHTTPRequest{Method: "GET", Path: "/"}); found {
 		t.Fatal("a plugin without http.serve answered")
 	}
 }

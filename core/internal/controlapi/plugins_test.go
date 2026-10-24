@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,7 +116,7 @@ func TestPluginListShowsLoadedAndFailedPlugins(t *testing.T) {
 	if broken.Key != "broken" || broken.State != contract.PluginStateFailed || broken.Error == nil || broken.Error.Code != plugin.CodeAsync || broken.Error.Line != 2 || broken.Error.File != "plugin.ts" {
 		t.Fatalf("broken = %+v %+v", broken, broken.Error)
 	}
-	if demo.Key != "demo" || demo.State != contract.PluginStateLoaded || demo.Name != "Demo memory" || demo.Source != contract.PluginSourceDirectory || demo.Enabled || !demo.NeedsNetwork || len(demo.GrantedCapabilities) != 0 {
+	if demo.Key != "demo" || demo.State != contract.PluginStateLoaded || demo.Name != "Demo memory" || demo.Source != contract.PluginSourceDirectory || demo.Enabled || !demo.NeedsNetwork || !slices.Equal(demo.GrantedCapabilities, demo.RequestedCapabilities) {
 		t.Fatalf("demo = %+v", demo)
 	}
 }
@@ -159,7 +160,7 @@ func TestPluginSettingsCredentialsAndConnectionTest(t *testing.T) {
 	}
 	detail = decodeBody[contract.PluginDetail](t, response)
 	origin, _ := plugin.NormalizeOrigin(server.URL)
-	if !detail.Enabled || strings.Join(detail.GrantedCapabilities, ",") != "network,storage,ui.views" || len(detail.NetworkOrigins) != 1 || detail.NetworkOrigins[0] != (contract.PluginNetworkOrigin{Origin: origin}) || detail.TurnWaitMs != 3500 {
+	if !detail.Enabled || strings.Join(detail.GrantedCapabilities, ",") != "context.inject,network,storage,ui.views" || len(detail.NetworkOrigins) != 1 || detail.NetworkOrigins[0] != (contract.PluginNetworkOrigin{Origin: origin}) || detail.TurnWaitMs != 3500 {
 		t.Fatalf("detail after PATCH = %+v", detail)
 	}
 	if loaded := handler.plugins.Current().Plugin("demo"); loaded == nil || loaded.Settings.Wait() != 3500*time.Millisecond {

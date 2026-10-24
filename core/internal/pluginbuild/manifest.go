@@ -58,6 +58,10 @@ type Entries struct {
 	Plugin string `json:"plugin"`
 	// Client is the interface part, which the desktop runs; "" for none.
 	Client string `json:"client,omitempty"`
+	// Files are the files and directories the plugin reads at run time
+	// beside its code, which the install puts in its install directory,
+	// import.meta.dirname.
+	Files []string `json:"files,omitempty"`
 }
 
 // MaxManifestBytes bounds package.json.
@@ -114,7 +118,25 @@ func ResolveEntries(dir string, manifest *Manifest) (Entries, error) {
 			return Entries{}, err
 		}
 	}
+	for _, file := range entries.Files {
+		if _, err := insideProject(dir, file); err != nil {
+			return Entries{}, err
+		}
+	}
 	return entries, nil
+}
+
+// insideProject returns the path of name, relative to the project in dir,
+// when it is inside the project.
+func insideProject(dir, name string) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if name == "" || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("the file %q is outside the project", name)
+	}
+	if _, err := os.Stat(filepath.Join(dir, clean)); err != nil {
+		return "", fmt.Errorf("the file %q is not in the project", name)
+	}
+	return clean, nil
 }
 
 // checkEntry checks that an entry is a file inside the project.

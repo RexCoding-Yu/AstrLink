@@ -231,14 +231,16 @@ func (installer *Installer) build(ctx context.Context, resolved Resolved, link, 
 		}
 		return review, record, failure
 	}
-	checked, err := plugin.Check(plugin.Source{File: "plugin.js", Text: string(result.Plugin), SourceMap: string(result.SourceMap)})
-	if err != nil {
-		return review, record, &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallInvalidPlugin, Messages: []string{err.Error()}}}
-	}
+	// The check runs in the directory the build goes to, where the
+	// plugin's top level finds the files it keeps beside its code.
 	out := filepath.Join(work, "out")
 	outputs, err := writeBuild(out, source, result)
 	if err != nil {
 		return review, record, err
+	}
+	checked, err := plugin.Check(plugin.Source{File: "plugin.js", Text: string(result.Plugin), SourceMap: string(result.SourceMap), Dir: out})
+	if err != nil {
+		return review, record, &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallInvalidPlugin, Messages: []string{err.Error()}}}
 	}
 	record = contract.PluginInstallRecord{
 		Source: resolved.Source(link), Version: checked.Meta.Version, Lockfile: lockName,
@@ -307,21 +309,19 @@ func (installer *Installer) checkEngines(manifest *pluginbuild.Manifest) error {
 // iconFiles are the icons a project may keep at its root.
 var iconFiles = []string{"icon.svg", "icon.png"}
 
-// writeBuild writes a build and the project's icon into out, returning the
-// sha256 of each file.
+// writeBuild writes a build, with the files the plugin keeps beside its
+// code, and the project's icon into out, returning the sha256 of each file.
 func writeBuild(out, project string, result *pluginbuild.Result) (map[string]string, error) {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
-	files := map[string][]byte{"plugin.js": result.Plugin, "plugin.js.map": result.SourceMap, "client.js": result.Client, "client.js.map": result.ClientMap}
-	for _, name := range iconFiles {
-		if data, err := os.ReadFile(filepath.Join(project, name)); err == nil && len(data) <= plugin.MaxIconBytes {
-			files[name] = data
-		}
+	outputs, err := result.Write(out)
+	if err != nil {
+		return nil, err
 	}
-	outputs := map[string]string{}
-	for name, data := range files {
-		if data == nil {
+	for _, name := range iconFiles {
+		data, err := os.ReadFile(filepath.Join(project, name))
+		if err != nil || len(data) > plugin.MaxIconBytes {
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(out, name), data, 0o644); err != nil {
@@ -650,6 +650,7 @@ func inspect(dir string) (*plugin.Checked, int, int, error) {
 	if info, err := os.Stat(filepath.Join(dir, "client.js")); err == nil {
 		clientBytes = int(info.Size())
 	}
+	source.Dir = dir
 	checked, err := plugin.Check(source)
 	if err != nil {
 		return nil, 0, 0, err

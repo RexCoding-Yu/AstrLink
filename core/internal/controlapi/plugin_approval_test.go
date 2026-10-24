@@ -19,7 +19,7 @@ export async function onRequest() { return { action: "allow" }; }
 export async function onStreamEvent(ctx, event, state) { return { events: [event], state }; }
 `
 
-func TestChangesThatGrantAPluginMoreNeedConfirmation(t *testing.T) {
+func TestChangesThatTrustAPluginMoreNeedConfirmation(t *testing.T) {
 	_, handler, manager, directory := newPluginHandler(t)
 	writePlugin(t, directory, "gate", "plugin.js", gatePlugin)
 	if err := manager.Reload(context.Background()); err != nil {
@@ -53,17 +53,12 @@ func TestChangesThatGrantAPluginMoreNeedConfirmation(t *testing.T) {
 		return envelope.Approval
 	}
 
-	enable := `{"enabled":true,"granted_capabilities":["request.gate"]}`
-	if approval := confirmation(enable); !approval.Enable || !slices.Equal(approval.AddedCapabilities, []string{"request.gate"}) || approval.Name != "Gate" {
-		t.Fatalf("approval = %+v", approval)
+	// Plugins are trusted code: enabling one gives it what it declares,
+	// which its install review listed, without a confirmation.
+	if detail := patch(`{"enabled":true}`, false); detail == nil || !detail.Enabled || !slices.Equal(detail.GrantedCapabilities, []string{"request.gate", "storage"}) {
+		t.Fatalf("enable = %+v", detail)
 	}
-	if detail := patch(enable, true); detail == nil || !detail.Enabled {
-		t.Fatalf("approved enable = %+v", detail)
-	}
-	if approval := confirmation(`{"granted_capabilities":["request.gate","storage"]}`); approval.Enable || !slices.Equal(approval.AddedCapabilities, []string{"storage"}) {
-		t.Fatalf("approval = %+v", approval)
-	}
-	if approval := confirmation(`{"fail_closed":true}`); !approval.FailClosed {
+	if approval := confirmation(`{"fail_closed":true}`); !approval.FailClosed || approval.Name != "Gate" {
 		t.Fatalf("approval = %+v", approval)
 	}
 	if detail := patch(`{"fail_closed":true}`, true); detail == nil || !detail.FailClosed || !detail.FailClosedRequested {

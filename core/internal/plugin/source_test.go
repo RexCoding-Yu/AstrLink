@@ -36,7 +36,6 @@ func TestCompileRejectsWhatSynchronousPluginsCannotUse(t *testing.T) {
 		{"for await", "plugin.js", "for await (const item of []) {}", CodeAwait, 2},
 		{"import", "plugin.js", `import { helper } from "./helper.js";`, CodeImport, 2},
 		{"dynamic import", "plugin.js", `export function prepareTurn() { return import("./later.js"); }`, CodeImport, 2},
-		{"import.meta", "plugin.js", `export function prepareTurn() { return import.meta; }`, CodeImport, 2},
 		{"export from", "plugin.js", `export { helper } from "./helper.js";`, CodeReexport, 2},
 		{"export star", "plugin.js", `export * from "./helper.js";`, CodeReexport, 2},
 	} {
@@ -50,6 +49,29 @@ func TestCompileRejectsWhatSynchronousPluginsCannotUse(t *testing.T) {
 				t.Fatalf("LoadError = %+v, want code %s at %s:%d", loadErr, test.code, test.file, test.line)
 			}
 		})
+	}
+}
+
+func TestCompileLinksTheModulesOfNode(t *testing.T) {
+	source := testMeta + `import fs from "node:fs";
+import { join } from "path";
+import * as crypto from "node:crypto";
+export { promisify } from "node:util";
+export function prepareTurn() { return [typeof fs.readFileSync, join("a", "b"), typeof crypto.createHash, import.meta.url]; }
+`
+	if err := compileChecked("plugin.js", source); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	for _, test := range []struct{ body, message string }{
+		{`import x from "node:nope";`, `"node:nope"`},
+		{`import x from "sqlite";`, `"sqlite"`},
+		{`import { nope } from "node:path";`, "nope"},
+	} {
+		err := compileChecked("plugin.js", testMeta+test.body)
+		var loadErr *LoadError
+		if !errors.As(err, &loadErr) || loadErr.Code != CodeImport || !strings.Contains(loadErr.Message, test.message) {
+			t.Errorf("%s: compile error = %v, want an import error naming %s", test.body, err, test.message)
+		}
 	}
 }
 

@@ -105,7 +105,7 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodPost) {
 			handler.pluginAction(writer, request, target)
 		}
-	case action == "workspaces" || action == "values" || action == "lookup-credentials":
+	case action == "workspaces" || action == "values" || action == "lookup-credentials" || action == "files":
 		handler.clearPluginData(writer, request, target, action)
 	case action == "stats":
 		if allowMethods(writer, request, http.MethodGet) {
@@ -358,6 +358,10 @@ func (handler *Handler) pluginHostStorage(ctx context.Context, target *plugin.Pl
 		}
 		count(contract.PluginStoredValues, len(keys))
 	}
+	// The plugin's own files show once it keeps some.
+	if files, bytes := target.DataFiles(); files > 0 {
+		kept = append(kept, contract.PluginHostStorage{Kind: contract.PluginStoredFiles, Count: &files, Bytes: &bytes})
+	}
 	return kept, nil
 }
 
@@ -589,27 +593,17 @@ type approvalEnvelope struct {
 }
 
 // pluginApproval describes what a change of settings grants the plugin
-// beyond what it had: being enabled, capabilities, addresses, plain http,
-// the privacy check skipped, and refusing requests its entry hook cannot
-// decide. Enabling counts every capability it then has.
+// beyond what it had: plain http to a server its credentials go to, the
+// privacy check skipped, and refusing requests its entry hook cannot
+// decide. Plugins are trusted code: what one declares the install review
+// lists, and enabling it, or reaching an address, needs no confirmation.
 func pluginApproval(target *plugin.Plugin, previous, next storage.PluginSettingsRecord) contract.PluginApproval {
 	approval := contract.PluginApproval{Plugin: target.Key, Name: target.Meta.Name}
 	if approval.Name == "" {
 		approval.Name = target.Key
 	}
-	approval.Enable = next.Enabled && !previous.Enabled
-	if next.Enabled {
-		for _, capability := range target.Meta.Granted(next.Capabilities) {
-			if approval.Enable || !slices.Contains(previous.Capabilities, capability) {
-				approval.AddedCapabilities = append(approval.AddedCapabilities, capability)
-			}
-		}
-	}
 	for _, origin := range next.Origins {
 		index := slices.IndexFunc(previous.Origins, func(existing storage.PluginOrigin) bool { return existing.Origin == origin.Origin })
-		if index < 0 {
-			approval.AddedOrigins = append(approval.AddedOrigins, origin.Origin)
-		}
 		if origin.AllowPlaintext && (index < 0 || !previous.Origins[index].AllowPlaintext) {
 			approval.Plaintext = append(approval.Plaintext, origin.Origin)
 		}

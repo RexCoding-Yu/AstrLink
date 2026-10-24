@@ -243,10 +243,11 @@ export async function route(ctx) {
 	if entry := hookRecord(t, record, "router", plugin.HookRoute); !slices.Contains(entry.Effects, contract.PluginEffectModel) {
 		t.Fatalf("record = %+v", entry)
 	}
-	// Without routing granted, route does not run.
-	gateway = newExtensionGateway(t, map[string]string{"router": router}, pluginSettings{"router": {Enabled: true}})
+	// Without routing declared, route does not run.
+	undeclared := strings.Replace(router, `capabilities: ["routing"]`, `capabilities: []`, 1)
+	gateway = newExtensionGateway(t, map[string]string{"router": undeclared}, pluginSettings{"router": {Enabled: true}})
 	if _, record := gateway.send(chat("hello")); gateway.last().provider != "Alpha" || len(record.PluginRecords) != 0 {
-		t.Fatalf("an ungranted route ran: %+v", record.PluginRecords)
+		t.Fatalf("an undeclared route ran: %+v", record.PluginRecords)
 	}
 }
 
@@ -296,12 +297,11 @@ export async function beforeForward(ctx) {
 	if entry := hookRecord(t, record, "raw", plugin.HookBeforeForward); !slices.Equal(entry.Effects, []string{"body"}) {
 		t.Fatalf("raw record = %+v", entry)
 	}
-	// A raw body without request.write.raw is left out.
-	gateway = newExtensionGateway(t, map[string]string{"raw": raw}, pluginSettings{
-		"raw": {Enabled: true, Capabilities: []string{plugin.CapabilityRequest}},
-	})
+	// A raw body without request.write.raw declared is left out.
+	undeclared := strings.Replace(raw, `capabilities: ["request.write.raw","request.read"]`, `capabilities: ["request.read"]`, 1)
+	gateway = newExtensionGateway(t, map[string]string{"raw": undeclared}, pluginSettings{"raw": {Enabled: true}})
 	if _, record := gateway.send(chat("hello")); len(record.PluginRecords) != 0 || gjson.GetBytes(gateway.last().body, "metadata").Exists() {
-		t.Fatalf("a raw edit without the grant: %s %+v", gateway.last().body, record.PluginRecords)
+		t.Fatalf("a raw edit without the capability: %s %+v", gateway.last().body, record.PluginRecords)
 	}
 }
 

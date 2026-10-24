@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"testing/fstest"
 	"time"
 	// A case's time zone loads on computers without a zone database too.
 	_ "time/tzdata"
@@ -37,10 +36,14 @@ type fixture struct {
 // responses its requests get, the clock, and the sessions' use of the
 // plugin's attributes. A file of cases may give it to all of them.
 type setup struct {
-	// Config is the plugin's configuration; Capabilities are those granted,
-	// all the plugin asks for when absent.
+	// Config is the plugin's configuration. Capabilities are what earlier
+	// versions granted one by one; a plugin now has every capability it
+	// declares, and the field is read and left alone.
 	Config       json.RawMessage `json:"config"`
 	Capabilities []string        `json:"capabilities"`
+	// Files are the files of the plugin's data directory, its working
+	// directory, when the case starts: text by path.
+	Files map[string]string `json:"files"`
 	// Request is what astrlink.request.info returns.
 	Request *plugin.RequestInfo        `json:"request"`
 	Store   map[string]json.RawMessage `json:"store"`
@@ -85,6 +88,9 @@ func (own setup) within(file setup) setup {
 	if own.MetaValues == nil {
 		own.MetaValues = file.MetaValues
 	}
+	if own.Files == nil {
+		own.Files = file.Files
+	}
 	own.Fetch = append(slices.Clip(own.Fetch), file.Fetch...)
 	return own
 }
@@ -128,6 +134,9 @@ type expectation struct {
 	Match  json.RawMessage            `json:"match"`
 	Error  string                     `json:"error"`
 	Store  map[string]json.RawMessage `json:"store"`
+	// Files are the files of the plugin's data directory after the call:
+	// text by path, null for one that must not be there.
+	Files map[string]*string `json:"files"`
 }
 
 type caseOutcome struct {
@@ -167,7 +176,12 @@ func runTest(ctx context.Context, env Environment, args []string) int {
 	if !ok {
 		return 1
 	}
-	runner := newRunner(project)
+	runner, err := newRunner(project)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "error: %v\n", err)
+		return 1
+	}
+	defer runner.close()
 	outcomes := make([]caseOutcome, 0, len(fixtures))
 	failed := 0
 	for _, each := range fixtures {
@@ -251,10 +265,11 @@ func parseFixtures(data []byte) ([]fixture, error) {
 }
 
 // runner runs cases against one build of the plugin, each in a registry of
-// its own.
+// its own. The build sits in an install directory under root, and each case
+// gets a data directory of its own there.
 type runner struct {
-	key   string
-	files fstest.MapFS
+	key  string
+	root string
 	// settings, the responses and the store are the current case's;
 	// answered counts the requests each response answered.
 	mutex      sync.Mutex
@@ -265,14 +280,21 @@ type runner struct {
 	store      *memoryStore
 }
 
-func newRunner(project *built) *runner {
-	current := &runner{key: project.checked.Meta.Key}
-	current.files = fstest.MapFS{current.key + "/plugin.js": &fstest.MapFile{Data: project.result.Plugin}}
-	if project.result.SourceMap != nil {
-		current.files[current.key+"/plugin.js.map"] = &fstest.MapFile{Data: project.result.SourceMap}
+func newRunner(project *built) (*runner, error) {
+	root, err := os.MkdirTemp("", "astrlink-plugin-test-")
+	if err != nil {
+		return nil, err
 	}
-	return current
+	current := &runner{key: project.checked.Meta.Key, root: root}
+	if _, err := project.result.Write(filepath.Join(root, "plugins", current.key)); err != nil {
+		current.close()
+		return nil, err
+	}
+	return current, nil
 }
+
+// close removes the build and the data directories.
+func (current *runner) close() { _ = os.RemoveAll(current.root) }
 
 // services are what the host serves the plugin in a case.
 func (current *runner) services(each fixture) (plugin.Services, error) {
@@ -315,8 +337,30 @@ func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 		current.store.values[key] = value
 	}
 	current.mutex.Unlock()
+	data, err := os.MkdirTemp(current.root, "data-")
+	if err != nil {
+		outcome.Message = err.Error()
+		return outcome
+	}
+	defer os.RemoveAll(data)
+	for name, text := range each.Files {
+		path := filepath.Join(data, current.key, filepath.FromSlash(name))
+		if rel, err := filepath.Rel(filepath.Join(data, current.key), path); err != nil || strings.HasPrefix(rel, "..") {
+			outcome.Message = fmt.Sprintf("files: %q is outside the data directory", name)
+			return outcome
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			outcome.Message = err.Error()
+			return outcome
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			outcome.Message = err.Error()
+			return outcome
+		}
+	}
 	manager := plugin.NewManager(plugin.ManagerOptions{
-		Builtin: current.files,
+		Dir:     filepath.Join(current.root, "plugins"),
+		DataDir: data,
 		Settings: settingsFunc(func() map[string]plugin.Settings {
 			current.mutex.Lock()
 			defer current.mutex.Unlock()
@@ -394,6 +438,17 @@ func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 		}
 		if !found || !jsonEqual(got, want) {
 			problems = append(problems, fmt.Sprintf("stored %s = %s, want %s", key, orUndefined(got), compact(want)))
+		}
+	}
+	for name, want := range each.Expect.Files {
+		data, err := os.ReadFile(filepath.Join(data, current.key, filepath.FromSlash(name)))
+		switch {
+		case want == nil && err == nil:
+			problems = append(problems, fmt.Sprintf("file %s holds %q, want none", name, data))
+		case want != nil && err != nil:
+			problems = append(problems, fmt.Sprintf("file %s: %v, want %q", name, err, *want))
+		case want != nil && string(data) != *want:
+			problems = append(problems, fmt.Sprintf("file %s holds %q, want %q", name, data, *want))
 		}
 	}
 	if len(problems) > 0 && len(info.Logs) > 0 {

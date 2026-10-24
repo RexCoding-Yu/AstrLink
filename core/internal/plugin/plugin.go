@@ -199,6 +199,8 @@ type Limits struct {
 	// Concurrency is how many calls of one plugin may run JavaScript at the
 	// same time. A call waiting on the host gives up its place meanwhile.
 	Concurrency int
+	// DataBytes is what a plugin's own data directory may hold.
+	DataBytes int64
 }
 
 // DefaultLimits are the limits of the design: 200 ms of JavaScript, 32 MiB,
@@ -210,6 +212,7 @@ func DefaultLimits() Limits {
 		ResultBytes: 64 << 10,
 		ResultNodes: 4096,
 		Concurrency: runtime.GOMAXPROCS(0),
+		DataBytes:   DefaultDataBytes,
 	}
 }
 
@@ -229,6 +232,9 @@ func (limits Limits) withDefaults() Limits {
 	}
 	if limits.Concurrency <= 0 {
 		limits.Concurrency = defaults.Concurrency
+	}
+	if limits.DataBytes <= 0 {
+		limits.DataBytes = defaults.DataBytes
 	}
 	return limits
 }

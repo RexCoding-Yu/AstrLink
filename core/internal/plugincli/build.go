@@ -5,8 +5,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/QuantumNous/astrlink/core/internal/buildinfo"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
@@ -21,7 +23,8 @@ type built struct {
 }
 
 // buildProject builds the project in dir and checks the plugin as the
-// gateway would load it. It reports problems on stderr.
+// gateway would load it, its files in an install directory of their own.
+// It reports problems on stderr.
 func buildProject(env Environment, dir string) (*built, bool) {
 	result, err := pluginbuild.Build(dir)
 	if err != nil {
@@ -31,7 +34,17 @@ func buildProject(env Environment, dir string) (*built, bool) {
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(env.Stderr, "warning: %s\n", warning)
 	}
-	checked, err := plugin.Check(plugin.Source{File: "plugin.js", Text: string(result.Plugin), SourceMap: string(result.SourceMap)})
+	install, err := os.MkdirTemp("", "astrlink-plugin-build-")
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "error: %v\n", err)
+		return nil, false
+	}
+	defer os.RemoveAll(install)
+	if _, err := result.Write(install); err != nil {
+		fmt.Fprintf(env.Stderr, "error: %v\n", err)
+		return nil, false
+	}
+	checked, err := plugin.Check(plugin.Source{File: "plugin.js", Text: string(result.Plugin), SourceMap: string(result.SourceMap), Dir: install})
 	if err != nil {
 		var loadErr *plugin.LoadError
 		if errors.As(err, &loadErr) && loadErr.Line > 0 {
@@ -55,27 +68,16 @@ func reportBuildError(env Environment, err error) {
 	fmt.Fprintf(env.Stderr, "error: %v\n", err)
 }
 
-// writeOutputs writes a build's files into dir.
+// writeOutputs writes a build's files into dir and lists them.
 func writeOutputs(dir string, result *pluginbuild.Result) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	files := map[string][]byte{"plugin.js": result.Plugin, "plugin.js.map": result.SourceMap}
-	if result.Client != nil {
-		files["client.js"] = result.Client
-		files["client.js.map"] = result.ClientMap
+	sums, err := result.Write(dir)
+	if err != nil {
+		return nil, err
 	}
-	var written []string
-	for _, name := range []string{"plugin.js", "plugin.js.map", "client.js", "client.js.map"} {
-		data, ok := files[name]
-		if !ok || data == nil {
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
-			return nil, err
-		}
-		written = append(written, name)
-	}
+	written := slices.Sorted(maps.Keys(sums))
 	return written, nil
 }
 
