@@ -29,6 +29,9 @@ type builtinInternal struct {
 	Model         string
 	Target        contract.ServiceID
 	Native        bool
+	// Status and Error are how the last model call's own record ended.
+	Status contract.RequestStatus
+	Error  *contract.ErrorSummary
 }
 
 func builtinInternalFrom(ctx context.Context) *builtinInternal {
@@ -92,11 +95,25 @@ func (handler *Handler) tryBuiltinTools(writer http.ResponseWriter, request *htt
 	}}
 	err = runner.Run(ctx, writer, string(principal), input, settings.BuiltinTools)
 	if err != nil {
+		summary := errorSummaryFromInference("builtin_tool_failed", err.Error(), false)
 		var streamed *builtintools.StreamFailure
-		if !errors.As(err, &streamed) {
+		var answered *builtinModelHTTPError
+		switch {
+		case errors.As(err, &streamed):
+		case errors.As(err, &answered):
+			// Nothing has reached the client, so it gets the model call's
+			// answer, as without the tool: the reason, and a status that
+			// tells it whether a retry can help. The record ends the same.
+			answered.write(writer)
+			summary = answered.summary
+		default:
 			writeInferenceError(writer, http.StatusBadGateway, "builtin_tool_failed", err.Error(), false, nil)
 		}
-		session.noteFailed(errorSummaryFromInference("builtin_tool_failed", err.Error(), false))
+		if answered != nil && answered.outcome == contract.RequestStatusBlocked {
+			session.noteBlocked(summary)
+		} else {
+			session.noteFailed(summary)
+		}
 		if ctx.Err() != nil {
 			session.noteCancelled()
 		}
@@ -183,6 +200,7 @@ func (handler *Handler) builtinModel(ctx context.Context, original *http.Request
 	// the client's Accept-Encoding would invite.
 	request.Header.Del("Accept-Encoding")
 	capture := &builtinCapture{header: make(http.Header), onEvent: mode.OnEvent}
+	mode.Status, mode.Error = "", nil
 	handler.ServeHTTP(capture, request)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -191,7 +209,16 @@ func (handler *Handler) builtinModel(ctx context.Context, original *http.Request
 		return nil, capture.err
 	}
 	if capture.status >= 400 {
-		return nil, fmt.Errorf("model request failed with HTTP %d", capture.status)
+		// A tool's own model call failing is the tool's failure, never the
+		// answer to the turn.
+		if mode.Native {
+			return nil, fmt.Errorf("model request failed with HTTP %d", capture.status)
+		}
+		failure := &builtinModelHTTPError{status: capture.status, header: capture.header, body: capture.buffer, outcome: mode.Status, summary: errorSummaryFromHTTPStatus(capture.status)}
+		if mode.Error != nil {
+			failure.summary = *mode.Error
+		}
+		return nil, failure
 	}
 	if capture.events {
 		if capture.response == nil {
@@ -204,6 +231,28 @@ func (handler *Handler) builtinModel(ctx context.Context, original *http.Request
 		return nil, fmt.Errorf("invalid model response")
 	}
 	return response, nil
+}
+
+// builtinModelHTTPError is the HTTP error a turn's model call was answered
+// with, kept whole for the client, and how that call's record ended.
+type builtinModelHTTPError struct {
+	status  int
+	header  http.Header
+	body    []byte
+	outcome contract.RequestStatus
+	summary contract.ErrorSummary
+}
+
+func (err *builtinModelHTTPError) Error() string {
+	return fmt.Sprintf("model request failed with HTTP %d", err.status)
+}
+
+// write answers the client the way the model call was answered.
+func (err *builtinModelHTTPError) write(writer http.ResponseWriter) {
+	maps.Copy(writer.Header(), err.header)
+	writer.Header().Del("Content-Length")
+	writer.WriteHeader(err.status)
+	_, _ = writer.Write(err.body)
 }
 
 // builtinServiceImages sends one Images API request to the configured
@@ -392,6 +441,10 @@ func (c *builtinCapture) Write(data []byte) (int, error) {
 	if len(c.buffer) > builtintools.MaxResultBytes {
 		c.err = fmt.Errorf("model response exceeds tool buffer limit")
 		return 0, c.err
+	}
+	// An error answer is kept whole for the client and opens no stream.
+	if c.status >= http.StatusBadRequest {
+		return len(data), nil
 	}
 	if !c.events {
 		// A JSON answer is one object, read whole once it ends.

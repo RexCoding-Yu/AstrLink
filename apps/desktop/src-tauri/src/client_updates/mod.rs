@@ -223,6 +223,18 @@ impl ClientError {
             .any(|marker| detail.contains(marker))
         {
             "network"
+        } else if ["command", "unchanged"].contains(&code)
+            && [
+                "eacces",
+                "eperm",
+                "permission denied",
+                "operation not permitted",
+                "access is denied",
+            ]
+            .iter()
+            .any(|marker| detail.to_ascii_lowercase().contains(marker))
+        {
+            "permission"
         } else {
             code
         };
@@ -486,12 +498,16 @@ fn installation_method(environment: &Environment, id: ClientId, resolved: &Path)
             return InstallMethod::Native;
         }
         ClientId::Codex => {
+            // A standalone package names its binary: bin/codex, or
+            // bin/codex.exe on Windows.
             for directory in resolved.ancestors().skip(1).take(3) {
                 if let Some(raw) = environment.read(&directory.join("codex-package.json")) {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                         if value["variant"] == "codex"
                             && value["layoutVersion"] == 1
-                            && value["entrypoint"] == "bin/codex"
+                            && value["entrypoint"]
+                                .as_str()
+                                .is_some_and(|entry| directory.join(entry) == resolved)
                         {
                             return InstallMethod::Native;
                         }
@@ -756,6 +772,11 @@ fn update_command(
                     "--global".into(),
                     "--prefix".into(),
                     environment.path_arg(prefix),
+                    // Earlier sudo installs can leave ~/.npm owned by root.
+                    // Keep update downloads in this user's separate cache,
+                    // using a Linux path for a client inside WSL.
+                    "--cache".into(),
+                    environment.path_arg(&environment.home.join(".cache/astrlink/npm")),
                     // npm 12 skips install scripts missing from allowScripts
                     // and still exits 0. Claude Code's postinstall replaces
                     // the bin/claude.exe stub with its native binary.
@@ -783,6 +804,71 @@ fn usual_directories(home: &Path) -> [PathBuf; 7] {
         PathBuf::from("/usr/bin"),
         PathBuf::from("/bin"),
     ]
+}
+
+/// The PATH a new terminal gets: the saved system Path, then the user's.
+/// Without the system part there is no usable PATH, so none is returned.
+#[cfg(windows)]
+fn saved_path() -> Option<OsString> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    let mut path = registry_path(
+        HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+    )?;
+    if let Some(user) = registry_path(HKEY_CURRENT_USER, "Environment") {
+        path.push(";");
+        path.push(user);
+    }
+    Some(path)
+}
+
+/// A key's saved Path value. RRF_RT_REG_SZ also reads the usual
+/// REG_EXPAND_SZ value, with its %NAME% references expanded.
+#[cfg(windows)]
+fn registry_path(root: windows_sys::Win32::System::Registry::HKEY, key: &str) -> Option<OsString> {
+    use std::{os::windows::ffi::OsStringExt, ptr};
+    use windows_sys::Win32::{
+        Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS},
+        System::Registry::{RegGetValueW, RRF_RT_REG_SZ},
+    };
+
+    let key: Vec<u16> = key.encode_utf16().chain([0]).collect();
+    let name: Vec<u16> = "Path".encode_utf16().chain([0]).collect();
+    let mut buffer: Vec<u16> = Vec::new();
+    // The first call only asks for the size; the value can also grow before
+    // the next read.
+    for _ in 0..4 {
+        let mut size = u32::try_from(buffer.len() * 2).ok()?;
+        let data: *mut std::ffi::c_void = if buffer.is_empty() {
+            ptr::null_mut()
+        } else {
+            buffer.as_mut_ptr().cast()
+        };
+        // SAFETY: both names are NUL-terminated and outlive the call; `data`
+        // is null or `buffer`, whose length in bytes is `size`.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ,
+                ptr::null_mut(),
+                data,
+                &mut size,
+            )
+        };
+        match status {
+            ERROR_SUCCESS if !buffer.is_empty() => {
+                let value = &buffer[..(size as usize / 2).min(buffer.len())];
+                let end = value.iter().position(|&unit| unit == 0);
+                return Some(OsString::from_wide(&value[..end.unwrap_or(value.len())]));
+            }
+            ERROR_SUCCESS | ERROR_MORE_DATA => buffer = vec![0; size as usize / 2 + 1],
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn load_environment(home: PathBuf, use_system_proxy: bool) -> Result<Environment, ClientError> {
@@ -817,6 +903,12 @@ fn load_environment(home: PathBuf, use_system_proxy: bool) -> Result<Environment
             }
         }
     }
+    // A Windows app keeps the PATH it started with; installers save theirs
+    // for later processes. Read the saved one, as a new terminal does.
+    #[cfg(windows)]
+    if let Some(path) = saved_path() {
+        environment.path = path;
+    }
     let mut paths: Vec<PathBuf> = std::env::split_paths(&environment.path)
         .filter(|p| p.is_absolute())
         .collect();
@@ -826,8 +918,14 @@ fn load_environment(home: PathBuf, use_system_proxy: bool) -> Result<Environment
         }
     }
     #[cfg(windows)]
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        paths.push(PathBuf::from(appdata).join("npm"));
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            paths.push(PathBuf::from(appdata).join("npm"));
+        }
+        // The Codex standalone installer's default command folder.
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            paths.push(PathBuf::from(local).join(r"Programs\OpenAI\Codex\bin"));
+        }
     }
     environment.path = std::env::join_paths(paths).unwrap_or(environment.path);
     #[cfg(target_os = "macos")]

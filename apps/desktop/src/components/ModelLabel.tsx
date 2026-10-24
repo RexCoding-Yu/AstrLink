@@ -1,4 +1,5 @@
 import { ModelBrandIcon } from "@/components/ModelBrandIcon";
+import { Route } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
@@ -7,22 +8,33 @@ import { useT } from "@/i18n";
  * Model identity and its optional requested reasoning level share one line.
  * `redirectedTo` adds the model a routing redirect sent the call to, drawn as
  * "model → redirectedTo" so both names keep their brand marks.
+ * Narrow columns can show the target with the full redirect in its hint.
  */
 export function ModelLabel({
   className,
   fallback = "—",
   model,
   reasoningEffort,
+  redirectDisplay = "inline",
   redirectedTo,
 }: {
   className?: string;
   fallback?: string;
   model: string | null;
   reasoningEffort?: string | null;
+  redirectDisplay?: "inline" | "target";
   redirectedTo?: string;
 }) {
   const t = useT();
-  const label = model ?? fallback;
+  const targetOnly = redirectDisplay === "target" && Boolean(redirectedTo);
+  const displayModel = targetOnly ? redirectedTo : model;
+  const label = displayModel ?? fallback;
+  const redirectHint = redirectedTo
+    ? t("records.modelRedirectNote", {
+        from: model ?? fallback,
+        to: redirectedTo,
+      })
+    : undefined;
   return (
     <span
       className={cn(
@@ -31,11 +43,22 @@ export function ModelLabel({
       )}
       data-redirected-to={redirectedTo || undefined}
     >
-      <ModelBrandIcon model={model} />
-      <span className="min-w-0 truncate" title={label}>
+      <ModelBrandIcon model={displayModel} />
+      <span
+        className="min-w-0 truncate"
+        title={targetOnly ? redirectHint : label}
+      >
         {label}
       </span>
-      {redirectedTo ? (
+      {targetOnly ? (
+        <span
+          className="inline-flex shrink-0 cursor-help text-muted-foreground"
+          title={redirectHint}
+        >
+          <Route animateOnHover={false} aria-hidden="true" className="size-3" />
+          <span className="sr-only">{redirectHint}</span>
+        </span>
+      ) : redirectedTo ? (
         <>
           <span aria-hidden="true" className="shrink-0 text-muted-foreground">
             →

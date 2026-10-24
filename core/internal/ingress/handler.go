@@ -183,7 +183,7 @@ const (
 	DefaultMaxConcurrentInspections    = 16
 	MinMaxConcurrentInspections        = 4
 	MaxMaxConcurrentInspections        = 128
-	DefaultResponseStartTimeoutSeconds = 0
+	DefaultResponseStartTimeoutSeconds = 600
 	MaxResponseStartTimeoutSeconds     = 86400
 )
 
@@ -206,10 +206,10 @@ func ValidateMaxConcurrentInspections(n int) error {
 }
 
 func ValidateResponseStartTimeoutSeconds(n int) error {
-	if n < DefaultResponseStartTimeoutSeconds || n > MaxResponseStartTimeoutSeconds {
+	if n < 0 || n > MaxResponseStartTimeoutSeconds {
 		return fmt.Errorf(
 			"response start timeout must be between %d and %d seconds",
-			DefaultResponseStartTimeoutSeconds,
+			0,
 			MaxResponseStartTimeoutSeconds,
 		)
 	}
@@ -259,7 +259,9 @@ func AccessTokenIDFromContext(ctx context.Context) (contract.AccessTokenID, bool
 }
 
 func New() *Handler {
-	return NewWithDependencies(Dependencies{})
+	return NewWithDependencies(Dependencies{
+		ResponseStartTimeout: time.Duration(DefaultResponseStartTimeoutSeconds) * time.Second,
+	})
 }
 
 // NewProduction requires the complete minimum loopback gate before a resolver
@@ -463,6 +465,9 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		// Never delay or fail the client response on persistence errors.
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 		session.pluginsPersisted()
+		if mode := builtinInternalFrom(request.Context()); mode != nil {
+			mode.Status, mode.Error = session.status, session.errorSummary
+		}
 	}()
 
 	// The entry hooks of plugins may refuse the request before routing.
@@ -1155,6 +1160,7 @@ func (handler *Handler) writeBoundaryError(writer http.ResponseWriter, request *
 // writeRecordedInferenceError writes a local inference-plane error and, when
 // the path maps to a known protocol, persists a failed request record so
 // boundary failures such as invalid_access_token appear in the operator list.
+// A HEAD request only probes the endpoint, so it gets the answer unrecorded.
 func (handler *Handler) writeRecordedInferenceError(
 	writer http.ResponseWriter,
 	request *http.Request,
@@ -1164,7 +1170,7 @@ func (handler *Handler) writeRecordedInferenceError(
 	details []errorDetail,
 ) {
 	classified, ok := classifyFromPath(request)
-	if !ok {
+	if !ok || request.Method == http.MethodHead {
 		writeInferenceError(writer, status, code, message, retryable, details)
 		return
 	}

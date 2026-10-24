@@ -1753,7 +1753,8 @@ func TestInferencePlaneResponseStartTimeoutCanFailOverWithoutCuttingLongSSE(t *t
 func TestInferencePlaneUnlimitedResponseStartTimeoutDoesNotCancelSlowHeaders(t *testing.T) {
 	candidate := validEndpoint(contract.ProtocolOpenAIResponses, false)
 	handler := NewWithDependencies(Dependencies{
-		Resolver: candidateResolver{candidates: []endpoint.Resolved{{Endpoint: candidate}}},
+		Resolver:             candidateResolver{candidates: []endpoint.Resolved{{Endpoint: candidate}}},
+		ResponseStartTimeout: 0,
 		Forwarder: forwarderFunc(func(writer http.ResponseWriter, request *http.Request, _ transport.Target) error {
 			time.Sleep(80 * time.Millisecond)
 			if request.Context().Err() != nil {
@@ -1766,7 +1767,7 @@ func TestInferencePlaneUnlimitedResponseStartTimeoutDoesNotCancelSlowHeaders(t *
 		}),
 	})
 	if handler.responseStartTimeout != 0 {
-		t.Fatalf("default response-start timeout = %s, want unlimited", handler.responseStartTimeout)
+		t.Fatalf("explicit response-start timeout = %s, want unlimited", handler.responseStartTimeout)
 	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(
@@ -2176,6 +2177,24 @@ func TestInferencePlaneRecordsBoundaryAndClassifyErrors(t *testing.T) {
 		}
 	})
 
+	// Codex Desktop probes /v1/responses with a token-less HEAD.
+	t.Run("HEAD probe is answered but not recorded", func(t *testing.T) {
+		store := &memoryRequestRecordStore{}
+		for _, check := range []struct {
+			handler *Handler
+			status  int
+		}{
+			{NewWithDependencies(Dependencies{AccessTokenAuthenticator: rejectToken, RequestRecords: store}), http.StatusUnauthorized},
+			{NewWithDependencies(Dependencies{RequestRecords: store}), http.StatusMethodNotAllowed},
+		} {
+			response := httptest.NewRecorder()
+			check.handler.ServeHTTP(response, httptest.NewRequest(http.MethodHead, "/v1/responses", nil))
+			if response.Code != check.status || len(store.records) != 0 {
+				t.Fatalf("status=%d records=%#v", response.Code, store.records)
+			}
+		}
+	})
+
 	t.Run("captures error response when audit is enabled", func(t *testing.T) {
 		store := &memoryRequestRecordStore{}
 		blobs := &memoryAuditBlobs{}
@@ -2328,11 +2347,10 @@ func TestValidateMaxConcurrentInspectionsRejectsOutOfRange(t *testing.T) {
 }
 
 func TestValidateResponseStartTimeoutSecondsAcceptsUnlimitedAndDayBound(t *testing.T) {
-	if err := ValidateResponseStartTimeoutSeconds(DefaultResponseStartTimeoutSeconds); err != nil {
-		t.Fatalf("default: %v", err)
-	}
-	if err := ValidateResponseStartTimeoutSeconds(MaxResponseStartTimeoutSeconds); err != nil {
-		t.Fatalf("max: %v", err)
+	for _, seconds := range []int{0, 1, 90, DefaultResponseStartTimeoutSeconds, MaxResponseStartTimeoutSeconds} {
+		if err := ValidateResponseStartTimeoutSeconds(seconds); err != nil {
+			t.Fatalf("valid timeout %d: %v", seconds, err)
+		}
 	}
 	if err := ValidateResponseStartTimeoutSeconds(-1); err == nil {
 		t.Fatal("expected error for -1")

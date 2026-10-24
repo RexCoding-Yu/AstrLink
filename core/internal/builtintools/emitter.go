@@ -12,6 +12,7 @@ type emitter struct {
 	writer      http.ResponseWriter
 	streaming   bool
 	sequence    int
+	started     bool
 	response    Object
 	output      []any
 	usage       Object
@@ -23,6 +24,9 @@ func newEmitter(writer http.ResponseWriter, model string, stream bool) *emitter 
 func (e *emitter) event(kind string, fields Object) error {
 	if !e.streaming {
 		return nil
+	}
+	if err := e.start(); err != nil {
+		return err
 	}
 	if fields == nil {
 		fields = Object{}
@@ -38,10 +42,14 @@ func (e *emitter) event(kind string, fields Object) error {
 	}
 	return err
 }
+
+// start opens the public stream once, before its first event. Until then a
+// failed model call can still answer with its own HTTP status.
 func (e *emitter) start() error {
-	if !e.streaming {
+	if !e.streaming || e.started {
 		return nil
 	}
+	e.started = true
 	e.writer.Header().Set("Content-Type", "text/event-stream")
 	e.writer.Header().Set("Cache-Control", "no-cache")
 	if err := e.event("response.created", Object{"response": e.response}); err != nil {
@@ -130,6 +138,10 @@ func (e *emitter) beginRound() { e.liveIndexes = map[int]int{}; e.liveItems = ma
 func (e *emitter) liveEvent(event Object, sources []Object) error {
 	if !e.streaming {
 		return nil
+	}
+	// The model's stream has begun, so the public one begins with it.
+	if err := e.start(); err != nil {
+		return err
 	}
 	kind := String(event["type"])
 	number, ok := event["output_index"].(float64)

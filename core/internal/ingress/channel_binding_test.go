@@ -90,8 +90,7 @@ func TestChannelStickinessReusesConvoFingerprintAndReleases(t *testing.T) {
 	if audit.Events[0].Action != "hit" || audit.Events[0].Source != "fingerprint" {
 		t.Fatalf("convo evidence %+v", audit.Events)
 	}
-	// Even with failover disabled, selection can still prefer B; it cannot
-	// switch to A if B's attempt then fails.
+	// With failover disabled, the bound provider B uses its retry budget.
 	settings.AllowUnmatchedFailover = false
 	store.UpdateRoutingSettings(ctx, settings)
 	failB = true
@@ -99,7 +98,7 @@ func TestChannelStickinessReusesConvoFingerprintAndReleases(t *testing.T) {
 	if status := serve(follow); status != 503 {
 		t.Fatalf("disabled failover %d", status)
 	}
-	if !reflect.DeepEqual(attempts, []string{"b.example"}) {
+	if !reflect.DeepEqual(attempts, []string{"b.example", "b.example"}) {
 		t.Fatalf("bypassed failover policy %v", attempts)
 	}
 	audit, _ = store.GetChannelBindingAudit(ctx, id, 0)

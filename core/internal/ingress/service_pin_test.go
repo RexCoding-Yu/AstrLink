@@ -119,9 +119,9 @@ func TestNamedServiceServesTheRequestAlone(t *testing.T) {
 		t.Fatalf("unpinned follow-up: status %d hosts %v", response.Code, hosts)
 	}
 
-	// A failing named provider fails the request; the backup stays unused.
+	// A failing named provider exhausts its retries before returning the error.
 	failNewAPI = true
-	if response := serve("POST", "/v1/chat/completions", "service_newapi", opening); response.Code != 503 || strings.Join(hosts, ",") != "newapi.example" {
+	if response := serve("POST", "/v1/chat/completions", "service_newapi", opening); response.Code != 503 || !reflect.DeepEqual(hosts, []string{"newapi.example", "newapi.example"}) {
 		t.Fatalf("failed pin: status %d hosts %v body %s", response.Code, hosts, response.Body)
 	}
 

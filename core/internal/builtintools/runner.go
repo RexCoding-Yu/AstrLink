@@ -185,11 +185,8 @@ func (runner Runner) Run(ctx context.Context, writer http.ResponseWriter, princi
 	streaming, _ := original["stream"].(bool)
 	emitter := newEmitter(writer, String(original["model"]), streaming)
 	emitter.response["tools"] = original["tools"]
-	if err := emitter.start(); err != nil {
-		return err
-	}
 	fail := func(err error) error {
-		if streaming {
+		if emitter.started {
 			_ = emitter.fail(err)
 			return &StreamFailure{Cause: err}
 		}

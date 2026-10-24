@@ -1,6 +1,6 @@
 module github.com/QuantumNous/astrlink/core
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/Calcium-Ion/moejs v0.1.0-alpha.7

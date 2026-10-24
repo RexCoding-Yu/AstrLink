@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -180,6 +181,33 @@ func TestToolFailureLimitAndCancellation(t *testing.T) {
 	before := count
 	if err := runner.Run(ctx, httptest.NewRecorder(), "p", input, settings); err == nil || count != before {
 		t.Fatal("cancelled request executed tool")
+	}
+}
+
+func TestModelFailureBeforeItsStreamLeavesTheAnswerToTheCaller(t *testing.T) {
+	failure := errors.New("model request failed with HTTP 400")
+	settings := &contract.BuiltinTools{WebSearch: toolConfig()}
+	input := Object{"model": "main", "input": "Search", "stream": true, "tools": []any{Object{"type": "web_search"}}}
+	runner := Runner{Store: &Store{}, StreamModel: func(context.Context, Object, func(Object) error) (Object, error) {
+		return nil, failure
+	}}
+	w := httptest.NewRecorder()
+	err := runner.Run(context.Background(), w, "p", input, settings)
+	var streamed *StreamFailure
+	if !errors.Is(err, failure) || errors.As(err, &streamed) || len(w.Header()) != 0 || w.Body.Len() != 0 {
+		t.Fatal(err, w.Header(), w.Body.String())
+	}
+	// Once the model's stream has begun, the failure ends the public one.
+	runner.StreamModel = func(_ context.Context, _ Object, emit func(Object) error) (Object, error) {
+		if err := emit(Object{"type": "response.created", "response": Object{"status": "in_progress"}}); err != nil {
+			return nil, err
+		}
+		return nil, failure
+	}
+	w = httptest.NewRecorder()
+	err = runner.Run(context.Background(), w, "p", input, settings)
+	if !errors.As(err, &streamed) || !strings.HasPrefix(w.Body.String(), "event: response.created\n") || !strings.Contains(w.Body.String(), "event: response.failed\n") {
+		t.Fatal(err, w.Body.String())
 	}
 }
 

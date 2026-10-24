@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -36,10 +37,12 @@ func TestRecoveryOrderingAndRules(t *testing.T) {
 		limit   int
 		want    []int
 	}{
-		{"once per service", contract.FailoverOnly, contract.FailureRetryAndFailover, true, 6, []int{0, 1, 2}},
-		{"once cannot retry-only", contract.FailoverOnly, contract.FailureRetry, true, 6, []int{0}},
-		{"once with switching off", contract.FailoverOnly, contract.FailureRetryAndFailover, false, 6, []int{0}},
-		{"once respects budget", contract.FailoverOnly, contract.FailureRetryAndFailover, true, 2, []int{0, 1}},
+		{"ABC retries last provider", contract.FailoverOnly, contract.FailureRetryAndFailover, true, 6, []int{0, 1, 2, 2}},
+		{"ABC honors retry-only", contract.FailoverOnly, contract.FailureRetry, true, 6, []int{0, 0}},
+		{"ABC with switching off", contract.FailoverOnly, contract.FailureRetryAndFailover, false, 6, []int{0, 0}},
+		{"ABC respects budget", contract.FailoverOnly, contract.FailureRetryAndFailover, true, 2, []int{0, 1}},
+		{"ABC honors switch-only", contract.FailoverOnly, contract.FailureFailover, true, 6, []int{0, 1, 2}},
+		{"ABC honors stop", contract.FailoverOnly, contract.FailureStop, true, 6, []int{0}},
 		{"retry first", contract.RetryFirst, contract.FailureRetryAndFailover, true, 6, []int{0, 0, 1, 1, 2, 2}},
 		{"failover first", contract.FailoverFirst, contract.FailureRetryAndFailover, true, 6, []int{0, 1, 2, 0, 1, 2}},
 		{"only retry overrides order", contract.FailoverFirst, contract.FailureRetry, true, 6, []int{0, 0}},
@@ -119,6 +122,50 @@ func TestRecoverySkippedCandidatesAndRetryAfter(t *testing.T) {
 	}
 }
 
+func TestFailoverOnlyDoesNotRetryEarlierProvider(t *testing.T) {
+	policy := contract.DefaultFailurePolicy()
+	policy.InitialDelayMS = 0
+	schedule := newRecoverySchedule(recoveryCandidates(3, policy, contract.FailoverPolicy{Enabled: true, Strategy: contract.FailoverOnly, MaxAttempts: 6}), true)
+	for index, action := range []contract.FailureAction{contract.FailureRetryAndFailover, contract.FailureFailover} {
+		i, ok := schedule.next(context.Background())
+		if !ok || i != index {
+			t.Fatalf("next = %d/%v, want %d", i, ok, index)
+		}
+		schedule.started(i)
+		if !schedule.recover(i, action, 0) {
+			t.Fatal("next provider unavailable")
+		}
+	}
+	// C fails preparation after B returned an error that only allows switching.
+	if i, ok := schedule.next(context.Background()); !ok || i != 2 {
+		t.Fatalf("next = %d/%v, want C", i, ok)
+	}
+	if i, ok := schedule.next(context.Background()); ok {
+		t.Fatalf("retried earlier provider %d", i)
+	}
+}
+
+func TestFailoverOnlyFallbackBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		policy := contract.DefaultFailurePolicy()
+		policy.InitialDelayMS, policy.MaxDelayMS = 500, 1000
+		schedule := newRecoverySchedule(recoveryCandidates(1, policy, contract.FailoverPolicy{Enabled: true, Strategy: contract.FailoverOnly, MaxAttempts: 6}), true)
+		i, _ := schedule.next(context.Background())
+		schedule.started(i)
+		if !schedule.recover(i, contract.FailureRetryAndFailover, 750*time.Millisecond) {
+			t.Fatal("fallback retry refused")
+		}
+		start := time.Now()
+		if i, ok := schedule.next(context.Background()); !ok || i != 0 || time.Since(start) != 750*time.Millisecond {
+			t.Fatalf("retry = %d/%v after %s", i, ok, time.Since(start))
+		}
+		schedule.started(0)
+		if schedule.recover(0, contract.FailureRetryAndFailover, 2*time.Second) || schedule.stopReason != "retry_after_limit" {
+			t.Fatalf("long Retry-After accepted: stop=%s", schedule.stopReason)
+		}
+	})
+}
+
 func TestRecoveryCancelDuringBackoff(t *testing.T) {
 	policy := contract.DefaultFailurePolicy()
 	// A backoff far longer than any scheduling stall keeps the elapsed check
@@ -146,7 +193,7 @@ func TestHTTPRecoveryPreservesResponseBoundary(t *testing.T) {
 		final  int
 	}{
 		{"429 once then backup", 429, contract.FailureRetryAndFailover, contract.FailoverOnly, []string{"A.example", "B.example"}, 200},
-		{"418 retry-only stops in ABC", 418, contract.FailureRetry, contract.FailoverOnly, []string{"A.example"}, 418},
+		{"418 retry-only in ABC", 418, contract.FailureRetry, contract.FailoverOnly, []string{"A.example", "A.example"}, 418},
 		{"429 retry then backup", 429, contract.FailureRetryAndFailover, contract.RetryFirst, []string{"A.example", "A.example", "B.example"}, 200},
 		{"503 backup first", 503, contract.FailureRetryAndFailover, contract.FailoverFirst, []string{"A.example", "B.example"}, 200},
 		{"401 backup only", 401, contract.FailureFailover, contract.RetryFirst, []string{"A.example", "B.example"}, 200},

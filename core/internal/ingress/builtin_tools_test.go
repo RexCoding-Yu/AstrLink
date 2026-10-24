@@ -203,6 +203,80 @@ func TestBuiltinToolsGatewayHTTPAndWebSocket(t *testing.T) {
 	}
 }
 
+// A rejected turn is answered as without the tool, so the client sees the
+// reason and does not retry a request that cannot pass.
+func TestBuiltinToolsPassARejectedTurnThrough(t *testing.T) {
+	const problem = `{"type":"error","error":{"type":"invalid_request_error","message":"input_schema does not support oneOf, allOf, or anyOf at the top level"}}`
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, problem)
+	}))
+	defer upstream.Close()
+	main := wsCandidate(upstream.URL)
+	main.Service.ID = "service_main"
+	main.Service.Models = []string{"main"}
+	main.Service.ResponsesWebSocketEnabled = nil
+	for _, check := range []struct {
+		name       string
+		candidates []endpoint.Resolved
+		calls      int32
+	}{
+		{"provider rejects", []endpoint.Resolved{main}, 1},
+		{"no provider", nil, 0},
+	} {
+		for _, stream := range []bool{false, true} {
+			answer := func(tool bool) (*httptest.ResponseRecorder, []contract.RequestRecord) {
+				store := newRedirectSettingsStore()
+				store.settings.BuiltinTools = &contract.BuiltinTools{WebSearch: contract.BuiltinTool{Enabled: tool, Backend: "upstream", ServiceID: "service_search", Model: "search"}}
+				handler := NewWithDependencies(Dependencies{Resolver: candidateResolver{candidates: check.candidates}, RequestRecords: store})
+				input := builtintools.Object{"model": "main", "input": "Find a fact", "tools": []any{builtintools.Object{"type": "web_search"}}, "stream": stream}
+				w := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(builtintools.Text(input)))
+				request.Header.Set("Content-Type", "application/json")
+				handler.ServeHTTP(w, request)
+				return w, store.records.records
+			}
+			// The tool's model call always streams, which AstrLink's own
+			// messages can mention; the code is the same.
+			code := func(w *httptest.ResponseRecorder) string {
+				var body struct {
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				_ = json.Unmarshal(w.Body.Bytes(), &body)
+				return body.Error.Code
+			}
+			calls.Store(0)
+			native, nativeRecords := answer(false)
+			w, records := answer(true)
+			if w.Code < 400 || w.Code != native.Code || code(w) != code(native) || w.Header().Get("Content-Type") != native.Header().Get("Content-Type") ||
+				(check.calls > 0 && w.Body.String() != problem) || calls.Load() != 2*check.calls {
+				t.Fatal(check.name, stream, w.Code, w.Body.String(), native.Code, native.Body.String(), calls.Load())
+			}
+			// The client's record and its model call's both end as the
+			// call would have without the tool.
+			if len(nativeRecords) != 1 || len(records) != 2 {
+				t.Fatal(check.name, stream, nativeRecords, records)
+			}
+			want := nativeRecords[0]
+			for _, record := range records {
+				if record.Status != want.Status || record.HTTPStatus == nil || *record.HTTPStatus != w.Code ||
+					record.Error == nil || want.Error == nil || record.Error.Code != want.Error.Code || record.Error.Category != want.Error.Category ||
+					(check.calls > 0 && record.Error.Message != want.Error.Message) {
+					t.Fatalf("%s stream=%v record %+v error %+v, want %+v", check.name, stream, record, record.Error, want.Error)
+				}
+			}
+			if check.calls > 0 && (!strings.Contains(want.Error.Message, "input_schema does not support") || records[0].Error.Upstream == nil || records[1].Error.Upstream == nil) {
+				t.Fatal(check.name, want.Error)
+			}
+		}
+	}
+}
+
 func builtinMessage(text string) builtintools.Object {
 	return builtintools.Object{"type": "message", "id": builtintools.ID("msg_"), "role": "assistant", "status": "completed", "content": []any{builtintools.Object{"type": "output_text", "text": text, "annotations": []any{}}}}
 }

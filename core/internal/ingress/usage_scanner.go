@@ -50,6 +50,10 @@ type usageScanner struct {
 	// markers reads the marker lines of the reply's visible text for the
 	// plugins; nil when none binds sessions by marker.
 	markers *replyMarkers
+	// output is what the response produces; outputChanged is set when the
+	// stream moved it on and cleared once it was stored.
+	output        contract.OutputActivity
+	outputChanged bool
 }
 
 func newUsageScanner(protocol contract.ProtocolID, streaming bool) *usageScanner {
@@ -212,6 +216,9 @@ func (scanner *usageScanner) parseNonStreaming(body []byte) {
 	if len(body) == 0 {
 		return
 	}
+	if output := outputFromBody(scanner.protocol, body); output != nil {
+		scanner.output = *output
+	}
 	scanner.parseEventJSON(body)
 	scanner.complete = scanner.usage != nil
 }
@@ -235,6 +242,7 @@ func (scanner *usageScanner) parseEventJSON(payload []byte) {
 		}
 	}
 	if scanner.streaming {
+		scanner.noteStreamPart(classifyStreamPart(scanner.protocol, payload))
 		var eventType string
 		_ = json.Unmarshal(document["type"], &eventType)
 		switch streamEventOutcome(scanner.protocol, eventType) {

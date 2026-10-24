@@ -58,6 +58,9 @@ type pluginGateway struct {
 	encoding []string
 	reply    string
 	header   http.Header
+	// answer, when set, writes the lookup gateway's upstream reply from
+	// what the upstream was sent.
+	answer func(sent []byte) string
 }
 
 func newPluginGateway(t *testing.T, protocol contract.ProtocolID, path string, streaming bool) *pluginGateway {
@@ -294,9 +297,13 @@ func newLookupGateway(t *testing.T, filters ...privacy.Filter) *pluginGateway {
 			gateway.mutex.Lock()
 			gateway.sent = append(gateway.sent, body)
 			gateway.mutex.Unlock()
+			reply := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+			if gateway.answer != nil {
+				reply = gateway.answer(body)
+			}
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusOK)
-			_, err := writer.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			_, err := writer.Write([]byte(reply))
 			return err
 		}),
 	}
@@ -391,8 +398,17 @@ func TestTheLookupOutletAnswersAShellOnThisMachineOnly(t *testing.T) {
 }
 
 func TestALookupAsksWithThePlaceholderTheUpstreamGot(t *testing.T) {
-	filter := testPrivacyEngine(t, privacy.Policy{Enabled: true, Mode: privacy.ModeRegex, Action: privacy.ActionRedact}, nil)
+	filter := testPrivacyEngine(t, privacy.Policy{
+		Enabled: true, Mode: privacy.ModeRegex, Action: privacy.ActionRedact, ResponseRestore: true, RestoreToolArguments: true,
+	}, nil)
 	gateway := newLookupGateway(t, filter)
+	// The model runs the usage it was given: its command reaches the client
+	// with what the privacy check replaced put back.
+	gateway.answer = func(sent []byte) string {
+		command, _ := json.Marshal(gjson.GetBytes(sent, "system").String())
+		return `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":` +
+			string(command) + `}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`
+	}
 	body := `{"model":"claude","max_tokens":16,"tools":[{"name":"Bash","input_schema":{"type":"object"}}],` +
 		`"metadata":{"user_id":"user_` + strings.Repeat("a", 64) + `_account_00000000-0000-0000-0000-000000000001_session_11111111-2222-3333-4444-555555555555"},` +
 		`"messages":[{"role":"user","content":"给 alice@example.com 发分页的说明"}]}`
@@ -409,14 +425,14 @@ func TestALookupAsksWithThePlaceholderTheUpstreamGot(t *testing.T) {
 	sent := gateway.sent[len(gateway.sent)-1]
 	gateway.mutex.Unlock()
 	placeholder := emailPlaceholderFromBody(t, sent)
-	system := gjson.GetBytes(sent, "system").String()
-	at := strings.Index(system, "mk-")
+	command := gjson.Get(recorder.Body.String(), "content.0.input.command").String()
+	at := strings.Index(command, "Bearer mk-")
 	if at < 0 {
-		t.Fatalf("no credential in %s", system)
+		t.Fatalf("no credential in the command %q", command)
 	}
 	lookup := httptest.NewRequest(http.MethodGet, "/tools/finder/search?query="+url.QueryEscape("alice@example.com 的分页"), nil)
 	lookup.RemoteAddr = "127.0.0.1:5000"
-	lookup.Header.Set("Authorization", "Bearer "+system[at:at+35])
+	lookup.Header.Set("Authorization", command[at:at+len("Bearer ")+35])
 	answer := httptest.NewRecorder()
 	gateway.handler.ServeHTTP(answer, lookup)
 	// The plugin is asked what the upstream was sent, so the memory it wrote

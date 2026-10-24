@@ -90,7 +90,7 @@ func (schedule *recoverySchedule) next(ctx context.Context) (int, bool) {
 				break
 			}
 		}
-		if schedule.nextIndex < 0 && schedule.policy.Strategy == contract.FailoverFirst {
+		if schedule.nextIndex < 0 && (schedule.policy.Strategy == contract.FailoverFirst || schedule.policy.Strategy == contract.FailoverOnly) {
 			for next := range schedule.counts {
 				if schedule.retryable[next] {
 					schedule.nextIndex = next
@@ -103,6 +103,11 @@ func (schedule *recoverySchedule) next(ctx context.Context) (int, bool) {
 }
 
 func (schedule *recoverySchedule) started(index int) {
+	if schedule.policy.Strategy == contract.FailoverOnly {
+		// ABC can return to the last attempted provider if every later candidate
+		// fails local preparation. Reaching another upstream replaces that fallback.
+		clear(schedule.retryable)
+	}
 	schedule.total++
 	if schedule.repairing {
 		return
@@ -152,7 +157,7 @@ func (schedule *recoverySchedule) recover(index int, action contract.FailureActi
 	schedule.delay = 0
 	schedule.stopReason = "error_rule"
 	policy := failurePolicy(schedule.candidates[index])
-	schedule.retryable[index] = !schedule.excluded[index] && schedule.policy.Strategy != contract.FailoverOnly && action.AllowsRetry() && schedule.counts[index] <= policy.MaxRetries
+	schedule.retryable[index] = !schedule.excluded[index] && action.AllowsRetry() && schedule.counts[index] <= policy.MaxRetries
 	if schedule.total >= schedule.policy.MaxAttempts {
 		schedule.stopReason = "attempt_limit"
 		return false
