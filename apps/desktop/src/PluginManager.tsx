@@ -15,7 +15,6 @@ import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -176,8 +175,6 @@ export function PluginManager({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [enabling, setEnabling] = useState<PluginDetail | null>(null);
-  const [grants, setGrants] = useState<string[]>([]);
   // A change that grants a plugin more waits for the user: in the
   // desktop's confirmation window (awaiting), or in the web console's own
   // dialog (confirming). afterApproval finishes what the change began, such
@@ -838,25 +835,17 @@ export function PluginManager({
                   void apply(() => save(detail.key, { enabled: false }))
                 }
                 onEnable={() => {
-                  if (isWebEdition) {
-                    // The web console has no confirmation window: its own
-                    // dialog confirms what enabling grants.
-                    setGrants(detail.requested_capabilities);
-                    setEnabling(detail);
-                    return;
-                  }
-                  // The confirmation window lists the capabilities, each
-                  // one the user may untick.
-                  void apply(() =>
-                    save(detail.key, {
-                      enabled: true,
-                      granted_capabilities: detail.requested_capabilities,
-                    }),
-                  ).then((enabled) => {
-                    if (!enabled) return;
-                    setTab("overview");
-                    setLinkPlay((count) => count + 1);
-                  });
+                  // A plugin is trusted code: what it declares the install
+                  // review listed, and enabling it grants all of that.
+                  void apply(() => save(detail.key, { enabled: true })).then(
+                    (enabled) => {
+                      if (!enabled) return;
+                      setTab("overview");
+                      setLinkPlay((count) => count + 1);
+                      if (detail.hooks.includes("describeStatus"))
+                        void loadStatus(detail.key);
+                    },
+                  );
                 }}
                 awaiting={awaiting === detail.key}
                 onOpenApproval={() => void openPluginApproval()}
@@ -882,42 +871,6 @@ export function PluginManager({
           </Panel>
         </SplitWorkspace>
       ) : null}
-
-      <ConfirmDialog
-        confirmDisabled={busy}
-        confirmLabel={t("plugins.enableDialog.confirm")}
-        description={
-          enabling ? (
-            <EnableSummary
-              detail={enabling}
-              grants={grants}
-              onGrants={setGrants}
-            />
-          ) : null
-        }
-        onCancel={() => setEnabling(null)}
-        onConfirm={() => {
-          const target = enabling;
-          setEnabling(null);
-          if (target)
-            void apply(() =>
-              save(
-                target.key,
-                { enabled: true, granted_capabilities: grants },
-                true,
-              ),
-            ).then((enabled) => {
-              if (!enabled) return;
-              // Show the plugin joining AstrLink.
-              setTab("overview");
-              setLinkPlay((count) => count + 1);
-              if (target.hooks.includes("describeStatus"))
-                void loadStatus(target.key);
-            });
-        }}
-        open={enabling !== null}
-        title={t("plugins.enableDialog.title", { name: enabling?.name ?? "" })}
-      />
       {installing ? (
         <PluginInstallDialog
           host={host}
@@ -1605,86 +1558,6 @@ function StatusTab({
         </section>
       ) : null}
       {stats ? <DailyEffects detail={detail} stats={stats} /> : null}
-    </div>
-  );
-}
-
-/** What enabling grants: the capabilities, each one the user may untick, the plugin's notice and the attributes it registers. */
-function EnableSummary({
-  detail,
-  grants,
-  onGrants,
-}: {
-  detail: PluginDetail;
-  grants: string[];
-  onGrants: (grants: string[]) => void;
-}) {
-  const t = useT();
-  return (
-    <div
-      className="grid gap-3 text-sm text-foreground"
-      data-testid="plugin-enable-summary"
-    >
-      {detail.requested_capabilities.length > 0 ? (
-        <fieldset className="grid gap-1.5">
-          <legend className="mb-1 text-xs text-muted-foreground">
-            {t("plugins.enableDialog.capabilities")}
-          </legend>
-          {detail.requested_capabilities.map((capability) => (
-            <Label
-              className="flex items-center gap-2 text-sm font-normal"
-              key={capability}
-            >
-              <Checkbox
-                checked={grants.includes(capability)}
-                onCheckedChange={(checked) =>
-                  onGrants(
-                    checked === true
-                      ? [...grants, capability]
-                      : grants.filter((item) => item !== capability),
-                  )
-                }
-              />
-              {capabilityLabel(capability, t)}
-            </Label>
-          ))}
-        </fieldset>
-      ) : null}
-      {detail.network_purpose ? (
-        <p className="text-xs">
-          {t("plugins.enableDialog.purpose", {
-            purpose: detail.network_purpose,
-          })}
-        </p>
-      ) : null}
-      {detail.notice ? (
-        <div className="grid gap-1">
-          <span className="text-xs font-medium">
-            {t("plugins.enableDialog.notice")}
-          </span>
-          <p className="text-xs leading-5 whitespace-pre-wrap">
-            {detail.notice}
-          </p>
-        </div>
-      ) : null}
-      {detail.metadata.length > 0 ? (
-        <div className="grid gap-1">
-          <span className="text-xs font-medium">
-            {t("plugins.enableDialog.metadata")}
-          </span>
-          <ul className="grid gap-0.5 text-xs">
-            {detail.metadata.map((attribute) => (
-              <li key={attribute.key}>
-                {attribute.label}{" "}
-                <code className="font-mono">({attribute.key})</code>
-                {attribute.marker
-                  ? ` · ${t("plugins.enableDialog.marker", { marker: attribute.marker })}`
-                  : ""}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
     </div>
   );
 }

@@ -491,6 +491,8 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/workspaces`, "DELETE")(a);
       case "clear_values":
         return route(`${plugin}/values`, "DELETE")(a);
+      case "clear_files":
+        return route(`${plugin}/files`, "DELETE")(a);
       case "revoke_lookups":
         return route(`${plugin}/lookup-credentials`, "DELETE")(a);
       case "save_credential":

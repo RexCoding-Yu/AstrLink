@@ -4844,13 +4844,10 @@
       }
     },
     "enableDialog": {
-      "title": "Enable “{{name}}”",
-      "capabilities": "The plugin asks for these capabilities. The ones you untick are not granted:",
       "purpose": "Network use: {{purpose}}",
       "notice": "From the plugin",
       "metadata": "Attributes it registers",
-      "marker": "session marker {{marker}}",
-      "confirm": "Enable"
+      "marker": "session marker {{marker}}"
     },
     "blocked": "The gateway is not running",
     "blockedHint": "Plugins load once the gateway is ready. If it has stopped, the overview shows why.",
@@ -4986,6 +4983,11 @@
           "label": "Lookup credentials",
           "what": "What each session runs lookups and reports with, kept as hashes.",
           "retention": "Void after 24 hours without a request, or a restart"
+        },
+        "plugin_files": {
+          "label": "Plugin files",
+          "what": "Files the plugin reads and writes in its own data directory through node:fs. They stay when the plugin is removed, and a reinstall picks them up.",
+          "retention": "Until cleared"
         }
       },
       "holds": {
@@ -4994,16 +4996,20 @@
       },
       "count_one": "{{count}} item",
       "count_other": "{{count}} items",
+      "files_one": "{{count}} file · {{size}}",
+      "files_other": "{{count}} files · {{size}}",
       "clear": "Clear",
       "clearTitle": {
         "workspaces": "Clear the workspace bindings?",
         "values": "Clear the plugin storage?",
-        "lookups": "Revoke the lookup credentials?"
+        "lookups": "Revoke the lookup credentials?",
+        "files": "Clear the plugin's files?"
       },
       "clearConfirm": {
         "workspaces": "New sessions no longer start with the project of their working directory and are asked again in their first turn. Sessions already bound keep their binding.",
         "values": "Clears the plugin's own small data, such as the server ids of projects. The plugin gets it again when it needs it; the memory itself is untouched.",
-        "lookups": "The plugin's lookup credentials stop working at once, along with the commands the model already has. Each session's next request carries a new one; its system prompt changes, so its prompt cache is written once more."
+        "lookups": "The plugin's lookup credentials stop working at once, along with the commands the model already has. Each session's next request carries a new one; its system prompt changes, so its prompt cache is written once more.",
+        "files": "Deletes every file in the plugin's data directory; the plugin starts over the next time it needs them. The files it carries beside its code stay."
       },
       "clearFailed": "Couldn't clear it.",
       "revoke": "Revoke",
@@ -5012,7 +5018,8 @@
       "places": {
         "database": "AstrLink database",
         "memory": "Memory only",
-        "records": "Request records"
+        "records": "Request records",
+        "disk": "Plugin directory"
       },
       "retention": " Kept: {{retention}}.",
       "declared": "{{label}} ({{retention}})"

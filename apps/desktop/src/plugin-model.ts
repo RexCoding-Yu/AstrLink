@@ -379,16 +379,19 @@ export const PLUGIN_HOST_STORAGE = [
   "resident_block",
   "plugin_values",
   "lookup_credentials",
+  "plugin_files",
 ] as const;
 export type PluginHostStorageKind = (typeof PLUGIN_HOST_STORAGE)[number];
 
 export interface PluginHostStorage {
   kind: PluginHostStorageKind;
   count?: number;
+  /** The size of what is kept, where the host measures it. */
+  bytes?: number;
 }
 
 /** What the plugin page clears of what the host keeps for a plugin. */
-export type PluginClearTarget = "workspaces" | "values" | "lookups";
+export type PluginClearTarget = "workspaces" | "values" | "lookups" | "files";
 
 /** The host's own settings a plugin may place in its form. */
 export const HOST_SETTINGS = [
@@ -1498,6 +1501,7 @@ export function parsePluginDetail(value: unknown): PluginDetail {
         defined({
           kind: kind as PluginHostStorageKind,
           count: plugin.optionalInteger(kept.count, `${path}.count`),
+          bytes: plugin.optionalInteger(kept.bytes, `${path}.bytes`),
         }),
       ];
     }),

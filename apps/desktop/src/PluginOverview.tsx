@@ -33,6 +33,7 @@ import {
 } from "./format-compact-number";
 import { useT } from "./i18n";
 import { EffectCard } from "./PluginEffects";
+import { formatSize } from "./PluginInstallReview";
 import {
   plaintextOrigin,
   settingValue,
@@ -299,6 +300,7 @@ const clearable: Partial<Record<PluginHostStorage["kind"], PluginClearTarget>> =
     workspace_bindings: "workspaces",
     plugin_values: "values",
     lookup_credentials: "lookups",
+    plugin_files: "files",
   };
 
 /** What holds memory text of what the host keeps. */
@@ -306,7 +308,7 @@ const holdsMemory: Partial<Record<PluginHostStorage["kind"], boolean>> = {
   resident_block: true,
 };
 
-type Place = "database" | "memory" | "records";
+type Place = "database" | "disk" | "memory" | "records";
 
 /** Where each thing is kept, which the card groups them by. */
 const places: Record<PluginHostStorage["kind"], Place> = {
@@ -317,9 +319,10 @@ const places: Record<PluginHostStorage["kind"], Place> = {
   resident_block: "memory",
   lookup_credentials: "memory",
   request_records: "records",
+  plugin_files: "disk",
 };
 
-const placeOrder: Place[] = ["database", "memory", "records"];
+const placeOrder: Place[] = ["database", "disk", "memory", "records"];
 
 /**
  * What is kept for the plugin, a column for each place it is kept in, with
@@ -393,7 +396,12 @@ function StorageCard({
                     <span className="flex shrink-0 items-center gap-2">
                       {kept.count !== undefined ? (
                         <span className="text-muted-foreground tabular-nums">
-                          {t("plugins.stored.count", { count: kept.count })}
+                          {kept.bytes !== undefined
+                            ? t("plugins.stored.files", {
+                                count: kept.count,
+                                size: formatSize(kept.bytes),
+                              })
+                            : t("plugins.stored.count", { count: kept.count })}
                         </span>
                       ) : null}
                       {what && onClear ? (

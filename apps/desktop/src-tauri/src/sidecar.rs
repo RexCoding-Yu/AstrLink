@@ -3704,6 +3704,7 @@ fn plugin_request(
         "source_uninstall" => (Method::DELETE, format!("{plugin}/source"), None),
         "clear_workspaces" => (Method::DELETE, format!("{plugin}/workspaces"), None),
         "clear_values" => (Method::DELETE, format!("{plugin}/values"), None),
+        "clear_files" => (Method::DELETE, format!("{plugin}/files"), None),
         // Voids the credentials the model runs the plugin's lookups with.
         "revoke_lookups" => (Method::DELETE, format!("{plugin}/lookup-credentials"), None),
         "save_credential" | "delete_credential" => {
@@ -7260,6 +7261,7 @@ mod tests {
         for (action, path) in [
             ("clear_workspaces", "workspaces"),
             ("clear_values", "values"),
+            ("clear_files", "files"),
             ("revoke_lookups", "lookup-credentials"),
         ] {
             assert_eq!(

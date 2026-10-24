@@ -4844,13 +4844,10 @@
       }
     },
     "enableDialog": {
-      "title": "启用「{{name}}」",
-      "capabilities": "插件申请以下能力，取消勾选的不会授予：",
       "purpose": "网络用途：{{purpose}}",
       "notice": "插件的提醒",
       "metadata": "登记的元信息属性",
-      "marker": "会话标记 {{marker}}",
-      "confirm": "启用"
+      "marker": "会话标记 {{marker}}"
     },
     "blocked": "网关没有运行",
     "blockedHint": "网关就绪后才能加载插件。网关停了的话，概览页会显示原因。",
@@ -4986,6 +4983,11 @@
           "label": "查询凭证",
           "what": "各会话运行查询和上报用的凭证，只存哈希。",
           "retention": "24 小时没有请求或网关重启就作废"
+        },
+        "plugin_files": {
+          "label": "插件文件",
+          "what": "插件用 node:fs 在自己的数据目录里读写的文件。卸载插件后仍保留，重新安装会接着用。",
+          "retention": "直到清除"
         }
       },
       "holds": {
@@ -4996,23 +4998,28 @@
       "clearTitle": {
         "workspaces": "清除工作区记录？",
         "values": "清除插件存储？",
-        "lookups": "作废查询凭证？"
+        "lookups": "作废查询凭证？",
+        "files": "清除插件文件？"
       },
       "clearConfirm": {
         "workspaces": "清除后，新会话不再按工作目录自动接上项目，会在第一轮重新询问。已经绑定的会话不受影响。",
         "values": "清除插件自己存的小数据，例如项目在服务器上的编号。插件会在下次用到时重新取，记忆本身不受影响。",
-        "lookups": "这个插件的查询凭证立即失效，模型已经拿到的查询命令都不能再用。每个会话的下一个请求会换新凭证，系统提示词随之变化，这些会话的提示词缓存要重写一次。"
+        "lookups": "这个插件的查询凭证立即失效，模型已经拿到的查询命令都不能再用。每个会话的下一个请求会换新凭证，系统提示词随之变化，这些会话的提示词缓存要重写一次。",
+        "files": "删除这个插件数据目录里的全部文件，插件下次用到时从头开始。插件随代码带的文件不受影响。"
       },
       "clearFailed": "无法清除。",
       "count_one": "{{count}} 条",
       "count_other": "{{count}} 条",
+      "files_one": "{{count}} 个文件 · {{size}}",
+      "files_other": "{{count}} 个文件 · {{size}}",
       "revoke": "作废",
       "helpLabel": "关于数据存储",
       "help": "AstrLink 为这个插件存的东西，按存放的地方分开列出。都不含对话内容，标明的除外。",
       "places": {
         "database": "AstrLink 数据库",
         "memory": "只在内存里",
-        "records": "请求记录"
+        "records": "请求记录",
+        "disk": "插件目录"
       },
       "retention": "保留：{{retention}}。",
       "declared": "{{label}}（{{retention}}）"

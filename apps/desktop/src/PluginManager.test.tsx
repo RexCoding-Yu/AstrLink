@@ -883,47 +883,25 @@ describe("PluginManager", () => {
     });
   });
 
-  it("asks the confirmation window to confirm what enabling grants", async () => {
-    bridgeMocks.updatePlugin.mockRejectedValueOnce(
-      new Error(
-        '{"error":{"code":"approval_pending","message":"the change waits"}}',
-      ),
-    );
-    await render();
-    await openTab("设置");
-    await click(button("启用"));
-    // The desktop asks no question of its own: the change goes to Core
-    // with every capability, and the confirmation window lets the user
-    // untick some.
-    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
+  it("enables a plugin at once with what it declares", async () => {
+    bridgeMocks.updatePlugin.mockResolvedValueOnce({
+      ...memory,
       enabled: true,
       granted_capabilities: memory.requested_capabilities,
     });
-    const waiting = document.querySelector(
-      '[data-testid="plugin-awaiting-approval"]',
-    );
-    expect(waiting?.textContent).toContain("插件确认");
-    expect(document.body.textContent).not.toContain("无法保存修改");
-    await click(button("打开确认窗口", waiting as HTMLElement));
-    expect(bridgeMocks.openPluginApproval).toHaveBeenCalled();
-
-    // Once the user confirmed, the plugin shows enabled.
-    bridgeMocks.getPlugin.mockResolvedValue({
-      ...memory,
+    await render();
+    await openTab("设置");
+    await click(button("启用"));
+    // A plugin is trusted code: its install review listed what it
+    // declares, and enabling it asks nothing more.
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(bridgeMocks.updatePlugin).toHaveBeenCalledWith("powercontext", {
       enabled: true,
-      granted_capabilities: ["context.inject", "network"],
-    });
-    await act(async () => {
-      approvalFinished?.({
-        id: "approval-1",
-        key: "powercontext",
-        approved: true,
-      });
     });
     expect(
       document.querySelector('[data-testid="plugin-awaiting-approval"]'),
     ).toBeNull();
+    expect(document.body.textContent).not.toContain("无法保存修改");
     const link = document.querySelector('[data-testid="plugin-link"]');
     expect(link?.getAttribute("data-state")).not.toBe("off");
   });

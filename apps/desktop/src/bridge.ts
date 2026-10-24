@@ -1791,11 +1791,13 @@ const clearActions: Record<PluginClearTarget, string> = {
   workspaces: "clear_workspaces",
   values: "clear_values",
   lookups: "revoke_lookups",
+  files: "clear_files",
 };
 
 /**
  * Clears what the host keeps for a plugin: the workspaces bound to its
- * attributes' values, its own stored values, or the credentials of its
+ * attributes' values, its own stored values, the files of its own
+ * directory, or the credentials of its
  * lookups, which each session's next request issues anew. Returns how many
  * it removed.
  */
