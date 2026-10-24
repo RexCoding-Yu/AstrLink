@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 )
@@ -19,13 +20,29 @@ type archiveLimits struct {
 	bytes int64
 }
 
+// archiveCommit is the commit a repository archive holds: git archive
+// names it in the archive's global header and dates every entry with the
+// time it was made.
+type archiveCommit struct {
+	id          string
+	committedAt time.Time
+}
+
 // extractSource writes the files of a repository archive under subdir into
 // dest, dropping the archive's top directory. Links, devices and what a
 // repository should not hold, node_modules and .git, stay out. found is
 // false when the archive has nothing under subdir.
-func extractSource(reader io.Reader, subdir, dest string, limits archiveLimits) (found bool, err error) {
+func extractSource(reader io.Reader, subdir, dest string, limits archiveLimits) (found bool, commit archiveCommit, err error) {
 	written := &archiveCount{limits: limits}
-	err = walkArchive(reader, func(name string, header *tar.Header, body io.Reader) error {
+	headers := func(header *tar.Header) {
+		switch {
+		case header.Typeflag == tar.TypeXGlobalHeader:
+			commit.id = strings.ToLower(strings.TrimSpace(header.PAXRecords["comment"]))
+		case commit.committedAt.IsZero() && !header.ModTime.IsZero():
+			commit.committedAt = header.ModTime.UTC()
+		}
+	}
+	err = walkArchive(reader, headers, func(name string, header *tar.Header, body io.Reader) error {
 		if subdir != "" {
 			if name != subdir && !strings.HasPrefix(name, subdir+"/") {
 				return nil
@@ -38,7 +55,7 @@ func extractSource(reader io.Reader, subdir, dest string, limits archiveLimits) 
 		}
 		return written.write(dest, name, header, body)
 	})
-	return found, err
+	return found, commit, err
 }
 
 // skippedSource reports whether a repository file stays out of the build:
@@ -64,7 +81,7 @@ type packageFiles struct {
 func extractPackage(reader io.Reader, dest string, limits archiveLimits) (packageFiles, error) {
 	written := &archiveCount{limits: limits}
 	var files packageFiles
-	err := walkArchive(reader, func(name string, header *tar.Header, body io.Reader) error {
+	err := walkArchive(reader, nil, func(name string, header *tar.Header, body io.Reader) error {
 		if name == "" {
 			return nil
 		}
@@ -78,9 +95,10 @@ func extractPackage(reader io.Reader, dest string, limits archiveLimits) (packag
 }
 
 // walkArchive calls visit for each entry of a gzipped tar archive with its
-// name past the top directory, cleaned. An entry whose name could reach
-// outside the directory it is written to fails the archive.
-func walkArchive(reader io.Reader, visit func(name string, header *tar.Header, body io.Reader) error) error {
+// name past the top directory, cleaned, after headers, when set, saw its
+// header as the archive has it. An entry whose name could reach outside the
+// directory it is written to fails the archive.
+func walkArchive(reader io.Reader, headers func(*tar.Header), visit func(name string, header *tar.Header, body io.Reader) error) error {
 	unzipped, err := gzip.NewReader(reader)
 	if err != nil {
 		return err
@@ -94,6 +112,9 @@ func walkArchive(reader io.Reader, visit func(name string, header *tar.Header, b
 		}
 		if err != nil {
 			return err
+		}
+		if headers != nil {
+			headers(header)
 		}
 		switch header.Typeflag {
 		case tar.TypeXGlobalHeader, tar.TypeXHeader, tar.TypeGNULongName, tar.TypeGNULongLink:

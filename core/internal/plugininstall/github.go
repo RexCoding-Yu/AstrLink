@@ -27,9 +27,12 @@ const (
 // maxAPIBytes bounds an answer of GitHub's API.
 const maxAPIBytes = 4 << 20
 
-// gitHub reads public repositories through GitHub's API and archives.
+// gitHub reads public repositories: their refs through Git's protocol,
+// their source from the archives GitHub serves, and what only the API
+// knows, such as release notes, when the API answers.
 type gitHub struct {
 	client   *http.Client
+	web      string
 	api      string
 	codeload string
 }
@@ -129,34 +132,11 @@ func (hub *gitHub) commit(ctx context.Context, owner, repo, ref string) (commitI
 	return info, err
 }
 
-// isBranch reports whether the repository has a branch named name.
-func (hub *gitHub) isBranch(ctx context.Context, owner, repo, name string) (bool, error) {
-	var branch struct {
-		Name string `json:"name"`
-	}
-	err := hub.get(ctx, "/repos/"+owner+"/"+repo+"/branches/"+url.PathEscape(name), &branch)
-	if errors.Is(err, errNotFound) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
 type tagInfo struct {
 	Name   string `json:"name"`
 	Commit struct {
 		SHA string `json:"sha"`
 	} `json:"commit"`
-}
-
-// tags lists the repository's tags: the first 100, which GitHub returns
-// newest first for tags made in order.
-func (hub *gitHub) tags(ctx context.Context, owner, repo string) ([]tagInfo, error) {
-	var tags []tagInfo
-	err := hub.get(ctx, "/repos/"+owner+"/"+repo+"/tags?per_page=100", &tags)
-	if errors.Is(err, errNotFound) {
-		return nil, fail(contract.PluginInstallRepositoryNotFound, owner+"/"+repo)
-	}
-	return tags, err
 }
 
 // tagPattern splits a version tag into what comes before its version and
@@ -194,109 +174,63 @@ func newestTag(tags []tagInfo, prefix string, after *pluginbuild.Version, withPr
 	return best, bestVersion, found
 }
 
-// resolve pins a link to a commit.
+// resolve pins a link to a commit from the repository's refs, which Git's
+// protocol lists without the API. A link to a commit is pinned as it is:
+// the archive tells its full id and when it was made.
 func (hub *gitHub) resolve(ctx context.Context, link Link) (Resolved, error) {
 	resolved := Resolved{Owner: link.Owner, Repo: link.Repo}
-	pin := func(ref, kind string) error {
-		info, err := hub.commit(ctx, link.Owner, link.Repo, ref)
-		if errors.Is(err, errNotFound) {
-			return hub.missing(ctx, link, ref)
-		}
-		if err != nil {
-			return err
-		}
-		resolved.Commit, resolved.CommittedAt = strings.ToLower(info.SHA), info.Commit.Committer.Date
-		resolved.Ref, resolved.RefKind = ref, kind
-		if kind == contract.PluginRefCommit {
-			resolved.Ref = ""
-		}
-		return nil
+	if link.Ref != "" && !link.Tag {
+		resolved.Commit, resolved.RefKind = strings.ToLower(link.Ref), contract.PluginRefCommit
+		return resolved, nil
 	}
-	switch {
-	case link.LatestRelease:
-		var release struct {
-			TagName string `json:"tag_name"`
-		}
-		err := hub.get(ctx, "/repos/"+link.Owner+"/"+link.Repo+"/releases/latest", &release)
-		if errors.Is(err, errNotFound) {
-			return resolved, hub.missing(ctx, link, "releases/latest")
-		}
+	tag := link.Ref
+	if link.LatestRelease {
+		latest, err := hub.latestRelease(ctx, link.Owner, link.Repo)
 		if err != nil {
 			return resolved, err
 		}
-		return resolved, pin(release.TagName, contract.PluginRefTag)
-	case link.Ref != "" && link.Tag:
-		return resolved, pin(link.Ref, contract.PluginRefTag)
-	case link.Ref != "":
-		return resolved, pin(link.Ref, contract.PluginRefCommit)
+		tag = latest
+	}
+	refs, err := hub.refs(ctx, link.Owner, link.Repo)
+	if err != nil {
+		return resolved, err
+	}
+	switch {
+	case tag != "":
+		commit, ok := refs.tags[tag]
+		if !ok {
+			return resolved, fail(contract.PluginInstallRefNotFound, tag)
+		}
+		resolved.Ref, resolved.RefKind, resolved.Commit = tag, contract.PluginRefTag, commit
 	case len(link.Tree) > 0:
 		// A branch may hold slashes: the shortest ref the repository has
 		// wins, and what follows is the plugin's directory.
 		for length := 1; length <= len(link.Tree); length++ {
 			ref := strings.Join(link.Tree[:length], "/")
-			info, err := hub.commit(ctx, link.Owner, link.Repo, ref)
-			if errors.Is(err, errNotFound) {
+			if commit, ok := refs.branches[ref]; ok {
+				resolved.Ref, resolved.RefKind, resolved.Commit = ref, contract.PluginRefBranch, commit
+			} else if commit, ok := refs.tags[ref]; ok {
+				resolved.Ref, resolved.RefKind, resolved.Commit = ref, contract.PluginRefTag, commit
+			} else if length == 1 && shaPattern.MatchString(ref) {
+				resolved.RefKind, resolved.Commit = contract.PluginRefCommit, strings.ToLower(ref)
+			} else {
 				continue
 			}
-			if err != nil {
-				return resolved, err
-			}
-			resolved.Commit, resolved.CommittedAt = strings.ToLower(info.SHA), info.Commit.Committer.Date
 			resolved.Subdir = strings.Join(link.Tree[length:], "/")
-			switch {
-			case shaPattern.MatchString(ref) && strings.HasPrefix(resolved.Commit, strings.ToLower(ref)):
-				resolved.RefKind = contract.PluginRefCommit
-			default:
-				branch, err := hub.isBranch(ctx, link.Owner, link.Repo, ref)
-				if err != nil {
-					return resolved, err
-				}
-				resolved.Ref, resolved.RefKind = ref, contract.PluginRefTag
-				if branch {
-					resolved.RefKind = contract.PluginRefBranch
-				}
-			}
 			return resolved, nil
 		}
-		return resolved, hub.missing(ctx, link, link.Tree[0])
-	}
-	// The home page: the newest version tag, else the default branch.
-	tags, err := hub.tags(ctx, link.Owner, link.Repo)
-	if err != nil {
-		return resolved, err
-	}
-	if tag, _, ok := newestTag(tags, "", nil, false); ok {
-		return resolved, pin(tag.Name, contract.PluginRefTag)
-	}
-	var repository struct {
-		DefaultBranch string `json:"default_branch"`
-	}
-	if err := hub.get(ctx, "/repos/"+link.Owner+"/"+link.Repo, &repository); err != nil {
-		if errors.Is(err, errNotFound) {
-			return resolved, fail(contract.PluginInstallRepositoryNotFound, link.Repository())
+		return resolved, fail(contract.PluginInstallRefNotFound, link.Tree[0])
+	default:
+		// The home page: the newest version tag, else the default branch.
+		if tag, _, ok := newestTag(refs.tagList(), "", nil, false); ok {
+			resolved.Ref, resolved.RefKind, resolved.Commit = tag.Name, contract.PluginRefTag, tag.Commit.SHA
+		} else if commit, ok := refs.branches[refs.head]; ok {
+			resolved.Ref, resolved.RefKind, resolved.Commit = refs.head, contract.PluginRefBranch, commit
+		} else {
+			return resolved, fail(contract.PluginInstallRefNotFound, "default branch")
 		}
-		return resolved, err
 	}
-	if repository.DefaultBranch == "" {
-		return resolved, fail(contract.PluginInstallRefNotFound, "default branch")
-	}
-	return resolved, pin(repository.DefaultBranch, contract.PluginRefBranch)
-}
-
-// missing says why ref was not found: the repository is missing or
-// private, or it has no such ref.
-func (hub *gitHub) missing(ctx context.Context, link Link, ref string) error {
-	var repository struct {
-		FullName string `json:"full_name"`
-	}
-	err := hub.get(ctx, "/repos/"+link.Owner+"/"+link.Repo, &repository)
-	switch {
-	case errors.Is(err, errNotFound):
-		return fail(contract.PluginInstallRepositoryNotFound, link.Repository())
-	case err != nil:
-		return err
-	}
-	return fail(contract.PluginInstallRefNotFound, ref)
+	return resolved, nil
 }
 
 // Bounds of a repository archive.
@@ -309,39 +243,49 @@ const (
 )
 
 // download writes the files of resolved's directory at its commit into
-// dest.
-func (hub *gitHub) download(ctx context.Context, resolved Resolved, dest string) error {
+// dest, and returns the commit's full id and when it was made, which the
+// archive records.
+func (hub *gitHub) download(ctx context.Context, resolved Resolved, dest string) (archiveCommit, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, hub.codeload+"/"+resolved.Owner+"/"+resolved.Repo+"/tar.gz/"+resolved.Commit, nil)
 	if err != nil {
-		return err
+		return archiveCommit{}, err
 	}
 	response, err := hub.client.Do(request)
 	if err != nil {
-		return fail(contract.PluginInstallUnavailable, "GitHub: "+networkError(err))
+		return archiveCommit{}, fail(contract.PluginInstallUnavailable, "GitHub: "+networkError(err))
 	}
 	defer response.Body.Close()
 	if err := hub.statusFailure(response); err != nil {
 		if errors.Is(err, errNotFound) {
-			return fail(contract.PluginInstallRefNotFound, resolved.Commit)
+			return archiveCommit{}, fail(contract.PluginInstallRefNotFound, resolved.Commit)
 		}
-		return err
+		return archiveCommit{}, err
 	}
 	limited := &limitReader{reader: response.Body, left: maxArchiveBytes}
-	found, err := extractSource(limited, resolved.Subdir, dest, archiveLimits{files: maxSourceFiles, bytes: maxSourceBytes})
+	found, commit, err := extractSource(limited, resolved.Subdir, dest, archiveLimits{files: maxSourceFiles, bytes: maxSourceBytes})
 	if limited.exceeded {
-		return fail(contract.PluginInstallTooLarge, "repository")
+		return archiveCommit{}, fail(contract.PluginInstallTooLarge, "repository")
 	}
 	if err != nil {
 		var failure *Failure
 		if errors.As(err, &failure) {
-			return failure
+			return archiveCommit{}, failure
 		}
-		return fail(contract.PluginInstallUnavailable, "GitHub: "+err.Error())
+		return archiveCommit{}, fail(contract.PluginInstallUnavailable, "GitHub: "+err.Error())
+	}
+	// An archive git made names its commit; one that names none is taken
+	// for the commit asked for only when that was named in full.
+	asked := strings.ToLower(resolved.Commit)
+	switch {
+	case commit.id == "" && objectPattern.MatchString(asked):
+		commit.id = asked
+	case !objectPattern.MatchString(commit.id) || !strings.HasPrefix(commit.id, asked):
+		return archiveCommit{}, fail(contract.PluginInstallUnavailable, "GitHub sent the source of another commit")
 	}
 	if !found {
-		return fail(contract.PluginInstallNoPlugin, resolved.Subdir)
+		return archiveCommit{}, fail(contract.PluginInstallNoPlugin, resolved.Subdir)
 	}
-	return nil
+	return commit, nil
 }
 
 // notes are a release's notes, "" when the tag has no release.

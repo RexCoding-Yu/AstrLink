@@ -5278,7 +5278,7 @@
         "invalid_link": "This is not a GitHub repository link AstrLink can read.",
         "repository_not_found": "The repository {{detail}} cannot be found, or it is private (not supported yet).",
         "ref_not_found": "The repository has no {{detail}}.",
-        "rate_limited": "GitHub's API limit is used up. Try again later.",
+        "rate_limited": "GitHub is limiting requests for now. Try again later.",
         "source_unavailable": "Could not download the source: {{detail}}",
         "too_large": "The plugin or its dependencies exceed the size limit ({{detail}}).",
         "no_plugin": "There is no plugin entry here: src/plugin.ts, plugin.ts, or the file astrlink.plugin in package.json names.",

@@ -5278,7 +5278,7 @@
         "invalid_link": "这不是能识别的 GitHub 仓库链接。",
         "repository_not_found": "找不到仓库 {{detail}}，或者它是私有仓库（暂不支持）。",
         "ref_not_found": "仓库里没有 {{detail}}。",
-        "rate_limited": "GitHub 接口的访问次数用完了，请过一会儿再试。",
+        "rate_limited": "GitHub 暂时限制了访问，请过一会儿再试。",
         "source_unavailable": "下载源码失败：{{detail}}",
         "too_large": "插件或依赖超出了大小限制（{{detail}}）。",
         "no_plugin": "这里没有插件入口：src/plugin.ts、plugin.ts，或 package.json 里 astrlink.plugin 指定的文件。",

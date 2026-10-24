@@ -5278,7 +5278,7 @@
         "invalid_link": "読み取れる GitHub リポジトリのリンクではありません。",
         "repository_not_found": "リポジトリ {{detail}} が見つからないか、プライベートリポジトリです（まだ対応していません）。",
         "ref_not_found": "リポジトリに {{detail}} がありません。",
-        "rate_limited": "GitHub API の利用回数の上限に達しました。しばらくしてから再試行してください。",
+        "rate_limited": "GitHub が一時的にアクセスを制限しています。しばらくしてから再試行してください。",
         "source_unavailable": "ソースをダウンロードできませんでした：{{detail}}",
         "too_large": "プラグインまたは依存がサイズの上限を超えています（{{detail}}）。",
         "no_plugin": "プラグインのエントリーがありません：src/plugin.ts、plugin.ts、または package.json の astrlink.plugin が指すファイル。",

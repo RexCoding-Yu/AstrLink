@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -54,6 +55,44 @@ func tgz(t *testing.T, top string, files map[string]string) []byte {
 	return buffer.Bytes()
 }
 
+// sourceArchive is a commit's archive as GitHub serves it: git archive
+// names the commit in a global header and dates every entry with its time.
+func sourceArchive(t *testing.T, top, commit string, date time.Time, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	zipped := gzip.NewWriter(&buffer)
+	archive := tar.NewWriter(zipped)
+	if commit != "" {
+		if err := archive.WriteHeader(&tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header", PAXRecords: map[string]string{"comment": commit}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.WriteHeader(&tar.Header{Name: top + "/", Mode: 0o755, Typeflag: tar.TypeDir, ModTime: date}); err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		body := files[name]
+		if err := archive.WriteHeader(&tar.Header{Name: top + "/" + name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg, ModTime: date}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := archive.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zipped.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
 func sri(data []byte) string {
 	sum := sha512.Sum512(data)
 	return "sha512-" + base64.StdEncoding.EncodeToString(sum[:])
@@ -75,23 +114,96 @@ type fakeRepo struct {
 	releases      map[string]string
 }
 
-// fakeGitHub serves GitHub's API and archives for repos.
+// fakeGitHub serves GitHub's refs over Git's protocol, its release pages,
+// its API and its archives for repos. rateLimited makes the API answer
+// that the hour's requests are used up; gitLimited does the same for Git's
+// protocol.
 type fakeGitHub struct {
 	t           *testing.T
 	mutex       sync.Mutex
 	repos       map[string]*fakeRepo
 	rateLimited bool
+	gitLimited  bool
+	web         *httptest.Server
 	api         *httptest.Server
 	codeload    *httptest.Server
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	hub := &fakeGitHub{t: t, repos: map[string]*fakeRepo{}}
+	hub.web = httptest.NewServer(http.HandlerFunc(hub.serveWeb))
 	hub.api = httptest.NewServer(http.HandlerFunc(hub.serveAPI))
 	hub.codeload = httptest.NewServer(http.HandlerFunc(hub.serveArchive))
+	t.Cleanup(hub.web.Close)
 	t.Cleanup(hub.api.Close)
 	t.Cleanup(hub.codeload.Close)
 	return hub
+}
+
+// serveWeb answers ls-refs at <owner>/<repo>.git/git-upload-pack and sends
+// <owner>/<repo>/releases/latest to the newest release.
+func (hub *fakeGitHub) serveWeb(writer http.ResponseWriter, request *http.Request) {
+	hub.mutex.Lock()
+	defer hub.mutex.Unlock()
+	parts := segments(request)
+	if len(parts) < 3 {
+		http.NotFound(writer, request)
+		return
+	}
+	if parts[2] == "git-upload-pack" && strings.HasSuffix(parts[1], ".git") {
+		if hub.gitLimited {
+			writer.Header().Set("Retry-After", "60")
+			writer.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		repo := hub.repos[parts[0]+"/"+strings.TrimSuffix(parts[1], ".git")]
+		body, _ := io.ReadAll(request.Body)
+		if repo == nil {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if request.Method != http.MethodPost || request.Header.Get("Git-Protocol") != "version=2" || !bytes.Contains(body, []byte("command=ls-refs")) {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+		var answer bytes.Buffer
+		line := func(text string) { fmt.Fprintf(&answer, "%04x%s\n", len(text)+5, text) }
+		if sha, ok := repo.branches[repo.defaultBranch]; ok {
+			line(sha + " HEAD symref-target:refs/heads/" + repo.defaultBranch)
+		}
+		for name, sha := range repo.branches {
+			line(sha + " refs/heads/" + name)
+		}
+		for name, sha := range repo.tags {
+			// Every tag is annotated: the tag object first, the commit
+			// it points to peeled.
+			line(strings.Repeat("f", 40) + " refs/tags/" + name + " peeled:" + sha)
+		}
+		answer.WriteString("0000")
+		_, _ = writer.Write(answer.Bytes())
+		return
+	}
+	repo := hub.repos[parts[0]+"/"+parts[1]]
+	if repo == nil {
+		http.NotFound(writer, request)
+		return
+	}
+	if len(parts) == 4 && parts[2] == "releases" && parts[3] == "latest" {
+		latest := ""
+		for tag := range repo.releases {
+			if tag > latest {
+				latest = tag
+			}
+		}
+		if latest == "" {
+			http.Redirect(writer, request, "/"+parts[0]+"/"+parts[1]+"/releases", http.StatusFound)
+			return
+		}
+		http.Redirect(writer, request, "/"+parts[0]+"/"+parts[1]+"/releases/tag/"+url.PathEscape(latest), http.StatusFound)
+		return
+	}
+	http.NotFound(writer, request)
 }
 
 // segments splits an escaped path into its unescaped segments.
@@ -214,12 +326,13 @@ func (hub *fakeGitHub) serveArchive(writer http.ResponseWriter, request *http.Re
 		http.NotFound(writer, request)
 		return
 	}
-	commit, ok := repo.commits[parts[3]]
-	if !ok {
+	sha, ok := hub.find(repo, parts[3])
+	if !ok || !shaPattern.MatchString(parts[3]) {
 		http.NotFound(writer, request)
 		return
 	}
-	_, _ = writer.Write(tgz(hub.t, parts[1]+"-"+parts[3], commit.files))
+	commit := repo.commits[sha]
+	_, _ = writer.Write(sourceArchive(hub.t, parts[1]+"-"+sha, sha, commit.date, commit.files))
 }
 
 // fakeRegistry serves package archives at their registry paths; broken
@@ -304,7 +417,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (fixture *fixture) installer() *Installer {
 	return New(Options{
-		Dir: fixture.dir, GitHubAPI: fixture.hub.api.URL, Codeload: fixture.hub.codeload.URL,
+		Dir: fixture.dir, GitHub: fixture.hub.web.URL, GitHubAPI: fixture.hub.api.URL, Codeload: fixture.hub.codeload.URL,
 		Registries: func() []string { return []string{fixture.primary.server.URL, fixture.mirror.server.URL} },
 		Version:    "1.0.0",
 	})
@@ -381,6 +494,10 @@ func TestInstallFromGitHubBuildsReviewsInstallsUpdatesAndRollsBack(t *testing.T)
 	// the second serves both, as the lock file's hashes say.
 	delete(fixture.primary.archives, fixture.tinyLib.path)
 	fixture.primary.wrong[fixture.helper2.path] = true
+	// The API's requests of the hour are used up, as on an address many
+	// people share: refs come through Git's protocol, the commit's time from
+	// its archive.
+	fixture.hub.rateLimited = true
 	installer := fixture.installer()
 	review, err := installer.Preview(context.Background(), "https://github.com/acme/hello", func(string) *Existing { return nil })
 	if err != nil {
@@ -444,6 +561,12 @@ func TestInstallFromGitHubBuildsReviewsInstallsUpdatesAndRollsBack(t *testing.T)
 	repo.tags["v2.0.0-beta.1"] = sha3v
 	repo.commits[sha3v] = fakeCommit{files: pluginFiles("1.2.0", `"storage"`, "package-lock.json", fixture.npmLockFile()), date: date.Add(2 * time.Hour)}
 	repo.releases["v1.2.0"] = "stores things"
+	// Without the API the update shows, only without its notes and time.
+	check, err = installer.CheckUpdate(context.Background(), record)
+	if err != nil || !check.Available || check.Ref != "v1.2.0" || check.Commit != sha3v || check.Notes != "" || check.CommittedAt != "" {
+		t.Fatalf("CheckUpdate without the API = %+v, %v", check, err)
+	}
+	fixture.hub.rateLimited = false
 	check, err = installer.CheckUpdate(context.Background(), record)
 	if err != nil || !check.Available || check.Ref != "v1.2.0" || check.Version != "1.2.0" || check.Notes != "stores things" ||
 		check.URL != "https://github.com/acme/hello/tree/v1.2.0" || check.CommittedAt != "2026-10-01T14:00:00Z" {
@@ -686,7 +809,7 @@ func TestPreviewSaysWhyAPluginCannotBeInstalled(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("failed previews left %d staged builds", len(entries))
 	}
-	fixture.hub.rateLimited = true
+	fixture.hub.gitLimited = true
 	if _, err := installer.Preview(context.Background(), "acme/hello", nil); !hasReason(err, contract.PluginInstallRateLimited) {
 		t.Fatalf("rate limited: %v", err)
 	}
@@ -732,6 +855,77 @@ func TestTreeLinksTellTheBranchFromTheDirectory(t *testing.T) {
 	pinned.Source.RefKind = contract.PluginRefCommit
 	if check, err := installer.CheckUpdate(context.Background(), pinned); err != nil || !check.Pinned {
 		t.Fatalf("CheckUpdate of a commit = %+v, %v", check, err)
+	}
+}
+
+func TestReleaseAndCommitLinksNeedNoAPI(t *testing.T) {
+	fixture := newFixture(t)
+	date := time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC)
+	fixture.hub.repos["acme/hello"] = &fakeRepo{
+		defaultBranch: "main",
+		branches:      map[string]string{"main": sha2v},
+		tags:          map[string]string{"v1.0.0": sha1v, "v1.1.0": sha2v},
+		commits: map[string]fakeCommit{
+			sha1v: {files: pluginFiles("1.0.0", "", "package-lock.json", fixture.npmLockFile()), date: date},
+			sha2v: {files: pluginFiles("1.1.0", "", "package-lock.json", fixture.npmLockFile()), date: date.Add(time.Hour)},
+		},
+		releases: map[string]string{"v1.0.0": "first"},
+	}
+	fixture.hub.repos["acme/quiet"] = &fakeRepo{defaultBranch: "main", branches: map[string]string{"main": sha2v}, tags: map[string]string{}, commits: map[string]fakeCommit{}}
+	fixture.hub.rateLimited = true
+	installer := fixture.installer()
+	for link, want := range map[string]contract.PluginInstallSource{
+		// The latest release is where its page sends a browser.
+		"https://github.com/acme/hello/releases/latest":      {Ref: "v1.0.0", RefKind: contract.PluginRefTag, Commit: sha1v, CommittedAt: "2026-10-02T08:00:00Z"},
+		"https://github.com/acme/hello/releases/tag/v1.1.0":  {Ref: "v1.1.0", RefKind: contract.PluginRefTag, Commit: sha2v, CommittedAt: "2026-10-02T09:00:00Z"},
+		"https://github.com/acme/hello/commit/" + sha1v[:12]: {RefKind: contract.PluginRefCommit, Commit: sha1v, CommittedAt: "2026-10-02T08:00:00Z"},
+	} {
+		review, err := installer.Preview(context.Background(), link, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", link, err)
+		}
+		if got := review.Source; got.Ref != want.Ref || got.RefKind != want.RefKind || got.Commit != want.Commit || got.CommittedAt != want.CommittedAt {
+			t.Fatalf("%s: source = %+v", link, got)
+		}
+	}
+	for link, reason := range map[string]string{
+		"https://github.com/acme/quiet/releases/latest":      contract.PluginInstallRefNotFound,
+		"https://github.com/acme/hello/releases/tag/v9.9.9":  contract.PluginInstallRefNotFound,
+		"https://github.com/acme/hello/commit/" + sha3v[:12]: contract.PluginInstallRefNotFound,
+		"https://github.com/acme/gone/releases/latest":       contract.PluginInstallRepositoryNotFound,
+	} {
+		if _, err := installer.Preview(context.Background(), link, nil); !hasReason(err, reason) {
+			t.Errorf("%s: Preview = %v, want %s", link, err, reason)
+		}
+	}
+}
+
+func TestParseRefsReadsLsRefs(t *testing.T) {
+	head, tag, peeled := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	var answer bytes.Buffer
+	for _, line := range []string{
+		head + " HEAD symref-target:refs/heads/main\n",
+		head + " refs/heads/main\n",
+		head + " refs/heads/feature/x\n",
+		tag + " refs/tags/v1.0.0 peeled:" + peeled + "\n",
+		head + " refs/tags/light\n",
+	} {
+		answer.Write(pktLine(line))
+	}
+	answer.WriteString("0000")
+	refs, err := parseRefs(&answer)
+	if err != nil || refs.head != "main" || refs.branches["feature/x"] != head || refs.tags["v1.0.0"] != peeled || refs.tags["light"] != head {
+		t.Fatalf("refs = %+v, %v", refs, err)
+	}
+	for name, text := range map[string]string{
+		"an error":         string(pktLine("ERR access denied\n")),
+		"a short answer":   string(pktLine(head + " refs/heads/main\n")),
+		"not the protocol": "<!DOCTYPE html>",
+		"a bad object":     string(pktLine("xyz refs/heads/main\n")) + "0000",
+	} {
+		if _, err := parseRefs(strings.NewReader(text)); err == nil {
+			t.Errorf("%s: no error", name)
+		}
 	}
 }
 

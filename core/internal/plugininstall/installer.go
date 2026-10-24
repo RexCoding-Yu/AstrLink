@@ -49,7 +49,8 @@ type Options struct {
 	// Client fetches from GitHub and the registries; the gateway's
 	// outbound proxy applies.
 	Client *http.Client
-	// GitHubAPI and Codeload default to GitHub's.
+	// GitHub, GitHubAPI and Codeload default to GitHub's.
+	GitHub    string
 	GitHubAPI string
 	Codeload  string
 	// Registries returns the npm registries to try, in order.
@@ -102,6 +103,9 @@ func New(options Options) *Installer {
 	if options.Client == nil {
 		options.Client = &http.Client{}
 	}
+	if options.GitHub == "" {
+		options.GitHub = DefaultGitHub
+	}
 	if options.GitHubAPI == "" {
 		options.GitHubAPI = DefaultGitHubAPI
 	}
@@ -121,8 +125,11 @@ func New(options Options) *Installer {
 	}
 	return &Installer{
 		options: options,
-		hub:     &gitHub{client: options.Client, api: strings.TrimRight(options.GitHubAPI, "/"), codeload: strings.TrimRight(options.Codeload, "/")},
-		staged:  map[string]*staged{},
+		hub: &gitHub{
+			client: options.Client, web: strings.TrimRight(options.GitHub, "/"),
+			api: strings.TrimRight(options.GitHubAPI, "/"), codeload: strings.TrimRight(options.Codeload, "/"),
+		},
+		staged: map[string]*staged{},
 	}
 }
 
@@ -182,9 +189,11 @@ func (installer *Installer) build(ctx context.Context, resolved Resolved, link, 
 	if err := os.MkdirAll(source, 0o700); err != nil {
 		return review, record, err
 	}
-	if err := installer.hub.download(ctx, resolved, source); err != nil {
+	commit, err := installer.hub.download(ctx, resolved, source)
+	if err != nil {
 		return review, record, err
 	}
+	resolved.Commit, resolved.CommittedAt = commit.id, commit.committedAt
 	manifest, err := pluginbuild.ReadManifest(source)
 	if err != nil {
 		return review, record, &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallBuildFailed, Messages: []string{err.Error()}}}
@@ -708,49 +717,47 @@ func (installer *Installer) CheckUpdate(ctx context.Context, record contract.Plu
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	switch source.RefKind {
-	case contract.PluginRefBranch:
-		info, err := installer.hub.commit(ctx, owner, repo, source.Ref)
-		if errors.Is(err, errNotFound) {
-			return contract.PluginUpdateCheck{}, installer.hub.missing(ctx, Link{Owner: owner, Repo: repo}, source.Ref)
+	if source.RefKind != contract.PluginRefBranch && source.RefKind != contract.PluginRefTag {
+		return contract.PluginUpdateCheck{Pinned: true}, nil
+	}
+	prefix, current, versioned := tagVersion(source.Ref)
+	if source.RefKind == contract.PluginRefTag && !versioned {
+		return contract.PluginUpdateCheck{Ref: source.Ref, RefKind: contract.PluginRefTag}, nil
+	}
+	refs, err := installer.hub.refs(ctx, owner, repo)
+	if err != nil {
+		return contract.PluginUpdateCheck{}, installer.failure(ctx, err)
+	}
+	var check contract.PluginUpdateCheck
+	if source.RefKind == contract.PluginRefBranch {
+		commit, ok := refs.branches[source.Ref]
+		if !ok {
+			return contract.PluginUpdateCheck{}, fail(contract.PluginInstallRefNotFound, source.Ref)
 		}
-		if err != nil {
-			return contract.PluginUpdateCheck{}, installer.failure(ctx, err)
-		}
-		check := contract.PluginUpdateCheck{Ref: source.Ref, RefKind: contract.PluginRefBranch}
-		if strings.EqualFold(info.SHA, source.Commit) {
+		check = contract.PluginUpdateCheck{Ref: source.Ref, RefKind: contract.PluginRefBranch}
+		if strings.EqualFold(commit, source.Commit) {
 			return check, nil
 		}
-		check.Available = true
-		check.Commit = strings.ToLower(info.SHA)
-		check.CommittedAt = info.Commit.Committer.Date.UTC().Format(time.RFC3339)
-		check.Notes = installer.hub.commitsSince(ctx, owner, repo, source.Commit, check.Commit)
+		check.Available, check.Commit = true, commit
 		check.URL = TreeURL(source.Repository, source.Ref, source.Subdir)
-		return check, nil
-	case contract.PluginRefTag:
-		prefix, current, ok := tagVersion(source.Ref)
-		if !ok {
-			return contract.PluginUpdateCheck{Ref: source.Ref, RefKind: contract.PluginRefTag}, nil
-		}
-		tags, err := installer.hub.tags(ctx, owner, repo)
-		if err != nil {
-			return contract.PluginUpdateCheck{}, installer.failure(ctx, err)
-		}
-		tag, version, found := newestTag(tags, prefix, &current, current.Prerelease != "")
+		// When the API answers, the commits since make the notes.
+		check.Notes = installer.hub.commitsSince(ctx, owner, repo, source.Commit, check.Commit)
+	} else {
+		tag, version, found := newestTag(refs.tagList(), prefix, &current, current.Prerelease != "")
 		if !found {
 			return contract.PluginUpdateCheck{Ref: source.Ref, RefKind: contract.PluginRefTag}, nil
 		}
-		check := contract.PluginUpdateCheck{
-			Available: true, Ref: tag.Name, RefKind: contract.PluginRefTag, Commit: strings.ToLower(tag.Commit.SHA),
+		check = contract.PluginUpdateCheck{
+			Available: true, Ref: tag.Name, RefKind: contract.PluginRefTag, Commit: tag.Commit.SHA,
 			Version: version.String(), URL: TreeURL(source.Repository, tag.Name, source.Subdir),
 		}
-		if info, err := installer.hub.commit(ctx, owner, repo, tag.Commit.SHA); err == nil {
-			check.CommittedAt = info.Commit.Committer.Date.UTC().Format(time.RFC3339)
-		}
+		// When the API answers, the release makes the notes.
 		check.Notes = installer.hub.notes(ctx, owner, repo, tag.Name)
-		return check, nil
 	}
-	return contract.PluginUpdateCheck{Pinned: true}, nil
+	if info, err := installer.hub.commit(ctx, owner, repo, check.Commit); err == nil {
+		check.CommittedAt = info.Commit.Committer.Date.UTC().Format(time.RFC3339)
+	}
+	return check, nil
 }
 
 func randomHex(size int) string {
