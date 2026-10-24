@@ -6,10 +6,10 @@ AstrLink Core 内嵌 [moejs](https://github.com/Calcium-Ion/moejs)，用来运�
 
 插件用 JavaScript 或 TypeScript 编写，负责策略：请求放不放行、走哪个提供商、往请求里加什么、怎么改回复、在请求记录和插件页上展示什么。
 
-AstrLink 负责机制：沙箱、时间上限、网络、存储、确认，以及把插件的结果放到哪里。
+AstrLink 负责机制：时间和内存上限、存储、确认，以及把插件的结果放到哪里。
 
-插件碰不到文件、子进程、环境变量和真实密钥。它能用的只有 AstrLink 提供的
-`astrlink.*` 函数和标准的 Web API，而且每一项能力都要用户在启用时授予。
+插件和 npm 包一样是受信任的代码，不进沙箱：除了 AstrLink 提供的 `astrlink.*`
+函数和标准的 Web API，还能用 Node 的大部分内置模块，网络可以访问任何地址。它碰不到的是：插件自己目录以外的文件、子进程和线程、网关的端口、网关的环境变量，以及网关替它保存的密钥。插件声明的能力在安装审查里列出，启用插件即全部生效。
 
 ## 写一个插件
 
@@ -25,24 +25,27 @@ my-plugin/
 ├── package-lock.json   # 有依赖时必需；也认 pnpm-lock.yaml、bun.lock
 ├── src/plugin.ts       # 后端入口（必需）
 ├── src/client.tsx      # 界面入口（可选）
+├── assets/             # 插件运行时读的文件（可选）
 └── icon.svg            # 图标（可选）
 ```
 
 `package.json` 里写
-`"astrlink": { "plugin": "src/plugin.ts", "client": "src/client.tsx" }`；不写时按
-`src/plugin.ts`、`plugin.ts` 这些惯用的位置找。`engines.astrlink`
-写兼容的 AstrLink 版本范围，不满足时拒绝安装。项目由 AstrLink 内置的构建器打包成单文件，运行时不再加载别的代码；React 和界面组件由宿主提供，不要打进包里。
+`"astrlink": { "plugin": "src/plugin.ts", "client": "src/client.tsx", "files": ["assets"] }`；不写时按
+`src/plugin.ts`、`plugin.ts` 这些惯用的位置找。`files`
+列出插件运行时要读的文件或目录，随插件装进安装目录，最多 1000 个、32
+MiB。`engines.astrlink`
+写兼容的 AstrLink 版本范围，不满足时拒绝安装。项目由 AstrLink 内置的构建器打包成单文件，运行时不再加载别的代码；Node 的内置模块不打进包里，由网关提供（见「Node 的模块」）；React 和界面组件由宿主提供，不要打进包里。
 
 命令行 `astrlink plugin`
 和 Core 用同一套构建器，本机构建的结果和用户安装时一致：
 
-| 命令                        | 做什么                                                                                                        |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `astrlink plugin new <key>` | 从模板起项目：`basic`、`gate`、`route`、`forward`、`stream`、`response`、`schedule`、`http`、`provider`、`ui` |
-| `astrlink plugin build`     | 构建出 `plugin.js`、`client.js` 和 source map                                                                 |
-| `astrlink plugin check`     | 构建并在 moejs 里编译，检查清单、能力和不该用的 API                                                           |
-| `astrlink plugin test`      | 按 `tests/` 里的用例跑钩子，可以伪造存储、网络应答和时钟                                                      |
-| `astrlink plugin dev`       | 监听改动、构建，装进本机 AstrLink 的插件目录并实时输出日志                                                    |
+| 命令                        | 做什么                                                                                                                 |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `astrlink plugin new <key>` | 从模板起项目：`basic`、`files`、`gate`、`route`、`forward`、`stream`、`response`、`schedule`、`http`、`provider`、`ui` |
+| `astrlink plugin build`     | 构建出 `plugin.js`、`client.js` 和 source map                                                                          |
+| `astrlink plugin check`     | 构建并在 moejs 里编译，检查清单、能力和不该用的 API                                                                    |
+| `astrlink plugin test`      | 按 `tests/` 里的用例跑钩子，可以伪造存储、网络应答和时钟                                                               |
+| `astrlink plugin dev`       | 监听改动、构建，装进本机 AstrLink 的插件目录并实时输出日志                                                             |
 
 `astrlink plugin new` 会把类型定义放进项目：后端是
 [astrlink-plugin.d.ts](../../core/plugins/astrlink-plugin.d.ts)，界面是
@@ -72,7 +75,7 @@ my-plugin/
 - 安装要在「插件确认」窗口里确认。装好的插件不会自动启用；目录里的
   `install.json` 记下仓库、提交、子目录、锁文件和构建产物的哈希。
 - 「检查更新」看同一个仓库：装的是标签就看同一前缀的新版本标签（显示 Release 说明），装的是分支就看分支的新提交，装的是固定提交就不跟随。更新同样经过审查和确认，审查里写明新增和去掉的能力、界面代码、联网用途和依赖的变化。
-- 被替换的版本保留最近 3 个，可以回滚；回滚也要确认。卸载会删掉插件文件和保留的版本，插件的设置和存储的数据保留，再装回来时先停用；替换过内置插件的，卸载后内置插件恢复。
+- 被替换的版本保留最近 3 个，可以回滚；回滚也要确认。卸载会删掉插件文件和保留的版本，插件的设置、存储的数据和数据目录里的文件保留，再装回来时先停用；替换过内置插件的，卸载后内置插件恢复。
 
 ## 清单 meta
 
@@ -83,10 +86,10 @@ my-plugin/
 | `name`         | 界面上显示的名称，最多 64 个字符                                                                   |
 | `version`      | 版本号，最多 32 个字符                                                                             |
 | `capabilities` | 申请的能力，见下表                                                                                 |
-| `network`      | 申请网络时必填：`{ purpose: "…" }`，启用时展示给用户                                               |
+| `network`      | 申请网络时必填：`{ purpose: "…" }`，安装审查和插件页展示给用户                                     |
 | `credentials`  | 凭据位：`name`、`label`、`header`、可选的 `scheme`（如 `Bearer`）。需要网络能力                    |
 | `metadata`     | 启用时登记的元信息属性：`key`、`label`、`pattern`（以 `^` 开头、`$` 结尾）、可选的 `marker`        |
-| `notice`       | 启用提醒，最多 1000 个字符，原样显示在启用确认框里                                                 |
+| `notice`       | 给用户的提醒，最多 1000 个字符，原样显示在插件页的介绍里                                           |
 | `settings`     | 插件页「设置」表单的字段，按顺序排列，见下文                                                       |
 | `credits`      | 插件依托或对接的开源项目，显示在「概览」里，见下文                                                 |
 | `storage`      | 插件在 `astrlink.store` 里存了什么，显示在「概览」的「数据存储」里，见下文                         |
@@ -160,7 +163,7 @@ my-plugin/
 | ---------------- | --------------------------------------------------------- |
 | `context.inject` | `prepareSession`、`prepareTurn` 可以往请求里加内容        |
 | `request.read`   | 钩子能看到本轮的用户文本和元信息；`astrlink.request.info` |
-| `network`        | `astrlink.http.fetch`，只能访问用户授权的地址             |
+| `network`        | `fetch`、`node:http(s)` 和 `astrlink.http.fetch`          |
 | `storage`        | `astrlink.store`，插件私有的键值存储                      |
 | `ui.views`       | 钩子可以返回请求记录和插件页里的视图                      |
 | `model.tools`    | 模型可以运行 `tools` 里的查询和上报，由 `callTool` 作答   |
@@ -181,26 +184,68 @@ apiVersion 2 另有这些能力：
 | `provider`          | 提供 `meta.providers` 里的供应商，见「供应商适配器」                           |
 | `ui.code`           | 高风险：插件的界面代码在主窗口里运行，和 AstrLink 界面同等权限，见「界面代码」 |
 
-这些操作只在单独的「插件确认」窗口里生效：启用插件、授予它没有的能力、允许新的地址或明文HTTP、设为受信任、出错时拦下请求，以及安装、更新和回滚插件代码。窗口自己弹出、不抢焦点，主窗口里运行的代码点不到它；用户在里面可以取消勾选要授予的能力，`ui.code`
-用红字写明风险。网页控制台没有这个窗口，用它自己的确认框。调用没有授予的函数会抛出
+插件声明的能力在安装审查里列出，`ui.code`
+用红字写明风险；启用插件即全部生效，不再逐项授予。调用没有声明的能力对应的函数会抛出
 `TypeError`。
+
+这些操作只在单独的「插件确认」窗口里生效：安装、更新和回滚插件代码，设为受信任（跳过隐私检查），让凭据经明文 HTTP 发往本机以外的服务器，以及出错时拦下请求。窗口自己弹出、不抢焦点，主窗口里运行的代码点不到它。网页控制台没有这个窗口，用它自己的确认框。
 
 ## 运行时
 
 apiVersion 2 的钩子可以写成
-`async`。网关自己驱动 Promise 和定时器：等网络、存储和定时器的时候不算脚本时间，也不占插件的执行槽位。一直不兑现的 Promise 算失败。
+`async`。网关自己驱动 Promise 和定时器：等网络、存储、文件和定时器的时候不算脚本时间，也不占插件的执行槽位。一直不兑现的 Promise 算失败。
 
-可以用的标准全局：
+可以用的全局：
 
-- `fetch`、`Headers`、`Response`、`AbortController`：等同
-  `astrlink.http.fetch`，受网络授权约束。
+- `fetch`、`Headers`、`Response`、`AbortController`：可以访问任何地址，规则见「宿主函数」。
 - `URL`、`URLSearchParams`、`TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone`、`queueMicrotask`。
 - `crypto.getRandomValues`、`crypto.randomUUID`、`crypto.subtle.digest`，以及 HMAC 的签名和校验。
-- `setTimeout`、`clearTimeout`、`setInterval`、`clearInterval`，受本次调用的时间上限约束。
-- `console`：写进插件日志。`performance.now()`。
+- `setTimeout`、`setInterval`、`setImmediate` 和对应的清除函数，返回 Node 的
+  `Timeout` 对象（`ref`、`unref`、`refresh`）。只在 apiVersion 2
+  的钩子运行时触发，受本次调用的时间上限约束；模块顶层设的定时器不会触发。
+- `console`：写进插件日志。`performance`。
+- Node 的全局：`process`、`Buffer`、`global`、`require`（只能取 Node 的模块）、`__dirname`
+  和 `__filename`（指向安装目录）、`EventTarget`、`Event`。
+- `eval` 和 `new Function` 可以用。内置对象每个运行时一份，插件可以修改，不影响别的插件。
 
-没有 Node 的 `fs`、`process`、`Buffer`
-这些模块，用到它们的库在构建时就会报出来。
+### Node 的模块
+
+插件可以 `import` 或 `require` Node 的内置模块，写 `node:fs` 或 `fs`
+都行。构建器不把它们打进包里，网关加载插件时提供，行为以 Node 22 为准。
+
+| 模块                                                                                                                                                                                  | 说明                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fs`、`fs/promises`                                                                                                                                                                   | 同步、回调和 Promise 三种写法，`FileHandle`、读写流、目录和 `glob`。只能读写插件自己的目录，见下                                                                                                                |
+| `path`、`url`、`util`、`events`、`buffer`、`stream`（含 `promises`、`consumers`）、`string_decoder`、`querystring`、`punycode`、`assert`、`timers`（含 `promises`）、`readline`、`vm` | 和 Node 一致                                                                                                                                                                                                    |
+| `crypto`                                                                                                                                                                              | 摘要（MD5、SHA-1、SHA-2、SHA-3）、HMAC、随机数、PBKDF2、scrypt、HKDF、AES（CBC、CTR、GCM、ECB）和 ChaCha20-Poly1305、RSA／ECDSA／Ed25519 的签名和验签、生成密钥对、`KeyObject`；`webcrypto` 就是全局的 `crypto` |
+| `zlib`                                                                                                                                                                                | gzip、deflate、brotli 的压缩和解压，同步、回调和流三种写法；流在结束时一次处理，解压结果最多 256 MiB                                                                                                            |
+| `http`、`https`                                                                                                                                                                       | 客户端，建在 `fetch` 上，规则和 `fetch` 相同。Agent 不保持连接，`ca`、`cert` 这些 TLS 选项不起作用                                                                                                              |
+| `sqlite`                                                                                                                                                                              | `DatabaseSync`、`StatementSync`，数据库文件放在插件自己的目录里；打开的数据库跨调用一直可用                                                                                                                     |
+| `os`                                                                                                                                                                                  | 系统的只读信息；`homedir()` 是插件的数据目录，`tmpdir()` 是其中的 `.tmp`                                                                                                                                        |
+| `process`                                                                                                                                                                             | `env` 只有 `NODE_ENV`、`HOME`、`TMPDIR`、`TZ`；`cwd()` 是数据目录；`stdout`、`stderr` 写进插件日志；`exit`、`kill`、`chdir` 抛出错误                                                                            |
+| `async_hooks`                                                                                                                                                                         | `AsyncLocalStorage`：`run` 给的值在它运行的函数结束前一直有效，跨 `await` 可用；同一次调用里并行的几路看到的是最新的值                                                                                          |
+| `perf_hooks`、`diagnostics_channel`、`module`、`console`、`constants`、`domain`、`tty`                                                                                                | 常用部分；`module.createRequire` 只能取 Node 的模块                                                                                                                                                             |
+
+不提供的模块：
+
+- `child_process`、`worker_threads`、`cluster`：起进程或线程能读写任何文件，目录的限制就形同虚设。
+- `net`、`tls`、`dgram`、`dns`、`http2`：网关的端口不交给插件；要对外提供接口，用 `http.serve` 扩展点。
+- `inspector`、`repl`、`wasi`，以及 `v8` 的堆快照。
+
+插件自己的代码导入它们时，构建直接报错；依赖导入时只给警告，模块照常加载，调用到的函数抛出
+`ERR_ACCESS_DENIED`。`net.isIP` 这类纯计算的函数照常可用。
+
+### 插件自己的目录
+
+| 目录     | 位置                            | 用法                                                                                                             |
+| -------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 数据目录 | `<数据目录>/plugin-data/<key>/` | 可读写，是 `process.cwd()`，相对路径都落在这里；`os.tmpdir()` 指向其中的 `.tmp/`                                 |
+| 安装目录 | `<数据目录>/plugins/<key>/`     | 只读，`import.meta.dirname` 和 `__dirname` 指向这里；`package.json` 的 `astrlink.files` 列出的文件随插件装在这里 |
+
+- 其他路径一律报 `EACCES`，消息里写明「plugins read and write only their own directories」；往安装目录写报 `EROFS`。符号链接只能用相对路径指向数据目录里，指到外面同样被拒。
+- 数据目录最多 1 GiB，超出的写入报 `ENOSPC`。
+- 一次调用里打开的文件描述符在调用结束时关闭。
+- 卸载插件时数据目录保留，和设置一样，重新安装接着用；插件页「数据存储」里可以清除。更新和回滚会整体替换安装目录，所以要留下的数据放在数据目录。
 
 `astrlink.textStream({ map?, replace?, maxMatch? })`
 是流式改写的帮手：它认得 Chat
@@ -409,7 +454,7 @@ tools: [
 
 **什么时候告诉模型。**
 同时满足这些条件时，AstrLink 在插件的常驻块后面附上它的查询方法和本会话的凭证：插件对这个客户端生效、`$lookup`
-打开、用户授予了 `model.tools`、请求声明了 shell 类工具（如 Claude Code 的
+打开、插件声明了 `model.tools`、请求声明了 shell 类工具（如 Claude Code 的
 `Bash`、Codex 的
 `exec_command`），并且客户端和网关在同一台机器上。没有绑定的会话不附。`unbound`
 的查询只出现在插件自己的块里：`prepareTurn` 的条目里写
@@ -493,7 +538,7 @@ registerSlot("overview.widget", () => (
 | `service.section` | 提供商「连接」标签页里的区块   | `{ service }`          |
 
 SDK 还提供：`call(name, input)` 调用插件后端的
-`onUiCall`（后端仍在沙箱里跑，受它的授权约束）；`getSettings`、`saveSettings`
+`onUiCall`（后端在网关里运行，受它的时间和内存上限约束）；`getSettings`、`saveSettings`
 读写插件设置；`t()`
 按界面语言取文字；`language()`、`useLanguage()`、`useTheme()`；`navigate()`
 跳到 AstrLink 的页面或插件自己的页面；`toast()` 显示提示条；以及
@@ -501,10 +546,10 @@ SDK 还提供：`call(name, input)` 调用插件后端的
 
 界面代码和 AstrLink 界面同等权限：能看请求记录、改设置，凡是界面能做的都能做。所以：
 
-- 需要 `ui.code`，启用时用红字确认；安装审查里写明有没有界面代码。
+- 需要 `ui.code`，安装审查里用红字写明有界面代码和它的风险。
 - 主窗口的 CSP 不放开，界面代码不能直接访问外网；要联网只能经过插件后端的
   `onUiCall`。
-- 给插件加能力、改网络地址、设为受信任、装新插件，只在「插件确认」窗口里生效，主窗口里的代码点不到它。
+- 设为受信任、装新插件或换代码，只在「插件确认」窗口里生效，主窗口里的代码点不到它。
 - 每个插件组件外面都有错误边界，出错只影响它自己；一分钟内出错 3 次，就自动关掉这个插件的界面。
 - 每个插件的界面可以在插件页单独关掉；插件页顶部的「插件界面」关掉就是安全模式，所有插件界面都不加载。上次加载插件界面后窗口没能正常运行时，下次启动自动进入安全模式。
 - 代码固定在安装时的提交上，更新要用户看过审查后确认。
@@ -575,23 +620,23 @@ export const meta = {
 
 ### `astrlink.http.fetch(request)` 或 `astrlink.http.fetch([request, …])`
 
-- 只能访问用户在插件页授权的地址（协议、主机、端口都要一致，路径不限）。本机以外的明文
-  `http://` 需要用户对这个地址单独同意。
+- 可以访问任何地址，经网关的出网代理发出。
 - 请求带上 `credential: "<凭据位>"`
-  时，AstrLink 只在请求发往该凭据绑定的地址时把它写进请求头，插件读不到凭据的值。
-- 插件不能自己设置
-  `Authorization`、`Cookie`、`Host`、`Content-Length`、`Proxy-*`、`X-AstrLink-*`
-  等请求头；不会发送 `User-Agent`；不跟随重定向，3xx 原样返回。
+  时，AstrLink 只在请求发往该凭据绑定的服务器时把它写进请求头，插件读不到凭据的值；本机以外的明文
+  `http://` 服务器需要用户对这个地址单独同意。
+- 插件可以自己设置 `Authorization`、`Cookie`、`User-Agent` 等请求头；`Host`、`Content-Length`、`Connection`
+  这些由传输决定的头，以及 `Proxy-*`、`X-AstrLink-*`，由网关去掉。插件没设 `User-Agent`
+  时不发送；不跟随重定向，3xx 原样返回。
 - 请求体用 `json`（作为 `application/json` 发送）或 `body`，不能同时有，`GET`
   不带请求体，最多 1 MiB。
 - 传数组时并行执行，一次最多 8 个；v1 的每次钩子调用最多 16 个，v2 的最多 32 个，可以用
   `Promise.all`
   同时等。单个请求默认 10 秒超时，最多 30 秒，钩子的时间上限会更早截止。等网络的时间不计入脚本时间。
-- v2 还提供标准的 `fetch(url, init)`，按同样的规则访问网络，返回标准的
-  `Response`；`init.credential` 指定凭据位。
+- v2 还提供标准的 `fetch(url, init)` 和 `node:http(s)`，按同样的规则访问网络；`fetch`
+  返回标准的 `Response`，`init.credential` 指定凭据位。
 - 响应：`status`（没收到响应时为 0）、`headers`（每个头的第一个值，键是小写）、`json`
   或 `text`（最多 1 MiB）、`took_ms`，以及出错时的
-  `error`：`denied`、`timeout`、`network`、`too_large`、`budget`。HTTP 错误码照常返回，不算
+  `error`：`denied`（凭据不能发往这个地址）、`timeout`、`network`、`too_large`、`budget`。HTTP 错误码照常返回，不算
   `error`。
 
 ### 其他函数
@@ -616,8 +661,9 @@ export const meta = {
 | 返回值   | 最多 64 KiB、4096 个值；供应商适配器 64 MiB                        |
 | 定时器   | v2 每次调用同时最多 64 个，调用结束时一并取消                      |
 | 时间上限 | 每个扩展点各自的上限，见「扩展点」                                 |
-| 动态代码 | `eval` 和 `new Function` 抛出 `EvalError`                          |
-| 内置对象 | 冻结并在所有插件间共享，修改会抛出 `TypeError`                     |
+| 文件     | 数据目录最多 1 GiB；同时打开的文件最多 256 个                      |
+| 动态代码 | `eval` 和 `new Function` 一次最多编译 1 MiB 的源码                 |
+| 内置对象 | 每个运行时一份，插件可以修改，不影响别的插件                       |
 
 超出限制时，这次调用的结果被丢弃，请求照常进行。出错的运行时不会再被使用，下次调用用新的。
 
@@ -701,7 +747,7 @@ KiB；表格最多 200 行，单个文字最多 1024 个字符。超出的部分
 
 - 插件页的「开发」页签有插件的实时日志：`console`、`astrlink.log`、失败的调用和调用栈。
 - 同一页签列出每个钩子最近 256 次调用的耗时分位和 JS 时间。
-- 「试运行」选一个钩子、填参数，在沙箱里跑一次，不访问网络，也不写请求记录。
+- 「试运行」选一个钩子、填参数跑一次，不访问网络，也不写请求记录。
 - 多文件项目构建时生成 source map，出错时调用栈对回 TS 源码的行号。
 - `astrlink plugin dev`
   构建出的开发版在插件列表里标为「开发版」，源码改了自动重新加载。
@@ -712,16 +758,17 @@ KiB；表格最多 200 行，单个文字最多 1024 个字符。超出的部分
 里的用例。一个文件可以是一个用例、用例数组，或者带 `cases`
 的对象：对象里的其他字段是这些用例共用的设置，用例自己写了的字段以自己的为准。
 
-| 字段                     | 说明                                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------------- |
-| `name`、`hook`、`args`   | 用例名、要调的钩子和参数                                                              |
-| `config`、`capabilities` | 插件的设置；授予的能力，不写时授予插件申请的全部能力                                  |
-| `request`                | `astrlink.request.info` 的返回值                                                      |
-| `store`                  | 调用前存储里的值                                                                      |
-| `now`、`timeZone`        | 时钟的时间（RFC 3339）和时区（如 `America/New_York`），不写时用真实时间和本机时区     |
-| `metaValues`             | `astrlink.meta.values` 按属性返回的值                                                 |
-| `fetch`                  | 伪造的应答，见下；用例自己的先匹配，再匹配文件共用的                                  |
-| `expect`                 | `result` 要求结果相等，`match` 要求包含；`error` 要求失败；`store` 是调用后存储里的值 |
+| 字段                   | 说明                                                                                                                                     |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`、`hook`、`args` | 用例名、要调的钩子和参数                                                                                                                 |
+| `config`               | 插件的设置。插件申请的能力全部生效，旧用例里的 `capabilities` 读取后不起作用                                                             |
+| `files`                | 调用前数据目录里的文件：路径到文本                                                                                                       |
+| `request`              | `astrlink.request.info` 的返回值                                                                                                         |
+| `store`                | 调用前存储里的值                                                                                                                         |
+| `now`、`timeZone`      | 时钟的时间（RFC 3339）和时区（如 `America/New_York`），不写时用真实时间和本机时区                                                        |
+| `metaValues`           | `astrlink.meta.values` 按属性返回的值                                                                                                    |
+| `fetch`                | 伪造的应答，见下；用例自己的先匹配，再匹配文件共用的                                                                                     |
+| `expect`               | `result` 要求结果相等，`match` 要求包含；`error` 要求失败；`store` 是调用后存储里的值；`files` 是调用后数据目录里的文件，`null` 表示没有 |
 
 - `fetch` 的每一项按 `method` 和 `url`（以 `*` 结尾时按前缀）匹配请求；写了
   `body` 时，请求的 JSON 正文还要包含这些字段。
