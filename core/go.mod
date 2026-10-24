@@ -3,7 +3,7 @@ module github.com/QuantumNous/astrlink/core
 go 1.26.10
 
 require (
-	github.com/Calcium-Ion/moejs v0.1.0-alpha.7
+	github.com/Calcium-Ion/moejs v0.1.0-alpha.9
 	github.com/QuantumNous/astrlink/convo v0.0.0
 	github.com/QuantumNous/new-api/relaykit v0.3.1
 	github.com/deepteams/webp v1.2.8
