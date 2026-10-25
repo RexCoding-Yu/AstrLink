@@ -325,6 +325,10 @@ export interface Service {
 export interface ServicePlugin {
   key: string;
   provider: string;
+  /** new_api for a task plugin's provider that is another new-api gateway with the plugin installed. */
+  upstream?: "new_api";
+  /** What a task plugin reads as the provider's own settings, such as vertexRegion. */
+  settings?: Record<string, unknown>;
 }
 
 export type RoutableService = Pick<
@@ -973,12 +977,20 @@ const pluginNamePattern = /^[a-z][a-z0-9-]{0,31}$/;
 
 function parseServicePlugin(value: unknown, path: string): ServicePlugin {
   const plugin = objectAt(value, path);
-  keysAt(plugin, ["key", "provider"], [], path);
+  keysAt(plugin, ["key", "provider"], ["upstream", "settings"], path);
   const key = stringAt(plugin.key, `${path}.key`, 1, 32);
   const provider = stringAt(plugin.provider, `${path}.provider`, 1, 32);
   if (!pluginNamePattern.test(key) || !pluginNamePattern.test(provider))
     invalid(path, "invalid plugin provider");
-  return { key, provider };
+  const parsed: ServicePlugin = { key, provider };
+  if (plugin.upstream !== undefined) {
+    if (plugin.upstream !== "new_api")
+      invalid(`${path}.upstream`, "unknown upstream");
+    parsed.upstream = "new_api";
+  }
+  if (plugin.settings !== undefined)
+    parsed.settings = objectAt(plugin.settings, `${path}.settings`);
+  return parsed;
 }
 
 export function parseService(value: unknown, path = "$"): Service {
@@ -1270,12 +1282,14 @@ export function subscriptionRiskLabel(
 }
 
 export function supportsResponsesWebSocket(
-  service: Pick<Service, "kind" | "capabilities">,
+  service: Pick<Service, "kind" | "capabilities" | "plugin">,
 ): boolean {
-  // The Copilot API and Factory's gateway serve Responses over HTTP only.
+  // The Copilot API and Factory's gateway serve Responses over HTTP only,
+  // and a task plugin's provider answers Responses through its tasks.
   if (
     service.kind === "copilot_subscription" ||
-    service.kind === "droid_subscription"
+    service.kind === "droid_subscription" ||
+    service.plugin?.provider === "task"
   )
     return false;
   return (

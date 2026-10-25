@@ -114,7 +114,8 @@ import {
 import { copyButtonLabel, useCopyFeedback } from "./copy-feedback";
 import { compactTitle } from "./file-path-spans";
 import { formatCompactNumber } from "./format-compact-number";
-import { currentLocale, i18n, useT } from "./i18n";
+import { formatClockTime, formatDateTime } from "./format-time";
+import { i18n, useT } from "./i18n";
 import { LIVE_CLOCK_INTERVAL_MS, useLiveClock } from "./live-clock";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
@@ -2848,7 +2849,7 @@ const DiscoveryRow = memo(function DiscoveryRow({
           dateTime={session.last_started_at}
           title={formatDateTime(session.last_started_at)}
         >
-          {formatTime(session.last_started_at)}
+          {formatClockTime(session.last_started_at)}
         </time>
       </Button>
     </DataRow>
@@ -2968,7 +2969,7 @@ const SessionRow = memo(function SessionRow({
             dateTime={session.last_started_at}
             title={formatDateTime(session.last_started_at)}
           >
-            {formatTime(session.last_started_at)}
+            {formatClockTime(session.last_started_at)}
           </time>
         </span>
         {/* Capped by the list width, not a fixed size: a redirect shows two names. */}
@@ -4676,39 +4677,6 @@ function serviceLabel(
 ): string | null {
   if (!serviceId) return null;
   return services.find((service) => service.id === serviceId)?.name ?? null;
-}
-
-// Same output as toLocaleString / toLocaleTimeString with `hour12: false`,
-// which build a new formatter per call; the list formats two times per row.
-const dateTimeFormats = new Map<string, Intl.DateTimeFormat>();
-
-function formatDate(value: string, withDate: boolean): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const locale = currentLocale();
-  const key = `${locale}:${withDate}`;
-  let format = dateTimeFormats.get(key);
-  if (!format) {
-    format = new Intl.DateTimeFormat(locale, {
-      ...(withDate
-        ? { year: "numeric", month: "numeric", day: "numeric" }
-        : {}),
-      hour: "numeric",
-      minute: "numeric",
-      second: "numeric",
-      hour12: false,
-    });
-    dateTimeFormats.set(key, format);
-  }
-  return format.format(date);
-}
-
-function formatDateTime(value: string): string {
-  return formatDate(value, true);
-}
-
-function formatTime(value: string): string {
-  return formatDate(value, false);
 }
 
 function formatBytes(bytes: number): string {

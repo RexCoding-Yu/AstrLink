@@ -200,6 +200,9 @@ export const protocolLabels: Readonly<Record<string, string>> = {
   "openai.embeddings": "OpenAI Embeddings",
   "google.embeddings": "Gemini Embeddings",
   rerank: "Rerank",
+  "openai.images": "OpenAI Images",
+  "openai.videos": "OpenAI Videos",
+  "plugin.native": "Plugin Routes",
 };
 
 export const protocolClients: Readonly<Record<string, string>> = {
@@ -232,6 +235,9 @@ export const protocolEntryPaths: Readonly<Record<string, string>> = {
   "openai.embeddings": "/v1/embeddings",
   "google.embeddings": "/v1beta/models/:model:embedContent",
   rerank: "/v1/rerank",
+  "openai.images": "/v1/images/generations",
+  "openai.videos": "/v1/videos",
+  "plugin.native": "/v1/tasks",
 };
 
 export function protocolEntryPath(

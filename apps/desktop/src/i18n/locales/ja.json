@@ -1261,7 +1261,11 @@
       "gemini": "Gemini CLI が使用"
     },
     "groupPlugins": "プラグイン",
-    "kindPickerPluginHint": "「{{plugin}}」プラグインが中継"
+    "kindPickerPluginHint": "「{{plugin}}」プラグインが中継",
+    "taskUpstream": "上流は別の New API ゲートウェイ",
+    "taskUpstreamHelp": "同じプラグインを入れた別の New API ゲートウェイに送ります。アドレスにそのゲートウェイ、キーにそのトークンを入れてください。",
+    "serviceAccountKey": "サービスアカウント JSON",
+    "serviceAccountKeyHelp": "Google Cloud のサービスアカウントキーのファイル内容をすべて貼り付けてください。ゲートウェイがアクセストークンに交換し、プラグインには渡しません。"
   },
   "models": {
     "deleteNamed": "{{label}} を削除",
@@ -4735,7 +4739,8 @@
       "builtin": "組み込み",
       "directory": "ディレクトリ",
       "override": "組み込みを置換",
-      "github": "GitHub"
+      "github": "GitHub",
+      "market": "マーケットプレイス"
     },
     "state": {
       "running": "実行中",
@@ -4751,7 +4756,8 @@
       "overview": "概要",
       "settings": "設定",
       "status": "稼働状況",
-      "develop": "開発"
+      "develop": "開発",
+      "tasks": "タスク"
     },
     "testStatus": {
       "ok": "接続 OK",
@@ -4831,8 +4837,6 @@
       "calls": "呼び出し",
       "timeouts": "タイムアウト",
       "memoryLimits": "メモリ超過",
-      "network": "ネットワーク",
-      "networkValue": "{{requests}} 件 · 拒否 {{denied}} · 失敗 {{errors}}",
       "failures": "失敗した呼び出し",
       "reasons": {
         "timeout": "タイムアウト",
@@ -4841,7 +4845,9 @@
         "invalid_result": "無効な結果",
         "canceled": "キャンセル",
         "unavailable": "利用不可"
-      }
+      },
+      "networkRequests": "ネットワーク要求",
+      "networkDetail": "拒否 {{denied}} · 失敗 {{errors}}"
     },
     "enableDialog": {
       "purpose": "ネットワークの用途: {{purpose}}",
@@ -4917,7 +4923,11 @@
       "budget": "注入の上限",
       "budgetHelp": "すべてのプラグインが 1 回のリクエストに追加できる内容の合計です。超えた場合、順番が後のプラグインのブロックは入らず、リクエスト記録に「注入の上限を超過」と残ります。",
       "budgetValue": "{{value}} KB",
-      "saveFailed": "プラグイン全体の設定を保存できませんでした。"
+      "saveFailed": "プラグイン全体の設定を保存できませんでした。",
+      "open": "プラグイン設定",
+      "title": "プラグイン設定",
+      "pausedShort": "すべてのプラグインを一時停止中",
+      "helpLabel": "{{label}} について"
     },
     "clients": {
       "label": "対象のクライアント",
@@ -5182,7 +5192,8 @@
       "confirm": "許可",
       "confirmEnable": "有効にする",
       "waiting": "この変更は「プラグインの確認」ウィンドウで確認を待っています。",
-      "open": "確認ウィンドウを開く"
+      "open": "確認ウィンドウを開く",
+      "pluginWords": "プラグインの説明"
     },
     "limits": {
       "label": "拡張ポイントの時間上限",
@@ -5201,7 +5212,7 @@
     },
     "install": {
       "open": "プラグインをインストール",
-      "title": "GitHub からプラグインをインストール",
+      "title": "プラグインをインストール",
       "helpLabel": "GitHub からのインストールについて",
       "helpLinks": "リポジトリのトップ（最新のバージョンタグ、タグがなければデフォルトブランチをインストール）、tree/ 以下のブランチ・タグ・ディレクトリ、リリース、コミットのリンクを貼り付けられます。プライベートリポジトリはまだ対応していません。",
       "helpBuild": "AstrLink はこのコンピューターでロックファイルが固定する依存を npm からダウンロードし、ロックファイルのハッシュと 1 つずつ照合してから、内蔵のバンドラーでビルドします。インストールスクリプトは一切実行しません。ネイティブモジュールを含む依存は使えません。",
@@ -5245,7 +5256,8 @@
       "replacedAt": "{{day}}に置き換え",
       "ref": {
         "tag": "タグ {{ref}}",
-        "branch": "ブランチ {{ref}}"
+        "branch": "ブランチ {{ref}}",
+        "version": "バージョン {{ref}}"
       },
       "refCommit": "固定コミット",
       "refAt": "{{ref}} · {{day}}のコミット",
@@ -5301,7 +5313,24 @@
         "expired": "審査結果の有効期限が切れました。もう一度確認してください。",
         "busy": "別のプラグインをビルドしています。少し待ってから再試行してください。",
         "unknown": "インストールできませんでした（{{reason}}）。"
-      }
+      },
+      "sourceLabel": "インストール元",
+      "sources": {
+        "github": "GitHub",
+        "market": "マーケットプレイス"
+      },
+      "backToMarket": "ほかを選ぶ",
+      "marketRef": "バージョン {{version}} · 検証済み",
+      "groups": {
+        "source": "提供元",
+        "abilities": "できること",
+        "dependencies": "コードと依存関係",
+        "risks": "リスク"
+      },
+      "taskKind": "タスクプラグイン",
+      "keyHosts": "キーの送信先",
+      "highRisk": "高リスクの権限を要求：{{capability}}",
+      "changelog": "更新履歴"
     },
     "ui": {
       "switch": "プラグインの画面",
@@ -5318,7 +5347,140 @@
       "tab": "プラグイン",
       "pluginSwitch": "このプラグインの画面を読み込む",
       "pluginSwitchLabel": "画面"
-    }
+    },
+    "countLabel_one": "{{count}} 個のプラグイン",
+    "countLabel_other": "{{count}} 個のプラグイン",
+    "metrics": {
+      "label": "プラグインの概況",
+      "installed": "インストール済み",
+      "running": "実行中",
+      "calls": "起動後の呼び出し",
+      "tasks": "実行中のタスク",
+      "problems": "問題",
+      "callCount_one": "{{count}} 回の呼び出し",
+      "callCount_other": "{{count}} 回の呼び出し"
+    },
+    "list": {
+      "tabs": "プラグインのセクション",
+      "installed": "インストール済み",
+      "market": "マーケットプレイス",
+      "develop": "開発",
+      "browseMarket": "マーケットプレイスを見る"
+    },
+    "groups": {
+      "providers": "プロバイダー",
+      "extensions": "拡張"
+    },
+    "market": {
+      "failed": "マーケットプレイスを読み込めませんでした。",
+      "source": "マーケットプレイスの提供元",
+      "official": "公式マーケットプレイス",
+      "custom": "ほかのマーケットプレイス",
+      "indexLabel": "マーケットプレイスの index.json のアドレス",
+      "open": "開く",
+      "search": "プラグインやモデルを検索",
+      "count_one": "{{name}} · {{count}} 個のプラグイン",
+      "count_other": "{{name}} · {{count}} 個のプラグイン",
+      "loading": "マーケットプレイスを読み込んでいます…",
+      "noMatch": "一致するプラグインがありません",
+      "empty": "このマーケットプレイスにはまだプラグインがありません",
+      "listLabel": "マーケットプレイスのプラグイン",
+      "installed": "インストール済み",
+      "update": "{{version}} に更新",
+      "install": "インストール",
+      "models_one": "{{count}} 個のモデル",
+      "models_other": "{{count}} 個のモデル",
+      "noDescription": "このプラグインには説明がありません。",
+      "installedVersion": "{{version}} をインストール済み",
+      "website": "ウェブサイト",
+      "versions": "すべてのバージョン",
+      "installVersion": "このバージョンをインストール",
+      "fewerModels": "折りたたむ",
+      "moreModels_one": "ほか {{count}} 個",
+      "moreModels_other": "ほか {{count}} 個"
+    },
+    "task": {
+      "protocols": {
+        "openai_video": "動画",
+        "openai_image": "画像",
+        "openai_responses": "Responses"
+      },
+      "modes": {
+        "stream": "ストリーミング",
+        "sync": "同期",
+        "background": "バックグラウンド"
+      },
+      "nativeRoutes": "ネイティブルート",
+      "auth": {
+        "api_key": "API キー",
+        "oauth2_jwt": "サービスアカウント（OAuth）",
+        "none": "キー不要"
+      },
+      "status": {
+        "NOT_START": "待機中",
+        "SUBMITTED": "送信済み",
+        "QUEUED": "待機中",
+        "IN_PROGRESS": "生成中",
+        "SUCCESS": "完了",
+        "FAILURE": "失敗",
+        "UNKNOWN": "不明"
+      },
+      "endpoints": "対応するエンドポイント",
+      "noEndpoints": "このプラグインはエンドポイントを宣言していません。",
+      "routeTypes": {
+        "submit": "送信",
+        "query": "照会",
+        "dynamic": "送信または照会"
+      },
+      "connection": "接続",
+      "baseUrl": "既定のアドレス",
+      "noBaseUrl": "プロバイダー追加時に指定",
+      "authLabel": "認証方式",
+      "allowedHosts": "追加のホスト",
+      "author": "作者",
+      "website": "ウェブサイト",
+      "fetchModeLabel": "照会方式",
+      "fetchMode": {
+        "per_task": "1 件ずつ照会",
+        "batch": "まとめて照会"
+      },
+      "metrics": {
+        "models": "モデル",
+        "running": "実行中",
+        "tasks": "全タスク",
+        "providers": "プロバイダー"
+      },
+      "providers": "このプラグインを使うプロバイダー",
+      "addProvider": "プロバイダーを追加",
+      "noProviders": "このプラグインを使うプロバイダーはまだありません。キーを入れてプロバイダーを追加すると、クライアントがそのモデルで生成できます。",
+      "enableFirst": "プロバイダーを追加するにはプラグインを有効にしてください。",
+      "providerOn": "有効",
+      "providerOff": "無効",
+      "about": "プラグインについて",
+      "tasksTitle": "最近のタスク",
+      "runningCount_one": "{{count}} 件実行中",
+      "runningCount_other": "{{count}} 件実行中",
+      "clear": "完了したタスクを消去",
+      "clearTitle": "完了したタスクを消去しますか？",
+      "clearConfirm": "完了・失敗したタスクと、ゲートウェイが保存した結果ファイルを削除します。クライアントからは参照できなくなります。実行中のタスクは残ります。",
+      "clearFailed": "タスクを消去できませんでした。",
+      "tasksFailed": "タスクを読み込めませんでした。",
+      "noTasks": "タスクはまだありません",
+      "loadMore": "さらに読み込む"
+    },
+    "developHome": {
+      "commands": "コマンドライン",
+      "builds": "このコンピューターのプロジェクトからビルドしたプラグイン",
+      "noBuilds": "まだありません。プラグインのプロジェクトで astrlink plugin dev を実行すると、ここに表示され、変更のたびに再読み込みされます。",
+      "command": {
+        "new": "テンプレートからプラグインプロジェクトを作成",
+        "dev": "変更を監視してビルドし、このコンピューターの AstrLink に入れてログを表示",
+        "check": "ビルドしてマニフェスト・権限・API を確認",
+        "test": "tests/ のケースでフックを実行",
+        "build": "plugin.js と client.js をビルド"
+      }
+    },
+    "directoryPath": "パス"
   },
   "pluginRecords": {
     "none": "このリクエストにプラグインの記録はありません。",

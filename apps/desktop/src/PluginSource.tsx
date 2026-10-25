@@ -127,19 +127,35 @@ export function PluginSourceCard({
         <h3 className="text-xs font-semibold">{t("plugins.install.source")}</h3>
       </PanelHeader>
       <div className="grid gap-2 p-3 text-sm">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <GitHubRepoBadge
-            href={repository}
-            label={t("plugins.install.openRepository", {
-              repository: source.repository,
-            })}
-          />
-          <span className="min-w-0 break-all">
-            {source.repository}
-            {source.subdir ? ` / ${source.subdir}` : ""}
-          </span>
-        </div>
-        <p className="text-xs text-muted-foreground">{sourceRef(source, t)}</p>
+        {source.kind === "market" ? (
+          <div className="grid gap-0.5">
+            <span className="min-w-0 break-all">
+              {source.repository || t("plugins.source.market")}
+              {source.key ? ` / ${source.key}` : ""}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {t("plugins.install.marketRef", { version: source.ref ?? "" })}
+            </span>
+          </div>
+        ) : (
+          <>
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <GitHubRepoBadge
+                href={repository}
+                label={t("plugins.install.openRepository", {
+                  repository: source.repository,
+                })}
+              />
+              <span className="min-w-0 break-all">
+                {source.repository}
+                {source.subdir ? ` / ${source.subdir}` : ""}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {sourceRef(source, t)}
+            </p>
+          </>
+        )}
         {error ? <FormMessage tone="error">{error}</FormMessage> : null}
         {check ? (
           check.pinned ? (

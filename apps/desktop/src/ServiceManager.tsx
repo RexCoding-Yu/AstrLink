@@ -98,6 +98,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
+import { PluginIcon, pluginAvatar } from "@/components/PluginIcon";
 import {
   Dialog,
   DialogContent,
@@ -207,7 +208,7 @@ import {
   type ServiceRecord,
   type SubscriptionServiceKind,
 } from "./service-model";
-import type { PluginList, PluginProvider } from "./plugin-model";
+import type { PluginList, PluginProvider, PluginTask } from "./plugin-model";
 import {
   SubscriptionResetButton,
   SubscriptionUsageMeter,
@@ -239,20 +240,27 @@ export interface PluginProviderChoice {
   plugin: string;
   pluginName: string;
   provider: PluginProvider;
+  /** The plugin's icon, as a data URL. */
+  icon?: string;
+  /** What a task plugin declares: its provider runs generation tasks. */
+  task?: PluginTask;
 }
 
-/** The kinds of provider the enabled plugins adapt. */
+/** The kinds of provider the enabled plugins adapt, a task plugin's among them. */
 export function pluginProviderChoices(
   list: PluginList,
 ): PluginProviderChoice[] {
   return list.plugins.flatMap((plugin) =>
     plugin.enabled &&
-    plugin.granted_capabilities.includes("provider") &&
+    (plugin.kind === "task" ||
+      plugin.granted_capabilities.includes("provider")) &&
     plugin.providers
       ? plugin.providers.map((provider) => ({
           plugin: plugin.key,
           pluginName: plugin.name,
           provider,
+          ...(plugin.icon ? { icon: plugin.icon } : {}),
+          ...(plugin.task ? { task: plugin.task } : {}),
         }))
       : [],
   );
@@ -311,6 +319,8 @@ type Draft = {
   modelListPath: string;
   /** The plugin that adapts a provider of kind plugin. */
   plugin?: ServicePlugin;
+  /** What the task plugin of a new provider declares. */
+  pluginTask?: PluginTask;
 };
 
 type ConfirmAction =
@@ -446,7 +456,19 @@ export function ServiceKindPickerDialog({
         description: t("services.kindPickerPluginHint", {
           plugin: choice.pluginName,
         }),
-        icon: <ServiceKindIcon kind="plugin" size={20} />,
+        icon:
+          choice.icon || choice.task ? (
+            <PluginIcon
+              className="size-5 rounded-sm"
+              icon={choice.icon}
+              label={pluginAvatar({
+                name: choice.pluginName,
+                task: choice.task,
+              })}
+            />
+          ) : (
+            <ServiceKindIcon kind="plugin" size={20} />
+          ),
       })),
     });
   return (
@@ -507,6 +529,7 @@ function pluginProviderDraft(
   return {
     kind: "plugin",
     plugin: { key: choice.plugin, provider: provider.id },
+    ...(choice.task ? { pluginTask: choice.task } : {}),
     name: provider.name,
     enabled: true,
     responsesWebSocket: false,
@@ -2292,8 +2315,12 @@ export function ServiceManager({
         ) : null}
         <ServiceKindPickerDialog
           onOpenChange={setKindPickerOpen}
-          onSelect={(serviceKind) =>
-            onViewChange({ kind: "create", serviceKind })
+          onSelect={(serviceKind, plugin) =>
+            onViewChange({
+              kind: "create",
+              serviceKind,
+              ...(plugin ? { plugin } : {}),
+            })
           }
           open={kindPickerOpen}
         />
@@ -3282,6 +3309,9 @@ export function ServiceManager({
   }
 
   const editingKind = editing?.service.kind;
+  // A task plugin's provider serves the protocols its plugin claims, which
+  // the gateway sets; it has no protocols to choose.
+  const taskProvider = draft.plugin?.provider === "task";
   const canKeepCredential = Boolean(editing?.service.http?.credential_ref);
   const savedKeyHint = editing?.service.http?.credential_hint;
   const selectedPreset = isSubscriptionKind(draft.kind)
@@ -3334,7 +3364,9 @@ export function ServiceManager({
         }))
       }
       onDiscoverModels={
-        // A plugin's provider lists its models once it is saved.
+        // A plugin's provider lists its models once it is saved; a task
+        // plugin's models are the ones it declares.
+        draft.plugin?.provider !== "task" &&
         (draft.kind === "plugin" ? editing !== null : true) &&
         (modelDiscoveryProtocols(draft).length > 0 ||
           (draft.kind === "custom" && draft.modelListPath.trim() !== ""))
@@ -3867,6 +3899,35 @@ export function ServiceManager({
                   ) : null}
                 </>
               ) : null}
+              {draft.pluginTask?.new_api && !editingKind ? (
+                <Field
+                  label={t("services.taskUpstream")}
+                  tooltip={t("services.taskUpstreamHelp")}
+                >
+                  <Switch
+                    aria-label={t("services.taskUpstream")}
+                    checked={draft.plugin?.upstream === "new_api"}
+                    onCheckedChange={(on) =>
+                      setDraft((current) =>
+                        current.plugin
+                          ? {
+                              ...current,
+                              plugin: on
+                                ? { ...current.plugin, upstream: "new_api" }
+                                : {
+                                    key: current.plugin.key,
+                                    provider: current.plugin.provider,
+                                    ...(current.plugin.settings
+                                      ? { settings: current.plugin.settings }
+                                      : {}),
+                                  },
+                            }
+                          : current,
+                      )
+                    }
+                  />
+                </Field>
+              ) : null}
               {draft.authScheme !== "none" ? (
                 <Field
                   label={
@@ -3874,7 +3935,16 @@ export function ServiceManager({
                       ? canKeepCredential
                         ? t("services.apiKeyKeep")
                         : t("services.apiKeyRequired")
-                      : "API Key"
+                      : draft.pluginTask?.auth === "oauth2_jwt" &&
+                          draft.plugin?.upstream !== "new_api"
+                        ? t("services.serviceAccountKey")
+                        : "API Key"
+                  }
+                  tooltip={
+                    draft.pluginTask?.auth === "oauth2_jwt" &&
+                    draft.plugin?.upstream !== "new_api"
+                      ? t("services.serviceAccountKeyHelp")
+                      : undefined
                   }
                 >
                   <Input
@@ -4083,8 +4153,10 @@ export function ServiceManager({
                     ) : null}
                   </TabsTrigger>
                   <TabsTrigger
+                    className={taskProvider ? "hidden" : undefined}
                     data-testid="service-editor-tab-protocols"
                     data-tour-target="protocols"
+                    disabled={taskProvider}
                     onClick={() => setEditorTab("protocols")}
                     type="button"
                     value="protocols"

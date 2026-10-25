@@ -29,6 +29,9 @@ const bridgeMocks = vi.hoisted(() => ({
   rollbackPlugin: vi.fn(),
   uninstallPlugin: vi.fn(),
   pluginInstallFailureOf: vi.fn(),
+  getPluginMarket: vi.fn(),
+  listPluginTasks: vi.fn(),
+  clearPluginTasks: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -37,9 +40,13 @@ import { PluginManager } from "./PluginManager";
 import type {
   PluginDayStats,
   PluginDetail,
+  PluginInstallReview,
   PluginList,
+  PluginMarket,
   PluginStats,
+  PluginTask,
 } from "./plugin-model";
+import type { Service } from "./service-model";
 import {
   finishExitAnimations,
   installDialogAnimations,
@@ -344,6 +351,165 @@ const helloReview = {
   warnings: [{ code: "install_scripts_skipped", package: "tiny-lib@2.0.0" }],
 };
 
+/** What a plugin's detail has beyond its summary, all empty. */
+const emptyDetail = {
+  hooks: [],
+  config: {},
+  network_origins: [],
+  privacy_trusted: false,
+  turn_wait_ms: 2500,
+  credentials: [],
+  metadata: [],
+  settings: [],
+  credits: [],
+  excluded_clients: [],
+  workspace_binding: true,
+  auto_refresh: false,
+  lookup_enabled: true,
+  tools: [],
+  storage: [],
+  host_storage: [],
+  limits: [],
+  ui_enabled: true,
+};
+
+const soraTask: PluginTask = {
+  icon: "Sora.Color",
+  description: "OpenAI Sora 视频生成",
+  author: "QuantumNous",
+  models: ["sora-2", "sora-2-pro"],
+  fetch_mode: "per_task",
+  auth: "api_key",
+  base_url: "https://api.openai.com",
+  new_api: true,
+  protocols: [
+    { name: "openai_responses", supports: ["stream", "sync", "background"] },
+    { name: "openai_video" },
+  ],
+  routes: [],
+};
+
+const soraProvider = {
+  id: "task",
+  name: "Sora",
+  base_url: "https://api.openai.com",
+  auth: { scheme: "bearer" as const },
+  protocols: [{ protocol: "openai.videos", stream: false, sync: true }],
+  models: ["sora-2", "sora-2-pro"],
+};
+
+/** A task plugin of new-api's marketplace, enabled, with a task running. */
+const sora: PluginDetail = {
+  ...emptyDetail,
+  key: "sora",
+  name: "Sora",
+  version: "1.1.0",
+  source: "directory",
+  file: "plugin.js",
+  enabled: true,
+  state: "loaded",
+  kind: "task",
+  task: soraTask,
+  providers: [soraProvider],
+  tasks: 3,
+  running_tasks: 1,
+  requested_capabilities: [],
+  granted_capabilities: [],
+  needs_network: false,
+};
+
+const soraService = {
+  id: "service_sora",
+  name: "Sora 主账号",
+  kind: "plugin",
+  enabled: true,
+  models: ["sora-2"],
+  capabilities: [],
+  http: { base_url: "https://api.openai.com", auth: { scheme: "bearer" } },
+  plugin: { key: "sora", provider: "task" },
+  created_at: "2026-10-25T08:00:00Z",
+  updated_at: "2026-10-25T08:00:00Z",
+} as unknown as Service;
+
+const market: PluginMarket = {
+  index:
+    "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json",
+  name: "New API Official Plugins",
+  plugins: [
+    {
+      key: "alibaba",
+      name: "Alibaba Bailian",
+      description: "阿里云百炼图片与视频生成",
+      icon: "AlibabaCloud.Color",
+      latest: "1.4.2",
+      versions: [
+        {
+          version: "1.4.2",
+          base_url: "https://dashscope.aliyuncs.com",
+          auth: "api_key",
+          link: "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json#alibaba@1.4.2",
+        },
+      ],
+      models: ["wan2.5-t2v-preview", "qwen-image"],
+      protocols: [{ name: "openai_video" }, { name: "openai_image" }],
+      routes: [],
+      link: "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json#alibaba@1.4.2",
+    },
+    {
+      key: "sora",
+      name: "Sora",
+      description: "OpenAI Sora 视频生成",
+      latest: "1.1.0",
+      versions: [
+        {
+          version: "1.1.0",
+          link: "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json#sora@1.1.0",
+        },
+      ],
+      models: ["sora-2", "sora-2-pro"],
+      protocols: [{ name: "openai_video" }],
+      routes: [],
+      link: "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json#sora@1.1.0",
+      installed: "1.1.0",
+    },
+  ],
+};
+
+const alibabaReview = {
+  token: "token-market",
+  expires_at: "2026-10-25T13:00:00Z",
+  source: {
+    kind: "market",
+    repository: "New API Official Plugins",
+    url: "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/plugins/tasks/alibaba/1.4.2/plugin.js",
+    ref: "1.4.2",
+    ref_kind: "version",
+    commit: "4f2c",
+    index: market.index,
+    key: "alibaba",
+  },
+  key: "alibaba",
+  name: "Alibaba Bailian",
+  version: "1.4.2",
+  description: "阿里云百炼图片与视频生成",
+  author: "QuantumNous",
+  api_version: 1,
+  capabilities: [],
+  hooks: [],
+  plugin_bytes: 30720,
+  dependencies: [],
+  dependency_bytes: 0,
+  kind: "task",
+  task: {
+    models: ["wan2.5-t2v-preview", "qwen-image"],
+    fetch_mode: "per_task",
+    auth: "api_key",
+    base_url: "https://dashscope.aliyuncs.com",
+    protocols: [{ name: "openai_video" }, { name: "openai_image" }],
+    routes: [],
+  },
+} as unknown as PluginInstallReview;
+
 function button(label: string, root: ParentNode = document): HTMLButtonElement {
   const match = [...root.querySelectorAll("button")].find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -498,6 +664,64 @@ describe("PluginManager", () => {
     });
   }
 
+  /** Renders the list and opens a plugin's page from its row. */
+  async function renderOpen(key = "powercontext") {
+    await render();
+    const row = document.querySelector<HTMLElement>(
+      `[data-testid="plugin-row"][data-plugin-key="${key}"]`,
+    );
+    if (!row) throw new Error(`Missing the row of ${key}`);
+    await click(row);
+  }
+
+  /** Opens the dialog of the settings of every plugin. */
+  async function openHostSettings() {
+    await click(button("插件设置"));
+    const dialog = document.querySelector(
+      '[data-testid="plugin-host-dialog"]',
+    ) as HTMLElement | null;
+    if (!dialog) throw new Error("Missing the plugin settings dialog");
+    return dialog;
+  }
+
+  it("goes back to the list when the sidebar opens the page again", async () => {
+    const first = { kind: "plugins" };
+    await act(async () => {
+      reactRoot.render(
+        <PluginManager coreSessionKey="session-1" isReady visit={first} />,
+      );
+    });
+    const row = document.querySelector<HTMLElement>(
+      '[data-testid="plugin-row"][data-plugin-key="powercontext"]',
+    );
+    await click(row!);
+    expect(document.querySelector('[data-testid="plugin-detail"]')).not.toBe(
+      null,
+    );
+    // A render of the same visit keeps the plugin open.
+    await act(async () => {
+      reactRoot.render(
+        <PluginManager coreSessionKey="session-1" isReady visit={first} />,
+      );
+    });
+    expect(document.querySelector('[data-testid="plugin-detail"]')).not.toBe(
+      null,
+    );
+    await act(async () => {
+      reactRoot.render(
+        <PluginManager
+          coreSessionKey="session-1"
+          isReady
+          visit={{ kind: "plugins" }}
+        />,
+      );
+    });
+    expect(document.querySelector('[data-testid="plugin-detail"]')).toBe(null);
+    expect(
+      document.querySelectorAll('[data-testid="plugin-row"]'),
+    ).toHaveLength(2);
+  });
+
   it("says the gateway is not running instead of loading forever", async () => {
     await act(async () => {
       reactRoot.render(
@@ -533,12 +757,12 @@ describe("PluginManager", () => {
     const rows = document.querySelectorAll('[data-testid="plugin-row"]');
     expect(rows).toHaveLength(2);
     expect(rows[0]?.textContent).toContain("PowerContext 记忆");
-    expect(rows[0]?.textContent).not.toContain("内置");
+    expect(rows[0]?.textContent).toContain("内置");
     expect(rows[1]?.textContent).toContain(
       "plugin.ts 第 12 行 · async 需要 apiVersion 2",
     );
-    // The title says where the plugin comes from, never its key.
-    expect(document.body.textContent).toContain("内置 · 1.0.0");
+    // The row says where the plugin comes from, never its key.
+    expect(rows[0]?.textContent).toContain("内置");
     expect(document.body.textContent).not.toContain("powercontext · 1.0.0");
     await click(rows[1] as HTMLElement);
     expect(document.body.textContent).toContain(
@@ -548,7 +772,7 @@ describe("PluginManager", () => {
   });
 
   it("shows the connection, the bound projects, its own status and its credits", async () => {
-    await render();
+    await renderOpen();
     const connection = document.querySelector(
       '[data-testid="plugin-connection"]',
     );
@@ -556,11 +780,9 @@ describe("PluginManager", () => {
     // and the last test on the link.
     const link = connection?.querySelector('[data-testid="plugin-link"]');
     expect(link?.getAttribute("data-state")).toBe("off");
-    expect(link?.textContent).toContain("AstrLink本机网关已停用");
+    expect(link?.textContent).toContain("已停用");
     expect(link?.textContent).toContain("PowerContext 1.3.0 · 190 ms");
-    expect(link?.textContent).toContain(
-      "PowerContext 记忆192.0.2.1:9090明文 HTTP",
-    );
+    expect(link?.textContent).toContain("192.0.2.1:9090明文 HTTP");
     expect(connection?.textContent).toContain("原子记忆 / 主题记忆");
     const bindings = document.querySelector('[data-testid="plugin-bindings"]');
     expect(bindings?.textContent).toContain("已绑定的项目");
@@ -641,7 +863,7 @@ describe("PluginManager", () => {
       days: [day("2026-10-21")],
       total: day(""),
     });
-    await render();
+    await renderOpen();
     expect(
       document.querySelector('[data-testid="plugin-effects"]')?.textContent,
     ).toContain("最近 7 天还没有记录。");
@@ -664,15 +886,16 @@ describe("PluginManager", () => {
         },
       },
     });
-    bridgeMocks.reloadPlugins.mockResolvedValue(list);
-    await click(button("重新扫描"));
+    await click(
+      document.querySelector('button[aria-label="刷新"]') as HTMLElement,
+    );
     expect(
       document.querySelector('[data-testid="plugin-effects"]')?.textContent,
     ).toContain("查询8 次命中 75% · 2 个会话用过 · 拒绝 1 次");
   });
 
   it("lists the account day by day on the status page, today first", async () => {
-    await render();
+    await renderOpen();
     await openTab("运行状态");
     const daily = document.querySelector(
       '[data-testid="plugin-daily-effects"]',
@@ -750,7 +973,7 @@ describe("PluginManager", () => {
         },
       ],
     });
-    await render();
+    await renderOpen();
     // A development build says so instead of where it came from.
     expect(document.body.textContent).toContain("开发版 · 1.0.0");
     await openTab("开发");
@@ -816,7 +1039,7 @@ describe("PluginManager", () => {
       fail_closed_requested: true,
     });
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     const limits = document.querySelector('[data-testid="plugin-limits"]');
     const inputs = [...(limits?.querySelectorAll("input") ?? [])];
@@ -867,6 +1090,7 @@ describe("PluginManager", () => {
         (row) => row.getAttribute("data-key") ?? row.textContent,
       );
     expect(rows()[0]).toContain("team-rules");
+    await openHostSettings();
     await click(button("调整顺序"));
     const ordered = [
       ...document.querySelectorAll('[data-testid="plugin-order-row"]'),
@@ -876,7 +1100,7 @@ describe("PluginManager", () => {
       expect.stringContaining("PowerContext 记忆"),
     ]);
     await click(
-      button("保存", document.querySelector('[role="dialog"]') as HTMLElement),
+      button("保存", ordered[0]?.closest('[role="dialog"]') as HTMLElement),
     );
     expect(bridgeMocks.updatePluginHostSettings).toHaveBeenCalledWith({
       order: ["team-rules", "powercontext"],
@@ -889,7 +1113,7 @@ describe("PluginManager", () => {
       enabled: true,
       granted_capabilities: memory.requested_capabilities,
     });
-    await render();
+    await renderOpen();
     await openTab("设置");
     await click(button("启用"));
     // A plugin is trusted code: its install review listed what it
@@ -1011,7 +1235,7 @@ describe("PluginManager", () => {
     });
     bridgeMocks.previewPluginInstall.mockResolvedValue(helloReview);
     bridgeMocks.uninstallPlugin.mockResolvedValue(list);
-    await render();
+    await renderOpen("hello");
     const source = document.querySelector(
       '[data-testid="plugin-source"]',
     ) as HTMLElement;
@@ -1069,7 +1293,7 @@ describe("PluginManager", () => {
       ],
     });
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     const scopes = document.querySelector<HTMLButtonElement>(
       'button[aria-label="查询范围"]',
@@ -1113,28 +1337,27 @@ describe("PluginManager", () => {
     );
   });
 
-  it("keeps the help of the header in one ?", async () => {
+  it("keeps the settings of every plugin in one dialog, their help behind ?", async () => {
     await render();
-    const controls = document.querySelector(
+    const dialog = await openHostSettings();
+    const controls = dialog.querySelector(
       '[data-testid="plugin-host-controls"]',
     );
-    expect(controls?.querySelector("button[aria-label^='关于']")).toBeNull();
-    const help = document.querySelector<HTMLButtonElement>(
-      'button[aria-label="关于插件的总设置"]',
+    expect(controls?.textContent).toContain("暂停所有插件");
+    expect(controls?.textContent).toContain("注入总预算");
+    // No explanation under the controls: each is behind its ?.
+    expect(controls?.textContent).not.toContain("暂停期间所有插件都不运行");
+    const help = controls?.querySelector<HTMLButtonElement>(
+      'button[aria-label="关于「暂停所有插件」"]',
     );
-    if (!help) throw new Error("Missing the header help");
+    if (!help) throw new Error("Missing the help of the pause");
     await click(help);
-    for (const part of [
-      "暂停期间所有插件都不运行",
-      "所有插件往一次请求里注入的内容合计",
-      "每个插件在这里有自己的文件夹",
-    ])
-      expect(document.body.textContent).toContain(part);
+    expect(document.body.textContent).toContain("暂停期间所有插件都不运行");
   });
 
   it("saves the settings form as one configuration", async () => {
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     const form = document.querySelector('[data-testid="plugin-settings"]');
     expect(form?.textContent).toContain("每轮条数");
@@ -1163,7 +1386,7 @@ describe("PluginManager", () => {
 
   it("asks again for plain HTTP when the server moves", async () => {
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     await type(
       control<HTMLInputElement>("服务器地址"),
@@ -1202,7 +1425,7 @@ describe("PluginManager", () => {
       ],
     });
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     await click(button("更多设置"));
     expect(
@@ -1225,7 +1448,7 @@ describe("PluginManager", () => {
 
   it("sends a new token to its server", async () => {
     bridgeMocks.savePluginCredential.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     expect(document.body.textContent).toContain("已配置 ···· abcd");
     await click(button("更换"));
@@ -1241,7 +1464,7 @@ describe("PluginManager", () => {
 
   it("edits the same configuration as JSON", async () => {
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     await click(button("更多设置"));
     expect(control<HTMLInputElement>("最短问题").value).toBe("8");
@@ -1282,6 +1505,7 @@ describe("PluginManager", () => {
       }),
     );
     await render();
+    await openHostSettings();
     const controls = document.querySelector(
       '[data-testid="plugin-host-controls"]',
     );
@@ -1314,7 +1538,7 @@ describe("PluginManager", () => {
       ],
     });
     bridgeMocks.clearPluginData.mockResolvedValue(2);
-    await render();
+    await renderOpen();
     const item = [
       ...document.querySelectorAll('[data-testid="plugin-stored-item"]'),
     ].find((entry) => entry.textContent?.includes("查询凭证")) as HTMLElement;
@@ -1359,7 +1583,7 @@ describe("PluginManager", () => {
       settings: [...memory.settings, { key: "$lookup", group: "查询" }],
     });
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     const lookup = control<HTMLButtonElement>("允许 Agent 查询");
     expect(lookup.getAttribute("aria-checked")).toBe("true");
@@ -1388,14 +1612,14 @@ describe("PluginManager", () => {
   });
 
   it("offers no lookup switch for a plugin without lookups", async () => {
-    await render();
+    await renderOpen();
     await openTab("设置");
     expect(document.body.textContent).not.toContain("允许 Agent 查询");
   });
 
   it("lists what is kept for the plugin and clears it after asking", async () => {
     bridgeMocks.clearPluginData.mockResolvedValue(2);
-    await render();
+    await renderOpen();
     const stored = document.querySelector('[data-testid="plugin-stored"]');
     expect(stored?.textContent).toContain("工作区和值的对应");
     expect(stored?.textContent).toContain("2 条");
@@ -1458,7 +1682,7 @@ describe("PluginManager", () => {
 
   it("asks before automatic refresh and saves the host's switches", async () => {
     bridgeMocks.updatePlugin.mockResolvedValue(memory);
-    await render();
+    await renderOpen();
     await openTab("设置");
     expect(
       control<HTMLButtonElement>("按工作区自动绑定").getAttribute(
@@ -1512,7 +1736,7 @@ describe("PluginManager", () => {
       ...memory,
       turn_wait_ms: 3500,
     });
-    await render();
+    await renderOpen();
     await openTab("设置");
     const wait = control<HTMLButtonElement>("最长等待");
     expect(wait.textContent).toContain("2.5 秒");
@@ -1530,7 +1754,7 @@ describe("PluginManager", () => {
       hooks: ["observeTurn", "testConnection"],
       settings: [],
     });
-    await render();
+    await renderOpen();
     await openTab("设置");
     expect(document.body.textContent).not.toContain("最长等待");
     // Without settings of its own the gateway's still show.
@@ -1544,7 +1768,7 @@ describe("PluginManager", () => {
       last_test: undefined,
     });
     bridgeMocks.testPlugin.mockResolvedValue(status.last_test);
-    await render();
+    await renderOpen();
     const link = () => document.querySelector('[data-testid="plugin-link"]');
     expect(link()?.getAttribute("data-state")).toBe("idle");
     expect(link()?.textContent).toContain("还没测试");
@@ -1569,7 +1793,7 @@ describe("PluginManager", () => {
         },
       ],
     });
-    await render();
+    await renderOpen();
     const connection = document.querySelector(
       '[data-testid="plugin-connection"]',
     );
@@ -1586,7 +1810,7 @@ describe("PluginManager", () => {
       view: undefined,
       view_error: "threw TypeError: boom",
     });
-    await render();
+    await renderOpen();
     expect(
       document.querySelector('[data-testid="plugin-status-error"]')
         ?.textContent,
@@ -1600,7 +1824,7 @@ describe("PluginManager", () => {
     expect(document.body.textContent).toContain("threw TypeError: boom");
   });
 
-  it("opens the first plugin a rescan finds", async () => {
+  it("lists what a rescan finds and opens a plugin from its row", async () => {
     bridgeMocks.listPlugins.mockResolvedValue({
       directory: "/data/plugins",
       plugins: [],
@@ -1608,11 +1832,27 @@ describe("PluginManager", () => {
     bridgeMocks.reloadPlugins.mockResolvedValue(list);
     await render();
     expect(document.body.textContent).toContain("还没有插件");
-    await click(button("重新扫描"));
+    await click(
+      document.querySelector('button[aria-label="重新扫描"]') as HTMLElement,
+    );
+    expect(
+      document.querySelectorAll('[data-testid="plugin-row"]'),
+    ).toHaveLength(2);
+    expect(bridgeMocks.getPlugin).not.toHaveBeenCalled();
+    await click(
+      document.querySelector(
+        '[data-testid="plugin-row"][data-plugin-key="powercontext"]',
+      ) as HTMLElement,
+    );
     expect(bridgeMocks.getPlugin).toHaveBeenCalledWith("powercontext");
     expect(
       document.querySelector('[data-testid="plugin-overview"]'),
     ).not.toBeNull();
+    // Back to the list.
+    await click(button("插件"));
+    expect(
+      document.querySelectorAll('[data-testid="plugin-row"]'),
+    ).toHaveLength(2);
   });
 
   it("says the overview needs the views grant", async () => {
@@ -1623,9 +1863,228 @@ describe("PluginManager", () => {
       timeouts: 0,
       network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
     });
-    await render();
+    await renderOpen();
     expect(
       document.querySelector('[data-testid="plugin-overview"]')?.textContent,
     ).toContain("启用时授予「界面视图」，这里才会显示插件提供的概览。");
+  });
+
+  describe("task plugins and the marketplace", () => {
+    beforeEach(() => {
+      bridgeMocks.listPlugins.mockResolvedValue({
+        ...list,
+        plugins: [...list.plugins, sora],
+      });
+      const fallback = bridgeMocks.getPlugin.getMockImplementation();
+      bridgeMocks.getPlugin.mockImplementation(async (key: string) =>
+        key === "sora" ? sora : fallback?.(key),
+      );
+      bridgeMocks.listPluginTasks.mockResolvedValue({
+        items: [
+          {
+            id: "video_1",
+            plugin_key: "sora",
+            service_id: "service_sora",
+            surface: "openai_video",
+            action: "generate",
+            model: "sora-2",
+            status: "SUCCESS",
+            usage: { seconds: 8 },
+            created_at: "2026-10-25T08:00:00Z",
+            updated_at: "2026-10-25T08:01:00Z",
+            finished_at: "2026-10-25T08:01:00Z",
+          },
+          {
+            id: "video_2",
+            plugin_key: "sora",
+            service_id: "service_sora",
+            surface: "openai_video",
+            model: "sora-2-pro",
+            status: "IN_PROGRESS",
+            progress: "40%",
+            created_at: "2026-10-25T08:02:00Z",
+            updated_at: "2026-10-25T08:02:30Z",
+          },
+          {
+            id: "resp_3",
+            plugin_key: "sora",
+            service_id: "service_sora",
+            surface: "openai_responses",
+            model: "sora-2",
+            status: "FAILURE",
+            fail_reason: "content policy",
+            created_at: "2026-10-25T07:00:00Z",
+            updated_at: "2026-10-25T07:00:10Z",
+            finished_at: "2026-10-25T07:00:10Z",
+          },
+        ],
+        running: 1,
+      });
+      bridgeMocks.clearPluginTasks.mockResolvedValue(2);
+      bridgeMocks.getPluginMarket.mockResolvedValue(market);
+    });
+
+    async function renderTasks(
+      onAddProvider = vi.fn(),
+      onOpenService = vi.fn(),
+    ) {
+      await act(async () => {
+        reactRoot.render(
+          <PluginManager
+            coreSessionKey="session-1"
+            isReady
+            onAddProvider={onAddProvider}
+            onOpenService={onOpenService}
+            services={[soraService]}
+          />,
+        );
+      });
+    }
+
+    it("opens a task plugin's page: its numbers, endpoints, models and providers", async () => {
+      const onAddProvider = vi.fn();
+      const onOpenService = vi.fn();
+      await renderTasks(onAddProvider, onOpenService);
+      const row = document.querySelector<HTMLElement>(
+        '[data-testid="plugin-row"][data-plugin-key="sora"]',
+      );
+      // The list puts it with the providers, its models on the right.
+      expect(row?.textContent).toContain("2 个模型");
+      await click(row!);
+      expect(
+        [...document.querySelectorAll('[role="tab"]')].map(
+          (tab) => tab.textContent,
+        ),
+      ).toEqual(["概览", "任务", "运行状态"]);
+      const overview = document.querySelector(
+        '[data-testid="plugin-task-overview"]',
+      ) as HTMLElement;
+      const metrics = [
+        ...overview.querySelectorAll('[data-slot="metric-group"] dt'),
+      ].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
+      expect(metrics).toEqual([
+        ["模型", "2"],
+        ["进行中", "1"],
+        ["全部任务", "3"],
+        ["提供商", "1"],
+      ]);
+      const endpoints = overview.querySelector(
+        '[data-testid="plugin-task-endpoints"]',
+      )?.textContent;
+      expect(endpoints).toContain("/v1/responses");
+      expect(endpoints).toContain("流式 · 同步 · 后台");
+      expect(endpoints).toContain("/v1/videos");
+      expect(overview.textContent).toContain("sora-2-pro");
+      expect(overview.textContent).toContain("逐个查询");
+      await click(button("添加提供商"));
+      expect(onAddProvider).toHaveBeenCalledWith(
+        expect.objectContaining({
+          plugin: "sora",
+          pluginName: "Sora",
+          provider: soraProvider,
+          task: soraTask,
+        }),
+      );
+      const provider = [
+        ...overview.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="plugin-task-providers"] button',
+        ),
+      ].find((item) => item.textContent?.includes("Sora 主账号"));
+      await click(provider!);
+      expect(onOpenService).toHaveBeenCalledWith("service_sora");
+    });
+
+    it("lists a task plugin's tasks and clears the finished ones after asking", async () => {
+      await renderTasks();
+      await click(
+        document.querySelector(
+          '[data-testid="plugin-row"][data-plugin-key="sora"]',
+        ) as HTMLElement,
+      );
+      await openTab("任务");
+      const tasks = document.querySelector(
+        '[data-testid="plugin-tasks"]',
+      ) as HTMLElement;
+      expect(tasks.textContent).toContain("1 个进行中");
+      const rows = [
+        ...tasks.querySelectorAll('[data-testid="plugin-task-row"]'),
+      ];
+      expect(
+        rows.map((row) => row.querySelector("[data-tone]")?.textContent),
+      ).toEqual(["完成", "生成中 40%", "失败"]);
+      expect(rows[0].textContent).toContain("视频 · generate");
+      expect(rows[2].textContent).toContain("content policy");
+      await click(button("清除已完成的任务"));
+      const dialog = document.querySelector(
+        '[role="alertdialog"]',
+      ) as HTMLElement;
+      expect(dialog.textContent).toContain("进行中的任务不受影响");
+      expect(bridgeMocks.clearPluginTasks).not.toHaveBeenCalled();
+      await click(button("清除已完成的任务", dialog));
+      await finishExitAnimations();
+      expect(bridgeMocks.clearPluginTasks).toHaveBeenCalledWith("sora");
+      expect(bridgeMocks.listPluginTasks).toHaveBeenCalledTimes(2);
+    });
+
+    it("browses the marketplace and installs from it after the review", async () => {
+      bridgeMocks.previewPluginInstall.mockResolvedValue(alibabaReview);
+      bridgeMocks.installPlugin.mockResolvedValue({
+        ...sora,
+        key: "alibaba",
+        name: "Alibaba Bailian",
+      });
+      await renderTasks();
+      await openTab("插件市场");
+      const cards = () =>
+        [
+          ...document.querySelectorAll<HTMLElement>(
+            '[data-testid="plugin-market-card"]',
+          ),
+        ].map((card) => card);
+      expect(cards()).toHaveLength(2);
+      // An installed version says so instead of offering itself again.
+      expect(cards()[1].textContent).toContain("已安装");
+      // The search reaches the models too.
+      await type(
+        document.querySelector<HTMLInputElement>(
+          'input[placeholder="搜索插件或模型"]',
+        )!,
+        "wan2.5",
+      );
+      expect(cards().map((card) => card.textContent)).toEqual([
+        expect.stringContaining("Alibaba Bailian"),
+      ]);
+      await click(cards()[0]);
+      const entry = document.querySelector(
+        '[data-testid="plugin-market-entry"]',
+      ) as HTMLElement;
+      expect(entry.textContent).toContain("阿里云百炼图片与视频生成");
+      expect(entry.textContent).toContain("/v1/images/generations");
+      await click(button("安装", entry));
+      await finishExitAnimations();
+      expect(bridgeMocks.previewPluginInstall).toHaveBeenCalledWith(
+        market.plugins[0].link,
+      );
+      const review = document.querySelector(
+        '[data-testid="plugin-install-review"]',
+      ) as HTMLElement;
+      expect(review.textContent).toContain("任务插件");
+      expect(
+        review.querySelector('[data-testid="plugin-install-source"]')
+          ?.textContent,
+      ).toBe("New API Official Plugins / alibaba版本 1.4.2 · 已校验");
+      expect(
+        review.querySelector('[data-testid="plugin-install-task"]')
+          ?.textContent,
+      ).toContain("/v1/videos");
+      const dialog = document.querySelector(
+        '[data-testid="plugin-install-dialog"]',
+      ) as HTMLElement;
+      await click(button("安装", dialog));
+      expect(bridgeMocks.installPlugin).toHaveBeenCalledWith(
+        "token-market",
+        false,
+      );
+    });
   });
 });

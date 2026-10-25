@@ -14,6 +14,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input, verbatimTextInput } from "@/components/ui/input";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Boxes } from "@/components/icons";
+import { GithubMono } from "@/components/brand-icons";
 
 import {
   installPlugin,
@@ -29,6 +32,7 @@ import {
   installFailureText,
   PluginInstallReviewView,
 } from "./PluginInstallReview";
+import { PluginMarketView } from "./PluginMarket";
 import type {
   PluginHostSettings,
   PluginHostSettingsUpdate,
@@ -71,6 +75,10 @@ export function PluginInstallDialog({
   const t = useT();
   const [url, setUrl] = useState(link ?? "");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  // A marketplace link (…/index.json#key@version) comes from the market.
+  const [source, setSource] = useState<"github" | "market">(
+    link && !/github\.com/i.test(link) ? "market" : "github",
+  );
   const [registry, setRegistry] = useState(host?.npm_registry ?? "");
   // The newest preview wins; an older one's answer is dropped.
   const previewRun = useRef(0);
@@ -174,7 +182,7 @@ export function PluginInstallDialog({
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
-        className="sm:max-w-lg"
+        className="flex flex-col overflow-hidden sm:max-w-xl"
         data-testid="plugin-install-dialog"
       >
         <DialogHeader className="text-left">
@@ -193,38 +201,95 @@ export function PluginInstallDialog({
             </HelpPopover>
           </DialogTitle>
         </DialogHeader>
-        <form
-          className="flex items-end gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (url.trim() && !busy) void preview(url);
+        <Tabs
+          className="gap-3"
+          onValueChange={(value) => {
+            setSource(value as "github" | "market");
+            if (phase.kind === "failed" || phase.kind === "review")
+              setPhase({ kind: "idle" });
           }}
+          value={source}
         >
-          <Field
-            className="min-w-0 flex-1"
-            htmlFor="plugin-install-url"
-            label={t("plugins.install.link")}
+          <TabsList
+            aria-label={t("plugins.install.sourceLabel")}
+            className="justify-start border-b"
+            variant="line"
           >
-            <Input
-              {...verbatimTextInput}
-              autoFocus={!link}
+            <TabsTrigger
+              className="flex-none"
               disabled={busy || phase.kind === "waiting"}
-              id="plugin-install-url"
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder="https://github.com/owner/repo"
-              value={url}
-            />
-          </Field>
-          <Button
-            disabled={!url.trim() || busy || phase.kind === "waiting"}
-            size="sm"
-            type="submit"
-            variant="outline"
+              value="github"
+            >
+              <GithubMono aria-hidden="true" className="size-3.5" />
+              {t("plugins.install.sources.github")}
+            </TabsTrigger>
+            <TabsTrigger
+              className="flex-none"
+              disabled={busy || phase.kind === "waiting"}
+              value="market"
+            >
+              <Boxes aria-hidden="true" />
+              {t("plugins.install.sources.market")}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+        {source === "github" ? (
+          <form
+            className="flex items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (url.trim() && !busy) void preview(url);
+            }}
           >
-            {t("plugins.install.check")}
-          </Button>
-        </form>
-        <div className="max-h-[55vh] min-h-0 overflow-y-auto overscroll-contain">
+            <Field
+              className="min-w-0 flex-1"
+              htmlFor="plugin-install-url"
+              label={t("plugins.install.link")}
+            >
+              <Input
+                {...verbatimTextInput}
+                autoFocus={!link}
+                disabled={busy || phase.kind === "waiting"}
+                id="plugin-install-url"
+                onChange={(event) => setUrl(event.target.value)}
+                placeholder="https://github.com/owner/repo"
+                value={url}
+              />
+            </Field>
+            <Button
+              disabled={!url.trim() || busy || phase.kind === "waiting"}
+              size="sm"
+              type="submit"
+              variant="outline"
+            >
+              {t("plugins.install.check")}
+            </Button>
+          </form>
+        ) : phase.kind === "idle" ? (
+          <div className="flex min-h-64 flex-1 flex-col">
+            <PluginMarketView
+              compact
+              isReady
+              onInstall={(target) => {
+                setUrl(target);
+                void preview(target);
+              }}
+            />
+          </div>
+        ) : review || phase.kind === "previewing" || phase.kind === "failed" ? (
+          <div className="flex min-w-0 items-center justify-end gap-2">
+            <Button
+              disabled={busy || phase.kind === "waiting"}
+              onClick={() => setPhase({ kind: "idle" })}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              {t("plugins.install.backToMarket")}
+            </Button>
+          </div>
+        ) : null}
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           {phase.kind === "previewing" ? (
             <LoadingState
               className="w-full py-6"
@@ -280,23 +345,25 @@ export function PluginInstallDialog({
             </Button>
           </FormMessage>
         ) : null}
-        <HelpDisclosure title={t("plugins.install.registry")}>
-          <Field
-            htmlFor="plugin-install-registry"
-            inDialog
-            label={t("plugins.install.registryLabel")}
-            tooltip={t("plugins.install.registryHelp")}
-          >
-            <Input
-              {...verbatimTextInput}
-              id="plugin-install-registry"
-              onBlur={saveRegistry}
-              onChange={(event) => setRegistry(event.target.value)}
-              placeholder="https://registry.npmjs.org"
-              value={registry}
-            />
-          </Field>
-        </HelpDisclosure>
+        {source === "github" ? (
+          <HelpDisclosure title={t("plugins.install.registry")}>
+            <Field
+              htmlFor="plugin-install-registry"
+              inDialog
+              label={t("plugins.install.registryLabel")}
+              tooltip={t("plugins.install.registryHelp")}
+            >
+              <Input
+                {...verbatimTextInput}
+                id="plugin-install-registry"
+                onBlur={saveRegistry}
+                onChange={(event) => setRegistry(event.target.value)}
+                placeholder="https://registry.npmjs.org"
+                value={registry}
+              />
+            </Field>
+          </HelpDisclosure>
+        ) : null}
         <DialogFooter>
           <Button onClick={onClose} size="sm" type="button" variant="outline">
             {t("common.cancel")}

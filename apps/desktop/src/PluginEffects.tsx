@@ -353,7 +353,9 @@ export function DailyEffects({
   return (
     <section className="grid gap-1.5" data-testid="plugin-daily-effects">
       <div className="flex items-center gap-1">
-        <h3 className="text-xs font-medium">{t("plugins.effects.daily")}</h3>
+        <h3 className="text-xs font-medium text-muted-foreground">
+          {t("plugins.effects.daily")}
+        </h3>
         <HelpPopover label={t("plugins.effects.dailyHelpLabel")}>
           <p>{t("plugins.effects.dailyHelp")}</p>
         </HelpPopover>

@@ -47,17 +47,22 @@ export interface PluginApproval {
 
 /** Where a plugin installed from source came from. */
 export interface PluginInstallSource {
+  /** github, or market for a plugin marketplace in new-api's index format. */
   kind: string;
-  /** owner/name on GitHub. */
+  /** owner/name on GitHub; a marketplace's name. */
   repository: string;
   url: string;
-  /** The tag or branch installed; absent for a commit. */
+  /** The tag, branch or marketplace version installed; absent for a commit. */
   ref?: string;
-  ref_kind: "tag" | "branch" | "commit";
+  ref_kind: "tag" | "branch" | "commit" | "version";
+  /** The commit built; for a marketplace, the sha256 of the plugin's file. */
   commit: string;
   committed_at?: string;
   /** The plugin's directory in the repository. */
   subdir?: string;
+  /** The marketplace index a plugin came from, and its key there. */
+  index?: string;
+  key?: string;
 }
 
 /** A package a build took from the lock file. */
@@ -122,6 +127,13 @@ export interface PluginInstallReview {
   warnings?: PluginInstallWarning[];
   replaces?: PluginInstallReplace;
   changes?: PluginInstallChanges;
+  /** extension, or task for a task plugin, which task describes. */
+  kind?: PluginKind;
+  task?: PluginTask;
+  /** The icon the plugin installs with, as a data URL. */
+  icon?: string;
+  /** What the version's changelog says, in the page's language when it has one. */
+  changelog?: string;
 }
 
 /** Why a plugin could not be fetched, built or installed. */
@@ -137,7 +149,7 @@ export interface PluginUpdateCheck {
   pinned?: boolean;
   available: boolean;
   ref?: string;
-  ref_kind?: "tag" | "branch" | "commit";
+  ref_kind?: "tag" | "branch" | "commit" | "version";
   commit?: string;
   committed_at?: string;
   version?: string;
@@ -203,8 +215,133 @@ export interface PluginSummary {
   installed?: PluginInstallSource;
   /** Set while the plugin's interface code loads; it changes with the code. */
   ui_version?: string;
-  /** The kinds of provider the plugin adapts, while it is enabled with provider granted. */
+  /** The kinds of provider the plugin adapts, while it is enabled with provider granted; a task plugin's one, while it is enabled. */
   providers?: PluginProvider[];
+  /** extension, or task for a task plugin; absent for a plugin that did not load. */
+  kind?: PluginKind;
+  /** What a task plugin, written for new-api's task plugin API, declares. */
+  task?: PluginTask;
+  /** The plugin's hook calls since the gateway started, and those that failed. */
+  calls?: number;
+  failures?: number;
+  /** A task plugin's tasks, and those not yet finished. */
+  tasks?: number;
+  running_tasks?: number;
+}
+
+/** An extension of requests, or a task plugin of new-api's API. */
+export type PluginKind = "extension" | "task";
+
+/** A gateway protocol a task plugin serves. */
+export interface PluginTaskProtocol {
+  /** openai_image, openai_video or openai_responses. */
+  name: string;
+  /** The forms of Responses request: stream, sync, background. */
+  supports?: string[];
+  /** The models it narrows to; none for all. */
+  models?: string[];
+}
+
+/** A vendor-native URL a task plugin serves on the inference port. */
+export interface PluginTaskRoute {
+  method: string;
+  path: string;
+  /** submit, query or dynamic. */
+  type: string;
+  models?: string[];
+}
+
+/** What a task plugin declares: the models it generates media with and how clients reach them. */
+export interface PluginTask {
+  /** A LobeHub icon name, or text / text:<label> for a text avatar. */
+  icon?: string;
+  description?: string;
+  author?: string;
+  author_url?: string;
+  website?: string;
+  models: string[];
+  /** per_task or batch. */
+  fetch_mode: string;
+  /** api_key, oauth2_jwt or none. */
+  auth: string;
+  base_url?: string;
+  allowed_hosts?: string[];
+  /** The plugin can also drive another new-api gateway that has it. */
+  new_api?: boolean;
+  protocols: PluginTaskProtocol[];
+  routes: PluginTaskRoute[];
+  sort_priority?: number;
+  capabilities?: string[];
+  usage?: { schema?: unknown; examples?: unknown; profiles?: unknown };
+}
+
+/** A task a task plugin ran, as the plugin page lists it. */
+export interface PluginTaskRecord {
+  id: string;
+  plugin_key: string;
+  service_id: string;
+  surface: string;
+  action?: string;
+  model: string;
+  status: string;
+  progress?: string;
+  fail_reason?: string;
+  /** The usage facts the plugin reported, such as seconds or image_count. */
+  usage?: Record<string, string | number | boolean>;
+  /** The kinds of the task's outputs: video, image, audio, file. */
+  artifacts?: string[];
+  created_at: string;
+  updated_at: string;
+  finished_at?: string;
+  request_id?: string;
+}
+
+/** A page of a plugin's tasks, the newest first. */
+export interface PluginTaskPage {
+  items: PluginTaskRecord[];
+  next_cursor?: string;
+  /** The tasks not yet finished. */
+  running: number;
+}
+
+/** A version a plugin marketplace lists. */
+export interface PluginMarketVersion {
+  version: string;
+  min_api_version?: number;
+  base_url?: string;
+  auth?: string;
+  allowed_hosts?: string[];
+  /** The link that installs this version. */
+  link: string;
+}
+
+/** A plugin a marketplace offers, as its index describes the newest version. */
+export interface PluginMarketEntry {
+  key: string;
+  name: string;
+  description?: string;
+  /** A LobeHub icon name or text / text:<label>. */
+  icon?: string;
+  /** The icon as a data URL, when the gateway could fetch it. */
+  icon_url?: string;
+  website?: string;
+  sort_priority?: number;
+  latest: string;
+  versions: PluginMarketVersion[];
+  models: string[];
+  protocols: PluginTaskProtocol[];
+  routes: PluginTaskRoute[];
+  /** The link that installs the newest version. */
+  link: string;
+  /** The version installed now. */
+  installed?: string;
+}
+
+/** What a plugin marketplace offers. */
+export interface PluginMarket {
+  index: string;
+  name: string;
+  plugins: PluginMarketEntry[];
 }
 
 /** A kind of provider a plugin adapts, as the add-provider picker offers it. */
@@ -950,7 +1087,195 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
             .map((item, index) =>
               parseProvider(item, `${path}.providers[${index}]`),
             ),
+    kind:
+      summary.kind === undefined
+        ? undefined
+        : plugin.oneOf(summary.kind, pluginKinds, `${path}.kind`),
+    task:
+      summary.task === undefined
+        ? undefined
+        : parseTask(summary.task, `${path}.task`),
+    calls: plugin.optionalInteger(summary.calls, `${path}.calls`),
+    failures: plugin.optionalInteger(summary.failures, `${path}.failures`),
+    tasks: plugin.optionalInteger(summary.tasks, `${path}.tasks`),
+    running_tasks: plugin.optionalInteger(
+      summary.running_tasks,
+      `${path}.running_tasks`,
+    ),
   });
+}
+
+const pluginKinds = ["extension", "task"] as const;
+
+function parseTaskProtocols(
+  value: unknown,
+  path: string,
+): PluginTaskProtocol[] {
+  return plugin.array(value, path).map((item, index) => {
+    const at = `${path}[${index}]`;
+    const claim = plugin.object(item, at);
+    return defined({
+      name: plugin.string(claim.name, `${at}.name`),
+      supports: optionalStrings(claim.supports, `${at}.supports`),
+      models: optionalStrings(claim.models, `${at}.models`),
+    });
+  });
+}
+
+function parseTaskRoutes(value: unknown, path: string): PluginTaskRoute[] {
+  return plugin.array(value, path).map((item, index) => {
+    const at = `${path}[${index}]`;
+    const route = plugin.object(item, at);
+    return defined({
+      method: plugin.string(route.method, `${at}.method`),
+      path: plugin.string(route.path, `${at}.path`),
+      type: plugin.string(route.type, `${at}.type`),
+      models: optionalStrings(route.models, `${at}.models`),
+    });
+  });
+}
+
+function parseTask(value: unknown, path: string): PluginTask {
+  const task = plugin.object(value, path);
+  const usage =
+    task.usage === undefined
+      ? undefined
+      : plugin.object(task.usage, `${path}.usage`);
+  return defined({
+    icon: plugin.optionalString(task.icon, `${path}.icon`),
+    description: plugin.optionalString(task.description, `${path}.description`),
+    author: plugin.optionalString(task.author, `${path}.author`),
+    author_url: plugin.optionalString(task.author_url, `${path}.author_url`),
+    website: plugin.optionalString(task.website, `${path}.website`),
+    models: plugin.strings(task.models, `${path}.models`),
+    fetch_mode: plugin.string(task.fetch_mode, `${path}.fetch_mode`),
+    auth: plugin.string(task.auth, `${path}.auth`),
+    base_url: plugin.optionalString(task.base_url, `${path}.base_url`),
+    allowed_hosts: optionalStrings(task.allowed_hosts, `${path}.allowed_hosts`),
+    new_api: plugin.optionalBoolean(task.new_api, `${path}.new_api`),
+    protocols: parseTaskProtocols(task.protocols, `${path}.protocols`),
+    routes: parseTaskRoutes(task.routes, `${path}.routes`),
+    sort_priority: plugin.optionalNumber(
+      task.sort_priority,
+      `${path}.sort_priority`,
+    ),
+    capabilities: optionalStrings(task.capabilities, `${path}.capabilities`),
+    usage: usage
+      ? defined({
+          schema: usage.schema,
+          examples: usage.examples,
+          profiles: usage.profiles,
+        })
+      : undefined,
+  });
+}
+
+/** A usage fact: text, a number or a switch. */
+function parseFacts(
+  value: unknown,
+  path: string,
+): Record<string, string | number | boolean> | undefined {
+  if (value === undefined || value === null) return undefined;
+  const facts = plugin.object(value, path);
+  return Object.fromEntries(
+    Object.entries(facts).filter(
+      ([, fact]) =>
+        typeof fact === "string" ||
+        typeof fact === "number" ||
+        typeof fact === "boolean",
+    ),
+  ) as Record<string, string | number | boolean>;
+}
+
+export function parsePluginTaskPage(value: unknown): PluginTaskPage {
+  const page = plugin.object(value, "$");
+  return defined({
+    items: plugin.array(page.items, "$.items").map((item, index) => {
+      const at = `$.items[${index}]`;
+      const task = plugin.object(item, at);
+      return defined({
+        id: plugin.string(task.id, `${at}.id`),
+        plugin_key: plugin.string(task.plugin_key, `${at}.plugin_key`),
+        service_id: plugin.string(task.service_id, `${at}.service_id`),
+        surface: plugin.string(task.surface, `${at}.surface`),
+        action: plugin.optionalString(task.action, `${at}.action`),
+        model: plugin.string(task.model, `${at}.model`),
+        status: plugin.string(task.status, `${at}.status`),
+        progress: plugin.optionalString(task.progress, `${at}.progress`),
+        fail_reason: plugin.optionalString(
+          task.fail_reason,
+          `${at}.fail_reason`,
+        ),
+        usage: parseFacts(task.usage, `${at}.usage`),
+        artifacts: optionalStrings(task.artifacts, `${at}.artifacts`),
+        created_at: plugin.string(task.created_at, `${at}.created_at`),
+        updated_at: plugin.string(task.updated_at, `${at}.updated_at`),
+        finished_at: plugin.optionalString(
+          task.finished_at,
+          `${at}.finished_at`,
+        ),
+        request_id: plugin.optionalString(task.request_id, `${at}.request_id`),
+      });
+    }),
+    next_cursor: plugin.optionalString(page.next_cursor, "$.next_cursor"),
+    running: plugin.integer(page.running, "$.running"),
+  });
+}
+
+export function parsePluginMarket(value: unknown): PluginMarket {
+  const market = plugin.object(value, "$");
+  return {
+    index: plugin.string(market.index, "$.index"),
+    name: plugin.string(market.name, "$.name"),
+    plugins: plugin.array(market.plugins, "$.plugins").map((item, index) => {
+      const at = `$.plugins[${index}]`;
+      const entry = plugin.object(item, at);
+      return defined({
+        key: plugin.string(entry.key, `${at}.key`),
+        name: plugin.string(entry.name, `${at}.name`),
+        description: plugin.optionalString(
+          entry.description,
+          `${at}.description`,
+        ),
+        icon: plugin.optionalString(entry.icon, `${at}.icon`),
+        icon_url: pluginIcon(entry.icon_url, `${at}.icon_url`),
+        website: plugin.optionalString(entry.website, `${at}.website`),
+        sort_priority: plugin.optionalNumber(
+          entry.sort_priority,
+          `${at}.sort_priority`,
+        ),
+        latest: plugin.string(entry.latest, `${at}.latest`),
+        versions: plugin
+          .array(entry.versions, `${at}.versions`)
+          .map((version, position) => {
+            const where = `${at}.versions[${position}]`;
+            const listed = plugin.object(version, where);
+            return defined({
+              version: plugin.string(listed.version, `${where}.version`),
+              min_api_version: plugin.optionalInteger(
+                listed.min_api_version,
+                `${where}.min_api_version`,
+              ),
+              base_url: plugin.optionalString(
+                listed.base_url,
+                `${where}.base_url`,
+              ),
+              auth: plugin.optionalString(listed.auth, `${where}.auth`),
+              allowed_hosts: optionalStrings(
+                listed.allowed_hosts,
+                `${where}.allowed_hosts`,
+              ),
+              link: plugin.string(listed.link, `${where}.link`),
+            });
+          }),
+        models: plugin.strings(entry.models, `${at}.models`),
+        protocols: parseTaskProtocols(entry.protocols, `${at}.protocols`),
+        routes: parseTaskRoutes(entry.routes, `${at}.routes`),
+        link: plugin.string(entry.link, `${at}.link`),
+        installed: plugin.optionalString(entry.installed, `${at}.installed`),
+      });
+    }),
+  };
 }
 
 function parseProvider(value: unknown, path: string): PluginProvider {
@@ -986,7 +1311,7 @@ function parseProvider(value: unknown, path: string): PluginProvider {
   });
 }
 
-const refKinds = ["tag", "branch", "commit"] as const;
+const refKinds = ["tag", "branch", "commit", "version"] as const;
 
 function parseInstallSource(value: unknown, path: string): PluginInstallSource {
   const source = plugin.object(value, path);
@@ -1002,6 +1327,8 @@ function parseInstallSource(value: unknown, path: string): PluginInstallSource {
       `${path}.committed_at`,
     ),
     subdir: plugin.optionalString(source.subdir, `${path}.subdir`),
+    index: plugin.optionalString(source.index, `${path}.index`),
+    key: plugin.optionalString(source.key, `${path}.key`),
   });
 }
 
@@ -1140,6 +1467,16 @@ export function parsePluginInstallReview(
           ),
         })
       : undefined,
+    kind:
+      review.kind === undefined
+        ? undefined
+        : plugin.oneOf(review.kind, pluginKinds, `${path}.kind`),
+    task:
+      review.task === undefined
+        ? undefined
+        : parseTask(review.task, `${path}.task`),
+    icon: pluginIcon(review.icon, `${path}.icon`),
+    changelog: plugin.optionalString(review.changelog, `${path}.changelog`),
   });
 }
 

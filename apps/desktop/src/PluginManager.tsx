@@ -1,31 +1,37 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
-import { Blocks, Plus, RefreshCw } from "@/components/icons";
+import {
+  Activity,
+  Blocks,
+  Boxes,
+  Flask,
+  Home,
+  Plus,
+  RefreshCw,
+  SlidersHorizontal,
+  SquareStack,
+} from "@/components/icons";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { DataField } from "@/components/DataRow";
 import { EmptyState } from "@/components/EmptyState";
 import { FormMessage } from "@/components/FormMessage";
 import { HelpPopover } from "@/components/HelpPopover";
 import { IconButton } from "@/components/IconButton";
 import { LoadingState } from "@/components/LoadingState";
-import { Panel, PanelHeader } from "@/components/Panel";
-import { PluginIcon } from "@/components/PluginIcon";
-import { SplitWorkspace } from "@/components/SplitWorkspace";
+import { Metric, MetricGroup } from "@/components/Metric";
+import { Panel } from "@/components/Panel";
+import { PluginIcon, pluginAvatar } from "@/components/PluginIcon";
 import { StatusBadge } from "@/components/StatusBadge";
-import type { StatusTone } from "@/components/StatusDot";
-import { Badge } from "@/components/ui/badge";
+import { StatusDot } from "@/components/StatusDot";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
 import {
   clearPluginData,
   deletePluginCredential,
@@ -55,6 +61,18 @@ import { PageHeader } from "./PageHeader";
 import { PluginDevelop } from "./PluginDevelop";
 import { PluginInstallDialog } from "./PluginInstall";
 import {
+  loadErrorText,
+  PluginDevelopHome,
+  PluginHostDialog,
+  PluginMetrics,
+  pluginOrigin,
+  PluginRows,
+  pluginState,
+  pluginTone,
+} from "./PluginList";
+import { PluginMarketView } from "./PluginMarket";
+import { TaskPluginOverview, TaskPluginTasks } from "./PluginTaskDetail";
+import {
   installFailureText,
   PluginInstallReviewView,
 } from "./PluginInstallReview";
@@ -70,9 +88,9 @@ import {
 import { capabilityLabel } from "./plugin-labels";
 import { PluginOverview } from "./PluginOverview";
 import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
+import type { PluginProviderChoice } from "./ServiceManager";
+import type { Service } from "./service-model";
 import {
-  MAX_INJECTION_BUDGET_BYTES,
-  MIN_INJECTION_BUDGET_BYTES,
   type PluginApproval,
   type PluginClearTarget,
   type PluginCreditStars,
@@ -82,7 +100,6 @@ import {
   type PluginInstalledVersion,
   type PluginInstallReview,
   type PluginList,
-  type PluginLoadError,
   type PluginSettingsUpdate,
   type PluginStats,
   type PluginStatus,
@@ -90,51 +107,24 @@ import {
 } from "./plugin-model";
 import { DailyEffects } from "./PluginEffects";
 
-type Translate = ReturnType<typeof useT>;
 type DetailTab =
   | "overview"
   | "settings"
   | "status"
   | "develop"
+  /** A task plugin's tasks. */
+  | "tasks"
   /** A tab the plugin's interface registered. */
   | `plugin:${string}`;
 
-/** The injection budgets the plugin page offers, in KiB. */
-const INJECTION_BUDGETS_KIB = [4, 8, 16, 32, 64].filter(
-  (kib) =>
-    kib * 1024 >= MIN_INJECTION_BUDGET_BYTES &&
-    kib * 1024 <= MAX_INJECTION_BUDGET_BYTES,
-);
+/** The tabs of the list page: the installed plugins, the marketplace, development. */
+type ListTab = "installed" | "market" | "develop";
 
-/** i18n keys cannot hold the dots of a capability name. */
-function loadErrorText(error: PluginLoadError, t: Translate): string {
-  const reason = t(`plugins.loadErrors.${error.code}`, {
-    defaultValue: error.code,
-  });
-  const where =
-    error.file && error.line
-      ? t("plugins.errorAt", { file: error.file, line: error.line })
-      : (error.file ?? "");
-  return [where, reason].filter(Boolean).join(" · ");
-}
-
-function pluginTone(plugin: PluginSummary): StatusTone {
-  if (plugin.state === "failed") return "negative";
-  return plugin.enabled ? "positive" : "neutral";
-}
-
-function pluginState(plugin: PluginSummary, t: Translate): string {
-  if (plugin.state === "failed") return t("plugins.state.failed");
-  return plugin.enabled
-    ? t("plugins.state.running")
-    : t("plugins.state.disabled");
-}
-
-/** The plugin to show after the list changes: the same one while it is listed, else the first. */
+/** The plugin open after the list changes: the same one while it is listed, else the list. */
 function keptSelection(current: string | null, list: PluginList) {
   return current && list.plugins.some((plugin) => plugin.key === current)
     ? current
-    : (list.plugins[0]?.key ?? null);
+    : null;
 }
 
 /** The origin of the server that sends credential, once Core allows it. */
@@ -151,15 +141,33 @@ function serverOrigin(detail: PluginDetail, credential: string) {
 export function PluginManager({
   coreSessionKey,
   isReady,
+  services = [],
+  onAddProvider,
+  onOpenService,
+  visit,
 }: {
   coreSessionKey: string | null;
   isReady: boolean;
+  /** The providers, for a task plugin's page to list those that run it. */
+  services?: Service[];
+  /** Opens the editor of a new provider of a plugin. */
+  onAddProvider?: (choice: PluginProviderChoice) => void;
+  /** Opens a provider's editor. */
+  onOpenService?: (id: string) => void;
+  /** A new value each time the sidebar opens the page, which shows the list. */
+  visit?: object;
 }) {
   const t = useT();
   const [list, setList] = useState<PluginList | null>(null);
+  const [listTab, setListTab] = useState<ListTab>("installed");
+  const [hostOpen, setHostOpen] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // The sidebar's 插件 leads to the list, from a plugin's page too.
+  useEffect(() => {
+    setSelectedKey(null);
+  }, [visit]);
   const [detail, setDetail] = useState<PluginDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [status, setStatus] = useState<PluginStatus | null>(null);
@@ -620,112 +628,14 @@ export function PluginManager({
 
   // The list shows the plugins in the order their extension points run.
   const plugins = orderedPlugins(list?.plugins ?? [], host?.order);
-  const selected = plugins.find((plugin) => plugin.key === selectedKey) ?? null;
+  const listed = plugins.find((plugin) => plugin.key === selectedKey) ?? null;
+  // The page of a plugin shows it as its detail has it, once read.
+  const selected =
+    listed && detail?.key === listed.key ? { ...listed, ...detail } : listed;
+  const uiOn = isWebEdition ? host?.web_ui === true : ui.safeMode === "off";
 
-  return (
-    <section
-      aria-labelledby="plugin-manager-heading"
-      className="@container gutter-frame flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
-    >
-      <PageHeader
-        actions={
-          <>
-            {host ? (
-              <PluginHostControls
-                disabled={!isReady}
-                host={host}
-                onChange={(update) => void changeHost(update)}
-                onUi={(on) =>
-                  isWebEdition
-                    ? void changeHost({ web_ui: on })
-                    : setPluginUiSafeMode(!on)
-                }
-                ui={isWebEdition ? host.web_ui === true : ui.safeMode === "off"}
-              />
-            ) : null}
-            {list || host ? (
-              <HelpPopover label={t("plugins.headerHelpLabel")} size="wide">
-                <div className="grid gap-3">
-                  {host ? (
-                    <>
-                      <section className="grid gap-1">
-                        <h3 className="text-xs font-medium text-muted-foreground">
-                          {t("plugins.host.pause")}
-                        </h3>
-                        <p>{t("plugins.host.pauseHelp")}</p>
-                      </section>
-                      <section className="grid gap-1">
-                        <h3 className="text-xs font-medium text-muted-foreground">
-                          {t("plugins.host.budget")}
-                        </h3>
-                        <p>{t("plugins.host.budgetHelp")}</p>
-                      </section>
-                      <section className="grid gap-1">
-                        <h3 className="text-xs font-medium text-muted-foreground">
-                          {t("plugins.ui.switch")}
-                        </h3>
-                        <p>
-                          {isWebEdition
-                            ? t("plugins.ui.webHelp")
-                            : t("plugins.ui.switchHelp")}
-                        </p>
-                      </section>
-                    </>
-                  ) : null}
-                  {list ? (
-                    <section className="grid gap-1">
-                      <h3 className="text-xs font-medium text-muted-foreground">
-                        {t("plugins.directoryHelpLabel")}
-                      </h3>
-                      <p>{t("plugins.directoryHelp")}</p>
-                      <p className="font-mono text-xs break-all">
-                        {list.directory}
-                      </p>
-                      <p>{t("plugins.rescanHelp")}</p>
-                    </section>
-                  ) : null}
-                </div>
-              </HelpPopover>
-            ) : null}
-            <Button
-              disabled={!isReady}
-              onClick={() => setInstalling({})}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <Plus />
-              {t("plugins.install.open")}
-            </Button>
-            <Button
-              disabled={!isReady || rescanning}
-              onClick={() => void rescan()}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <RefreshCw
-                className={
-                  rescanning
-                    ? "animate-spin motion-reduce:animate-none"
-                    : undefined
-                }
-              />
-              {rescanning ? t("plugins.rescanning") : t("plugins.rescan")}
-            </Button>
-          </>
-        }
-        title={t("plugins.title")}
-        titleId="plugin-manager-heading"
-        titleSuffix={
-          list ? (
-            <Badge className="tabular-nums" variant="secondary">
-              {plugins.length}
-            </Badge>
-          ) : null
-        }
-        variant="compact"
-      />
+  const notices = (
+    <>
       {listError || hostError ? (
         <FormMessage className="mb-3" tone="error">
           {listError ?? hostError}
@@ -758,119 +668,319 @@ export function PluginManager({
           {t("plugins.stale")}
         </FormMessage>
       ) : null}
-      {!isReady && list === null ? (
-        <EmptyState
-          className="flex-1"
-          description={t("plugins.blockedHint")}
-          illustration={<Blocks className="size-6" />}
-          title={t("plugins.blocked")}
-          variant="page"
-        />
-      ) : list === null && !listError ? (
-        <LoadingState className="flex-1" label={t("plugins.loading")} />
-      ) : list !== null && plugins.length === 0 ? (
-        <EmptyState
-          className="flex-1"
-          description={t("plugins.emptyHint")}
-          illustration={<Blocks className="size-6" />}
-          title={t("plugins.empty")}
-          variant="page"
-        />
-      ) : list !== null ? (
-        <SplitWorkspace className="grid-rows-[auto_minmax(360px,1fr)] @[720px]:grid-cols-[minmax(11rem,14rem)_minmax(0,1fr)]">
-          <Panel className="flex min-h-0 flex-col overflow-hidden">
-            <ul
-              aria-label={t("plugins.listLabel")}
-              className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
-            >
-              {plugins.map((plugin) => (
-                <li className="border-b last:border-b-0" key={plugin.key}>
-                  <PluginRow
-                    onSelect={() => setSelectedKey(plugin.key)}
-                    plugin={plugin}
-                    selected={plugin.key === selectedKey}
-                  />
-                </li>
-              ))}
-            </ul>
-            {plugins.length > 1 && host ? (
-              <div className="shrink-0 border-t p-2">
-                <Button
-                  className="w-full"
-                  disabled={!isReady}
-                  onClick={() => setOrdering(true)}
-                  size="xs"
-                  type="button"
-                  variant="ghost"
-                >
-                  {t("plugins.order.open")}
-                </Button>
-              </div>
-            ) : null}
-          </Panel>
-          <Panel className="flex min-h-0 flex-col overflow-hidden">
-            {selected === null ? (
-              <EmptyState className="flex-1" title={t("plugins.select")} />
-            ) : detailError ? (
-              <FormMessage className="m-3" tone="error">
-                {detailError}
-              </FormMessage>
-            ) : detail === null || detail.key !== selected.key ? (
-              <LoadingState className="flex-1" label={t("plugins.loading")} />
-            ) : (
-              <PluginDetailPane
-                actionError={actionError}
-                advancedOpen={advancedOpen}
-                busy={busy}
-                detail={detail}
-                onAdvancedOpen={setAdvancedOpen}
-                onClearData={(what) => clearData(detail.key, what)}
-                onCredentialClear={(name) =>
-                  apply(() => deletePluginCredential(detail.key, name))
-                }
-                onSaveSettings={(update, credentials) =>
-                  saveSettings(detail.key, update, credentials)
-                }
-                onDisable={() =>
-                  void apply(() => save(detail.key, { enabled: false }))
-                }
-                onEnable={() => {
-                  // A plugin is trusted code: what it declares the install
-                  // review listed, and enabling it grants all of that.
-                  void apply(() => save(detail.key, { enabled: true })).then(
-                    (enabled) => {
-                      if (!enabled) return;
-                      setTab("overview");
-                      setLinkPlay((count) => count + 1);
-                      if (detail.hooks.includes("describeStatus"))
-                        void loadStatus(detail.key);
-                    },
-                  );
-                }}
-                awaiting={awaiting === detail.key}
-                onOpenApproval={() => void openPluginApproval()}
-                onUpdate={(link) => setInstalling({ link })}
-                onRollback={(version) => void rollback(detail.key, version)}
-                onUninstall={() => setUninstalling(detail)}
-                onUiEnabled={(on) =>
-                  void apply(() => save(detail.key, { ui_enabled: on }))
-                }
-                onRefreshStatus={() => void loadStatus(detail.key)}
-                onTab={setTab}
-                onTest={() => void runTest(detail.key)}
-                linkPlay={linkPlay}
-                revision={revision}
-                stars={stars}
-                stats={stats}
-                status={status}
-                statusError={statusError}
-                tab={tab}
-                testing={testing}
+    </>
+  );
+
+  return (
+    <section
+      aria-labelledby="plugin-manager-heading"
+      className="@container gutter-frame flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
+    >
+      {selected ? (
+        <>
+          <PageHeader
+            back={{
+              label: t("plugins.title"),
+              onClick: () => setSelectedKey(null),
+            }}
+            title={selected.name}
+            titleId="plugin-manager-heading"
+            titlePrefix={
+              <PluginIcon
+                className="size-6 rounded-md"
+                icon={selected.icon}
+                label={pluginAvatar(selected)}
               />
-            )}
-          </Panel>
-        </SplitWorkspace>
-      ) : null}
+            }
+            titleSuffix={
+              <span className="flex min-w-0 items-center gap-2">
+                <StatusBadge tone={pluginTone(selected)}>
+                  {pluginState(selected, t)}
+                </StatusBadge>
+                {/* Narrow, the name keeps the room; the page says the rest. */}
+                <span className="truncate text-xs text-muted-foreground @max-[560px]:hidden">
+                  {[pluginOrigin(selected, t), selected.version]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              </span>
+            }
+            actions={
+              detail && detail.key === selected.key ? (
+                <PluginActions
+                  busy={busy}
+                  detail={detail}
+                  onDisable={() =>
+                    void apply(() => save(detail.key, { enabled: false }))
+                  }
+                  onEnable={() => {
+                    // A plugin is trusted code: what it declares the install
+                    // review listed, and enabling it grants all of that.
+                    void apply(() => save(detail.key, { enabled: true })).then(
+                      (enabled) => {
+                        if (!enabled) return;
+                        setTab("overview");
+                        setLinkPlay((count) => count + 1);
+                        if (detail.hooks.includes("describeStatus"))
+                          void loadStatus(detail.key);
+                      },
+                    );
+                  }}
+                  onTest={() => void runTest(detail.key)}
+                  onUiEnabled={(on) =>
+                    void apply(() => save(detail.key, { ui_enabled: on }))
+                  }
+                  testing={testing}
+                />
+              ) : null
+            }
+          />
+          {notices}
+          {detailError ? (
+            <FormMessage tone="error">{detailError}</FormMessage>
+          ) : detail === null || detail.key !== selected.key ? (
+            <LoadingState className="flex-1" label={t("plugins.loading")} />
+          ) : (
+            <PluginDetailPane
+              actionError={actionError}
+              advancedOpen={advancedOpen}
+              busy={busy}
+              detail={detail}
+              onAdvancedOpen={setAdvancedOpen}
+              onClearData={(what) => clearData(detail.key, what)}
+              onCredentialClear={(name) =>
+                apply(() => deletePluginCredential(detail.key, name))
+              }
+              onSaveSettings={(update, credentials) =>
+                saveSettings(detail.key, update, credentials)
+              }
+              awaiting={awaiting === detail.key}
+              onOpenApproval={() => void openPluginApproval()}
+              onUpdate={(link) => setInstalling({ link })}
+              onRollback={(version) => void rollback(detail.key, version)}
+              onUninstall={() => setUninstalling(detail)}
+              onRefreshStatus={() =>
+                // Refresh reads the plugin anew, then what it did.
+                void loadDetail(detail.key).then((next) => {
+                  if (next?.state === "loaded") void loadStatus(detail.key);
+                })
+              }
+              onTab={setTab}
+              linkPlay={linkPlay}
+              revision={revision}
+              services={services}
+              onAddProvider={
+                onAddProvider && detail.providers?.length
+                  ? () => {
+                      const provider = detail.providers?.[0];
+                      if (provider)
+                        onAddProvider({
+                          plugin: detail.key,
+                          pluginName: detail.name,
+                          provider,
+                          ...(detail.icon ? { icon: detail.icon } : {}),
+                          ...(detail.task ? { task: detail.task } : {}),
+                        });
+                    }
+                  : undefined
+              }
+              onOpenService={onOpenService}
+              stars={stars}
+              stats={stats}
+              status={status}
+              statusError={statusError}
+              tab={tab}
+            />
+          )}
+        </>
+      ) : (
+        <>
+          <PageHeader
+            actions={
+              <>
+                {list || host ? (
+                  <Button
+                    disabled={!isReady}
+                    onClick={() => setHostOpen(true)}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    <SlidersHorizontal aria-hidden="true" />
+                    {t("plugins.host.open")}
+                  </Button>
+                ) : null}
+                <Button
+                  disabled={!isReady}
+                  onClick={() => setInstalling({})}
+                  size="sm"
+                  type="button"
+                >
+                  <Plus aria-hidden="true" />
+                  {t("plugins.install.open")}
+                </Button>
+              </>
+            }
+            className="mb-0"
+            title={t("plugins.title")}
+            titleId="plugin-manager-heading"
+            titleSuffix={
+              list ? (
+                <span className="inline-flex shrink-0 items-center gap-1.5 text-micro whitespace-nowrap text-muted-foreground">
+                  <StatusDot
+                    tone={
+                      !isReady
+                        ? "neutral"
+                        : host?.paused
+                          ? "pending"
+                          : "positive"
+                    }
+                  />
+                  {host?.paused
+                    ? t("plugins.host.pausedShort")
+                    : t("plugins.countLabel", { count: plugins.length })}
+                </span>
+              ) : null
+            }
+            variant="compact"
+          />
+          <div className="pt-3">{notices}</div>
+          {!isReady && list === null ? (
+            <EmptyState
+              className="flex-1"
+              description={t("plugins.blockedHint")}
+              illustration={<Blocks className="size-6" />}
+              title={t("plugins.blocked")}
+              variant="page"
+            />
+          ) : list === null && !listError ? (
+            <LoadingState className="flex-1" label={t("plugins.loading")} />
+          ) : list !== null ? (
+            <Tabs
+              className="min-h-0 min-w-0 flex-1 gap-0"
+              onValueChange={(value) => setListTab(value as ListTab)}
+              value={listTab}
+            >
+              <div className="pb-3">
+                <PluginMetrics plugins={plugins} />
+              </div>
+              <div className="flex min-w-0 shrink-0 items-center gap-2 border-b">
+                <TabsList
+                  aria-label={t("plugins.list.tabs")}
+                  className="min-w-0 flex-1 justify-start"
+                  variant="line"
+                >
+                  <TabsTrigger className="flex-none" value="installed">
+                    <Blocks aria-hidden="true" />
+                    {t("plugins.list.installed")}
+                  </TabsTrigger>
+                  <TabsTrigger className="flex-none" value="market">
+                    <Boxes aria-hidden="true" />
+                    {t("plugins.list.market")}
+                  </TabsTrigger>
+                  <TabsTrigger className="flex-none" value="develop">
+                    <Flask aria-hidden="true" />
+                    {t("plugins.list.develop")}
+                  </TabsTrigger>
+                </TabsList>
+                {listTab === "installed" ? (
+                  <IconButton
+                    disabled={!isReady || rescanning}
+                    label={t("plugins.rescan")}
+                    onClick={() => void rescan()}
+                    type="button"
+                    variant="outline"
+                  >
+                    <RefreshCw
+                      className={
+                        rescanning
+                          ? "animate-spin motion-reduce:animate-none"
+                          : undefined
+                      }
+                    />
+                  </IconButton>
+                ) : null}
+              </div>
+              <TabsContent
+                className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain pb-3"
+                data-tab-scroller
+                value="installed"
+              >
+                {plugins.length === 0 ? (
+                  <EmptyState
+                    action={
+                      <Button
+                        onClick={() => setListTab("market")}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        {t("plugins.list.browseMarket")}
+                      </Button>
+                    }
+                    className="h-full"
+                    description={t("plugins.emptyHint")}
+                    illustration={<Blocks className="size-6" />}
+                    title={t("plugins.empty")}
+                    variant="page"
+                  />
+                ) : (
+                  <PluginRows onOpen={setSelectedKey} plugins={plugins} />
+                )}
+              </TabsContent>
+              <TabsContent
+                className="flex min-h-0 min-w-0 flex-1 flex-col pt-3"
+                value="market"
+              >
+                {listTab === "market" ? (
+                  <PluginMarketView
+                    isReady={isReady}
+                    onInstall={(link) => setInstalling({ link })}
+                  />
+                ) : null}
+              </TabsContent>
+              <TabsContent
+                className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain"
+                data-tab-scroller
+                value="develop"
+              >
+                <PluginDevelopHome
+                  directory={list.directory}
+                  disabled={!isReady}
+                  onOpen={setSelectedKey}
+                  onRescan={() => void rescan()}
+                  plugins={plugins}
+                  rescanning={rescanning}
+                />
+              </TabsContent>
+            </Tabs>
+          ) : null}
+        </>
+      )}
+      <PluginHostDialog
+        canOrder={plugins.length > 1 && host !== null}
+        directory={list?.directory ?? null}
+        disabled={!isReady}
+        host={host}
+        onChange={(update) => void changeHost(update)}
+        onOpenChange={setHostOpen}
+        onOrder={() => {
+          setHostOpen(false);
+          setOrdering(true);
+        }}
+        onRescan={() => void rescan()}
+        onUi={(on) =>
+          isWebEdition
+            ? void changeHost({ web_ui: on })
+            : setPluginUiSafeMode(!on)
+        }
+        open={hostOpen}
+        rescanning={rescanning}
+        ui={uiOn}
+        uiHelp={
+          isWebEdition ? t("plugins.ui.webHelp") : t("plugins.ui.switchHelp")
+        }
+      />
       {installing ? (
         <PluginInstallDialog
           host={host}
@@ -1022,132 +1132,82 @@ function summaryOf(detail: PluginDetail): Partial<PluginSummary> {
   };
 }
 
-function PluginRow({
-  plugin,
-  selected,
-  onSelect,
-}: {
-  plugin: PluginSummary;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const t = useT();
-  return (
-    <Button
-      aria-current={selected ? "true" : undefined}
-      className={cn(
-        "flex h-auto w-full min-w-0 flex-col items-stretch justify-start gap-1 rounded-none px-3 py-2.5 text-left font-normal whitespace-normal text-foreground hover:bg-muted/60 focus-visible:ring-inset",
-        selected && "bg-accent hover:bg-accent",
-      )}
-      data-testid="plugin-row"
-      onClick={onSelect}
-      type="button"
-      variant="ghost"
-    >
-      <span className="flex min-w-0 items-center gap-2">
-        <PluginIcon icon={plugin.icon} />
-        <strong className="truncate text-sm font-semibold">
-          {plugin.name}
-        </strong>
-        <span className="shrink-0 text-micro text-muted-foreground tabular-nums">
-          {plugin.version}
-        </span>
-      </span>
-      {/* Under the name, past the icon. */}
-      <span className="flex min-w-0 flex-wrap items-center gap-1.5 pl-7">
-        <StatusBadge tone={pluginTone(plugin)}>
-          {pluginState(plugin, t)}
-        </StatusBadge>
-      </span>
-      {plugin.error ? (
-        <span
-          className="truncate pl-7 text-micro text-danger-foreground"
-          title={plugin.error.message}
-        >
-          {loadErrorText(plugin.error, t)}
-        </span>
-      ) : null}
-    </Button>
-  );
-}
-
 /**
- * The settings of every plugin at once, in the page's header: the pause of
- * them all and what they may inject into one request together.
+ * What a plugin's page offers in its header: its interface switch, the
+ * connection test, and enabling or turning it off.
  */
-function PluginHostControls({
-  host,
-  disabled,
-  onChange,
-  ui,
-  onUi,
+function PluginActions({
+  detail,
+  busy,
+  testing,
+  onEnable,
+  onDisable,
+  onTest,
+  onUiEnabled,
 }: {
-  host: PluginHostSettings;
-  disabled: boolean;
-  onChange: (update: PluginHostSettingsUpdate) => void;
-  /** Whether plugins' interfaces load in this window. */
-  ui: boolean;
-  onUi: (on: boolean) => void;
+  detail: PluginDetail;
+  busy: boolean;
+  testing: boolean;
+  onEnable: () => void;
+  onDisable: () => void;
+  onTest: () => void;
+  onUiEnabled: (on: boolean) => void;
 }) {
   const t = useT();
-  const budgetKib = Math.round(host.injection_budget_bytes / 1024);
-  const budgets = INJECTION_BUDGETS_KIB.includes(budgetKib)
-    ? INJECTION_BUDGETS_KIB
-    : [...INJECTION_BUDGETS_KIB, budgetKib].sort((a, b) => a - b);
+  if (detail.state !== "loaded") return null;
   return (
-    <div className="flex items-center gap-3" data-testid="plugin-host-controls">
-      <div className="flex items-center gap-1.5">
-        <Switch
-          aria-label={t("plugins.host.pause")}
-          checked={host.paused}
-          disabled={disabled}
-          id="plugin-host-pause"
-          onCheckedChange={(paused) => onChange({ paused })}
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      {detail.client ? (
+        <Label className="mr-1 inline-flex cursor-pointer items-center gap-2 text-xs font-normal text-text-secondary">
+          <span>{t("plugins.ui.pluginSwitchLabel")}</span>
+          <Switch
+            aria-label={t("plugins.ui.pluginSwitch")}
+            checked={detail.ui_enabled}
+            disabled={busy}
+            id="plugin-ui-enabled"
+            onCheckedChange={onUiEnabled}
+            size="sm"
+          />
+        </Label>
+      ) : null}
+      {detail.hooks.includes("testConnection") ? (
+        <Button
+          disabled={testing || busy}
+          onClick={onTest}
           size="sm"
-        />
-        <Label className="text-xs font-normal" htmlFor="plugin-host-pause">
-          {t("plugins.host.pause")}
-        </Label>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <Switch
-          aria-label={t("plugins.ui.switch")}
-          checked={ui}
-          disabled={disabled}
-          id="plugin-host-ui"
-          onCheckedChange={onUi}
-          size="sm"
-        />
-        <Label className="text-xs font-normal" htmlFor="plugin-host-ui">
-          {t("plugins.ui.switch")}
-        </Label>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <Label className="text-xs font-normal" htmlFor="plugin-host-budget">
-          {t("plugins.host.budget")}
-        </Label>
-        <Select
-          disabled={disabled}
-          onValueChange={(value) =>
-            onChange({ injection_budget_bytes: Number(value) * 1024 })
-          }
-          value={String(budgetKib)}
+          type="button"
+          variant="outline"
         >
-          <SelectTrigger className="w-24" id="plugin-host-budget" size="sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {budgets.map((kib) => (
-              <SelectItem key={kib} value={String(kib)}>
-                {t("plugins.host.budgetValue", { value: kib })}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+          {testing ? t("plugins.testing") : t("plugins.test")}
+        </Button>
+      ) : null}
+      {detail.enabled ? (
+        <Button
+          disabled={busy}
+          onClick={onDisable}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {t("plugins.disable")}
+        </Button>
+      ) : (
+        <Button disabled={busy} onClick={onEnable} size="sm" type="button">
+          {t("plugins.enable")}
+        </Button>
+      )}
     </div>
   );
 }
+
+/** Each tab of a plugin's page with its icon. */
+const tabIcons: Partial<Record<DetailTab, ReactNode>> = {
+  overview: <Home aria-hidden="true" />,
+  settings: <SlidersHorizontal aria-hidden="true" />,
+  status: <Activity aria-hidden="true" />,
+  develop: <Flask aria-hidden="true" />,
+  tasks: <SquareStack aria-hidden="true" />,
+};
 
 function PluginDetailPane({
   detail,
@@ -1156,16 +1216,13 @@ function PluginDetailPane({
   linkPlay,
   status,
   statusError,
-  testing,
   busy,
   actionError,
   tab,
   revision,
   advancedOpen,
+  services,
   onTab,
-  onEnable,
-  onDisable,
-  onTest,
   onRefreshStatus,
   onAdvancedOpen,
   onSaveSettings,
@@ -1176,7 +1233,8 @@ function PluginDetailPane({
   onUpdate,
   onRollback,
   onUninstall,
-  onUiEnabled,
+  onAddProvider,
+  onOpenService,
 }: {
   detail: PluginDetail;
   stats: PluginStats | null;
@@ -1184,16 +1242,13 @@ function PluginDetailPane({
   linkPlay: number;
   status: PluginStatus | null;
   statusError: string | null;
-  testing: boolean;
   busy: boolean;
   actionError: string | null;
   tab: DetailTab;
   revision: number;
   advancedOpen: boolean;
+  services: Service[];
   onTab: (tab: DetailTab) => void;
-  onEnable: () => void;
-  onDisable: () => void;
-  onTest: () => void;
   onRefreshStatus: () => void;
   onAdvancedOpen: (open: boolean) => void;
   onSaveSettings: (
@@ -1207,114 +1262,48 @@ function PluginDetailPane({
   onUpdate: (link: string) => void;
   onRollback: (version: PluginInstalledVersion) => void;
   onUninstall: () => void;
-  onUiEnabled: (on: boolean) => void;
+  onAddProvider?: () => void;
+  onOpenService?: (id: string) => void;
 }) {
   const t = useT();
   const loaded = detail.state === "loaded";
+  const task = detail.task;
   const pluginTabs = usePluginSlot("plugin.tab", detail.key);
-  const tabs: DetailTab[] = loaded
-    ? [
-        "overview",
-        "settings",
-        "status",
-        "develop",
-        ...pluginTabs.map((entry) => `plugin:${entry.id}` as const),
-      ]
-    : [];
+  const tabs: DetailTab[] = !loaded
+    ? []
+    : task
+      ? ["overview", "tasks", "status"]
+      : [
+          "overview",
+          "settings",
+          "status",
+          "develop",
+          ...pluginTabs.map((entry) => `plugin:${entry.id}` as const),
+        ];
   const current = tabs.includes(tab) ? tab : "overview";
+  const source = detail.installed ? (
+    <PluginSourceCard
+      busy={busy}
+      detail={detail}
+      onRollback={onRollback}
+      onUninstall={onUninstall}
+      onUpdate={onUpdate}
+      source={detail.installed}
+    />
+  ) : null;
   return (
-    <>
-      <PanelHeader
-        actions={
-          loaded ? (
-            <>
-              {detail.client ? (
-                <div className="flex items-center gap-1.5">
-                  <Switch
-                    aria-label={t("plugins.ui.pluginSwitch")}
-                    checked={detail.ui_enabled}
-                    disabled={busy}
-                    id="plugin-ui-enabled"
-                    onCheckedChange={onUiEnabled}
-                    size="sm"
-                  />
-                  <Label
-                    className="text-xs font-normal"
-                    htmlFor="plugin-ui-enabled"
-                  >
-                    {t("plugins.ui.pluginSwitchLabel")}
-                  </Label>
-                </div>
-              ) : null}
-              {detail.hooks.includes("testConnection") ? (
-                <Button
-                  disabled={testing || busy}
-                  onClick={onTest}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  {testing ? t("plugins.testing") : t("plugins.test")}
-                </Button>
-              ) : null}
-              {detail.enabled ? (
-                <Button
-                  disabled={busy}
-                  onClick={onDisable}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  {t("plugins.disable")}
-                </Button>
-              ) : (
-                <Button
-                  disabled={busy}
-                  onClick={onEnable}
-                  size="sm"
-                  type="button"
-                >
-                  {t("plugins.enable")}
-                </Button>
-              )}
-            </>
-          ) : null
-        }
-        size="sm"
-      >
-        <div className="flex min-w-0 items-center gap-2">
-          <PluginIcon icon={detail.icon} />
-          <h2 className="truncate text-sm font-semibold">{detail.name}</h2>
-          <StatusBadge tone={pluginTone(detail)}>
-            {pluginState(detail, t)}
-          </StatusBadge>
-          {loaded ? (
-            <HelpPopover label={t("plugins.about.label")} size="wide">
-              <AboutPlugin detail={detail} />
-            </HelpPopover>
-          ) : null}
-        </div>
-        <p className="truncate pl-7 text-micro text-muted-foreground">
-          {[
-            detail.development
-              ? t("plugins.develop.build")
-              : detail.installed
-                ? t("plugins.source.github")
-                : t(`plugins.source.${detail.source}`),
-            detail.version,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-        </p>
-      </PanelHeader>
+    <div
+      className="flex min-h-0 min-w-0 flex-1 flex-col"
+      data-testid="plugin-detail"
+    >
       {actionError ? (
-        <FormMessage className="m-3 mb-0" tone="error">
+        <FormMessage className="mb-3" tone="error">
           {actionError}
         </FormMessage>
       ) : null}
       {awaiting ? (
         <FormMessage
-          className="m-3 mb-0 flex flex-wrap items-center gap-2"
+          className="mb-3 flex flex-wrap items-center gap-2"
           data-testid="plugin-awaiting-approval"
           tone="notice"
         >
@@ -1330,7 +1319,7 @@ function PluginDetailPane({
         </FormMessage>
       ) : null}
       {!loaded ? (
-        <div className="grid gap-3 p-3">
+        <div className="grid gap-3">
           {detail.error ? (
             <FormMessage tone="error">
               <span className="block font-medium">
@@ -1341,6 +1330,7 @@ function PluginDetailPane({
               </span>
             </FormMessage>
           ) : null}
+          {source}
         </div>
       ) : (
         <Tabs
@@ -1348,10 +1338,16 @@ function PluginDetailPane({
           onValueChange={(value) => onTab(value as DetailTab)}
           value={current}
         >
-          <div className="mx-3 mt-2 flex shrink-0 items-center gap-2">
-            <TabsList aria-label={t("plugins.tabsLabel")} scrollable>
+          <div className="flex min-w-0 shrink-0 items-center gap-2 border-b">
+            <TabsList
+              aria-label={t("plugins.tabsLabel")}
+              className="min-w-0 flex-1 justify-start"
+              scrollable
+              variant="line"
+            >
               {tabs.map((item) => (
-                <TabsTrigger key={item} value={item}>
+                <TabsTrigger className="flex-none" key={item} value={item}>
+                  {tabIcons[item] ?? null}
                   {item.startsWith("plugin:")
                     ? (pluginTabs.find((entry) => `plugin:${entry.id}` === item)
                         ?.title ?? t("plugins.ui.tab"))
@@ -1359,7 +1355,6 @@ function PluginDetailPane({
                 </TabsTrigger>
               ))}
             </TabsList>
-            <span className="flex-1" />
             {current === "overview" || current === "status" ? (
               <IconButton
                 label={t("common.refresh")}
@@ -1371,51 +1366,72 @@ function PluginDetailPane({
                 <RefreshCw />
               </IconButton>
             ) : null}
+            {!loaded || task ? null : (
+              <HelpPopover label={t("plugins.about.label")} size="wide">
+                <AboutPlugin detail={detail} />
+              </HelpPopover>
+            )}
           </div>
           <TabsContent
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-4"
             data-tab-scroller
             value="overview"
           >
-            {detail.installed ? (
-              <div className="mb-3">
-                <PluginSourceCard
-                  busy={busy}
+            {task ? (
+              <div className="grid min-w-0 gap-5">
+                {source}
+                <TaskPluginOverview
                   detail={detail}
-                  onRollback={onRollback}
-                  onUninstall={onUninstall}
-                  onUpdate={onUpdate}
-                  source={detail.installed}
+                  onAddProvider={onAddProvider}
+                  onOpenProvider={onOpenService}
+                  services={services}
+                  task={task}
                 />
               </div>
-            ) : null}
-            <PluginOverview
-              busy={busy}
-              detail={detail}
-              linkPlay={linkPlay}
-              onClear={onClearData}
-              stars={stars}
-              stats={stats}
-              status={status}
-              statusError={statusError}
-            />
+            ) : (
+              <>
+                {source ? <div className="mb-4">{source}</div> : null}
+                <PluginOverview
+                  busy={busy}
+                  detail={detail}
+                  linkPlay={linkPlay}
+                  onClear={onClearData}
+                  stars={stars}
+                  stats={stats}
+                  status={status}
+                  statusError={statusError}
+                />
+              </>
+            )}
           </TabsContent>
+          {task ? (
+            <TabsContent
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-4"
+              data-tab-scroller
+              value="tasks"
+            >
+              {current === "tasks" ? (
+                <TaskPluginTasks pluginKey={detail.key} />
+              ) : null}
+            </TabsContent>
+          ) : (
+            <TabsContent
+              className="flex min-h-0 min-w-0 flex-1 flex-col"
+              value="settings"
+            >
+              <PluginSettingsForm
+                advancedOpen={advancedOpen}
+                busy={busy}
+                detail={detail}
+                key={`${detail.key}:${revision}`}
+                onAdvancedOpen={onAdvancedOpen}
+                onClearCredential={onCredentialClear}
+                onSave={onSaveSettings}
+              />
+            </TabsContent>
+          )}
           <TabsContent
-            className="flex min-h-0 min-w-0 flex-1 flex-col"
-            value="settings"
-          >
-            <PluginSettingsForm
-              advancedOpen={advancedOpen}
-              busy={busy}
-              detail={detail}
-              key={`${detail.key}:${revision}`}
-              onAdvancedOpen={onAdvancedOpen}
-              onClearCredential={onCredentialClear}
-              onSave={onSaveSettings}
-            />
-          </TabsContent>
-          <TabsContent
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-4"
             data-tab-scroller
             value="status"
           >
@@ -1426,16 +1442,18 @@ function PluginDetailPane({
               statusError={statusError}
             />
           </TabsContent>
-          <TabsContent
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
-            data-tab-scroller
-            value="develop"
-          >
-            {current === "develop" ? <PluginDevelop detail={detail} /> : null}
-          </TabsContent>
+          {task ? null : (
+            <TabsContent
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-4"
+              data-tab-scroller
+              value="develop"
+            >
+              {current === "develop" ? <PluginDevelop detail={detail} /> : null}
+            </TabsContent>
+          )}
           {pluginTabs.map((entry) => (
             <TabsContent
-              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3"
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-4"
               data-tab-scroller
               key={entry.id}
               value={`plugin:${entry.id}`}
@@ -1450,7 +1468,7 @@ function PluginDetailPane({
           ))}
         </Tabs>
       )}
-    </>
+    </div>
   );
 }
 
@@ -1517,35 +1535,52 @@ function StatusTab({
   if (statusError) return <FormMessage tone="error">{statusError}</FormMessage>;
   if (status === null) return <LoadingState label={t("plugins.loading")} />;
   const failures = Object.entries(status.failures);
+  const warn = (count: number) => (
+    <span className={count > 0 ? "text-warning-foreground" : undefined}>
+      {count}
+    </span>
+  );
   return (
-    <div className="grid gap-4" data-testid="plugin-status">
-      <div className="grid grid-cols-2 gap-3 @[560px]:grid-cols-4">
-        <DataField label={t("plugins.status.calls")} value={status.calls} />
-        <DataField
-          label={t("plugins.status.timeouts")}
-          value={status.timeouts}
-        />
-        <DataField
-          label={t("plugins.status.memoryLimits")}
-          value={status.memory_limits}
-        />
-        <DataField
-          label={t("plugins.status.network")}
-          value={t("plugins.status.networkValue", {
-            requests: status.network.requests,
-            denied: status.network.denied,
-            errors: status.network.errors,
-          })}
-        />
-      </div>
+    <div
+      className="@container/overview grid min-w-0 gap-5"
+      data-testid="plugin-status"
+    >
+      <Panel>
+        <MetricGroup className="grid-cols-2 @[560px]/overview:grid-cols-4">
+          <Metric
+            label={t("plugins.status.calls")}
+            size="sm"
+            value={status.calls}
+          />
+          <Metric
+            label={t("plugins.status.timeouts")}
+            size="sm"
+            value={warn(status.timeouts)}
+          />
+          <Metric
+            label={t("plugins.status.memoryLimits")}
+            size="sm"
+            value={warn(status.memory_limits)}
+          />
+          <Metric
+            detail={t("plugins.status.networkDetail", {
+              denied: status.network.denied,
+              errors: status.network.errors,
+            })}
+            label={t("plugins.status.networkRequests")}
+            size="sm"
+            value={status.network.requests}
+          />
+        </MetricGroup>
+      </Panel>
       {failures.length > 0 ? (
         <section className="grid gap-1">
-          <h3 className="text-xs font-medium">
+          <h3 className="text-xs font-medium text-muted-foreground">
             {t("plugins.status.failures")}
           </h3>
-          <ul className="grid gap-0.5 text-xs">
+          <ul className="divide-y border-y text-xs">
             {failures.map(([reason, count]) => (
-              <li className="flex justify-between gap-3" key={reason}>
+              <li className="flex justify-between gap-3 py-2" key={reason}>
                 <span>
                   {t(`plugins.status.reasons.${reason}`, {
                     defaultValue: reason,
@@ -1557,7 +1592,10 @@ function StatusTab({
           </ul>
         </section>
       ) : null}
-      {stats ? <DailyEffects detail={detail} stats={stats} /> : null}
+      {/* The days count what an extension did; a task plugin's are its tasks. */}
+      {stats && !detail.task ? (
+        <DailyEffects detail={detail} stats={stats} />
+      ) : null}
     </div>
   );
 }

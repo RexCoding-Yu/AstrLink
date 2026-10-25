@@ -11,7 +11,9 @@ import {
   parsePluginHostSettings,
   parsePluginJournal,
   parsePluginList,
+  parsePluginMarket,
   parsePluginStatus,
+  parsePluginTaskPage,
   parsePluginTestResult,
   parsePluginView,
   parsePluginStats,
@@ -44,6 +46,115 @@ const summary = {
 };
 
 describe("plugin model", () => {
+  it("reads a task plugin, its tasks and a marketplace", () => {
+    const task = {
+      icon: "Sora.Color",
+      models: ["sora-2"],
+      fetch_mode: "per_task",
+      auth: "api_key",
+      new_api: true,
+      protocols: [{ name: "openai_responses", supports: ["stream", "sync"] }],
+      routes: [{ method: "POST", path: "/sora/v1/videos", type: "submit" }],
+    };
+    const list = parsePluginList({
+      directory: "/data/plugins",
+      plugins: [
+        {
+          ...summary,
+          key: "sora",
+          kind: "task",
+          task,
+          providers: [
+            {
+              id: "task",
+              name: "Sora",
+              auth: { scheme: "bearer" },
+              protocols: [
+                { protocol: "openai.responses", stream: true, sync: true },
+              ],
+              models: ["sora-2"],
+            },
+          ],
+          calls: 12,
+          failures: 1,
+          tasks: 4,
+          running_tasks: 1,
+        },
+      ],
+    });
+    expect(list.plugins[0]).toMatchObject({
+      kind: "task",
+      task,
+      calls: 12,
+      tasks: 4,
+      running_tasks: 1,
+    });
+    expect(() =>
+      parsePluginList({
+        directory: "/data/plugins",
+        plugins: [{ ...summary, kind: "provider" }],
+      }),
+    ).toThrow();
+
+    const page = parsePluginTaskPage({
+      items: [
+        {
+          id: "video_1",
+          plugin_key: "sora",
+          service_id: "service_sora",
+          surface: "openai_video",
+          model: "sora-2",
+          status: "SUCCESS",
+          // Facts are text, numbers and switches; anything else is dropped.
+          usage: { seconds: 8, size: "1280x720", hd: true, raw: { a: 1 } },
+          artifacts: ["video"],
+          created_at: "2026-10-25T08:00:00Z",
+          updated_at: "2026-10-25T08:01:00Z",
+        },
+      ],
+      next_cursor: "c1",
+      running: 0,
+    });
+    expect(page.items[0].usage).toEqual({
+      seconds: 8,
+      size: "1280x720",
+      hd: true,
+    });
+    expect(page.next_cursor).toBe("c1");
+
+    const market = parsePluginMarket({
+      index: "https://example.com/index.json",
+      name: "Example",
+      plugins: [
+        {
+          key: "sora",
+          name: "Sora",
+          latest: "1.1.0",
+          versions: [
+            {
+              version: "1.1.0",
+              base_url: "https://api.openai.com",
+              link: "https://example.com/index.json#sora@1.1.0",
+            },
+          ],
+          models: ["sora-2"],
+          protocols: [{ name: "openai_video" }],
+          routes: [],
+          link: "https://example.com/index.json#sora@1.1.0",
+          installed: "1.0.0",
+        },
+      ],
+    });
+    expect(market.plugins[0]).toMatchObject({
+      latest: "1.1.0",
+      installed: "1.0.0",
+      versions: [{ version: "1.1.0", base_url: "https://api.openai.com" }],
+    });
+    expect(() =>
+      parsePluginMarket({ index: "x", name: "y", plugins: [{ key: "sora" }] }),
+    ).toThrow();
+  });
+
   it("reads the plugin list, failed plugins included", () => {
     const list = parsePluginList({
       directory: "/data/plugins",

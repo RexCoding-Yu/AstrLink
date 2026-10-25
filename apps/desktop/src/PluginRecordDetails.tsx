@@ -3,7 +3,8 @@ import { useState } from "react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DisclosureRow } from "@/components/DisclosureRow";
 import { PluginView } from "@/components/PluginView";
-import { StatusDot, type StatusTone } from "@/components/StatusDot";
+import { StatusBadge } from "@/components/StatusBadge";
+import type { StatusTone } from "@/components/StatusDot";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { runPluginAction } from "./bridge";
@@ -405,10 +406,10 @@ function PluginRecordRow({
   const point = extensionHooks.has(entry.hook) ? hookLabel(entry.hook, t) : "";
   const view = entry.view && entry.view.length > 0 ? entry.view : null;
   const buttons = actions && actions.length > 0 ? actions : null;
+  // As in request records, only a record that went wrong carries a pill.
   const line = (
     <div className="grid min-w-0 flex-1 gap-0.5">
       <div className="flex min-w-0 items-center gap-2">
-        <StatusDot tone={statusTones[entry.status]} />
         <span
           className={cn(
             "min-w-0 truncate text-xs font-medium",
@@ -426,16 +427,13 @@ function PluginRecordRow({
           </span>
         ) : null}
         {entry.status !== "ok" && !usageOnly ? (
-          <span
-            className={cn(
-              "shrink-0 text-micro",
-              entry.status === "failed"
-                ? "text-danger-foreground"
-                : "text-muted-foreground",
-            )}
+          <StatusBadge
+            className="shrink-0"
+            data-testid="plugin-record-status"
+            tone={statusTones[entry.status]}
           >
             {t(`pluginRecords.status.${entry.status}`)}
-          </span>
+          </StatusBadge>
         ) : null}
         <span className="flex-1" />
         {entry.elapsed_ms > 0 ? (
@@ -447,7 +445,7 @@ function PluginRecordRow({
       {headline ? (
         <p
           className={cn(
-            "min-w-0 pl-3.5 text-xs break-words",
+            "min-w-0 text-xs break-words",
             quiet && "text-muted-foreground",
             entry.status === "failed" && "text-danger-foreground",
           )}
@@ -457,7 +455,7 @@ function PluginRecordRow({
         </p>
       ) : null}
       {points.length > 0 ? (
-        <p className="min-w-0 pl-3.5 text-micro break-words text-muted-foreground">
+        <p className="min-w-0 text-micro break-words text-muted-foreground">
           {points.join(" · ")}
         </p>
       ) : null}
@@ -467,7 +465,7 @@ function PluginRecordRow({
     <li data-testid="plugin-record">
       <DisclosureRow defaultOpen={entry.status === "failed"} summary={line}>
         <div
-          className="grid min-w-0 gap-2.5 pt-0.5 pr-3 pb-3 pl-[1.625rem]"
+          className="grid min-w-0 gap-2.5 px-3 pt-0.5 pb-3"
           data-testid="plugin-record-details"
         >
           {details.length > 0 ? (

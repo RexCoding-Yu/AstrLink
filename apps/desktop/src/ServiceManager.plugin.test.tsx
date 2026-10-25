@@ -84,8 +84,54 @@ const plugins: PluginList = {
   ],
 };
 
+/** A task plugin that can also drive another new-api gateway with it. */
+const vertex: PluginList["plugins"][number] = {
+  key: "vertex",
+  name: "Vertex AI",
+  version: "1.0.0",
+  source: "directory",
+  enabled: true,
+  state: "loaded",
+  kind: "task",
+  icon: "data:image/svg+xml;base64,PHN2Zy8+",
+  requested_capabilities: [],
+  granted_capabilities: [],
+  needs_network: false,
+  task: {
+    models: ["veo-3.0-generate-001"],
+    fetch_mode: "per_task",
+    auth: "oauth2_jwt",
+    new_api: true,
+    protocols: [{ name: "openai_video" }],
+    routes: [],
+  },
+  providers: [
+    {
+      id: "task",
+      name: "Vertex AI",
+      auth: { scheme: "bearer" },
+      protocols: [
+        { protocol: "openai.videos", stream: false, sync: true },
+        { protocol: "plugin.native", stream: false, sync: true },
+      ],
+      models: ["veo-3.0-generate-001"],
+    },
+  ],
+};
+
 let container: HTMLDivElement;
 let root: Root;
+
+async function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  await act(async () => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
 
 describe("plugin providers", () => {
   beforeEach(() => {
@@ -108,6 +154,111 @@ describe("plugin providers", () => {
     const choices = pluginProviderChoices(plugins);
     expect(choices.map((choice) => choice.provider.name)).toEqual(["Acme AI"]);
     expect(choices[0].pluginName).toBe("Acme");
+  });
+
+  it("offers a task plugin's provider, granted or not, with its icon", async () => {
+    bridgeMocks.listPlugins.mockResolvedValue({
+      ...plugins,
+      plugins: [...plugins.plugins, vertex],
+    });
+    expect(
+      pluginProviderChoices({
+        ...plugins,
+        plugins: [...plugins.plugins, vertex],
+      }).map((choice) => choice.plugin),
+    ).toEqual(["acme", "vertex"]);
+    await act(async () =>
+      root.render(
+        <ServiceKindPickerDialog
+          onOpenChange={() => {}}
+          onSelect={() => {}}
+          open
+        />,
+      ),
+    );
+    await act(async () => {});
+    const option = [...document.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("由「Vertex AI」插件转接"),
+    );
+    expect(
+      option?.querySelector('[data-slot="plugin-icon"]')?.getAttribute("src"),
+    ).toBe(vertex.icon);
+  });
+
+  it("starts a task plugin's provider without protocols to choose, and saves the gateway it drives", async () => {
+    const choice = pluginProviderChoices({
+      ...plugins,
+      plugins: [vertex],
+    })[0];
+    bridgeMocks.createService.mockImplementation(async (input) => ({
+      etag: '"1"',
+      service: {
+        ...input,
+        id: "service_vertex",
+        enabled: true,
+        http: { ...input.http, credential_ref: "local://service_vertex" },
+        created_at: "2026-10-25T12:00:00Z",
+        updated_at: "2026-10-25T12:00:00Z",
+      },
+    }));
+    await act(async () =>
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+          protocols={[]}
+          services={[]}
+          view={{ kind: "create", serviceKind: "plugin", plugin: choice }}
+        />,
+      ),
+    );
+    await act(async () => {});
+    const protocolsTab = [
+      ...container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((tab) => tab.textContent?.includes("入口协议"));
+    expect(protocolsTab?.disabled).toBe(true);
+    // Its own vendor takes a service account; another gateway its token.
+    expect(container.textContent).toContain("服务账号 JSON");
+    expect(container.textContent).not.toContain("Responses WebSocket");
+    const upstream = container.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="上游是另一个 New API 网关"]',
+    );
+    if (!upstream) throw new Error("no switch for another gateway");
+    await act(async () => upstream.click());
+    expect(container.textContent).not.toContain("服务账号 JSON");
+    const address = [
+      ...container.querySelectorAll<HTMLInputElement>("input"),
+    ].find((input) => input.placeholder.startsWith("https://"));
+    if (address) await typeInto(address, "https://gateway.example");
+    const key = container.querySelector<HTMLInputElement>(
+      'input[aria-label="API Key"]',
+    );
+    if (!key) throw new Error("no key field");
+    await typeInto(key, "sk-gateway");
+    await act(async () =>
+      container
+        .querySelector("form")!
+        .dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        ),
+    );
+    expect(bridgeMocks.createService).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "plugin",
+        name: "Vertex AI",
+        plugin: { key: "vertex", provider: "task", upstream: "new_api" },
+        http: expect.objectContaining({
+          base_url: "https://gateway.example",
+          credential: { secret: "sk-gateway" },
+        }),
+      }),
+    );
   });
 
   it("lists them in the add-provider picker", async () => {

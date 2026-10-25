@@ -1,18 +1,11 @@
 import { useState, type CSSProperties } from "react";
 
-import astrlinkLogo from "@/assets/astrlink-logo.svg";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import {
-  ConnectionLink,
-  type ConnectionLinkState,
-} from "@/components/ConnectionLink";
 import { ExternalLink } from "@/components/ExternalLink";
 import { FormMessage } from "@/components/FormMessage";
 import { GitHubRepoBadge } from "@/components/GitHubRepoBadge";
 import { HelpPopover } from "@/components/HelpPopover";
 import { LoadingState } from "@/components/LoadingState";
-import { Panel, PanelHeader } from "@/components/Panel";
-import { PluginIcon } from "@/components/PluginIcon";
 import { PluginView } from "@/components/PluginView";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { StatusTone } from "@/components/StatusDot";
@@ -61,7 +54,9 @@ function displayAddress(url: string): string {
 }
 
 function CardTitle({ children }: { children: string }) {
-  return <h3 className="text-xs font-semibold">{children}</h3>;
+  return (
+    <h3 className="text-xs font-medium text-muted-foreground">{children}</h3>
+  );
 }
 
 /**
@@ -118,7 +113,7 @@ export function PluginOverview({
 }) {
   return (
     <div
-      className="@container/overview grid gap-3"
+      className="@container/overview grid gap-5"
       data-testid="plugin-overview"
     >
       {statusError ? (
@@ -150,7 +145,11 @@ function linkState(
   detail: PluginDetail,
   status: PluginStatus | null,
   t: Translate,
-): { state: ConnectionLinkState; tone: StatusTone; text: string } {
+): {
+  state: "off" | "connected" | "idle" | "failed";
+  tone: StatusTone;
+  text: string;
+} {
   if (!detail.enabled)
     return {
       state: "off",
@@ -206,53 +205,41 @@ function ConnectionCard({
   const link = linkState(detail, status, t);
   const test = status?.last_test;
   return (
-    <Panel data-testid="plugin-connection">
-      <ConnectionLink
-        badge={<StatusBadge tone={link.tone}>{link.text}</StatusBadge>}
-        className="px-4 pt-5 pb-4"
+    <section className="grid min-w-0 gap-3" data-testid="plugin-connection">
+      <div
+        className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border px-3 py-2.5 text-xs"
+        data-state={link.state}
         data-testid="plugin-link"
-        detail={
-          test
-            ? `${test.summary} · ${formatAgo(new Date(test.tested_at), now)}`
-            : undefined
-        }
-        from={{
-          mark: (
-            <img
-              alt=""
-              className="size-7"
-              height={28}
-              src={astrlinkLogo}
-              width={28}
-            />
-          ),
-          name: "AstrLink",
-          caption: t("plugins.overview.gateway"),
-        }}
-        playKey={linkPlay}
-        state={link.state}
-        to={{
-          mark: <PluginIcon className="size-7" icon={detail.icon} />,
-          name: detail.name,
-          caption: server ? (
-            typeof address === "string" && address !== "" ? (
-              <span className="inline-flex items-center gap-1">
-                <span className="font-mono">{displayAddress(address)}</span>
-                {plaintextOrigin(address) ? (
-                  <span className="text-warning-foreground">
-                    {t("plugins.network.plaintext")}
-                  </span>
-                ) : null}
+        key={linkPlay}
+      >
+        <StatusBadge tone={link.tone}>{link.text}</StatusBadge>
+        {server ? (
+          typeof address === "string" && address !== "" ? (
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              <span className="truncate font-mono">
+                {displayAddress(address)}
               </span>
-            ) : (
-              t("plugins.overview.noServer")
-            )
-          ) : undefined,
-        }}
-      />
+              {plaintextOrigin(address) ? (
+                <span className="text-warning-foreground">
+                  {t("plugins.network.plaintext")}
+                </span>
+              ) : null}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">
+              {t("plugins.overview.noServer")}
+            </span>
+          )
+        ) : null}
+        {test ? (
+          <span className="ml-auto min-w-0 truncate text-muted-foreground tabular-nums">
+            {`${test.summary} · ${formatAgo(new Date(test.tested_at), now)}`}
+          </span>
+        ) : null}
+      </div>
       {view.length > 0 ||
       (describes && (status === null || status.view_error)) ? (
-        <div className="grid gap-2 border-t p-3 text-xs">
+        <div className="grid gap-2 text-xs">
           {describes && status?.view_error ? (
             <p
               className="flex min-w-0 items-center gap-1 text-warning-foreground"
@@ -286,11 +273,11 @@ function ConnectionCard({
       !(status.view && status.view.length > 0) &&
       !status.view_error &&
       !detail.granted_capabilities.includes("ui.views") ? (
-        <p className="border-t p-3 text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           {t("plugins.overviewNeedsViews")}
         </p>
       ) : null}
-    </Panel>
+    </section>
   );
 }
 
@@ -350,19 +337,15 @@ function StorageCard({
     }))
     .filter((group) => group.kept.length > 0);
   return (
-    <Panel data-testid="plugin-stored">
-      <PanelHeader
-        actions={
-          <HelpPopover label={t("plugins.stored.helpLabel")} size="wide">
-            <StorageHelp detail={detail} />
-          </HelpPopover>
-        }
-        size="sm"
-      >
+    <section className="grid gap-2" data-testid="plugin-stored">
+      <div className="flex min-h-7 items-center gap-1">
         <CardTitle>{t("plugins.stored.title")}</CardTitle>
-      </PanelHeader>
+        <HelpPopover label={t("plugins.stored.helpLabel")} size="wide">
+          <StorageHelp detail={detail} />
+        </HelpPopover>
+      </div>
       <div
-        className="grid gap-px bg-border @[640px]/overview:[grid-template-columns:repeat(var(--places),minmax(0,1fr))]"
+        className="grid gap-px overflow-hidden rounded-md border bg-border @[640px]/overview:[grid-template-columns:repeat(var(--places),minmax(0,1fr))]"
         style={{ "--places": groups.length } as CSSProperties}
       >
         {groups.map(({ place, kept: items }) => (
@@ -442,7 +425,7 @@ function StorageCard({
         open={clearing !== null}
         title={clearing ? t(`plugins.stored.clearTitle.${clearing}`) : ""}
       />
-    </Panel>
+    </section>
   );
 }
 
@@ -514,64 +497,62 @@ function BindingsCard({
   const t = useT();
   const bound = bindings.values.filter((entry) => entry.value !== "none");
   return (
-    <Panel data-testid="plugin-bindings">
-      <PanelHeader
-        actions={
-          <Badge className="tabular-nums" variant="secondary">
-            {bound.length}
-          </Badge>
-        }
-        size="sm"
-      >
+    <section className="grid gap-2" data-testid="plugin-bindings">
+      <div className="flex min-h-7 items-center gap-2">
         <CardTitle>
           {t("plugins.overview.bindings", { label: bindings.label })}
         </CardTitle>
-      </PanelHeader>
+        <Badge className="px-1.5 py-0 tabular-nums" variant="secondary">
+          {bound.length}
+        </Badge>
+      </div>
       {bindings.values.length === 0 ? (
-        <p className="p-3 text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           {t("plugins.overview.noBindings", { label: bindings.label })}
         </p>
       ) : (
-        <Table className="text-xs">
-          <TableHeader>
-            <TableRow>
-              <TableHead className="h-8 px-3 text-xs">
-                {bindings.label}
-              </TableHead>
-              <TableHead className="h-8 w-20 px-3 text-right text-xs">
-                {t("plugins.overview.sessions")}
-              </TableHead>
-              <TableHead className="h-8 w-32 px-3 text-xs">
-                {t("plugins.overview.lastUsed")}
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {bindings.values.map((entry) => (
-              <TableRow key={entry.value}>
-                <TableCell className="px-3 py-1.5">
-                  {entry.value === "none" ? (
-                    <span className="text-muted-foreground">
-                      {t("plugins.overview.none")}
-                    </span>
-                  ) : (
-                    <span className="font-mono">{entry.value}</span>
-                  )}
-                </TableCell>
-                <TableCell className="px-3 py-1.5 text-right tabular-nums">
-                  {entry.sessions}
-                </TableCell>
-                <TableCell className="px-3 py-1.5 text-muted-foreground">
-                  {entry.last_used_at
-                    ? formatAgo(new Date(entry.last_used_at), now)
-                    : "—"}
-                </TableCell>
+        <div className="overflow-hidden rounded-md border">
+          <Table className="text-xs">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="h-8 px-3 text-xs">
+                  {bindings.label}
+                </TableHead>
+                <TableHead className="h-8 w-20 px-3 text-right text-xs">
+                  {t("plugins.overview.sessions")}
+                </TableHead>
+                <TableHead className="h-8 w-32 px-3 text-xs">
+                  {t("plugins.overview.lastUsed")}
+                </TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {bindings.values.map((entry) => (
+                <TableRow key={entry.value}>
+                  <TableCell className="px-3 py-1.5">
+                    {entry.value === "none" ? (
+                      <span className="text-muted-foreground">
+                        {t("plugins.overview.none")}
+                      </span>
+                    ) : (
+                      <span className="font-mono">{entry.value}</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="px-3 py-1.5 text-right tabular-nums">
+                    {entry.sessions}
+                  </TableCell>
+                  <TableCell className="px-3 py-1.5 text-muted-foreground">
+                    {entry.last_used_at
+                      ? formatAgo(new Date(entry.last_used_at), now)
+                      : "—"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
       )}
-    </Panel>
+    </section>
   );
 }
 
@@ -598,7 +579,7 @@ function CreditsLine({
   const t = useT();
   return (
     <div
-      className="grid gap-1.5 rounded-md border px-3 py-2.5 text-xs"
+      className="grid gap-1.5 border-t pt-3 text-xs text-muted-foreground"
       data-testid="plugin-credits"
     >
       {credits.map((credit) => {

@@ -204,7 +204,7 @@ it("shows the project, how it was bound, and the block the session carries", asy
   expect(onSelectRequest).toHaveBeenCalledWith(record.id);
 });
 
-it("lists a block that carried only the lookup usage as done", async () => {
+it("marks only what went wrong, and a block that carried only the lookup usage is no skip", async () => {
   await render(vi.fn(), [
     {
       ...record,
@@ -226,13 +226,34 @@ it("lists a block that carried only the lookup usage as done", async () => {
           },
           network: { requests: 5, denied: 0, errors: 0, wait_ms: 5 },
         },
+        {
+          plugin: "powercontext",
+          plugin_version: "2.1.1",
+          hook: "observeTurn",
+          title: "写入记忆",
+          status: "failed",
+          skipped_reason: "server_unavailable",
+          summary: "",
+          elapsed_ms: 3,
+          network: { requests: 1, denied: 0, errors: 1, wait_ms: 3 },
+        },
       ],
     } as RequestRecord,
   ]);
+  const failed = [...container.querySelectorAll("button")].find((item) =>
+    item.textContent?.includes("写入记忆"),
+  );
+  expect(failed?.querySelector('[data-tone="negative"]')?.textContent).toBe(
+    "失败",
+  );
   const row = [...container.querySelectorAll("button")].find((item) =>
     item.textContent?.includes("记忆装载"),
   );
-  expect(row?.textContent).toContain("完成");
+  // As in request records: a clock time, and no pill for what went as usual.
+  expect(row?.querySelector("time")?.textContent).toMatch(
+    /^\d{1,2}:\d{2}:\d{2}$/,
+  );
+  expect(row?.querySelector("[data-tone]")).toBeNull();
   expect(row?.textContent).not.toContain("已跳过");
 });
 

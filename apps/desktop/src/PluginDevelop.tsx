@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { EmptyState } from "@/components/EmptyState";
 import { FormMessage } from "@/components/FormMessage";
 import { HelpPopover } from "@/components/HelpPopover";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -32,6 +33,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { dryRunPlugin, getPluginJournal } from "./bridge";
 import { controlErrorMessage } from "./control-error";
+import { formatClockTime, formatDateTime } from "./format-time";
 import { useT } from "./i18n";
 import { hookLabel } from "./plugin-labels";
 import type {
@@ -148,7 +150,7 @@ export function PluginDevelop({ detail }: { detail: PluginDetail }) {
         >
           {t("plugins.develop.breaker", {
             point: hookLabel(breaker.hook, t),
-            time: new Date(breaker.until).toLocaleTimeString(),
+            time: formatClockTime(breaker.until),
           })}
         </FormMessage>
       ))}
@@ -167,7 +169,7 @@ function DevelopmentBuild({ detail }: { detail: PluginDetail }) {
     development.project.split(/[\\/]/).filter(Boolean).pop() ??
     development.project;
   const builtAt = development.built_at
-    ? new Date(development.built_at).toLocaleTimeString()
+    ? formatClockTime(development.built_at)
     : null;
   return (
     <div
@@ -198,15 +200,15 @@ function Timings({ timings }: { timings: PluginHookTiming[] }) {
   return (
     <section className="grid gap-2" data-testid="plugin-timings">
       <div className="flex items-center gap-1.5">
-        <h3 className="text-xs font-medium">{t("plugins.develop.timings")}</h3>
+        <h3 className="text-xs font-medium text-muted-foreground">
+          {t("plugins.develop.timings")}
+        </h3>
         <HelpPopover label={t("plugins.develop.timingsHelpLabel")}>
           {t("plugins.develop.timingsHelp")}
         </HelpPopover>
       </div>
       {timings.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          {t("plugins.develop.noCalls")}
-        </p>
+        <EmptyState className="py-6" title={t("plugins.develop.noCalls")} />
       ) : (
         <Table className="text-xs">
           <TableHeader>
@@ -310,7 +312,9 @@ function DryRun({ detail }: { detail: PluginDetail }) {
   return (
     <section className="grid gap-2" data-testid="plugin-dry-run">
       <div className="flex items-center gap-1.5">
-        <h3 className="text-xs font-medium">{t("plugins.develop.dryRun")}</h3>
+        <h3 className="text-xs font-medium text-muted-foreground">
+          {t("plugins.develop.dryRun")}
+        </h3>
         <HelpPopover label={t("plugins.develop.dryRunHelpLabel")}>
           {t("plugins.develop.dryRunHelp")}
         </HelpPopover>
@@ -395,7 +399,7 @@ function DryRunOutcome({ outcome }: { outcome: PluginDryRunResult }) {
         </CodeBlockContent>
       </CodeBlock>
       {outcome.logs.length > 0 ? (
-        <ul className="grid gap-1">
+        <ul className="divide-y border-y">
           {outcome.logs.map((entry, index) => (
             <LogLine entry={entry} key={index} />
           ))}
@@ -416,7 +420,9 @@ function Log({
   return (
     <section className="grid gap-2" data-testid="plugin-log">
       <div className="flex items-center gap-1.5">
-        <h3 className="text-xs font-medium">{t("plugins.develop.log")}</h3>
+        <h3 className="text-xs font-medium text-muted-foreground">
+          {t("plugins.develop.log")}
+        </h3>
         <HelpPopover label={t("plugins.develop.logHelpLabel")}>
           {t("plugins.develop.logHelp")}
         </HelpPopover>
@@ -428,11 +434,9 @@ function Log({
         ) : null}
       </div>
       {entries.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          {t("plugins.develop.noLog")}
-        </p>
+        <EmptyState className="py-6" title={t("plugins.develop.noLog")} />
       ) : (
-        <ul className="grid gap-1">
+        <ul className="divide-y border-y">
           {[...entries].reverse().map((entry) => (
             <LogLine entry={entry} key={entry.seq} />
           ))}
@@ -444,10 +448,16 @@ function Log({
 
 function LogLine({ entry }: { entry: PluginJournalEntry }) {
   const t = useT();
-  const time = new Date(entry.time);
   return (
-    <li className="grid gap-1 rounded-md border px-2 py-1.5 text-xs">
+    <li className="grid gap-1 py-2 text-xs">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <time
+          className="text-muted-foreground tabular-nums"
+          dateTime={entry.time}
+          title={formatDateTime(entry.time)}
+        >
+          {formatClockTime(entry.time)}
+        </time>
         <StatusBadge tone={levelTone[entry.level] ?? "neutral"}>
           {t(`plugins.develop.levels.${entry.level}`, {
             defaultValue: entry.level,
@@ -459,15 +469,6 @@ function LogLine({ entry }: { entry: PluginJournalEntry }) {
             {t("plugins.develop.dryRunTag")}
           </span>
         ) : null}
-        <span className="flex-1" />
-        <time
-          className="text-muted-foreground tabular-nums"
-          dateTime={entry.time}
-        >
-          {Number.isNaN(time.getTime())
-            ? entry.time
-            : time.toLocaleTimeString()}
-        </time>
       </div>
       <p className="break-words whitespace-pre-wrap">{entry.message}</p>
       {entry.stack ? (

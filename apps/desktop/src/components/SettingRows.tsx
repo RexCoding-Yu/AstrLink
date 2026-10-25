@@ -4,7 +4,10 @@ import { HelpPopover } from "@/components/HelpPopover";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
-/** A titled group of setting rows in one hairline panel. */
+/**
+ * A titled group of setting rows: a small heading over rows divided by
+ * hairlines, without a frame around them.
+ */
 export function SettingGroup({
   title,
   children,
@@ -15,14 +18,20 @@ export function SettingGroup({
   className?: string;
 }) {
   return (
-    <section className={cn("grid min-w-0 gap-1.5", className)}>
+    <section className={cn("grid min-w-0 gap-1", className)}>
       {title ? (
         <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
       ) : null}
-      <div className="min-w-0 divide-y rounded-md border">{children}</div>
+      <div className="min-w-0 divide-y border-y">{children}</div>
     </section>
   );
 }
+
+/**
+ * The width a setting's text field or select takes, so the controls of a
+ * group line up. A number field stays narrow and a switch keeps its size.
+ */
+export const settingControlWidth = "w-full @[560px]:w-80";
 
 /**
  * One setting: its name on the left, its controls on the right, the name
@@ -50,7 +59,7 @@ export function SettingRow({
   return (
     <div
       className={cn(
-        "grid min-w-0 items-center gap-x-4 gap-y-1.5 px-3 py-2 @[560px]:grid-cols-[minmax(6rem,9rem)_minmax(0,1fr)]",
+        "grid min-w-0 items-center gap-x-6 gap-y-1.5 py-2.5 @[560px]:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)]",
         className,
       )}
       data-slot="setting-row"

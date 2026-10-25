@@ -7,7 +7,11 @@ import { FormMessage } from "@/components/FormMessage";
 import { HelpPopover } from "@/components/HelpPopover";
 import { IconButton } from "@/components/IconButton";
 import { PanelFooter } from "@/components/Panel";
-import { SettingGroup, SettingRow } from "@/components/SettingRows";
+import {
+  SettingGroup,
+  SettingRow,
+  settingControlWidth,
+} from "@/components/SettingRows";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -675,10 +679,10 @@ export function PluginSettingsForm({
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="plugin-settings">
       <div
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-4"
         data-tab-scroller
       >
-        <div className="grid gap-4">
+        <div className="grid gap-6">
           {layout.main.map((group, index) => (
             <SettingGroup
               key={`${group.title ?? ""}:${index}`}
@@ -755,7 +759,7 @@ export function PluginSettingsForm({
             </Button>
           </>
         }
-        className="px-3 py-2"
+        className="bg-transparent px-0 pt-3 pb-1"
       >
         {showProblems && firstProblem ? (
           <FormMessage tone="error">{firstProblem}</FormMessage>
@@ -865,7 +869,7 @@ function SwitchesRow({
       <MultiFilterSelect
         allLabel={t("plugins.settings.choices.all")}
         ariaLabel={name}
-        className="w-56"
+        className={settingControlWidth}
         clearLabel={t("plugins.settings.choices.clear")}
         emptyMessage=""
         everyLabel={t("plugins.settings.choices.all")}
@@ -962,7 +966,7 @@ function Control({
         >
           <SelectTrigger
             aria-invalid={invalid || undefined}
-            className="w-44"
+            className={settingControlWidth}
             id={id}
           >
             <SelectValue placeholder={setting.placeholder} />
@@ -980,7 +984,7 @@ function Control({
       return (
         <Input
           aria-invalid={invalid || undefined}
-          className="h-8 w-14 text-right tabular-nums"
+          className="h-8 w-24 text-right tabular-nums"
           id={id}
           inputMode={
             setting.step !== undefined && setting.step < 1
@@ -1001,8 +1005,9 @@ function Control({
         <Input
           aria-invalid={invalid || undefined}
           className={cn(
-            "h-8 min-w-0 flex-1",
-            setting.type === "server" && "min-w-[14rem] font-mono",
+            "h-8",
+            settingControlWidth,
+            setting.type === "server" && "font-mono",
           )}
           id={id}
           onChange={(event) => onValue(event.target.value)}
@@ -1058,15 +1063,18 @@ function CredentialRow({
     >
       {editing ? (
         <>
-          <Input
-            autoComplete="off"
-            className="h-8 min-w-[12rem] flex-1"
-            id={id}
-            onChange={(event) => onSecret(event.target.value)}
-            placeholder={t("plugins.credentials.secret")}
-            type="password"
-            value={secret}
-          />
+          {/* The secret's field wraps the input with its reveal button. */}
+          <span className={settingControlWidth}>
+            <Input
+              autoComplete="off"
+              className="h-8"
+              id={id}
+              onChange={(event) => onSecret(event.target.value)}
+              placeholder={t("plugins.credentials.secret")}
+              type="password"
+              value={secret}
+            />
+          </span>
           {origins ? (
             <Select
               disabled={origins.length === 0}
@@ -1159,7 +1167,7 @@ function HostRow({
             }
             value={String(draft.wait)}
           >
-            <SelectTrigger className="w-28" id={id}>
+            <SelectTrigger className={settingControlWidth} id={id}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1362,7 +1370,7 @@ function ClientsRow({
       <MultiFilterSelect
         allLabel={t("plugins.clients.all")}
         ariaLabel={t("plugins.clients.label")}
-        className="w-56"
+        className={settingControlWidth}
         clearLabel={t("plugins.clients.clear")}
         emptyMessage={t("plugins.clients.empty")}
         everyLabel={t("plugins.clients.all")}

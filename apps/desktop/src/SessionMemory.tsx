@@ -18,6 +18,7 @@ import {
   refreshSessionPlugin,
 } from "./bridge";
 import { controlErrorMessage } from "./control-error";
+import { formatClockTime, formatDateTime, formatMoment } from "./format-time";
 import { useT } from "./i18n";
 import { shownStatus } from "./PluginRecordDetails";
 import type {
@@ -48,10 +49,9 @@ const triggers = new Set([
 type Pending = { kind: "refresh" | "pause" | "resume"; part: SessionPlugin };
 
 /**
- * A turn the plugin had nothing for, as a session with its project has: the
+ * A turn the plugin added nothing to, at most keeping earlier blocks: the
  * request's own record keeps it, the session's list leaves it out.
  */
-/** A turn the plugin added nothing to, at most keeping earlier blocks. */
 function idle(entry: RequestPluginRecord): boolean {
   return (
     entry.hook === "prepareTurn" &&
@@ -65,19 +65,6 @@ function idle(entry: RequestPluginRecord): boolean {
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   return `${(bytes / 1024).toFixed(1)} KB`;
-}
-
-function formatMoment(iso: string): string {
-  const at = new Date(iso);
-  return Number.isNaN(at.getTime())
-    ? iso
-    : at.toLocaleString(undefined, {
-        month: "numeric",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
 }
 
 /**
@@ -339,14 +326,18 @@ export function SessionMemory({
             {history.map(({ record, entry }, index) => (
               <li key={`${record.id}:${entry.hook}:${index}`}>
                 <Button
-                  className="grid h-auto w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 rounded-none px-3 py-1.5 text-left text-xs font-normal"
+                  className="grid h-auto w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 rounded-none px-3 py-2 text-left text-xs font-normal"
                   onClick={() => onSelectRequest(record.id)}
                   type="button"
                   variant="ghost"
                 >
-                  <span className="text-muted-foreground tabular-nums">
-                    {formatMoment(record.started_at)}
-                  </span>
+                  <time
+                    className="text-muted-foreground tabular-nums"
+                    dateTime={record.started_at}
+                    title={formatDateTime(record.started_at)}
+                  >
+                    {formatClockTime(record.started_at)}
+                  </time>
                   <span className="min-w-0 truncate">
                     <span className="font-medium">{entry.title}</span>
                     {entry.summary ? ` · ${entry.summary}` : ""}
@@ -357,9 +348,12 @@ export function SessionMemory({
                       ? ` · ${t(`pluginRecords.skipReasons.${entry.skipped_reason}`, { defaultValue: entry.skipped_reason })}`
                       : ""}
                   </span>
-                  <StatusBadge tone={statusTones[shownStatus(entry)]}>
-                    {t(`pluginRecords.status.${shownStatus(entry)}`)}
-                  </StatusBadge>
+                  {/* As in request records, only what went wrong is marked. */}
+                  {shownStatus(entry) === "ok" ? null : (
+                    <StatusBadge tone={statusTones[shownStatus(entry)]}>
+                      {t(`pluginRecords.status.${shownStatus(entry)}`)}
+                    </StatusBadge>
+                  )}
                 </Button>
               </li>
             ))}

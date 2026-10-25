@@ -1316,6 +1316,14 @@ export default function App() {
               <PluginManager
                 coreSessionKey={coreSessionKey}
                 isReady={isReady}
+                onAddProvider={(plugin) =>
+                  navigate({ kind: "create", serviceKind: "plugin", plugin })
+                }
+                onOpenService={(serviceId) =>
+                  navigate({ kind: "edit", serviceId })
+                }
+                services={catalog.items}
+                visit={page}
               />
             ) : page.kind === "pluginPage" ? (
               <PluginPage entry={page.entry} />

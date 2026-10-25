@@ -439,6 +439,8 @@ const commands: Record<string, Command> = {
       ).then((result) => result.value);
     if (a.action === "source_preview")
       return route("/plugins/sources/preview", "POST", input)(a);
+    if (a.action === "market")
+      return route(`/plugins/market${query(a.input as Args)}`)(a);
     if (a.action === "source_install")
       return consoleRequest(
         "/control/v1/plugins/sources/install",
@@ -493,6 +495,10 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/values`, "DELETE")(a);
       case "clear_files":
         return route(`${plugin}/files`, "DELETE")(a);
+      case "tasks":
+        return route(`${plugin}/tasks${query(a.input as Args)}`)(a);
+      case "clear_tasks":
+        return route(`${plugin}/tasks`, "DELETE")(a);
       case "revoke_lookups":
         return route(`${plugin}/lookup-credentials`, "DELETE")(a);
       case "save_credential":

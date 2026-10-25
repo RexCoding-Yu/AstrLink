@@ -3642,6 +3642,20 @@ fn plugin_request(
                 Some(input.ok_or("the review is required")?),
             ))
         }
+        // What a plugin marketplace offers, the official one unless the
+        // input names another index.
+        "market" => {
+            let index = input
+                .as_ref()
+                .and_then(|input| input.get("index"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|index| !index.is_empty());
+            let path = match index {
+                Some(index) => format!("{base}/market?index={}", percent_encode_query(index)),
+                None => format!("{base}/market"),
+            };
+            return Ok((Method::GET, path, None));
+        }
         _ => {}
     }
     let key = key
@@ -3705,6 +3719,22 @@ fn plugin_request(
         "clear_workspaces" => (Method::DELETE, format!("{plugin}/workspaces"), None),
         "clear_values" => (Method::DELETE, format!("{plugin}/values"), None),
         "clear_files" => (Method::DELETE, format!("{plugin}/files"), None),
+        // A task plugin's tasks, the newest first, a page after a cursor;
+        // and clearing those that finished.
+        "tasks" => {
+            let cursor = input
+                .as_ref()
+                .and_then(|input| input.get("cursor"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let path = if cursor.is_empty() {
+                format!("{plugin}/tasks")
+            } else {
+                format!("{plugin}/tasks?cursor={}", percent_encode_query(cursor))
+            };
+            (Method::GET, path, None)
+        }
+        "clear_tasks" => (Method::DELETE, format!("{plugin}/tasks"), None),
         // Voids the credentials the model runs the plugin's lookups with.
         "revoke_lookups" => (Method::DELETE, format!("{plugin}/lookup-credentials"), None),
         "save_credential" | "delete_credential" => {
@@ -7181,6 +7211,47 @@ mod tests {
         assert_eq!(
             plugin_request("host", None, None, None).unwrap(),
             (Method::GET, "/control/v1/plugin-host".into(), None)
+        );
+        assert_eq!(
+            plugin_request("market", None, None, None).unwrap(),
+            (Method::GET, "/control/v1/plugins/market".into(), None)
+        );
+        assert_eq!(
+            plugin_request(
+                "market",
+                None,
+                None,
+                Some(serde_json::json!({ "index": "https://example.com/index.json" }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/market?index=https%3A%2F%2Fexample.com%2Findex.json".into(),
+                None
+            )
+        );
+        assert_eq!(
+            plugin_request(
+                "tasks",
+                Some("sora"),
+                None,
+                Some(serde_json::json!({ "cursor": "2026-10-25T08:00:00.000000000Z|task_1" }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/sora/tasks?cursor=2026-10-25T08%3A00%3A00.000000000Z%7Ctask_1"
+                    .into(),
+                None
+            )
+        );
+        assert_eq!(
+            plugin_request("clear_tasks", Some("sora"), None, None).unwrap(),
+            (
+                Method::DELETE,
+                "/control/v1/plugins/sora/tasks".into(),
+                None
+            )
         );
         let link = serde_json::json!({ "url": "https://github.com/acme/hello" });
         assert_eq!(

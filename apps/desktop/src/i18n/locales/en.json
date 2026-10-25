@@ -1261,7 +1261,11 @@
       "gemini": "Used by Gemini CLI"
     },
     "groupPlugins": "Plugins",
-    "kindPickerPluginHint": "Adapted by the {{plugin}} plugin"
+    "kindPickerPluginHint": "Adapted by the {{plugin}} plugin",
+    "taskUpstream": "The upstream is another New API gateway",
+    "taskUpstreamHelp": "Sends requests to another New API gateway with the same plugin installed: enter that gateway's address and its token as the key.",
+    "serviceAccountKey": "Service account JSON",
+    "serviceAccountKeyHelp": "Paste the whole Google Cloud service account key file. The gateway exchanges it for access tokens and never hands it to the plugin."
   },
   "models": {
     "deleteNamed": "Delete {{label}}",
@@ -4735,7 +4739,8 @@
       "builtin": "Built in",
       "directory": "Directory",
       "override": "Replaces built-in",
-      "github": "GitHub"
+      "github": "GitHub",
+      "market": "Marketplace"
     },
     "state": {
       "running": "Running",
@@ -4751,7 +4756,8 @@
       "overview": "Overview",
       "settings": "Settings",
       "status": "Activity",
-      "develop": "Develop"
+      "develop": "Develop",
+      "tasks": "Tasks"
     },
     "testStatus": {
       "ok": "Connected",
@@ -4831,8 +4837,6 @@
       "calls": "Calls",
       "timeouts": "Timeouts",
       "memoryLimits": "Over memory",
-      "network": "Network",
-      "networkValue": "{{requests}} requests · {{denied}} denied · {{errors}} failed",
       "failures": "Failed calls",
       "reasons": {
         "timeout": "Timed out",
@@ -4841,7 +4845,9 @@
         "invalid_result": "Invalid result",
         "canceled": "Canceled",
         "unavailable": "Unavailable"
-      }
+      },
+      "networkRequests": "Network requests",
+      "networkDetail": "{{denied}} denied · {{errors}} failed"
     },
     "enableDialog": {
       "purpose": "Network use: {{purpose}}",
@@ -4917,7 +4923,11 @@
       "budget": "Injection budget",
       "budgetHelp": "What all plugins together may add to one request. Past it, the blocks of the plugins later in order stay out, and the request record says it went over the budget.",
       "budgetValue": "{{value}} KB",
-      "saveFailed": "Couldn't save the settings of the plugins."
+      "saveFailed": "Couldn't save the settings of the plugins.",
+      "open": "Plugin settings",
+      "title": "Plugin settings",
+      "pausedShort": "All plugins paused",
+      "helpLabel": "About {{label}}"
     },
     "clients": {
       "label": "Clients",
@@ -5182,7 +5192,8 @@
       "confirm": "Allow",
       "confirmEnable": "Enable",
       "waiting": "This change is waiting for you in the plugin confirmation window.",
-      "open": "Open the confirmation window"
+      "open": "Open the confirmation window",
+      "pluginWords": "In the plugin's words"
     },
     "limits": {
       "label": "Extension point time limits",
@@ -5201,7 +5212,7 @@
     },
     "install": {
       "open": "Install plugin",
-      "title": "Install a plugin from GitHub",
+      "title": "Install a plugin",
       "helpLabel": "About installing from GitHub",
       "helpLinks": "Paste a repository's home page (installs its newest version tag, or its default branch without tags), a branch, tag or directory under tree/, a release, or a commit. Private repositories are not supported yet.",
       "helpBuild": "AstrLink fetches the dependencies the lock file pins from npm on this computer, checks each against the lock file's hash, and builds the plugin with its own bundler, without running any install script. Dependencies with native modules cannot be used.",
@@ -5245,7 +5256,8 @@
       "replacedAt": "replaced {{day}}",
       "ref": {
         "tag": "Tag {{ref}}",
-        "branch": "Branch {{ref}}"
+        "branch": "Branch {{ref}}",
+        "version": "version {{ref}}"
       },
       "refCommit": "Fixed commit",
       "refAt": "{{ref}} · committed {{day}}",
@@ -5301,7 +5313,24 @@
         "expired": "The review expired. Check again.",
         "busy": "Another plugin is being built. Try again shortly.",
         "unknown": "Could not install ({{reason}})."
-      }
+      },
+      "sourceLabel": "Install from",
+      "sources": {
+        "github": "GitHub",
+        "market": "Marketplace"
+      },
+      "backToMarket": "Choose another",
+      "marketRef": "Version {{version}} · verified",
+      "groups": {
+        "source": "Source",
+        "abilities": "What it can do",
+        "dependencies": "Code and dependencies",
+        "risks": "Risks"
+      },
+      "taskKind": "Task plugin",
+      "keyHosts": "Key goes only to",
+      "highRisk": "Asks for a high-risk capability: {{capability}}",
+      "changelog": "Changelog"
     },
     "ui": {
       "switch": "Plugin interfaces",
@@ -5318,7 +5347,140 @@
       "tab": "Plugin",
       "pluginSwitch": "Load this plugin's interface",
       "pluginSwitchLabel": "Interface"
-    }
+    },
+    "countLabel_one": "{{count}} plugin",
+    "countLabel_other": "{{count}} plugins",
+    "metrics": {
+      "label": "Plugins at a glance",
+      "installed": "Installed",
+      "running": "Running",
+      "calls": "Calls since start",
+      "tasks": "Tasks running",
+      "problems": "Problems",
+      "callCount_one": "{{count}} call",
+      "callCount_other": "{{count}} calls"
+    },
+    "list": {
+      "tabs": "Plugin sections",
+      "installed": "Installed",
+      "market": "Marketplace",
+      "develop": "Develop",
+      "browseMarket": "Browse the marketplace"
+    },
+    "groups": {
+      "providers": "Providers",
+      "extensions": "Extensions"
+    },
+    "market": {
+      "failed": "Could not read the marketplace.",
+      "source": "Marketplace source",
+      "official": "Official marketplace",
+      "custom": "Another marketplace",
+      "indexLabel": "Address of the marketplace's index.json",
+      "open": "Open",
+      "search": "Search plugins or models",
+      "count_one": "{{name}} · {{count}} plugin",
+      "count_other": "{{name}} · {{count}} plugins",
+      "loading": "Reading the marketplace…",
+      "noMatch": "No plugin matches",
+      "empty": "This marketplace has no plugins yet",
+      "listLabel": "Plugins of the marketplace",
+      "installed": "Installed",
+      "update": "Update to {{version}}",
+      "install": "Install",
+      "models_one": "{{count}} model",
+      "models_other": "{{count}} models",
+      "noDescription": "The plugin has no description.",
+      "installedVersion": "{{version}} installed",
+      "website": "Website",
+      "versions": "All versions",
+      "installVersion": "Install this version",
+      "fewerModels": "Show fewer",
+      "moreModels_one": "{{count}} more",
+      "moreModels_other": "{{count}} more"
+    },
+    "task": {
+      "protocols": {
+        "openai_video": "Videos",
+        "openai_image": "Images",
+        "openai_responses": "Responses"
+      },
+      "modes": {
+        "stream": "streaming",
+        "sync": "synchronous",
+        "background": "background"
+      },
+      "nativeRoutes": "Native routes",
+      "auth": {
+        "api_key": "API key",
+        "oauth2_jwt": "Service account (OAuth)",
+        "none": "No key"
+      },
+      "status": {
+        "NOT_START": "Queued",
+        "SUBMITTED": "Submitted",
+        "QUEUED": "Queued",
+        "IN_PROGRESS": "Generating",
+        "SUCCESS": "Done",
+        "FAILURE": "Failed",
+        "UNKNOWN": "Unknown"
+      },
+      "endpoints": "Endpoints",
+      "noEndpoints": "The plugin declares no endpoint.",
+      "routeTypes": {
+        "submit": "Submit",
+        "query": "Query",
+        "dynamic": "Submit or query"
+      },
+      "connection": "Connection",
+      "baseUrl": "Default address",
+      "noBaseUrl": "Set when adding a provider",
+      "authLabel": "Authentication",
+      "allowedHosts": "Extra hosts",
+      "author": "Author",
+      "website": "Website",
+      "fetchModeLabel": "Polling",
+      "fetchMode": {
+        "per_task": "One task at a time",
+        "batch": "In batches"
+      },
+      "metrics": {
+        "models": "Models",
+        "running": "Running",
+        "tasks": "All tasks",
+        "providers": "Providers"
+      },
+      "providers": "Providers using this plugin",
+      "addProvider": "Add provider",
+      "noProviders": "No provider uses this plugin yet. Add one with its key, and clients can generate with its models.",
+      "enableFirst": "Enable the plugin to add a provider.",
+      "providerOn": "On",
+      "providerOff": "Off",
+      "about": "About the plugin",
+      "tasksTitle": "Recent tasks",
+      "runningCount_one": "{{count}} running",
+      "runningCount_other": "{{count}} running",
+      "clear": "Clear finished tasks",
+      "clearTitle": "Clear the finished tasks?",
+      "clearConfirm": "Finished and failed tasks are deleted with the results the gateway keeps; clients can no longer read them. Tasks still running stay.",
+      "clearFailed": "Could not clear the tasks.",
+      "tasksFailed": "Could not read the tasks.",
+      "noTasks": "No tasks yet",
+      "loadMore": "Load more"
+    },
+    "developHome": {
+      "commands": "Command line",
+      "builds": "Plugins built from projects here",
+      "noBuilds": "None yet. Run astrlink plugin dev in a plugin project and it shows here, reloading as it changes.",
+      "command": {
+        "new": "Start a plugin project from a template",
+        "dev": "Watch, build and install into AstrLink here, with live logs",
+        "check": "Build and check the manifest, capabilities and APIs",
+        "test": "Run the hooks against the cases in tests/",
+        "build": "Build plugin.js and client.js"
+      }
+    },
+    "directoryPath": "Path"
   },
   "pluginRecords": {
     "none": "No plugin recorded anything for this request.",

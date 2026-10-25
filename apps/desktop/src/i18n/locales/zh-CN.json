@@ -1261,7 +1261,11 @@
       "gemini": "Gemini CLI 使用"
     },
     "groupPlugins": "插件",
-    "kindPickerPluginHint": "由「{{plugin}}」插件转接"
+    "kindPickerPluginHint": "由「{{plugin}}」插件转接",
+    "taskUpstream": "上游是另一个 New API 网关",
+    "taskUpstreamHelp": "打开后请求发给另一个装了同一插件的 New API 网关：地址填那个网关，密钥填它的令牌。",
+    "serviceAccountKey": "服务账号 JSON",
+    "serviceAccountKeyHelp": "粘贴 Google Cloud 服务账号密钥文件的全部内容。网关用它换取访问令牌，不会发给插件。"
   },
   "models": {
     "deleteNamed": "删除 {{label}}",
@@ -4735,7 +4739,8 @@
       "builtin": "内置",
       "directory": "目录",
       "override": "替换内置",
-      "github": "GitHub"
+      "github": "GitHub",
+      "market": "插件市场"
     },
     "state": {
       "running": "运行中",
@@ -4751,7 +4756,8 @@
       "overview": "概览",
       "settings": "设置",
       "status": "运行状态",
-      "develop": "开发"
+      "develop": "开发",
+      "tasks": "任务"
     },
     "testStatus": {
       "ok": "连接正常",
@@ -4831,8 +4837,6 @@
       "calls": "调用",
       "timeouts": "超时",
       "memoryLimits": "内存超限",
-      "network": "网络",
-      "networkValue": "{{requests}} 个请求 · 拒绝 {{denied}} · 失败 {{errors}}",
       "failures": "失败的调用",
       "reasons": {
         "timeout": "超时",
@@ -4841,7 +4845,9 @@
         "invalid_result": "结果无效",
         "canceled": "已取消",
         "unavailable": "不可用"
-      }
+      },
+      "networkRequests": "网络请求",
+      "networkDetail": "拒绝 {{denied}} · 失败 {{errors}}"
     },
     "enableDialog": {
       "purpose": "网络用途：{{purpose}}",
@@ -4917,7 +4923,11 @@
       "budget": "注入总预算",
       "budgetHelp": "所有插件往一次请求里注入的内容合计不超过这么多。超出时按插件顺序丢掉后面插件的块，请求记录里写明「超出注入总预算」。",
       "budgetValue": "{{value}} KB",
-      "saveFailed": "无法保存插件的总设置。"
+      "saveFailed": "无法保存插件的总设置。",
+      "open": "插件设置",
+      "title": "插件设置",
+      "pausedShort": "已暂停所有插件",
+      "helpLabel": "关于「{{label}}」"
     },
     "clients": {
       "label": "对哪些客户端生效",
@@ -5182,7 +5192,8 @@
       "confirm": "同意",
       "confirmEnable": "启用",
       "waiting": "这个修改正在等你在「插件确认」窗口里确认。",
-      "open": "打开确认窗口"
+      "open": "打开确认窗口",
+      "pluginWords": "插件的说明"
     },
     "limits": {
       "label": "扩展点时间上限",
@@ -5201,7 +5212,7 @@
     },
     "install": {
       "open": "安装插件",
-      "title": "从 GitHub 安装插件",
+      "title": "安装插件",
       "helpLabel": "关于从 GitHub 安装",
       "helpLinks": "可以粘贴仓库首页（装最新的版本标签，没有标签就装默认分支）、tree/ 下的分支、标签或目录、Release 或提交的链接。暂不支持私有仓库。",
       "helpBuild": "AstrLink 在本机按锁文件从 npm 下载依赖，逐个核对锁文件里的哈希，再用内置的构建器打包，不运行任何安装脚本；带原生模块的依赖用不了。",
@@ -5245,7 +5256,8 @@
       "replacedAt": "{{day}}被替换",
       "ref": {
         "tag": "标签 {{ref}}",
-        "branch": "分支 {{ref}}"
+        "branch": "分支 {{ref}}",
+        "version": "版本 {{ref}}"
       },
       "refCommit": "固定提交",
       "refAt": "{{ref}} · {{day}}提交",
@@ -5301,7 +5313,24 @@
         "expired": "审查结果已过期，请重新检查。",
         "busy": "正在构建另一个插件，请稍后再试。",
         "unknown": "无法安装（{{reason}}）。"
-      }
+      },
+      "sourceLabel": "安装来源",
+      "sources": {
+        "github": "GitHub",
+        "market": "插件市场"
+      },
+      "backToMarket": "换一个插件",
+      "marketRef": "版本 {{version}} · 已校验",
+      "groups": {
+        "source": "来源",
+        "abilities": "能力",
+        "dependencies": "代码与依赖",
+        "risks": "风险"
+      },
+      "taskKind": "任务插件",
+      "keyHosts": "密钥只发往",
+      "highRisk": "申请了高风险能力：{{capability}}",
+      "changelog": "更新记录"
     },
     "ui": {
       "switch": "插件界面",
@@ -5318,7 +5347,140 @@
       "tab": "插件",
       "pluginSwitch": "加载这个插件的界面",
       "pluginSwitchLabel": "界面"
-    }
+    },
+    "countLabel_one": "{{count}} 个插件",
+    "countLabel_other": "{{count}} 个插件",
+    "metrics": {
+      "label": "插件概况",
+      "installed": "已安装",
+      "running": "运行中",
+      "calls": "调用（本次启动后）",
+      "tasks": "进行中的任务",
+      "problems": "问题",
+      "callCount_one": "{{count}} 次调用",
+      "callCount_other": "{{count}} 次调用"
+    },
+    "list": {
+      "tabs": "插件页签",
+      "installed": "已安装",
+      "market": "插件市场",
+      "develop": "开发",
+      "browseMarket": "去插件市场看看"
+    },
+    "groups": {
+      "providers": "供应商",
+      "extensions": "扩展"
+    },
+    "market": {
+      "failed": "无法读取插件市场。",
+      "source": "插件市场来源",
+      "official": "官方市场",
+      "custom": "其他市场",
+      "indexLabel": "市场的 index.json 地址",
+      "open": "打开",
+      "search": "搜索插件或模型",
+      "count_one": "{{name}} · {{count}} 个插件",
+      "count_other": "{{name}} · {{count}} 个插件",
+      "loading": "正在读取插件市场…",
+      "noMatch": "没有找到匹配的插件",
+      "empty": "这个市场还没有插件",
+      "listLabel": "市场里的插件",
+      "installed": "已安装",
+      "update": "更新到 {{version}}",
+      "install": "安装",
+      "models_one": "{{count}} 个模型",
+      "models_other": "{{count}} 个模型",
+      "noDescription": "插件没有写简介。",
+      "installedVersion": "已装 {{version}}",
+      "website": "官网",
+      "versions": "全部版本",
+      "installVersion": "安装这个版本",
+      "fewerModels": "收起",
+      "moreModels_one": "还有 {{count}} 个",
+      "moreModels_other": "还有 {{count}} 个"
+    },
+    "task": {
+      "protocols": {
+        "openai_video": "视频",
+        "openai_image": "图片",
+        "openai_responses": "Responses"
+      },
+      "modes": {
+        "stream": "流式",
+        "sync": "同步",
+        "background": "后台"
+      },
+      "nativeRoutes": "原生接口",
+      "auth": {
+        "api_key": "API Key",
+        "oauth2_jwt": "服务账号（OAuth）",
+        "none": "不需要密钥"
+      },
+      "status": {
+        "NOT_START": "排队中",
+        "SUBMITTED": "已提交",
+        "QUEUED": "排队中",
+        "IN_PROGRESS": "生成中",
+        "SUCCESS": "完成",
+        "FAILURE": "失败",
+        "UNKNOWN": "未知"
+      },
+      "endpoints": "支持的接口",
+      "noEndpoints": "插件没有声明接口。",
+      "routeTypes": {
+        "submit": "提交",
+        "query": "查询",
+        "dynamic": "提交或查询"
+      },
+      "connection": "连接",
+      "baseUrl": "默认地址",
+      "noBaseUrl": "添加提供商时填写",
+      "authLabel": "鉴权方式",
+      "allowedHosts": "额外主机",
+      "author": "作者",
+      "website": "官网",
+      "fetchModeLabel": "查询方式",
+      "fetchMode": {
+        "per_task": "逐个查询",
+        "batch": "批量查询"
+      },
+      "metrics": {
+        "models": "模型",
+        "running": "进行中",
+        "tasks": "全部任务",
+        "providers": "提供商"
+      },
+      "providers": "使用这个插件的提供商",
+      "addProvider": "添加提供商",
+      "noProviders": "还没有提供商使用这个插件。添加一个提供商、填上密钥后，客户端就能用它的模型生成。",
+      "enableFirst": "启用插件后才能添加提供商。",
+      "providerOn": "已启用",
+      "providerOff": "已停用",
+      "about": "关于插件",
+      "tasksTitle": "最近的任务",
+      "runningCount_one": "{{count}} 个进行中",
+      "runningCount_other": "{{count}} 个进行中",
+      "clear": "清除已完成的任务",
+      "clearTitle": "清除已完成的任务？",
+      "clearConfirm": "已完成和失败的任务会被删除，网关保存的结果文件一起删除；客户端之后查不到它们。进行中的任务不受影响。",
+      "clearFailed": "无法清除任务。",
+      "tasksFailed": "无法读取任务。",
+      "noTasks": "还没有任务",
+      "loadMore": "加载更多"
+    },
+    "developHome": {
+      "commands": "命令行",
+      "builds": "本机项目构建的插件",
+      "noBuilds": "还没有。在插件项目里运行 astrlink plugin dev，插件会出现在这里并随改动重新加载。",
+      "command": {
+        "new": "从模板新建插件项目",
+        "dev": "监听改动、构建并装进本机 AstrLink，实时输出日志",
+        "check": "构建并检查清单、能力和不该用的 API",
+        "test": "按 tests/ 里的用例跑钩子",
+        "build": "构建出 plugin.js 和 client.js"
+      }
+    },
+    "directoryPath": "路径"
   },
   "pluginRecords": {
     "none": "这个请求没有插件记录。",

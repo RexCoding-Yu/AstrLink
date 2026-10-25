@@ -188,6 +188,8 @@ import {
   parsePluginDetail,
   parsePluginHostSettings,
   parsePluginList,
+  parsePluginMarket,
+  parsePluginTaskPage,
   parsePluginStats,
   parsePluginStatus,
   parsePluginJournal,
@@ -219,6 +221,8 @@ import {
   type PluginHostSettings,
   type PluginHostSettingsUpdate,
   type PluginList,
+  type PluginMarket,
+  type PluginTaskPage,
   type PluginSettingsUpdate,
   type PluginStats,
   type PluginStatus,
@@ -1716,6 +1720,46 @@ export async function getPluginStats(
       input: { days },
     }),
   );
+}
+
+/** What a plugin marketplace offers: the official one unless index names another. */
+export async function getPluginMarket(index?: string): Promise<PluginMarket> {
+  requireNativeBridge();
+  return parsePluginMarket(
+    await invoke<unknown>("plugin_action", {
+      action: "market",
+      input: index ? { index } : {},
+    }),
+  );
+}
+
+/** A task plugin's tasks, the newest first, the page after cursor. */
+export async function listPluginTasks(
+  key: string,
+  cursor?: string,
+): Promise<PluginTaskPage> {
+  requireNativeBridge();
+  return parsePluginTaskPage(
+    await invoke<unknown>("plugin_action", {
+      action: "tasks",
+      key,
+      input: cursor ? { cursor } : {},
+    }),
+  );
+}
+
+/** Clears a task plugin's finished tasks; returns how many. */
+export async function clearPluginTasks(key: string): Promise<number> {
+  requireNativeBridge();
+  const result = await invoke<unknown>("plugin_action", {
+    action: "clear_tasks",
+    key,
+  });
+  const deleted =
+    typeof result === "object" && result !== null
+      ? (result as { deleted?: unknown }).deleted
+      : undefined;
+  return typeof deleted === "number" ? deleted : 0;
 }
 
 /** Stores a credential for the one origin Core injects it for. */
