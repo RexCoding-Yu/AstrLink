@@ -72,6 +72,26 @@ export function pluginOrigin(plugin: PluginSummary, t: Translate): string {
   return t(`plugins.source.${plugin.source}`);
 }
 
+/**
+ * Whether a plugin answers a search: by its name or key, where it comes
+ * from, what it says it does, or a model it generates with.
+ */
+export function pluginMatches(
+  plugin: PluginSummary,
+  query: string,
+  t: Translate,
+): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return [
+    plugin.name,
+    plugin.key,
+    pluginOrigin(plugin, t),
+    plugin.task?.description ?? "",
+    ...(plugin.task?.models ?? []),
+  ].some((text) => text.toLowerCase().includes(needle));
+}
+
 /** Whether a plugin offers providers: a task plugin, or a provider adapter. */
 export function offersProviders(plugin: PluginSummary): boolean {
   return (
@@ -168,9 +188,9 @@ function ListGroup({
 }
 
 /**
- * The installed plugins, those that offer providers apart from the rest,
- * each a row: its state, icon, name and version, where it comes from and
- * what it serves, and on the right what it did.
+ * The installed plugins, those that enhance requests apart from those that
+ * offer providers, each a row: its state, icon, name and version, where it
+ * comes from and what it serves, and on the right what it did.
  */
 export function PluginRows({
   plugins,
@@ -182,9 +202,10 @@ export function PluginRows({
   const t = useT();
   const providers = plugins.filter(offersProviders);
   const extensions = plugins.filter((plugin) => !offersProviders(plugin));
+  // In the order a request meets them, as the star map draws them.
   const groups = [
-    { key: "providers", plugins: providers },
     { key: "extensions", plugins: extensions },
+    { key: "providers", plugins: providers },
   ].filter((group) => group.plugins.length > 0);
   return (
     <div aria-label={t("plugins.listLabel")} className="grid gap-2" role="list">

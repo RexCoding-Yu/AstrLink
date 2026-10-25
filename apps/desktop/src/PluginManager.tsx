@@ -8,6 +8,7 @@ import {
 
 import {
   Activity,
+  AlignLeft,
   Blocks,
   Boxes,
   Flask,
@@ -16,6 +17,7 @@ import {
   RefreshCw,
   SlidersHorizontal,
   SquareStack,
+  Waypoints,
 } from "@/components/icons";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
@@ -26,12 +28,15 @@ import { LoadingState } from "@/components/LoadingState";
 import { Metric, MetricGroup } from "@/components/Metric";
 import { Panel } from "@/components/Panel";
 import { PluginIcon, pluginAvatar } from "@/components/PluginIcon";
+import { SearchInput } from "@/components/SearchInput";
+import { SegmentedControl } from "@/components/SegmentedControl";
 import { StatusBadge } from "@/components/StatusBadge";
 import { StatusDot } from "@/components/StatusDot";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 import {
   clearPluginData,
   deletePluginCredential,
@@ -64,12 +69,14 @@ import {
   loadErrorText,
   PluginDevelopHome,
   PluginHostDialog,
+  pluginMatches,
   PluginMetrics,
   pluginOrigin,
   PluginRows,
   pluginState,
   pluginTone,
 } from "./PluginList";
+import { PluginStarMap } from "./PluginStarMap";
 import { PluginMarketView } from "./PluginMarket";
 import { TaskPluginOverview, TaskPluginTasks } from "./PluginTaskDetail";
 import {
@@ -120,6 +127,28 @@ type DetailTab =
 /** The tabs of the list page: the installed plugins, the marketplace, development. */
 type ListTab = "installed" | "market" | "develop";
 
+/** How the installed plugins show: a star map, or a list. */
+type PluginView = "map" | "list";
+
+/** Where the page keeps the view a viewer chose last. */
+const VIEW_KEY = "astrlink.plugins.view";
+
+function rememberedView(): PluginView {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "map";
+  } catch {
+    return "map";
+  }
+}
+
+function rememberView(view: PluginView) {
+  try {
+    localStorage.setItem(VIEW_KEY, view);
+  } catch {
+    // The page works without storage; the view just resets.
+  }
+}
+
 /** The plugin open after the list changes: the same one while it is listed, else the list. */
 function keptSelection(current: string | null, list: PluginList) {
   return current && list.plugins.some((plugin) => plugin.key === current)
@@ -160,6 +189,8 @@ export function PluginManager({
   const t = useT();
   const [list, setList] = useState<PluginList | null>(null);
   const [listTab, setListTab] = useState<ListTab>("installed");
+  const [view, setView] = useState<PluginView>(rememberedView);
+  const [query, setQuery] = useState("");
   const [hostOpen, setHostOpen] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
@@ -628,6 +659,7 @@ export function PluginManager({
 
   // The list shows the plugins in the order their extension points run.
   const plugins = orderedPlugins(list?.plugins ?? [], host?.order);
+  const shown = plugins.filter((plugin) => pluginMatches(plugin, query, t));
   const listed = plugins.find((plugin) => plugin.key === selectedKey) ?? null;
   // The page of a plugin shows it as its detail has it, once read.
   const selected =
@@ -884,26 +916,62 @@ export function PluginManager({
                   </TabsTrigger>
                 </TabsList>
                 {listTab === "installed" ? (
-                  <IconButton
-                    disabled={!isReady || rescanning}
-                    label={t("plugins.rescan")}
-                    onClick={() => void rescan()}
-                    type="button"
-                    variant="outline"
-                  >
-                    <RefreshCw
-                      className={
-                        rescanning
-                          ? "animate-spin motion-reduce:animate-none"
-                          : undefined
-                      }
-                    />
-                  </IconButton>
+                  <>
+                    {plugins.length > 0 ? (
+                      <>
+                        <SearchInput
+                          className="hidden w-48 @[720px]:block"
+                          clearLabel={t("common.clearSearch")}
+                          label={t("plugins.search")}
+                          onValueChange={setQuery}
+                          placeholder={t("plugins.search")}
+                          value={query}
+                        />
+                        {/* Narrow, the map has no room: the list stands. */}
+                        <span className="hidden @[640px]:inline-flex">
+                          <SegmentedControl
+                            label={t("plugins.view.label")}
+                            onValueChange={(next) => {
+                              setView(next);
+                              rememberView(next);
+                            }}
+                            options={[
+                              {
+                                value: "map",
+                                label: t("plugins.view.map"),
+                                icon: <Waypoints />,
+                              },
+                              {
+                                value: "list",
+                                label: t("plugins.view.list"),
+                                icon: <AlignLeft />,
+                              },
+                            ]}
+                            value={view}
+                          />
+                        </span>
+                      </>
+                    ) : null}
+                    <IconButton
+                      disabled={!isReady || rescanning}
+                      label={t("plugins.rescan")}
+                      onClick={() => void rescan()}
+                      type="button"
+                      variant="outline"
+                    >
+                      <RefreshCw
+                        className={
+                          rescanning
+                            ? "animate-spin motion-reduce:animate-none"
+                            : undefined
+                        }
+                      />
+                    </IconButton>
+                  </>
                 ) : null}
               </div>
               <TabsContent
-                className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain pb-3"
-                data-tab-scroller
+                className="flex min-h-0 min-w-0 flex-1 flex-col"
                 value="installed"
               >
                 {plugins.length === 0 ? (
@@ -925,7 +993,39 @@ export function PluginManager({
                     variant="page"
                   />
                 ) : (
-                  <PluginRows onOpen={setSelectedKey} plugins={plugins} />
+                  <>
+                    {view === "map" ? (
+                      <PluginStarMap
+                        className="my-3 hidden @[640px]:block"
+                        matches={(plugin) => pluginMatches(plugin, query, t)}
+                        onAddEnhancer={
+                          isReady ? () => setInstalling({}) : undefined
+                        }
+                        onAddProvider={() => setListTab("market")}
+                        onHub={() => setHostOpen(true)}
+                        onOpen={setSelectedKey}
+                        paused={host?.paused === true}
+                        plugins={plugins}
+                        services={services}
+                      />
+                    ) : null}
+                    <div
+                      className={cn(
+                        "min-h-0 flex-1 overflow-y-auto overscroll-contain pb-3",
+                        view === "map" && "@[640px]:hidden",
+                      )}
+                      data-tab-scroller
+                    >
+                      {shown.length === 0 ? (
+                        <EmptyState
+                          className="mt-3"
+                          title={t("plugins.market.noMatch")}
+                        />
+                      ) : (
+                        <PluginRows onOpen={setSelectedKey} plugins={shown} />
+                      )}
+                    </div>
+                  </>
                 )}
               </TabsContent>
               <TabsContent

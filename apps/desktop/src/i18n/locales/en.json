@@ -5368,8 +5368,8 @@
       "browseMarket": "Browse the marketplace"
     },
     "groups": {
-      "providers": "Providers",
-      "extensions": "Extensions"
+      "providers": "Provider plugins",
+      "extensions": "Enhancement plugins"
     },
     "market": {
       "failed": "Could not read the marketplace.",
@@ -5480,7 +5480,25 @@
         "build": "Build plugin.js and client.js"
       }
     },
-    "directoryPath": "Path"
+    "directoryPath": "Path",
+    "search": "Search plugins or models",
+    "view": {
+      "label": "Plugin view",
+      "map": "Star map",
+      "list": "List"
+    },
+    "map": {
+      "label": "Plugin star map",
+      "hubRunning": "Gateway running",
+      "helpLabel": "About {{kind}}",
+      "enhancersHelp": "Enhancement plugins take part while the gateway handles a request: they load context into sessions, rewrite requests and replies, choose the provider, or note what happened. Requests reach the gateway from this side.",
+      "providersHelp": "Provider plugins connect the gateway to upstream services: they adapt chat APIs or bring in video, image and music generation. Clients use one once it is added as a provider with its key on the providers page.",
+      "addEnhancer": "Install from GitHub",
+      "addProvider": "Browse the marketplace",
+      "providers_one": "{{count}} provider uses it",
+      "providers_other": "{{count}} providers use it",
+      "noProviders": "No provider uses it yet"
+    }
   },
   "pluginRecords": {
     "none": "No plugin recorded anything for this request.",

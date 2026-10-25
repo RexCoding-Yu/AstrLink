@@ -1,5 +1,6 @@
 export type { AnimatedIcon, AnimatedIconProps } from "./create-animated-icon";
 export { Activity } from "./activity";
+export { AlignLeft } from "./align-left";
 export { ArrowDown } from "./arrow-down";
 export { ArrowLeft } from "./arrow-left";
 export { ArrowRight } from "./arrow-right";
@@ -53,4 +54,5 @@ export { SlidersHorizontal } from "./sliders-horizontal";
 export { SquarePen } from "./square-pen";
 export { SquareStack } from "./square-stack";
 export { UnfoldHorizontal } from "./unfold-horizontal";
+export { Waypoints } from "./waypoints";
 export { X } from "./x";

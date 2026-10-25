@@ -5368,8 +5368,8 @@
       "browseMarket": "マーケットプレイスを見る"
     },
     "groups": {
-      "providers": "プロバイダー",
-      "extensions": "拡張"
+      "providers": "プロバイダープラグイン",
+      "extensions": "拡張プラグイン"
     },
     "market": {
       "failed": "マーケットプレイスを読み込めませんでした。",
@@ -5480,7 +5480,25 @@
         "build": "plugin.js と client.js をビルド"
       }
     },
-    "directoryPath": "パス"
+    "directoryPath": "パス",
+    "search": "プラグインやモデルを検索",
+    "view": {
+      "label": "プラグインの表示",
+      "map": "スターマップ",
+      "list": "リスト"
+    },
+    "map": {
+      "label": "プラグインのスターマップ",
+      "hubRunning": "ゲートウェイ稼働中",
+      "helpLabel": "{{kind}}について",
+      "enhancersHelp": "拡張プラグインはゲートウェイがリクエストを処理する途中で働きます。セッションへのコンテキストの読み込み、リクエストと応答の書き換え、プロバイダーの選択、出来事の記録などを行います。リクエストはこちら側からゲートウェイに入ります。",
+      "providersHelp": "プロバイダープラグインはゲートウェイを上流につなぎます。チャット API を中継したり、動画・画像・音楽の生成を取り込んだりします。プロバイダー画面でプロバイダーとして追加し、キーを設定するとクライアントから使えます。",
+      "addEnhancer": "GitHub からインストール",
+      "addProvider": "マーケットプレイスへ",
+      "providers_one": "{{count}} 件のプロバイダーで使用中",
+      "providers_other": "{{count}} 件のプロバイダーで使用中",
+      "noProviders": "まだプロバイダーで使われていません"
+    }
   },
   "pluginRecords": {
     "none": "このリクエストにプラグインの記録はありません。",

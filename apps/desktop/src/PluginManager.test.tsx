@@ -1869,6 +1869,136 @@ describe("PluginManager", () => {
     ).toContain("启用时授予「界面视图」，这里才会显示插件提供的概览。");
   });
 
+  describe("the star map", () => {
+    afterEach(() => {
+      localStorage.removeItem("astrlink.plugins.view");
+    });
+
+    async function renderMap(
+      plugins: PluginList["plugins"],
+      services: Service[] = [],
+    ) {
+      bridgeMocks.listPlugins.mockResolvedValue({ ...list, plugins });
+      const fallback = bridgeMocks.getPlugin.getMockImplementation();
+      bridgeMocks.getPlugin.mockImplementation(async (key: string) =>
+        key === "sora" ? sora : fallback?.(key),
+      );
+      bridgeMocks.getPluginMarket.mockResolvedValue(market);
+      await act(async () => {
+        reactRoot.render(
+          <PluginManager
+            coreSessionKey="session-1"
+            isReady
+            services={services}
+          />,
+        );
+      });
+    }
+
+    const stars = () => [
+      ...document.querySelectorAll<HTMLElement>('[data-testid="plugin-star"]'),
+    ];
+
+    it("draws enhancement plugins left of the gateway and provider plugins right of it", async () => {
+      const idle = { ...sora, running_tasks: 0 };
+      await renderMap([...list.plugins, idle], [soraService]);
+      expect(
+        stars().map((star) => [star.dataset.pluginKey, star.dataset.side]),
+      ).toEqual([
+        ["powercontext", "left"],
+        ["team-rules", "left"],
+        ["sora", "right"],
+      ]);
+      // A star says what its plugin is doing, else its state.
+      expect(stars()[0].textContent).toContain("已停用");
+      expect(stars()[1].textContent).toContain("加载失败");
+      expect(stars()[2].textContent).toContain("1 个提供商在用");
+      await renderMap([...list.plugins, idle]);
+      expect(stars()[2].textContent).toContain("还没有提供商在用");
+      // A star opens its plugin; the gateway the settings of every plugin.
+      await click(
+        document.querySelector(
+          '[data-testid="plugin-star-hub"]',
+        ) as HTMLElement,
+      );
+      expect(
+        document.querySelector('[data-testid="plugin-host-dialog"]'),
+      ).not.toBe(null);
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        );
+      });
+      await finishExitAnimations();
+      await settleClosedLayer();
+      await click(stars()[2]);
+      expect(
+        document.querySelector('[data-testid="plugin-task-overview"]'),
+      ).not.toBe(null);
+    });
+
+    it("searches the stars and the list, and keeps the list once chosen", async () => {
+      await renderMap([...list.plugins, sora]);
+      await type(
+        document.querySelector<HTMLInputElement>(
+          'input[placeholder="搜索插件或模型"]',
+        )!,
+        "sora-2-pro",
+      );
+      // The stars that do not match fade; the rows go.
+      expect(
+        stars()
+          .filter((star) => star.dataset.faded === undefined)
+          .map((star) => star.dataset.pluginKey),
+      ).toEqual(["sora"]);
+      expect(
+        [
+          ...document.querySelectorAll<HTMLElement>(
+            '[data-testid="plugin-row"]',
+          ),
+        ].map((row) => row.dataset.pluginKey),
+      ).toEqual(["sora"]);
+      await click(button("列表"));
+      expect(document.querySelector('[data-testid="plugin-star-map"]')).toBe(
+        null,
+      );
+      expect(localStorage.getItem("astrlink.plugins.view")).toBe("list");
+      await act(async () => reactRoot.unmount());
+      reactRoot = createRoot(container);
+      await renderMap([...list.plugins, sora]);
+      expect(document.querySelector('[data-testid="plugin-star-map"]')).toBe(
+        null,
+      );
+      await click(button("星图"));
+      expect(
+        document.querySelector('[data-testid="plugin-star-map"]'),
+      ).not.toBe(null);
+    });
+
+    it("leads an empty side to where its plugins come from", async () => {
+      await renderMap([sora]);
+      const enhancer = document.querySelector<HTMLElement>(
+        '[data-testid="plugin-star-add"][data-side="left"]',
+      );
+      expect(enhancer?.textContent).toBe("从 GitHub 安装");
+      await click(enhancer!);
+      expect(
+        document.querySelector('[data-testid="plugin-install-dialog"]'),
+      ).not.toBe(null);
+      await act(async () => reactRoot.unmount());
+      reactRoot = createRoot(container);
+      await renderMap([memory]);
+      const provider = document.querySelector<HTMLElement>(
+        '[data-testid="plugin-star-add"][data-side="right"]',
+      );
+      expect(provider?.textContent).toBe("去插件市场");
+      await click(provider!);
+      expect(document.querySelector('[data-testid="plugin-market"]')).not.toBe(
+        null,
+      );
+    });
+  });
+
   describe("task plugins and the marketplace", () => {
     beforeEach(() => {
       bridgeMocks.listPlugins.mockResolvedValue({

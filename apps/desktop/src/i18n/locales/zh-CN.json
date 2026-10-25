@@ -5368,8 +5368,8 @@
       "browseMarket": "去插件市场看看"
     },
     "groups": {
-      "providers": "供应商",
-      "extensions": "扩展"
+      "providers": "供应商插件",
+      "extensions": "增强插件"
     },
     "market": {
       "failed": "无法读取插件市场。",
@@ -5480,7 +5480,25 @@
         "build": "构建出 plugin.js 和 client.js"
       }
     },
-    "directoryPath": "路径"
+    "directoryPath": "路径",
+    "search": "搜索插件或模型",
+    "view": {
+      "label": "插件的显示方式",
+      "map": "星图",
+      "list": "列表"
+    },
+    "map": {
+      "label": "插件星图",
+      "hubRunning": "网关运行中",
+      "helpLabel": "关于{{kind}}",
+      "enhancersHelp": "增强插件在网关处理请求的过程中起作用：给会话装载上下文、改写请求和回复、决定走哪个提供商，或者记下发生了什么。请求从这一侧进入网关。",
+      "providersHelp": "供应商插件把网关接到上游：转接对话接口，或者接入视频、图片、音乐生成。在提供商页把它添加成提供商、填上密钥后，客户端才会用上它。",
+      "addEnhancer": "从 GitHub 安装",
+      "addProvider": "去插件市场",
+      "providers_one": "{{count}} 个提供商在用",
+      "providers_other": "{{count}} 个提供商在用",
+      "noProviders": "还没有提供商在用"
+    }
   },
   "pluginRecords": {
     "none": "这个请求没有插件记录。",
