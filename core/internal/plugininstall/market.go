@@ -36,6 +36,24 @@ const (
 	maxIndexBytes = 8 << 20
 	// marketCacheFor is how long a marketplace's listing is reused.
 	marketCacheFor = 5 * time.Minute
+	// iconFetches is how many icons a listing fetches at a time.
+	iconFetches = 4
+	// iconRetry is how long an icon that could not be fetched, and the
+	// icon package, wait before another try.
+	iconRetry = 2 * time.Minute
+)
+
+// The waits of reading a marketplace, variables so that tests can shorten
+// them.
+var (
+	// indexAttempt bounds one address of an index while another may
+	// answer: a GitHub that cannot be reached often hangs rather than
+	// refuses, and its mirror should get its turn.
+	indexAttempt = 8 * time.Second
+	// iconBudget bounds how long a listing waits for the icons it has not
+	// got: they are decoration, and a listing without a few beats a late
+	// one.
+	iconBudget = 8 * time.Second
 )
 
 type marketIndex struct {
@@ -178,15 +196,27 @@ func (installer *Installer) marketGet(ctx context.Context, address string, limit
 
 // fetchIndex reads a marketplace's index, the official one from jsDelivr
 // when GitHub cannot be reached, and returns the address it came from,
-// which the files it lists are relative to.
+// which the files it lists are relative to. The address that answered
+// last goes first, so a network without GitHub waits for it once.
 func (installer *Installer) fetchIndex(ctx context.Context, address string) (*marketIndex, string, error) {
 	addresses := []string{address}
 	if address == contract.OfficialPluginMarket {
 		addresses = append(addresses, contract.OfficialPluginMarketFallback)
 	}
+	installer.market.mutex.Lock()
+	answered := installer.market.answered[address]
+	installer.market.mutex.Unlock()
+	if at := slices.Index(addresses, answered); at > 0 {
+		addresses[0], addresses[at] = addresses[at], addresses[0]
+	}
 	var last error
-	for _, candidate := range addresses {
-		data, err := installer.marketGet(ctx, candidate, maxIndexBytes)
+	for at, candidate := range addresses {
+		attempt, cancel := ctx, context.CancelFunc(func() {})
+		if at < len(addresses)-1 {
+			attempt, cancel = context.WithTimeout(ctx, indexAttempt)
+		}
+		data, err := installer.marketGet(attempt, candidate, maxIndexBytes)
+		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, "", ctx.Err()
@@ -198,6 +228,12 @@ func (installer *Installer) fetchIndex(ctx context.Context, address string) (*ma
 		if err != nil {
 			return nil, "", &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallInvalidPlugin, Messages: []string{err.Error()}}}
 		}
+		installer.market.mutex.Lock()
+		if installer.market.answered == nil {
+			installer.market.answered = map[string]string{}
+		}
+		installer.market.answered[address] = candidate
+		installer.market.mutex.Unlock()
 		return index, candidate, nil
 	}
 	return nil, "", last
@@ -369,17 +405,29 @@ func (installer *Installer) checkMarketUpdate(ctx context.Context, record contra
 	return check, nil
 }
 
-// marketListing is a marketplace's listing as the installer last read it.
+// marketListing is a marketplace's listing as the installer last read it:
+// the plugins it lists by key, and the address the files they name are
+// relative to.
 type marketListing struct {
 	at      time.Time
 	market  contract.PluginMarket
-	entries []marketPlugin
+	entries map[string]marketPlugin
+	base    string
 }
 
 type marketCache struct {
 	mutex    sync.Mutex
 	listings map[string]marketListing
-	icons    map[string]string
+	icons    map[string]marketIcon
+	// answered is the address each index last came from.
+	answered map[string]string
+}
+
+// marketIcon is an icon as fetched: a data URL, "" for none. failed is when
+// it could not be fetched; a listing after iconRetry tries again.
+type marketIcon struct {
+	url    string
+	failed time.Time
 }
 
 // Market lists what a marketplace offers, the official one for "":
@@ -412,6 +460,7 @@ func (installer *Installer) Market(ctx context.Context, index string, installed 
 	}
 	market := cached.market
 	market.Plugins = slices.Clone(market.Plugins)
+	installer.fillIcons(ctx, cached, market.Plugins)
 	for at := range market.Plugins {
 		if installed != nil {
 			market.Plugins[at].Installed = installed(market.Plugins[at].Key)
@@ -420,7 +469,31 @@ func (installer *Installer) Market(ctx context.Context, index string, installed 
 	return market, nil
 }
 
-// readMarket reads a marketplace's index and the icons of its plugins.
+// fillIcons gives the plugins of a listing their icons: those fetched
+// before at once, the others side by side for at most iconBudget.
+func (installer *Installer) fillIcons(ctx context.Context, listing marketListing, plugins []contract.PluginMarketEntry) {
+	ctx, cancel := context.WithTimeout(ctx, iconBudget)
+	defer cancel()
+	var group sync.WaitGroup
+	slots := make(chan struct{}, iconFetches)
+	for at := range plugins {
+		entry, ok := listing.entries[plugins[at].Key]
+		if !ok {
+			continue
+		}
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			plugins[at].IconURL = installer.marketIcon(ctx, listing.base, entry)
+		}()
+	}
+	group.Wait()
+}
+
+// readMarket reads a marketplace's index; the icons of its plugins come with
+// each listing.
 func (installer *Installer) readMarket(ctx context.Context, address string) (marketListing, error) {
 	index, base, err := installer.fetchIndex(ctx, address)
 	if err != nil {
@@ -428,6 +501,7 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 	}
 	language := installer.language()
 	market := contract.PluginMarket{Index: address, Name: index.Name, Plugins: []contract.PluginMarketEntry{}}
+	entries := map[string]marketPlugin{}
 	for _, entry := range index.Plugins {
 		if !plugin.ValidPluginKey(entry.Key) || len(entry.Versions) == 0 {
 			continue
@@ -459,7 +533,7 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 		if len(listed.Versions) == 0 {
 			continue
 		}
-		listed.IconURL = installer.marketIcon(ctx, base, entry)
+		entries[entry.Key] = entry
 		market.Plugins = append(market.Plugins, listed)
 	}
 	// Each source sorts by descending priority, then key.
@@ -469,48 +543,48 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 		}
 		return market.Plugins[i].Key < market.Plugins[j].Key
 	})
-	return marketListing{at: installer.options.Now(), market: market, entries: index.Plugins}, nil
+	return marketListing{at: installer.options.Now(), market: market, entries: entries, base: base}, nil
 }
 
 // marketIcon is a marketplace plugin's icon as a data URL: the file the
 // index lists, else its LobeHub icon; "" for a text avatar or an icon that
-// could not be fetched.
+// could not be fetched, which a listing tries again after iconRetry.
 func (installer *Installer) marketIcon(ctx context.Context, base string, entry marketPlugin) string {
 	cacheKey := entry.Icon
 	if entry.IconFile != nil {
 		cacheKey = entry.IconFile.SHA256
 	}
+	now := installer.options.Now()
 	installer.market.mutex.Lock()
-	if icon, ok := installer.market.icons[cacheKey]; ok {
-		installer.market.mutex.Unlock()
-		return icon
-	}
+	cached, ok := installer.market.icons[cacheKey]
 	installer.market.mutex.Unlock()
+	if ok && (cached.failed.IsZero() || now.Sub(cached.failed) < iconRetry) {
+		return cached.url
+	}
 	var data []byte
+	var err error
 	mime := "image/svg+xml"
 	switch {
 	case entry.IconFile != nil:
-		fetched, err := installer.verified(ctx, base, entry.IconFile.Path, entry.IconFile.SHA256, plugin.MaxIconBytes)
-		if err == nil {
-			data = fetched
-			if strings.HasSuffix(strings.ToLower(entry.IconFile.Path), ".png") {
-				mime = "image/png"
-			}
+		data, err = installer.verified(ctx, base, entry.IconFile.Path, entry.IconFile.SHA256, plugin.MaxIconBytes)
+		if strings.HasSuffix(strings.ToLower(entry.IconFile.Path), ".png") {
+			mime = "image/png"
 		}
 	case entry.Icon != "" && !strings.HasPrefix(entry.Icon, "text"):
-		if fetched, err := installer.lobeIcon(ctx, entry.Icon); err == nil {
-			data = fetched
-		}
+		data, err = installer.lobeIcon(ctx, entry.Icon)
 	}
-	icon := ""
-	if data != nil && (mime == "image/png" && bytes.HasPrefix(data, []byte("\x89PNG")) || mime == "image/svg+xml" && bytes.Contains(data, []byte("<svg"))) {
-		icon = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
+	icon := marketIcon{}
+	switch {
+	case err != nil:
+		icon.failed = now
+	case mime == "image/png" && bytes.HasPrefix(data, []byte("\x89PNG")) || mime == "image/svg+xml" && bytes.Contains(data, []byte("<svg")):
+		icon.url = "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
 	}
 	installer.market.mutex.Lock()
 	if installer.market.icons == nil {
-		installer.market.icons = map[string]string{}
+		installer.market.icons = map[string]marketIcon{}
 	}
 	installer.market.icons[cacheKey] = icon
 	installer.market.mutex.Unlock()
-	return icon
+	return icon.url
 }
