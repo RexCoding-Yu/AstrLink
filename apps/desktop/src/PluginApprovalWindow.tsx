@@ -85,17 +85,26 @@ export function PluginApprovalWindow() {
     }
   }
 
+  // Below the window's own title bar; what it asks scrolls between its
+  // title and its buttons, which stay in view.
+  const frame =
+    "flex h-dvh min-h-0 flex-col overflow-hidden pt-[var(--window-chrome-height)]";
   if (loading)
     return (
-      <LoadingState className="flex-1" label={t("plugins.approval.loading")} />
+      <main className={frame}>
+        <LoadingState
+          className="flex-1"
+          label={t("plugins.approval.loading")}
+        />
+      </main>
     );
   if (!pending)
     return (
       <main
-        className="flex flex-1 flex-col p-4"
+        className={`${frame} gap-3 px-4 pb-4`}
         data-testid="plugin-approval-window"
       >
-        <EmptyState title={t("plugins.approval.nothing")} />
+        <EmptyState className="flex-1" title={t("plugins.approval.nothing")} />
         {error ? <FormMessage tone="error">{error}</FormMessage> : null}
       </main>
     );
@@ -123,46 +132,54 @@ export function PluginApprovalWindow() {
       ? t("plugins.approval.confirmEnable")
       : t("plugins.approval.confirm");
   return (
-    <main
-      className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4"
-      data-testid="plugin-approval-window"
-    >
-      <header className="flex items-center gap-2">
-        <PluginIcon icon={detail?.icon} />
-        <h1 className="text-sm font-semibold">{title}</h1>
+    <main className={frame} data-testid="plugin-approval-window">
+      <header className="flex shrink-0 items-center gap-2 px-4 pt-2 pb-3">
+        {/* An install's review shows the plugin's own icon and name. */}
+        {install ? null : <PluginIcon icon={detail?.icon} />}
+        <h1 className="min-w-0 truncate text-sm font-semibold">{title}</h1>
       </header>
-      {install ? (
-        <PluginInstallReviewView
-          review={install}
-          rollback={approval.rollback}
-        />
-      ) : (
-        <PluginApprovalSummary
-          approval={approval}
-          detail={detail}
-          kept={kept}
-          onKept={setKept}
-        />
-      )}
-      {error ? <FormMessage tone="error">{error}</FormMessage> : null}
-      <footer className="mt-auto flex justify-end gap-2">
-        <Button
-          disabled={deciding}
-          onClick={() => void decide(false)}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          {t("plugins.approval.deny")}
-        </Button>
-        <Button
-          disabled={deciding}
-          onClick={() => void decide(true)}
-          size="sm"
-          type="button"
-        >
-          {confirm}
-        </Button>
+      <div
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-4"
+        data-slot="plugin-approval-body"
+      >
+        {install ? (
+          <PluginInstallReviewView
+            review={install}
+            rollback={approval.rollback}
+          />
+        ) : (
+          <PluginApprovalSummary
+            approval={approval}
+            detail={detail}
+            kept={kept}
+            onKept={setKept}
+          />
+        )}
+      </div>
+      <footer
+        className="grid shrink-0 gap-2 border-t bg-muted/40 px-4 py-3"
+        data-slot="plugin-approval-decision"
+      >
+        {error ? <FormMessage tone="error">{error}</FormMessage> : null}
+        <div className="flex justify-end gap-2">
+          <Button
+            disabled={deciding}
+            onClick={() => void decide(false)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {t("plugins.approval.deny")}
+          </Button>
+          <Button
+            disabled={deciding}
+            onClick={() => void decide(true)}
+            size="sm"
+            type="button"
+          >
+            {confirm}
+          </Button>
+        </div>
       </footer>
     </main>
   );

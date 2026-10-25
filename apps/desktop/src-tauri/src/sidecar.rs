@@ -3912,6 +3912,19 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     if method == Method::POST && path == "/control/v1/plugins/sources/preview" {
         return Duration::from_secs(200);
     }
+    // Core gives reading a marketplace a minute: its index, from a mirror
+    // when GitHub does not answer, then the icons of its plugins.
+    if method == Method::GET && path == "/control/v1/plugins/market" {
+        return Duration::from_secs(75);
+    }
+    // A page of a task plugin's tasks, or clearing the finished ones and the
+    // files kept for them.
+    if path.starts_with("/control/v1/plugins/")
+        && path.ends_with("/tasks")
+        && (method == Method::GET || method == Method::DELETE)
+    {
+        return Duration::from_secs(20);
+    }
     if path.starts_with("/control/v1/plugins/")
         && (path.contains("/source")
             || path.ends_with("/sources/install")
@@ -7310,6 +7323,26 @@ mod tests {
         assert_eq!(
             control_request_timeout(&Method::POST, "/control/v1/plugins/hello/source/rollback"),
             Duration::from_secs(75)
+        );
+        // Reading a marketplace fetches its index and icons from the network.
+        assert_eq!(
+            control_request_timeout(&Method::GET, "/control/v1/plugins/market"),
+            Duration::from_secs(75)
+        );
+        assert_eq!(
+            control_request_timeout(
+                &Method::GET,
+                "/control/v1/plugins/market?index=https%3A%2F%2Fexample.com%2Findex.json"
+            ),
+            Duration::from_secs(75)
+        );
+        assert_eq!(
+            control_request_timeout(&Method::GET, "/control/v1/plugins/sora/tasks?cursor=c1"),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            control_request_timeout(&Method::DELETE, "/control/v1/plugins/sora/tasks"),
+            Duration::from_secs(20)
         );
         let language = serde_json::json!({ "language": "ja" });
         assert_eq!(
