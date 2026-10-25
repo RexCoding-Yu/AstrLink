@@ -384,6 +384,10 @@ func (handler *Handler) createService(writer http.ResponseWriter, request *http.
 		service.HTTP = &connection
 		service.Capabilities = capabilities
 		credential = mutation
+		if _, err := handler.applyTaskProvider(&service); err != nil {
+			writeError(writer, http.StatusUnprocessableEntity, "invalid_service", err.Error())
+			return
+		}
 	default:
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_service", "service kind is unsupported")
 		return
@@ -440,6 +444,10 @@ func (handler *Handler) patchService(writer http.ResponseWriter, request *http.R
 		return
 	}
 	if err := handler.validateServiceCapabilities(service.Kind, service.Capabilities); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_service_patch", err.Error())
+		return
+	}
+	if _, err := handler.applyTaskProvider(&service); err != nil {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_service_patch", err.Error())
 		return
 	}

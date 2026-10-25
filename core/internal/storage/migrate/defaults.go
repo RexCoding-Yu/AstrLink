@@ -1138,7 +1138,7 @@ END`,
     sealed INTEGER NOT NULL DEFAULT 1
 )`,
 		}},
-		{Version: 57, Name: "plugins_request_metadata_and_extension_points", Statements: []string{
+		{Version: 57, Name: "plugins_request_metadata_extension_points_and_tasks", Statements: []string{
 			// The user's choices for each plugin. Plugins come from the
 			// builtin set and the plugin directory; a row exists once the
 			// user changed something, and a plugin without one is disabled.
@@ -1254,6 +1254,49 @@ END`,
 )`,
 			`ALTER TABLE request_records ADD COLUMN metadata_json TEXT`,
 			`ALTER TABLE request_records ADD COLUMN plugin_records_json TEXT`,
+			// The tasks of task plugins, written for new-api's task plugin
+			// API: one row per generation a client submitted. id is the
+			// public id clients read it by; upstream_task_id the vendor's,
+			// which stays in the gateway. owner is the access token that
+			// submitted it, '' on a gateway without tokens, and only it reads
+			// the task. surface is the protocol or native route it came by,
+			// operation what it asked of it. data_json is the vendor's latest
+			// snapshot, NULL once a route keeps no result; state_json the
+			// plugin's own state between polls; usage_json the usage facts it
+			// reported; request_json what the protocol answers echo.
+			// result_url is the result the vendor named, or stored: for one
+			// kept in the plugin task directory. next_poll_at is when the
+			// poller asks next, NULL once the task ended.
+			`CREATE TABLE plugin_tasks (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 8 AND 64),
+    plugin_key TEXT NOT NULL CHECK(length(plugin_key) BETWEEN 1 AND 32),
+    plugin_version TEXT NOT NULL,
+    service_id TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    surface TEXT NOT NULL,
+    operation TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL,
+    upstream_model TEXT NOT NULL,
+    upstream_task_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('NOT_START', 'SUBMITTED', 'QUEUED', 'IN_PROGRESS', 'SUCCESS', 'FAILURE', 'UNKNOWN')),
+    progress TEXT NOT NULL DEFAULT '',
+    fail_reason TEXT NOT NULL DEFAULT '',
+    retain INTEGER NOT NULL DEFAULT 1 CHECK(retain IN (0, 1)),
+    data_json TEXT CHECK(data_json IS NULL OR length(data_json) <= 4194304),
+    state_json TEXT CHECK(state_json IS NULL OR length(state_json) <= 1048576),
+    usage_json TEXT CHECK(usage_json IS NULL OR length(usage_json) <= 65536),
+    request_json TEXT CHECK(request_json IS NULL OR length(request_json) <= 1048576),
+    result_url TEXT NOT NULL DEFAULT '' CHECK(length(result_url) <= 65536),
+    poll_failures INTEGER NOT NULL DEFAULT 0,
+    request_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    next_poll_at TEXT
+)`,
+			`CREATE INDEX plugin_tasks_due ON plugin_tasks(next_poll_at) WHERE next_poll_at IS NOT NULL`,
+			`CREATE INDEX plugin_tasks_by_plugin ON plugin_tasks(plugin_key, created_at)`,
 		}},
 	}
 }

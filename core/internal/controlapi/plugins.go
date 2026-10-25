@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/plugin/view"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
+	"github.com/QuantumNous/astrlink/core/internal/taskplugin"
 )
 
 const PluginsPath = "/control/v1/plugins"
@@ -62,12 +63,19 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		handler.pluginSources(writer, request, action)
 		return
 	}
+	if key == "market" && action == "" {
+		if allowMethods(writer, request, http.MethodGet) {
+			handler.pluginMarket(writer, request)
+		}
+		return
+	}
 	if key == "reload" && action == "" && request.Method == http.MethodPost {
 		if err := handler.plugins.Reload(request.Context()); err != nil {
 			writeError(writer, http.StatusInternalServerError, "plugin_reload_failed", err.Error())
 			return
 		}
 		handler.registerEnabledPluginAttributes(request.Context())
+		handler.syncTaskProviders(request.Context())
 		handler.writePluginList(writer)
 		return
 	}
@@ -131,6 +139,8 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		if allowMethods(writer, request, http.MethodPost) {
 			handler.pluginUICall(writer, request, target)
 		}
+	case action == "tasks":
+		handler.pluginTasks(writer, request, target)
 	case action == "source" || strings.HasPrefix(action, "source/"):
 		handler.pluginSource(writer, request, target, strings.TrimPrefix(strings.TrimPrefix(action, "source"), "/"))
 	default:
@@ -150,13 +160,14 @@ func allowMethods(writer http.ResponseWriter, request *http.Request, method stri
 func (handler *Handler) writePluginList(writer http.ResponseWriter) {
 	plugins := handler.plugins.Current().Plugins()
 	summaries := make([]contract.PluginSummary, 0, len(plugins))
+	language := handler.pluginPageView().Language
 	for _, target := range plugins {
-		summaries = append(summaries, pluginSummary(target))
+		summaries = append(summaries, pluginSummary(target, language))
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"directory": handler.plugins.Dir(), "plugins": summaries})
 }
 
-func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
+func pluginSummary(target *plugin.Plugin, language string) contract.PluginSummary {
 	summary := contract.PluginSummary{
 		Key:                   target.Key,
 		Name:                  target.Key,
@@ -190,6 +201,14 @@ func pluginSummary(target *plugin.Plugin) contract.PluginSummary {
 			}
 			summary.Providers = append(summary.Providers, offered)
 		}
+	}
+	if meta := target.Task(); meta != nil {
+		summary.Kind, summary.Task = contract.PluginKindTask, taskplugin.Summary(meta, language)
+		if target.Enabled() {
+			summary.Providers = append(summary.Providers, taskProvider(meta))
+		}
+	} else if target.Loaded() {
+		summary.Kind = contract.PluginKindExtension
 	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed
@@ -247,7 +266,7 @@ func (handler *Handler) writePluginDetail(writer http.ResponseWriter, ctx contex
 
 func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin) (contract.PluginDetail, error) {
 	detail := contract.PluginDetail{
-		PluginSummary:  pluginSummary(target),
+		PluginSummary:  pluginSummary(target, handler.pluginPageView().Language),
 		Notice:         target.Meta.Notice,
 		Hooks:          []string{},
 		Config:         json.RawMessage("{}"),

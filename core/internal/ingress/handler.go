@@ -29,11 +29,13 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/imagecompress"
 	"github.com/QuantumNous/astrlink/core/internal/planner"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/privacy"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
+	"github.com/QuantumNous/astrlink/core/internal/taskplugin"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
 )
 
@@ -97,6 +99,10 @@ type Dependencies struct {
 	// Plugins is optional. It runs the plugins' part in each request a
 	// client sends; nil runs none.
 	Plugins *pluginhost.Host
+	// Tasks is optional. It runs the tasks of task plugins: the video,
+	// image and Responses requests for the models they claim, their
+	// native routes and /v1/tasks; nil serves none.
+	Tasks *taskplugin.Engine
 }
 
 // MetadataResolver resolves a request's metadata; *metadata.Registry
@@ -143,6 +149,7 @@ func (function PolicyWarningReporterFunc) ReportPolicyWarning(warning privacy.Wa
 type Handler struct {
 	requestMetadata  MetadataResolver
 	plugins          *pluginhost.Host
+	tasks            *taskplugin.Engine
 	builtinStates    builtintools.Store
 	searchRefs       searchRefStore
 	codexTurns       codexTurnStore
@@ -335,6 +342,7 @@ func NewWithDependencies(dependencies Dependencies) *Handler {
 		providerTransport: providerTransport,
 		requestMetadata:   dependencies.Metadata,
 		plugins:           dependencies.Plugins,
+		tasks:             dependencies.Tasks,
 		proxyCredentials:  dependencies.ProxyCredentials,
 		resolver:          dependencies.Resolver, authorizer: dependencies.Authorizer, forwarder: dependencies.Forwarder,
 		accessTokenAuthenticator: dependencies.AccessTokenAuthenticator, privacyFilter: dependencies.PrivacyFilter,
@@ -377,7 +385,20 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		handler.serveReachability(writer, request)
 		return
 	}
+	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && handler.tasks != nil && request.URL.Query().Has("access") {
+		// A task's artifact link opens without a token: the link is the
+		// capability.
+		if !handler.allowLocalCaller(writer, request) {
+			return
+		}
+		if handler.serveTaskArtifact(writer, request) {
+			return
+		}
+	}
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && !handler.allowInferenceBoundary(writer, request) {
+		return
+	}
+	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && handler.serveTasks(writer, request) {
 		return
 	}
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && strings.HasPrefix(request.URL.Path, PluginHTTPPath) {
@@ -1103,6 +1124,10 @@ func (handler *Handler) allowInferenceBoundary(writer http.ResponseWriter, reque
 		return true
 	}
 	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err == nil && mediaType == "multipart/form-data" && request.URL.Path == "/v1/images/edits" && handler.tasks != nil && handler.tasks.Claims(plugin.TaskProtocolImage) {
+		// A task plugin's image edit may upload its images.
+		return true
+	}
 	if err != nil || mediaType != "application/json" {
 		handler.writeRecordedInferenceError(writer, request, http.StatusUnsupportedMediaType, "unsupported_media_type", "inference request bodies must use application/json", false, nil)
 		return false

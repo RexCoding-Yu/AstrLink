@@ -5976,7 +5976,14 @@ components:
         provider:
           type: string
           pattern: "^[a-z][a-z0-9-]{0,31}$"
-          description: Which of the plugin's meta.providers the service is.
+          description: Which of the plugin's meta.providers the service is; task for the provider of a task plugin.
+        upstream:
+          type: string
+          enum: [new_api]
+          description: A task plugin's provider that is another new-api gateway with the plugin installed, instead of the vendor.
+        settings:
+          type: object
+          description: What a task plugin reads as the provider's own settings (ctx.userSetting), such as vertexRegion; at most 16 KiB.
       additionalProperties: false
       description: Required for, and only valid with, kind plugin; fixed once the service is created.
     ServiceCreate:

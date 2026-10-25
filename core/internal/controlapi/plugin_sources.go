@@ -23,6 +23,7 @@ type PluginInstaller interface {
 	Rollback(key, id string) error
 	Uninstall(key string) error
 	CheckUpdate(ctx context.Context, record contract.PluginInstallRecord) (contract.PluginUpdateCheck, error)
+	Market(ctx context.Context, index string, installed func(key string) string) (contract.PluginMarket, error)
 }
 
 // installFailureEnvelope is the error of an install that cannot go on,
@@ -163,8 +164,10 @@ func (handler *Handler) reloadInstalled(writer http.ResponseWriter, ctx context.
 		writeError(writer, http.StatusInternalServerError, "plugin_reload_failed", "installed, but the plugins could not be reloaded")
 		return
 	}
-	// An enabled plugin's new manifest may register other attributes.
+	// An enabled plugin's new manifest may register other attributes, and
+	// a task plugin's claim other protocols.
 	handler.registerEnabledPluginAttributes(ctx)
+	handler.syncTaskProviders(ctx)
 	target := handler.plugins.Current().Plugin(key)
 	if target == nil {
 		writeError(writer, http.StatusInternalServerError, "plugin_unavailable", "installed, but the plugin is not among the plugins")
@@ -243,4 +246,26 @@ func (handler *Handler) pluginSource(writer http.ResponseWriter, request *http.R
 	default:
 		writeError(writer, http.StatusNotFound, "not_found", "plugin endpoint not found")
 	}
+}
+
+// pluginMarket lists what a plugin marketplace offers, the official one
+// unless index names another.
+func (handler *Handler) pluginMarket(writer http.ResponseWriter, request *http.Request) {
+	if handler.pluginInstaller == nil {
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", "installing plugins is unavailable")
+		return
+	}
+	installed := func(key string) string {
+		target := handler.plugins.Current().Plugin(key)
+		if target == nil || target.Task() == nil {
+			return ""
+		}
+		return target.Task().Version
+	}
+	market, err := handler.pluginInstaller.Market(request.Context(), request.URL.Query().Get("index"), installed)
+	if err != nil {
+		writeInstallFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, market)
 }

@@ -313,8 +313,14 @@ type PluginSummary struct {
 	// the code.
 	UIVersion string `json:"ui_version,omitempty"`
 	// Providers are the kinds of provider the plugin adapts, while it is
-	// enabled with provider granted.
+	// enabled with provider granted; a task plugin's one, while it is
+	// enabled.
 	Providers []PluginProvider `json:"providers,omitempty"`
+	// Kind is extension, or task for a task plugin written for new-api's
+	// task plugin API, which Task describes. A plugin that did not load
+	// has none.
+	Kind string      `json:"kind,omitempty"`
+	Task *PluginTask `json:"task,omitempty"`
 }
 
 // PluginUICallRequest is a call of a plugin's interface code to its

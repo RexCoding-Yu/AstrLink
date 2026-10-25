@@ -1,6 +1,8 @@
 package contract
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
 )
@@ -10,7 +12,16 @@ import (
 type ServicePlugin struct {
 	Key      string `json:"key"`
 	Provider string `json:"provider"`
+	// Upstream is new_api for a task plugin's provider that is another
+	// new-api gateway with the plugin installed, "" for the vendor.
+	Upstream string `json:"upstream,omitempty"`
+	// Settings are what a task plugin reads as the provider's own
+	// settings, such as vertexRegion: a JSON object.
+	Settings json.RawMessage `json:"settings,omitempty"`
 }
+
+// MaxServicePluginSettingsBytes bounds a provider's plugin settings.
+const MaxServicePluginSettingsBytes = 16 << 10
 
 var pluginProviderPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
@@ -27,6 +38,12 @@ func (plugin *ServicePlugin) validate(kind ServiceKind) error {
 		return fmt.Errorf("plugin.key %q is not a plugin key", plugin.Key)
 	case !pluginProviderPattern.MatchString(plugin.Provider):
 		return fmt.Errorf("plugin.provider %q is not a provider id", plugin.Provider)
+	case plugin.Upstream != "" && (plugin.Upstream != PluginUpstreamNewAPI || plugin.Provider != PluginProviderTask):
+		return fmt.Errorf("plugin.upstream may only be new_api, for the provider of a task plugin")
+	case len(plugin.Settings) > MaxServicePluginSettingsBytes:
+		return fmt.Errorf("plugin.settings is larger than %d KiB", MaxServicePluginSettingsBytes>>10)
+	case len(plugin.Settings) > 0 && (!json.Valid(plugin.Settings) || !bytes.HasPrefix(bytes.TrimSpace(plugin.Settings), []byte("{"))):
+		return fmt.Errorf("plugin.settings must be a JSON object")
 	}
 	return nil
 }

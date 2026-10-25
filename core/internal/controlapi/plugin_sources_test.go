@@ -92,6 +92,10 @@ func (fake *fakeInstaller) CheckUpdate(_ context.Context, record contract.Plugin
 	return contract.PluginUpdateCheck{Available: true, Ref: "v1.2.0", RefKind: contract.PluginRefTag, URL: "https://github.com/" + record.Source.Repository + "/tree/v1.2.0"}, nil
 }
 
+func (fake *fakeInstaller) Market(_ context.Context, index string, installed func(string) string) (contract.PluginMarket, error) {
+	return contract.PluginMarket{Index: index, Name: "Test", Plugins: []contract.PluginMarketEntry{{Key: "sora", Name: "Sora", Latest: "1.1.0", Installed: installed("sora")}}}, nil
+}
+
 func TestInstallingFromSourceWaitsForConfirmation(t *testing.T) {
 	_, handler, manager, directory := newPluginHandler(t)
 	fake := &fakeInstaller{t: t, directory: directory}

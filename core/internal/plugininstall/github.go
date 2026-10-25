@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -51,7 +52,7 @@ type Resolved struct {
 // Source is what a resolved link records.
 func (resolved Resolved) Source(link string) contract.PluginInstallSource {
 	source := contract.PluginInstallSource{
-		Kind: "github", Repository: resolved.Owner + "/" + resolved.Repo, URL: link,
+		Kind: contract.PluginSourceGitHub, Repository: resolved.Owner + "/" + resolved.Repo, URL: link,
 		Ref: resolved.Ref, RefKind: resolved.RefKind, Commit: resolved.Commit, Subdir: resolved.Subdir,
 	}
 	if !resolved.CommittedAt.IsZero() {
@@ -262,7 +263,7 @@ func (hub *gitHub) download(ctx context.Context, resolved Resolved, dest string)
 		return archiveCommit{}, err
 	}
 	limited := &limitReader{reader: response.Body, left: maxArchiveBytes}
-	found, commit, err := extractSource(limited, resolved.Subdir, dest, archiveLimits{files: maxSourceFiles, bytes: maxSourceBytes})
+	found, commit, err := extractSource(limited, resolved.Subdir, dest, archiveLimits{files: maxSourceFiles, bytes: maxSourceBytes}, taskExtras(resolved.Subdir), filepath.Join(filepath.Dir(dest), extrasDir))
 	if limited.exceeded {
 		return archiveCommit{}, fail(contract.PluginInstallTooLarge, "repository")
 	}

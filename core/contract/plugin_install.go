@@ -9,13 +9,25 @@ const (
 	PluginRefTag    = "tag"
 	PluginRefBranch = "branch"
 	PluginRefCommit = "commit"
+	// PluginRefVersion is a version of a plugin marketplace, which an
+	// update follows to the newest version the index lists.
+	PluginRefVersion = "version"
+)
+
+// Kinds of PluginInstallSource.
+const (
+	PluginSourceGitHub = "github"
+	// PluginSourceMarket is a plugin marketplace in new-api's index
+	// format: its index.json lists the plugins, their versions and the
+	// sha256 of each file.
+	PluginSourceMarket = "market"
 )
 
 // PluginInstallSource is where a plugin installed from source came from.
 type PluginInstallSource struct {
-	// Kind is "github", the only kind so far.
+	// Kind is github or market.
 	Kind string `json:"kind"`
-	// Repository is owner/name.
+	// Repository is owner/name; for a marketplace, its name.
 	Repository string `json:"repository"`
 	// URL is the link the install started from.
 	URL string `json:"url"`
@@ -23,11 +35,17 @@ type PluginInstallSource struct {
 	Ref string `json:"ref,omitempty"`
 	// RefKind is tag, branch or commit: what an update follows.
 	RefKind string `json:"ref_kind"`
-	// Commit is the commit built.
+	// Commit is the commit built; for a marketplace, the sha256 of the
+	// plugin's file.
 	Commit      string `json:"commit"`
 	CommittedAt string `json:"committed_at,omitempty"`
-	// Subdir is the plugin's directory in the repository, "" for its root.
+	// Subdir is the plugin's directory in the repository, "" for its root;
+	// for a marketplace, the plugin's file relative to the index.
 	Subdir string `json:"subdir,omitempty"`
+	// Index is the marketplace index a plugin came from, and Key its key
+	// there.
+	Index string `json:"index,omitempty"`
+	Key   string `json:"key,omitempty"`
 }
 
 // PluginInstallRecord is install.json beside an installed plugin: where its
@@ -79,12 +97,20 @@ type PluginInstallReview struct {
 	ExpiresAt string              `json:"expires_at"`
 	Source    PluginInstallSource `json:"source"`
 
-	Key            string   `json:"key"`
-	Name           string   `json:"name"`
-	Version        string   `json:"version"`
-	Description    string   `json:"description,omitempty"`
-	Author         string   `json:"author,omitempty"`
-	APIVersion     int      `json:"api_version"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description,omitempty"`
+	Author      string `json:"author,omitempty"`
+	APIVersion  int    `json:"api_version"`
+	// Kind is extension, or task for a task plugin, which Task describes.
+	Kind string      `json:"kind,omitempty"`
+	Task *PluginTask `json:"task,omitempty"`
+	// Icon is the icon the plugin installs with, as a data URL.
+	Icon string `json:"icon,omitempty"`
+	// Changelog is what the version's changelog says, in the page's
+	// language when the plugin has it.
+	Changelog      string   `json:"changelog,omitempty"`
 	Capabilities   []string `json:"capabilities"`
 	NetworkPurpose string   `json:"network_purpose,omitempty"`
 	Hooks          []string `json:"hooks"`
@@ -114,6 +140,8 @@ const (
 	PluginWarningVersion = "version_mismatch"
 	// PluginWarningBuild: the bundler warned.
 	PluginWarningBuild = "build_warning"
+	// PluginWarningIcon: the plugin's icon could not be fetched.
+	PluginWarningIcon = "icon_unavailable"
 )
 
 // PluginInstallWarning is something the review points out that does not
@@ -219,4 +247,53 @@ type PluginInstalledVersion struct {
 	Source  *PluginInstallSource `json:"source,omitempty"`
 	// ReplacedAt is when a later install replaced it.
 	ReplacedAt string `json:"replaced_at"`
+}
+
+// The official plugin marketplace of new-api, through GitHub and, when
+// GitHub cannot be reached, jsDelivr.
+const (
+	OfficialPluginMarket         = "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json"
+	OfficialPluginMarketFallback = "https://cdn.jsdelivr.net/gh/QuantumNous/new-api-plugins@main/index.json"
+)
+
+// PluginMarket is what a plugin marketplace offers.
+type PluginMarket struct {
+	// Index is the address of its index.json; Name what it calls itself.
+	Index   string              `json:"index"`
+	Name    string              `json:"name"`
+	Plugins []PluginMarketEntry `json:"plugins"`
+}
+
+// PluginMarketEntry is a plugin a marketplace offers, as its index
+// describes the newest version.
+type PluginMarketEntry struct {
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// Icon is a LobeHub icon name or text / text:<label>; IconURL the
+	// icon as a data URL, when the gateway could fetch it.
+	Icon         string                `json:"icon,omitempty"`
+	IconURL      string                `json:"icon_url,omitempty"`
+	Website      string                `json:"website,omitempty"`
+	SortPriority int32                 `json:"sort_priority,omitempty"`
+	Latest       string                `json:"latest"`
+	Versions     []PluginMarketVersion `json:"versions"`
+	Models       []string              `json:"models"`
+	Protocols    []PluginTaskProtocol  `json:"protocols"`
+	Routes       []PluginTaskRoute     `json:"routes"`
+	// Link installs the newest version.
+	Link string `json:"link"`
+	// Installed is the version installed now, "" for none.
+	Installed string `json:"installed,omitempty"`
+}
+
+// PluginMarketVersion is a version a marketplace lists.
+type PluginMarketVersion struct {
+	Version       string   `json:"version"`
+	MinAPIVersion int      `json:"min_api_version,omitempty"`
+	BaseURL       string   `json:"base_url,omitempty"`
+	Auth          string   `json:"auth,omitempty"`
+	AllowedHosts  []string `json:"allowed_hosts,omitempty"`
+	// Link installs this version.
+	Link string `json:"link"`
 }

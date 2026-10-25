@@ -28,11 +28,28 @@ type archiveCommit struct {
 	committedAt time.Time
 }
 
+// taskExtras are the files outside a plugin's directory a task plugin's
+// install reads, by their path in the repository: the marketplace index at
+// its root, and the icon beside the plugin's versions.
+func taskExtras(subdir string) map[string]string {
+	extras := map[string]string{"index.json": "index.json"}
+	if parent := path.Dir(subdir); subdir != "" && parent != "." {
+		for _, name := range iconFiles {
+			extras[parent+"/"+name] = name
+		}
+	}
+	return extras
+}
+
+// maxExtraBytes bounds a file of extras.
+const maxExtraBytes = 8 << 20
+
 // extractSource writes the files of a repository archive under subdir into
-// dest, dropping the archive's top directory. Links, devices and what a
-// repository should not hold, node_modules and .git, stay out. found is
-// false when the archive has nothing under subdir.
-func extractSource(reader io.Reader, subdir, dest string, limits archiveLimits) (found bool, commit archiveCommit, err error) {
+// dest, dropping the archive's top directory, and the files extras names
+// into extrasDest. Links, devices and what a repository should not hold,
+// node_modules and .git, stay out. found is false when the archive has
+// nothing under subdir.
+func extractSource(reader io.Reader, subdir, dest string, limits archiveLimits, extras map[string]string, extrasDest string) (found bool, commit archiveCommit, err error) {
 	written := &archiveCount{limits: limits}
 	headers := func(header *tar.Header) {
 		switch {
@@ -42,7 +59,14 @@ func extractSource(reader io.Reader, subdir, dest string, limits archiveLimits) 
 			commit.committedAt = header.ModTime.UTC()
 		}
 	}
+	extra := &archiveCount{limits: archiveLimits{files: len(extras), bytes: int64(len(extras)) * maxExtraBytes}}
 	err = walkArchive(reader, headers, func(name string, header *tar.Header, body io.Reader) error {
+		if target, ok := extras[name]; ok && header.Size <= maxExtraBytes {
+			if err := extra.write(extrasDest, target, header, body); err != nil {
+				return err
+			}
+			return nil
+		}
 		if subdir != "" {
 			if name != subdir && !strings.HasPrefix(name, subdir+"/") {
 				return nil

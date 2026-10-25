@@ -772,7 +772,7 @@ func TestAPluginProviderNamesItsPlugin(t *testing.T) {
 	_, handler := newServiceHandler(t, "service_acme", "service_bad_one", "service_bad_two", "service_bad_three")
 	service := createServiceForTest(t, handler,
 		`{"name":"Acme","kind":"plugin","plugin":{"key":"acme","provider":"acme"},"http":{"base_url":"https://api.acme.example/v1","auth":{"scheme":"none"}},"capabilities":[{"protocol":"openai.chat","mode":"native","streaming":true}]}`)
-	if service.Kind != contract.ServiceKindPlugin || service.Plugin == nil || *service.Plugin != (contract.ServicePlugin{Key: "acme", Provider: "acme"}) {
+	if service.Kind != contract.ServiceKindPlugin || service.Plugin == nil || service.Plugin.Key != "acme" || service.Plugin.Provider != "acme" || service.Plugin.Upstream != "" || service.Plugin.Settings != nil {
 		t.Fatalf("service = %+v", service)
 	}
 	for _, body := range []string{

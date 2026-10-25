@@ -33,6 +33,8 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/servicetest"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	syncengine "github.com/QuantumNous/astrlink/core/internal/sync"
+	"github.com/QuantumNous/astrlink/core/internal/taskplugin"
+	"github.com/QuantumNous/astrlink/core/internal/transport"
 )
 
 // installOutboundProxy configures the outbound proxy once per process,
@@ -205,10 +207,11 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	auditKey, err := store.GetAuditKey(ctx)
 	// The workspace key fingerprints the directories sessions run in, so a
 	// new session there takes the project of the last.
-	var workspaceKey []byte
+	var workspaceKey, taskKey []byte
 	if err == nil {
 		err = privacyFilter.PersistPlaceholders(auditKey, store)
 		workspaceKey = pluginhost.WorkspaceKey(auditKey)
+		taskKey = taskplugin.SigningKey(auditKey)
 		clear(auditKey)
 	}
 	if err != nil {
@@ -320,6 +323,15 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			Metadata: hostapi.Metadata{Store: store},
 		},
 	})
+	// The tasks of task plugins go through providers of kind plugin and
+	// are polled in the background; a result a vendor returns inline is
+	// kept in <data-dir>/plugin-tasks.
+	taskEngine := taskplugin.New(taskplugin.Options{
+		Plugins: pluginManager, Store: store, Services: store, Secrets: store, ProxyCredentials: store,
+		Send: transport.New(nil).RoundTrip, Dir: filepath.Join(options.dataDirectory, "plugin-tasks"),
+		SigningKey: taskKey, Logf: logf,
+	})
+	gatewayDependencies.Tasks = taskEngine
 	pluginHost := pluginhost.New(pluginhost.Options{
 		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Store: store, Records: store,
 		WorkspaceKey: workspaceKey, Logf: logf,
@@ -340,7 +352,8 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			}
 			return registries
 		},
-		Version: buildinfo.Version,
+		Version:  buildinfo.Version,
+		Language: func() string { return pluginHost.Settings().Language },
 	})
 	gatewayDependencies.Plugins = pluginHost
 	// One shared inference handler backs both control-plane seams: the builtin
@@ -383,13 +396,14 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		MetadataStore:      store,
 		PluginHost:         pluginHost,
 		PluginInstaller:    pluginInstaller,
+		PluginTasks:        taskEngine,
 	})
 	if err != nil {
 		return fail("configure persistent control API: %w", err)
 	}
 	monitorCtx, stopMonitors := context.WithCancel(ctx)
 	var monitors sync.WaitGroup
-	monitors.Add(6)
+	monitors.Add(7)
 	go func() {
 		defer monitors.Done()
 		if err := pluginManager.Reload(monitorCtx); err != nil {
@@ -417,6 +431,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	go func() { defer monitors.Done(); subscriptionManager.RunUsageMonitor(monitorCtx) }()
 	go func() { defer monitors.Done(); rawVault.Run(monitorCtx) }()
 	go func() { defer monitors.Done(); syncEngine.Run(monitorCtx, logf) }()
+	go func() { defer monitors.Done(); taskEngine.Run(monitorCtx) }()
 	return &persistentCore{
 		control:  handler,
 		rawVault: rawVault,

@@ -58,6 +58,9 @@ type Options struct {
 	// Version is this AstrLink's version, which engines.astrlink must
 	// allow; a development build allows any.
 	Version string
+	// Language is the plugin page's language, which a review describes a
+	// task plugin in; English without it.
+	Language func() string
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -87,6 +90,9 @@ type Installer struct {
 	// mutex guards staged and the moves in the plugin directory.
 	mutex  sync.Mutex
 	staged map[string]*staged
+	// icons and market keep LobeHub's icons and marketplace listings.
+	icons  lobeIcons
+	market marketCache
 }
 
 // staged is a build waiting to be installed.
@@ -138,7 +144,8 @@ func New(options Options) *Installer {
 // now, nil for none. A *Failure says why the plugin cannot be installed.
 func (installer *Installer) Preview(ctx context.Context, link string, existing func(key string) *Existing) (contract.PluginInstallReview, error) {
 	parsed, ok := ParseLink(link)
-	if !ok {
+	market, isMarket := parseMarketLink(link)
+	if !ok && !isMarket {
 		return contract.PluginInstallReview{}, fail(contract.PluginInstallInvalidLink, "")
 	}
 	if !installer.busy.TryLock() {
@@ -148,13 +155,20 @@ func (installer *Installer) Preview(ctx context.Context, link string, existing f
 	ctx, cancel := context.WithTimeout(ctx, previewTimeout)
 	defer cancel()
 	installer.expire()
-	resolved, err := installer.hub.resolve(ctx, parsed)
-	if err != nil {
-		return contract.PluginInstallReview{}, installer.failure(ctx, err)
-	}
 	token := randomHex(16)
 	work := filepath.Join(installer.options.Dir, stagingDir, token)
-	review, record, err := installer.build(ctx, resolved, strings.TrimSpace(link), work, existing)
+	var review contract.PluginInstallReview
+	var record contract.PluginInstallRecord
+	var err error
+	if ok {
+		var resolved Resolved
+		if resolved, err = installer.hub.resolve(ctx, parsed); err != nil {
+			return contract.PluginInstallReview{}, installer.failure(ctx, err)
+		}
+		review, record, err = installer.build(ctx, resolved, strings.TrimSpace(link), work, existing)
+	} else {
+		review, record, err = installer.previewMarket(ctx, market, strings.TrimSpace(link), work, existing)
+	}
 	if err != nil {
 		_ = os.RemoveAll(work)
 		return contract.PluginInstallReview{}, installer.failure(ctx, err)
@@ -194,6 +208,9 @@ func (installer *Installer) build(ctx context.Context, resolved Resolved, link, 
 		return review, record, err
 	}
 	resolved.Commit, resolved.CommittedAt = commit.id, commit.committedAt
+	if text, ok := readTaskSource(source); ok {
+		return installer.buildTask(ctx, resolved, link, work, source, text, existing)
+	}
 	manifest, err := pluginbuild.ReadManifest(source)
 	if err != nil {
 		return review, record, &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallBuildFailed, Messages: []string{err.Error()}}}
@@ -712,6 +729,11 @@ func (installer *Installer) Uninstall(key string) error {
 // commit for a branch. A plugin installed from a commit stays on it.
 func (installer *Installer) CheckUpdate(ctx context.Context, record contract.PluginInstallRecord) (contract.PluginUpdateCheck, error) {
 	source := record.Source
+	if source.Kind == contract.PluginSourceMarket {
+		ctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		return installer.checkMarketUpdate(ctx, record)
+	}
 	owner, repo, ok := strings.Cut(source.Repository, "/")
 	if !ok || !ownerPattern.MatchString(owner) || !repoPattern.MatchString(repo) {
 		return contract.PluginUpdateCheck{}, fail(contract.PluginInstallInvalidLink, source.Repository)
