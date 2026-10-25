@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -151,6 +153,20 @@ func readTaskMeta(runtime *moejs.Runtime, file string) (*TaskMeta, error) {
 		return nil, &LoadError{Code: CodeInvalidMeta, File: file, Message: cleanText("meta: "+strings.TrimPrefix(err.Error(), "json: "), maxMessageRunes, "")}
 	}
 	return &meta, nil
+}
+
+// ReadTaskSource reads a task plugin from a source directory: a plugin.js
+// that exports buildSubmitRequest, with no package.json to build it from.
+// Such a plugin installs and runs as it is, never built.
+func ReadTaskSource(dir string) (string, bool) {
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return "", false
+	}
+	text, err := os.ReadFile(filepath.Join(dir, "plugin.js"))
+	if err != nil || len(text) > MaxSourceBytes || !bytes.Contains(text, []byte("buildSubmitRequest")) {
+		return "", false
+	}
+	return string(text), true
 }
 
 // Task returns the manifest of a task plugin, nil for any other plugin and

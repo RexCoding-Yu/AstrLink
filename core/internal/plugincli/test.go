@@ -29,7 +29,29 @@ type fixture struct {
 	Args []json.RawMessage `json:"args"`
 	setup
 	Expect expectation `json:"expect"`
-	file   string
+	// Member, Expected and ExpectedError are new-api's fixture format, so a
+	// task plugin's author tests with the same cases on both: the member of
+	// the hook to call (a member of native, or of a protocol of protocols,
+	// such as openai_video.render), the result and a text of the error.
+	Member        string          `json:"member"`
+	Expected      json.RawMessage `json:"expected"`
+	ExpectedError string          `json:"expectedError"`
+	file          string
+}
+
+// normalize reads a case in new-api's format as one of ours: the hook at
+// the member's path, and what it expects where it says nothing itself.
+func (each *fixture) normalize() {
+	if each.Member != "" {
+		each.Hook += "." + each.Member
+		each.Member = ""
+	}
+	if len(each.Expected) > 0 && len(each.Expect.Result) == 0 && len(each.Expect.Match) == 0 {
+		each.Expect.Result = each.Expected
+	}
+	if each.ExpectedError != "" && each.Expect.Error == "" {
+		each.Expect.Error = each.ExpectedError
+	}
 }
 
 // setup is what a case runs with: the settings and stored values, the
@@ -149,12 +171,19 @@ type caseOutcome struct {
 func runTest(ctx context.Context, env Environment, args []string) int {
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	only := flags.String("run", "", "run only the cases whose name contains this text")
+	file := flags.String("fixture", "", "run the cases of this file instead of tests/*.json")
 	positional, ok := parse(env, "test", flags, args, 1)
 	if !ok {
 		return 2
 	}
 	dir := projectDir(positional)
-	fixtures, err := readFixtures(filepath.Join(dir, "tests"))
+	var fixtures []fixture
+	var err error
+	if *file != "" {
+		fixtures, err = readFixtureFile(*file)
+	} else {
+		fixtures, err = readFixtures(filepath.Join(dir, "tests"))
+	}
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "error: %v\n", err)
 		return 1
@@ -169,7 +198,11 @@ func runTest(ctx context.Context, env Environment, args []string) int {
 		fixtures = kept
 	}
 	if len(fixtures) == 0 {
-		fmt.Fprintln(env.Stderr, "error: no test cases in tests/*.json")
+		where := "tests/*.json"
+		if *file != "" {
+			where = *file
+		}
+		fmt.Fprintf(env.Stderr, "error: no test cases in %s\n", where)
 		return 1
 	}
 	project, ok := buildProject(env, dir)
@@ -215,26 +248,36 @@ func readFixtures(dir string) ([]fixture, error) {
 	sort.Strings(names)
 	var fixtures []fixture
 	for _, name := range names {
-		data, err := os.ReadFile(name)
+		cases, err := readFixtureFile(name)
 		if err != nil {
 			return nil, err
-		}
-		cases, err := parseFixtures(bytes.TrimSpace(data))
-		if err != nil {
-			return nil, fmt.Errorf("%s: %v", filepath.Base(name), err)
-		}
-		for index := range cases {
-			cases[index].file = filepath.Base(name)
-			if cases[index].Name == "" {
-				cases[index].Name = fmt.Sprintf("%s #%d", filepath.Base(name), index+1)
-			}
-			if cases[index].Hook == "" {
-				return nil, fmt.Errorf("%s: case %q names no hook", filepath.Base(name), cases[index].Name)
-			}
 		}
 		fixtures = append(fixtures, cases...)
 	}
 	return fixtures, nil
+}
+
+// readFixtureFile reads the cases of one file.
+func readFixtureFile(name string) ([]fixture, error) {
+	data, err := os.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	cases, err := parseFixtures(bytes.TrimSpace(data))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", filepath.Base(name), err)
+	}
+	for index := range cases {
+		cases[index].file = filepath.Base(name)
+		if cases[index].Name == "" {
+			cases[index].Name = fmt.Sprintf("%s #%d", filepath.Base(name), index+1)
+		}
+		if cases[index].Hook == "" {
+			return nil, fmt.Errorf("%s: case %q names no hook", filepath.Base(name), cases[index].Name)
+		}
+		cases[index].normalize()
+	}
+	return cases, nil
 }
 
 func parseFixtures(data []byte) ([]fixture, error) {
@@ -423,6 +466,10 @@ func (current *runner) run(ctx context.Context, each fixture) caseOutcome {
 		}
 		problems = append(problems, "failed: "+message)
 	case len(each.Expect.Result) > 0:
+		// A hook that returns nothing returns null, as JSON has it.
+		if len(result) == 0 {
+			result = json.RawMessage("null")
+		}
 		if !jsonEqual(result, each.Expect.Result) {
 			problems = append(problems, fmt.Sprintf("returned %s\nwant     %s", orUndefined(result), compact(each.Expect.Result)))
 		}

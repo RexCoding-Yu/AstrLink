@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -53,6 +54,50 @@ func TestNewTestCheckAndBuildAProject(t *testing.T) {
 	}
 	if code, _, stderr := run(t, Environment{}, "new", "Bad_Key"); code != 2 || !strings.Contains(stderr, "cannot be a plugin key") {
 		t.Fatalf("new with a bad key = %d: %s", code, stderr)
+	}
+}
+
+func TestATaskPluginRunsNewAPIFixturesAsItIs(t *testing.T) {
+	dir := t.TempDir()
+	source, err := os.ReadFile(filepath.Join("..", "plugin", "testdata", "newapi", "sora", "plugin.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugin.js"), source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	golden := `[
+		{"name": "queued", "hook": "parseTaskResult", "args": [{}, {"status": "queued"}], "expected": {"status": "QUEUED"}},
+		{"hook": "parseTaskResult", "args": [{}, {"status": "in_progress", "progress": 40}], "expected": {"status": "IN_PROGRESS", "progress": "40%"}},
+		{"name": "needs a prompt", "hook": "buildSubmitRequest", "args": [{"requestBody": {}, "apiKey": "k", "baseUrl": "https://api.openai.com"}], "expectedError": "field prompt is required"},
+		{"name": "decodes Responses", "hook": "protocols", "member": "openai_responses.decodeRequest", "args": [{"body": {"kind": "json", "value": {"model": "sora-2", "prompt": "a cat"}}}],
+		 "expected": {"kind": "submit", "model": "sora-2", "action": "text_to_video", "requestBody": {"model": "sora-2", "prompt": "a cat"}}}
+	]`
+	if err := os.WriteFile(filepath.Join(dir, "golden.json"), []byte(golden), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// As new-api runs them: the plugin's file and the fixture's.
+	code, stdout, stderr := run(t, Environment{}, "test", filepath.Join(dir, "plugin.js"), "--fixture", filepath.Join(dir, "golden.json"))
+	if code != 0 || !strings.Contains(stdout, `"passed": 4`) {
+		t.Fatalf("test = %d: %s %s", code, stdout, stderr)
+	}
+	// A wrong expectation says what the hook returned.
+	failing := `{"name": "no video yet", "hook": "listArtifacts", "args": [{"status": "SUCCESS"}], "expected": []}`
+	if err := os.MkdirAll(filepath.Join(dir, "tests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tests", "artifacts.json"), []byte(failing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr = run(t, Environment{}, "test", dir)
+	if code != 1 || !strings.Contains(stderr, `returned [{"key":"video","type":"video"}]`) {
+		t.Fatalf("failing test = %d: %s", code, stderr)
+	}
+	code, stdout, stderr = run(t, Environment{}, "check", dir)
+	var report checkReport
+	if code != 0 || json.Unmarshal([]byte(stdout), &report) != nil || report.Key != "sora" || report.APIVersion != 1 ||
+		!slices.Contains(report.Hooks, "protocols.openai_responses.decodeRequest") || report.PluginBytes != len(source) {
+		t.Fatalf("check = %d: %s %s", code, stdout, stderr)
 	}
 }
 

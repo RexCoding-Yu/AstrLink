@@ -299,9 +299,13 @@ func (service Service) ModelProtocol(model string) ProtocolID {
 }
 
 // ResponsesWebSocket reports the effective per-channel transport setting.
-// The Copilot API and Factory's gateway serve Responses over HTTP only.
+// The Copilot API and Factory's gateway serve Responses over HTTP only, and
+// a task plugin's provider answers Responses through its tasks over HTTP.
 func (service Service) ResponsesWebSocket() bool {
 	if service.Kind == ServiceKindCopilotSubscription || service.Kind == ServiceKindDroidSubscription {
+		return false
+	}
+	if service.Plugin != nil && service.Plugin.Provider == PluginProviderTask {
 		return false
 	}
 	if service.ResponsesWebSocketEnabled != nil {

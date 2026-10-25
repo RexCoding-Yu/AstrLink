@@ -24,8 +24,17 @@ type built struct {
 
 // buildProject builds the project in dir and checks the plugin as the
 // gateway would load it, its files in an install directory of their own.
-// It reports problems on stderr.
+// A task plugin of new-api's is not built: its plugin.js is checked as it
+// is, as the gateway installs it. It reports problems on stderr.
 func buildProject(env Environment, dir string) (*built, bool) {
+	if text, ok := plugin.ReadTaskSource(dir); ok {
+		checked, err := plugin.Check(plugin.Source{File: "plugin.js", Text: text, Dir: dir})
+		if err != nil {
+			reportCheckError(env, err)
+			return nil, false
+		}
+		return &built{result: &pluginbuild.Result{Plugin: []byte(text)}, checked: checked}, true
+	}
 	result, err := pluginbuild.Build(dir)
 	if err != nil {
 		reportBuildError(env, err)
@@ -46,15 +55,21 @@ func buildProject(env Environment, dir string) (*built, bool) {
 	}
 	checked, err := plugin.Check(plugin.Source{File: "plugin.js", Text: string(result.Plugin), SourceMap: string(result.SourceMap), Dir: install})
 	if err != nil {
-		var loadErr *plugin.LoadError
-		if errors.As(err, &loadErr) && loadErr.Line > 0 {
-			fmt.Fprintf(env.Stderr, "error: %s:%d:%d: %s\n", loadErr.File, loadErr.Line, loadErr.Column, loadErr.Message)
-		} else {
-			fmt.Fprintf(env.Stderr, "error: %v\n", err)
-		}
+		reportCheckError(env, err)
 		return nil, false
 	}
 	return &built{result: result, checked: checked}, true
+}
+
+// reportCheckError writes why the plugin does not load, at its line when
+// the error has one.
+func reportCheckError(env Environment, err error) {
+	var loadErr *plugin.LoadError
+	if errors.As(err, &loadErr) && loadErr.Line > 0 {
+		fmt.Fprintf(env.Stderr, "error: %s:%d:%d: %s\n", loadErr.File, loadErr.Line, loadErr.Column, loadErr.Message)
+	} else {
+		fmt.Fprintf(env.Stderr, "error: %v\n", err)
+	}
 }
 
 func reportBuildError(env Environment, err error) {

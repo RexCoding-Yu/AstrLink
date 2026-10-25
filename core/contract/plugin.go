@@ -321,6 +321,13 @@ type PluginSummary struct {
 	// has none.
 	Kind string      `json:"kind,omitempty"`
 	Task *PluginTask `json:"task,omitempty"`
+	// Calls and Failures count the plugin's hook calls since Core started;
+	// Tasks and RunningTasks a task plugin's tasks, and those not yet
+	// finished.
+	Calls        int `json:"calls,omitempty"`
+	Failures     int `json:"failures,omitempty"`
+	Tasks        int `json:"tasks,omitempty"`
+	RunningTasks int `json:"running_tasks,omitempty"`
 }
 
 // PluginUICallRequest is a call of a plugin's interface code to its

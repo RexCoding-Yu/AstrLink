@@ -208,7 +208,7 @@ func (installer *Installer) build(ctx context.Context, resolved Resolved, link, 
 		return review, record, err
 	}
 	resolved.Commit, resolved.CommittedAt = commit.id, commit.committedAt
-	if text, ok := readTaskSource(source); ok {
+	if text, ok := plugin.ReadTaskSource(source); ok {
 		return installer.buildTask(ctx, resolved, link, work, source, text, existing)
 	}
 	manifest, err := pluginbuild.ReadManifest(source)

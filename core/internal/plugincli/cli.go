@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -41,7 +43,7 @@ func commands() []command {
 		{"new", "astrlink plugin new <key> [--template <name>] [--dir <parent>]", "Start a plugin project from a template.", runNew},
 		{"build", "astrlink plugin build [dir] [--out <dir>]", "Build a project into plugin.js, its source map and client.js.", runBuild},
 		{"check", "astrlink plugin check [dir]", "Build a project and check it as the gateway would load it.", runCheck},
-		{"test", "astrlink plugin test [dir] [--run <text>]", "Run the hook fixtures in the project's tests directory.", runTest},
+		{"test", "astrlink plugin test [dir | plugin.js] [--run <text>] [--fixture <file>]", "Run the hook fixtures in the project's tests directory, or in a file.", runTest},
 		{"dev", "astrlink plugin dev [dir] [--force]", "Keep the project built into the running gateway and show its logs.", runDev},
 	}
 }
@@ -112,13 +114,17 @@ func usageOf(name string) string {
 	return "astrlink plugin " + name
 }
 
-// projectDir is the project a command works on: its argument, else the
+// projectDir is the project a command works on: its argument, the
+// directory of the file it names (a task plugin's plugin.js), else the
 // current directory.
 func projectDir(positional []string) string {
-	if len(positional) > 0 {
-		return positional[0]
+	if len(positional) == 0 {
+		return "."
 	}
-	return "."
+	if info, err := os.Stat(positional[0]); err == nil && !info.IsDir() {
+		return filepath.Dir(positional[0])
+	}
+	return positional[0]
 }
 
 // printJSON writes a command's result on stdout.

@@ -162,7 +162,9 @@ func (handler *Handler) writePluginList(writer http.ResponseWriter) {
 	summaries := make([]contract.PluginSummary, 0, len(plugins))
 	language := handler.pluginPageView().Language
 	for _, target := range plugins {
-		summaries = append(summaries, pluginSummary(target, language))
+		summary := pluginSummary(target, language)
+		handler.countTasks(context.Background(), target, &summary)
+		summaries = append(summaries, summary)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"directory": handler.plugins.Dir(), "plugins": summaries})
 }
@@ -222,7 +224,23 @@ func pluginSummary(target *plugin.Plugin, language string) contract.PluginSummar
 	summary.RequestedCapabilities = append(summary.RequestedCapabilities, target.Meta.Capabilities...)
 	summary.GrantedCapabilities = append(summary.GrantedCapabilities, target.Granted()...)
 	summary.NeedsNetwork = target.Meta.NeedsNetwork()
+	stats := target.Stats()
+	summary.Calls = stats.Calls
+	for _, count := range stats.Failures {
+		summary.Failures += count
+	}
 	return summary
+}
+
+// countTasks adds how many tasks a task plugin has to its summary.
+func (handler *Handler) countTasks(ctx context.Context, target *plugin.Plugin, summary *contract.PluginSummary) {
+	if handler.pluginTaskEngine == nil || target.Task() == nil {
+		return
+	}
+	total, running, err := handler.pluginTaskEngine.Store().CountPluginTasks(ctx, target.Key)
+	if err == nil {
+		summary.Tasks, summary.RunningTasks = total, running
+	}
 }
 
 // hookLimits lists the time limits of the extension points the plugin
@@ -265,8 +283,10 @@ func (handler *Handler) writePluginDetail(writer http.ResponseWriter, ctx contex
 }
 
 func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin) (contract.PluginDetail, error) {
+	summary := pluginSummary(target, handler.pluginPageView().Language)
+	handler.countTasks(ctx, target, &summary)
 	detail := contract.PluginDetail{
-		PluginSummary:  pluginSummary(target, handler.pluginPageView().Language),
+		PluginSummary:  summary,
 		Notice:         target.Meta.Notice,
 		Hooks:          []string{},
 		Config:         json.RawMessage("{}"),

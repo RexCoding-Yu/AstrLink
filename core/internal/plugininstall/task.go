@@ -1,7 +1,6 @@
 package plugininstall
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -33,20 +32,6 @@ const maxChangelogBytes = 64 << 10
 // changelogPattern is a changelog's file name: CHANGELOG.md, or a
 // translation CHANGELOG.<locale>.md.
 var changelogPattern = regexp.MustCompile(`^CHANGELOG(\.[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*)?\.md$`)
-
-// readTaskSource reads a task plugin from a source directory: a plugin.js
-// that exports buildSubmitRequest, with no package.json to build it
-// from.
-func readTaskSource(dir string) (string, bool) {
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		return "", false
-	}
-	text, err := os.ReadFile(filepath.Join(dir, "plugin.js"))
-	if err != nil || len(text) > plugin.MaxSourceBytes || !bytes.Contains(text, []byte("buildSubmitRequest")) {
-		return "", false
-	}
-	return string(text), true
-}
 
 // taskFiles are what a task plugin installs with beside its source.
 type taskFiles struct {
