@@ -257,7 +257,6 @@ func (plugin *Plugin) Loaded() bool { return plugin.program != nil }
 // Enabled reports whether the plugin loaded and the user enabled it.
 func (plugin *Plugin) Enabled() bool { return plugin.program != nil && plugin.Settings.Enabled }
 
-// Granted returns the capabilities in effect.
 // DataFiles counts the files of the plugin's own data directory and what
 // they hold; zero for a plugin that has none or did not load.
 func (plugin *Plugin) DataFiles() (files int, bytes int64) {
@@ -301,6 +300,7 @@ func (plugin *Plugin) ClearData() (int, error) {
 	return files, nil
 }
 
+// Granted returns the capabilities in effect.
 func (plugin *Plugin) Granted() []string { return slices.Clone(plugin.granted) }
 
 // Can reports whether capability is in effect.
@@ -385,10 +385,12 @@ func (plugin *Plugin) invoke(ctx context.Context, name string, exported moejs.Ho
 var errCallEnded = errors.New("the plugin call ended")
 
 // Checked is a plugin that compiled and passed its checks before it is
-// installed: its manifest and the hooks it exports.
+// installed: its manifest and the hooks it exports. Task is the manifest of
+// a task plugin, whose Meta carries only its key, name and version.
 type Checked struct {
 	Meta  Meta
 	Hooks []string
+	Task  *TaskMeta
 }
 
 // Check compiles a plugin's source as the host would load it, under the key
@@ -403,7 +405,7 @@ func Check(source Source) (*Checked, error) {
 	if err != nil {
 		return nil, asLoadError(source, err)
 	}
-	checked := &Checked{Meta: loaded.meta}
+	checked := &Checked{Meta: loaded.meta, Task: loaded.task}
 	for name := range loaded.hooks {
 		checked.Hooks = append(checked.Hooks, name)
 	}
@@ -621,6 +623,9 @@ func (manager *Manager) publish(settings map[string]Settings) {
 			limits := manager.limits
 			if len(result.program.meta.Providers) > 0 {
 				limits = providerLimits(limits)
+			}
+			if result.program.task != nil {
+				limits = taskLimits(limits)
 			}
 			plugin.pool = newPool(result.program, limits)
 		}

@@ -256,7 +256,10 @@ type CallError struct {
 	// Message is safe to show: control characters removed and at most
 	// maxMessageRunes long.
 	Message string
-	Err     error
+	// Thrown is the message of what the plugin threw, cleaned as Message,
+	// without its name or position: what a task plugin tells the client.
+	Thrown string
+	Err    error
 }
 
 func (e *CallError) Error() string { return e.Reason + ": " + e.Message }

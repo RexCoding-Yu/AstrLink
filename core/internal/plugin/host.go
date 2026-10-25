@@ -187,6 +187,9 @@ type CallOptions struct {
 	// DryRun marks a call the plugin page runs by hand: its journal lines
 	// say so, and it does not count in the hook's timing.
 	DryRun bool
+	// TaskFetch lets a driver hook of a task plugin read upstream data with
+	// utils.fetch; without it utils.fetch throws.
+	TaskFetch *TaskFetch
 }
 
 // CallInfo is what the host observed during a call, for request records and
@@ -240,7 +243,11 @@ type call struct {
 	networkDeadline time.Time
 	fetchSlots      chan struct{}
 	fetched         int
-	info            CallInfo
+	// taskFetches and taskFetchTime count the utils.fetch requests of a
+	// task plugin's hook call and the time they took.
+	taskFetches   int
+	taskFetchTime time.Duration
+	info          CallInfo
 }
 
 func (c *call) granted(capability string) bool { return slices.Contains(c.plugin.granted, capability) }

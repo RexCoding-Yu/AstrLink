@@ -40,6 +40,8 @@ type program struct {
 	dirs *pluginDirs
 	// importer serves import() and import.meta in the program's runtimes.
 	importer *moejs.Importer
+	// task is the manifest of a task plugin, nil for any other plugin.
+	task *TaskMeta
 }
 
 // async reports whether the plugin's hooks may return promises: those of
@@ -66,6 +68,9 @@ func load(source Source, limits Limits, dirs *pluginDirs) (*program, error) {
 	module, parsed, err := compile(source.File, source.Text)
 	if err != nil {
 		return nil, err
+	}
+	if isTaskModule(module) {
+		return loadTask(source, module, parsed, limits, dirs)
 	}
 	loaded := &program{key: source.Key, file: source.File, module: module, hooks: make(map[string]moejs.Hook), sources: parseSourceMap(source.SourceMap, source.File), dirs: dirs}
 	loaded.importer = &moejs.Importer{Resolve: resolveNode, Meta: loaded.importMeta}
@@ -186,11 +191,19 @@ func newInstance(loaded *program, limits Limits) (*instance, error) {
 	})
 	created := &instance{runtime: runtime, program: loaded, resources: &nodeResources{}}
 	goruntime.AddCleanup(created, (*nodeResources).close, created.resources)
-	if err := created.install(); err != nil {
-		return nil, err
-	}
-	if err := created.installNode(); err != nil {
-		return nil, err
+	if loaded.task != nil {
+		// A task plugin gets new-api's utils and a console, as its
+		// contract says, and nothing of AstrLink's or Node's.
+		if err := created.installTask(); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := created.install(); err != nil {
+			return nil, err
+		}
+		if err := created.installNode(); err != nil {
+			return nil, err
+		}
 	}
 	stop := interruptAfter(runtime, loadTime, errLoadTime)
 	err := runtime.Load(loaded.module)
@@ -465,6 +478,10 @@ func classify(err error, limits Limits) *CallError {
 		failure.Reason, failure.Message = ReasonInvalidResult, fmt.Sprintf("the result is larger than %d KiB or %d values", limits.ResultBytes>>10, limits.ResultNodes)
 	case errors.As(err, &exception):
 		failure.Message = cleanText("threw "+exceptionText(exception)+stackSuffix(stackOf(err)), maxMessageRunes, "")
+		failure.Thrown = cleanText(exception.Message(), maxMessageRunes, "")
+		if failure.Thrown == "" {
+			failure.Thrown = cleanText(exceptionText(exception), maxMessageRunes, "")
+		}
 	case errors.As(err, &internal):
 		failure.Message = "the call failed inside the host"
 	case errors.As(err, &syntaxError), errors.As(err, &typeError):
