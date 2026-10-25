@@ -9,7 +9,8 @@ AstrLink Core 内嵌 [moejs](https://github.com/Calcium-Ion/moejs)，用来运�
 AstrLink 负责机制：时间和内存上限、存储、确认，以及把插件的结果放到哪里。
 
 插件和 npm 包一样是受信任的代码，不进沙箱：除了 AstrLink 提供的 `astrlink.*`
-函数和标准的 Web API，还能用 Node 的大部分内置模块，网络可以访问任何地址。它碰不到的是：插件自己目录以外的文件、子进程和线程、网关的端口、网关的环境变量，以及网关替它保存的密钥。插件声明的能力在安装审查里列出，启用插件即全部生效。
+函数和标准的 Web
+API，还能用 Node 的大部分内置模块，网络可以访问任何地址。它碰不到的是：插件自己目录以外的文件、子进程和线程、网关的端口、网关的环境变量，以及网关替它保存的密钥。插件声明的能力在安装审查里列出，启用插件即全部生效。
 
 ## 写一个插件
 
@@ -201,12 +202,13 @@ apiVersion 2 的钩子可以写成
 - `URL`、`URLSearchParams`、`TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone`、`queueMicrotask`。
 - `crypto.getRandomValues`、`crypto.randomUUID`、`crypto.subtle.digest`，以及 HMAC 的签名和校验。
 - `setTimeout`、`setInterval`、`setImmediate` 和对应的清除函数，返回 Node 的
-  `Timeout` 对象（`ref`、`unref`、`refresh`）。只在 apiVersion 2
-  的钩子运行时触发，受本次调用的时间上限约束；模块顶层设的定时器不会触发。
+  `Timeout` 对象（`ref`、`unref`、`refresh`）。只在 apiVersion
+  2 的钩子运行时触发，受本次调用的时间上限约束；模块顶层设的定时器不会触发。
 - `console`：写进插件日志。`performance`。
 - Node 的全局：`process`、`Buffer`、`global`、`require`（只能取 Node 的模块）、`__dirname`
   和 `__filename`（指向安装目录）、`EventTarget`、`Event`。
-- `eval` 和 `new Function` 可以用。内置对象每个运行时一份，插件可以修改，不影响别的插件。
+- `eval` 和 `new Function`
+  可以用。内置对象每个运行时一份，插件可以修改，不影响别的插件。
 
 ### Node 的模块
 
@@ -229,7 +231,8 @@ apiVersion 2 的钩子可以写成
 不提供的模块：
 
 - `child_process`、`worker_threads`、`cluster`：起进程或线程能读写任何文件，目录的限制就形同虚设。
-- `net`、`tls`、`dgram`、`dns`、`http2`：网关的端口不交给插件；要对外提供接口，用 `http.serve` 扩展点。
+- `net`、`tls`、`dgram`、`dns`、`http2`：网关的端口不交给插件；要对外提供接口，用
+  `http.serve` 扩展点。
 - `inspector`、`repl`、`wasi`，以及 `v8` 的堆快照。
 
 插件自己的代码导入它们时，构建直接报错；依赖导入时只给警告，模块照常加载，调用到的函数抛出
@@ -242,7 +245,9 @@ apiVersion 2 的钩子可以写成
 | 数据目录 | `<数据目录>/plugin-data/<key>/` | 可读写，是 `process.cwd()`，相对路径都落在这里；`os.tmpdir()` 指向其中的 `.tmp/`                                 |
 | 安装目录 | `<数据目录>/plugins/<key>/`     | 只读，`import.meta.dirname` 和 `__dirname` 指向这里；`package.json` 的 `astrlink.files` 列出的文件随插件装在这里 |
 
-- 其他路径一律报 `EACCES`，消息里写明「plugins read and write only their own directories」；往安装目录写报 `EROFS`。符号链接只能用相对路径指向数据目录里，指到外面同样被拒。
+- 其他路径一律报 `EACCES`，消息里写明「plugins read and write only their own
+  directories」；往安装目录写报
+  `EROFS`。符号链接只能用相对路径指向数据目录里，指到外面同样被拒。
 - 数据目录最多 1 GiB，超出的写入报 `ENOSPC`。
 - 一次调用里打开的文件描述符在调用结束时关闭。
 - 卸载插件时数据目录保留，和设置一样，重新安装接着用；插件页「数据存储」里可以清除。更新和回滚会整体替换安装目录，所以要留下的数据放在数据目录。
@@ -612,6 +617,74 @@ export const meta = {
   `parseStreamEvent`；导出了用不到的适配钩子，插件拒绝加载。
 - 时间上限：构造和解析一次 1 秒（最多 5 秒），流式每条事件 50 毫秒（最多 1 秒）；超时或出错按上游失败处理，可以故障切换。
 
+## new-api 的任务插件
+
+AstrLink 也能运行 [new-api](https://github.com/QuantumNous/new-api)
+的任务插件（v1），接入视频、图片和音乐生成。new-api 官方插件市场里的插件不用改就能装。
+
+- 一个任务插件就是一个 `plugin.js`：导出 `meta` 和一组同步钩子，不能
+  `import`。目录里只有它、没有 `package.json`，并且导出 `buildSubmitRequest`
+  时，AstrLink 把它当作任务插件：原样安装，不经过构建，文件的 sha256 和市场列出的一致。
+- 任务插件运行在单独的配置里：没有 `astrlink.*` 和 Node 的模块，有 new-api 的
+  `utils`（JSON、Base64、HMAC、JWT、火山引擎签名和只读的 `utils.fetch`）和
+  `console`。时间、内存和输入大小照样有上限。
+- 插件只做数据转换：选提供商、发请求、存任务、查询进度和下载结果都由网关完成。插件构造的请求只能发往提供商的地址和插件声明的主机，密钥由网关加上。
+- 插件页把任务插件和供应商适配器一起放在「供应商」分组里。
+
+### 安装任务插件
+
+- 插件页「插件市场」读官方市场的
+  `index.json`，也可以换成其他市场的地址。读取走 raw 地址，不占 GitHub 接口次数。
+- 安装前按市场列出的 sha256 校验文件，再按 v1 的规则检查清单和导出。
+- 「安装插件」里也可以粘贴 GitHub 上单个 `plugin.js`
+  的链接；官方插件仓库里的链接认作市场安装，同样校验。
+- 插件的图标（`iconFile`、旁边的 `icon.svg` 或
+  `icon.png`，都没有时用清单里写的 LobeHub 图标）和更新说明（`CHANGELOG.md`
+  及各语言的翻译）一起装上。更新、回滚和卸载和其他插件一样。
+
+### 任务插件的提供商
+
+启用插件后，在提供商页添加提供商，在「插件」一组里选它：
+
+- 地址默认用插件声明的 `baseUrl`；模型取插件声明的模型，可以增删。
+- 密钥填上游的 API Key。用服务账号的插件（如 Vertex
+  AI）粘贴服务账号 JSON，网关拿它换访问令牌，不交给插件。
+- 插件支持时可以打开「上游是另一个 New
+  API 网关」：地址填那个装了同一插件的网关，密钥填它的令牌。
+- 提供商接哪些接口由插件决定，网关自动设置，编辑器里没有「入口协议」。
+
+### 客户端怎么调用
+
+和其他接口一样带 AstrLink 的访问令牌：
+
+| 接口                                                                                                                            | 做什么                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `POST /v1/videos`、`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content`、`POST /v1/videos/{id}/remix`                           | OpenAI 的视频接口：创建、查询、下载和再创作                |
+| `POST /v1/images/generations`、`POST /v1/images/edits`                                                                          | OpenAI 的图片接口，任务完成后一次返回，最多等 10 分钟      |
+| `POST /v1/responses`、`GET /v1/responses/{id}`                                                                                  | Responses 接口的流式、同步和后台（`background: true`）用法 |
+| 插件声明的原生接口                                                                                                              | 厂商自己的请求格式，路径按插件声明的写                     |
+| `POST /v1/tasks/{插件 key}`、`GET /v1/tasks/{id}`、`GET /v1/tasks/{id}/artifacts`、`GET /v1/tasks/{id}/artifacts/{key}/content` | 通用的任务接口                                             |
+
+- 请求里的模型决定由哪个插件处理；同一模型有多个提供商时按提供商路由挑选，提交时上游出错可以故障切换。
+- 任务存进数据库，网关在后台按插件的方式逐个或批量查询进度。结果文件经网关下载：返回给客户端的下载地址带
+  `access` 参数，不带令牌也能下载。
+- 插件页「任务」页签列出最近的任务，可以清除已完成的任务，网关保存的结果文件一起删除。
+- 请求记录只记提交那一次，查询和下载不记。任务请求不经过隐私检查。
+
+### 用例
+
+`astrlink plugin test` 认 new-api 的用例格式
+`{name?, hook, member?, args, expected?, expectedError?}`，同一份用例两边都能跑：
+
+```sh
+astrlink plugin test plugin.js --fixture golden.json
+```
+
+`member` 是 `native` 里的函数，或 `protocols` 里某个协议的函数，如
+`openai_responses.decodeRequest`；`expected` 要求结果相等，`expectedError`
+要求失败的消息包含这段文字。不写 `--fixture` 时跑
+`tests/*.json`。`astrlink plugin check plugin.js` 按网关加载的方式检查。
+
 ## 宿主函数
 
 这些函数只在 AstrLink 调用钩子的时候能用；在模块顶层调用会抛出
@@ -624,16 +697,18 @@ export const meta = {
 - 请求带上 `credential: "<凭据位>"`
   时，AstrLink 只在请求发往该凭据绑定的服务器时把它写进请求头，插件读不到凭据的值；本机以外的明文
   `http://` 服务器需要用户对这个地址单独同意。
-- 插件可以自己设置 `Authorization`、`Cookie`、`User-Agent` 等请求头；`Host`、`Content-Length`、`Connection`
-  这些由传输决定的头，以及 `Proxy-*`、`X-AstrLink-*`，由网关去掉。插件没设 `User-Agent`
+- 插件可以自己设置 `Authorization`、`Cookie`、`User-Agent`
+  等请求头；`Host`、`Content-Length`、`Connection` 这些由传输决定的头，以及
+  `Proxy-*`、`X-AstrLink-*`，由网关去掉。插件没设 `User-Agent`
   时不发送；不跟随重定向，3xx 原样返回。
 - 请求体用 `json`（作为 `application/json` 发送）或 `body`，不能同时有，`GET`
   不带请求体，最多 1 MiB。
 - 传数组时并行执行，一次最多 8 个；v1 的每次钩子调用最多 16 个，v2 的最多 32 个，可以用
   `Promise.all`
   同时等。单个请求默认 10 秒超时，最多 30 秒，钩子的时间上限会更早截止。等网络的时间不计入脚本时间。
-- v2 还提供标准的 `fetch(url, init)` 和 `node:http(s)`，按同样的规则访问网络；`fetch`
-  返回标准的 `Response`，`init.credential` 指定凭据位。
+- v2 还提供标准的 `fetch(url, init)` 和
+  `node:http(s)`，按同样的规则访问网络；`fetch` 返回标准的
+  `Response`，`init.credential` 指定凭据位。
 - 响应：`status`（没收到响应时为 0）、`headers`（每个头的第一个值，键是小写）、`json`
   或 `text`（最多 1 MiB）、`took_ms`，以及出错时的
   `error`：`denied`（凭据不能发往这个地址）、`timeout`、`network`、`too_large`、`budget`。HTTP 错误码照常返回，不算
