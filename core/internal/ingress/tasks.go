@@ -266,6 +266,25 @@ func (current *taskRequest) taskCandidates(protocol contract.ProtocolID, model s
 	return candidates, nil
 }
 
+// fixedCandidates keeps the given providers whose task plugin serves the
+// request, whether routing would choose them or not.
+func (current *taskRequest) fixedCandidates(fixed []endpoint.Resolved, model string, serves func(*plugin.TaskMeta) bool) ([]endpoint.Resolved, error) {
+	var candidates []endpoint.Resolved
+	for _, candidate := range fixed {
+		service := candidate.CanonicalService()
+		if service.Plugin == nil {
+			continue
+		}
+		if meta := current.handler.tasks.TaskPlugin(service.Plugin.Key); meta != nil && serves(meta) {
+			candidates = append(candidates, candidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, &taskplugin.Error{Status: http.StatusBadRequest, Code: "unsupported_model", Message: "the provider's task plugin does not serve the model " + model + " this way"}
+	}
+	return candidates, nil
+}
+
 // submit decodes and submits on the candidates in order: each plugin
 // decodes the request once, and a candidate whose plugin cannot gives way
 // to the next.
@@ -314,6 +333,12 @@ func (current *taskRequest) submit(candidates []endpoint.Resolved, surface, oper
 // submitTaskProtocol serves a submission on a gateway protocol: a video,
 // an image or a Responses request for a model a task plugin claims.
 func (handler *Handler) submitTaskProtocol(writer http.ResponseWriter, request *http.Request, protocol, operation, model string) {
+	handler.runTaskProtocol(writer, request, protocol, operation, model, nil)
+}
+
+// runTaskProtocol serves a submission on a gateway protocol on the
+// providers routing chooses, or on fixed ones, as a provider's test asks.
+func (handler *Handler) runTaskProtocol(writer http.ResponseWriter, request *http.Request, protocol, operation, model string, fixed []endpoint.Resolved) {
 	if _, err := readTaskBody(request); err != nil {
 		writeTaskError(writer, err)
 		return
@@ -363,7 +388,12 @@ func (handler *Handler) submitTaskProtocol(writer http.ResponseWriter, request *
 		}
 		return mode == "" || slices.Contains(meta.Claim(protocol).Supports, mode)
 	}
-	candidates, err := current.taskCandidates(taskProtocols[protocol], model, false, serves)
+	var candidates []endpoint.Resolved
+	if fixed != nil {
+		candidates, err = current.fixedCandidates(fixed, model, serves)
+	} else {
+		candidates, err = current.taskCandidates(taskProtocols[protocol], model, false, serves)
+	}
 	if err != nil {
 		if mode != "" {
 			if forms := handler.tasks.ResponseModes(model); len(forms) > 0 && !slices.Contains(forms, mode) {
@@ -474,6 +504,11 @@ func publicBase(request *http.Request) string {
 	if forwarded := strings.TrimSpace(strings.Split(request.Header.Get("X-Forwarded-Host"), ",")[0]); forwarded != "" {
 		host = forwarded
 	}
+	// Without a host, as in a request made inside the gateway, the links
+	// stay relative.
+	if host == "" {
+		return ""
+	}
 	return (&url.URL{Scheme: scheme, Host: host}).String()
 }
 
@@ -544,7 +579,13 @@ func (current *taskRequest) streamResponse(task storage.PluginTask, request task
 		}
 	}
 	response := func(current storage.PluginTask) json.RawMessage { return taskplugin.ResponseObject(current, nil, nil) }
-	send("response.created", map[string]any{"response": response(task)})
+	// A stream opens in progress, also on a task its vendor finished at
+	// once: response.completed or response.failed ends it.
+	opening := task
+	if opening.Terminal() {
+		opening.Status = contract.PluginTaskInProgress
+	}
+	send("response.created", map[string]any{"response": response(opening)})
 	itemID := "msg_" + strings.TrimPrefix(task.ID, "resp_")
 	var text strings.Builder
 	opened := false

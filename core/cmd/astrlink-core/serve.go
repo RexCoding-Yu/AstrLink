@@ -168,6 +168,11 @@ func serve(
 		RetentionSweep:   core.retentionSweep,
 		Listening: func(address net.Addr) {
 			logf("listening on %s for the client API and the web console", address)
+			// A provider's test links its results here; an address of every
+			// interface names no host to reach.
+			if tcp, ok := address.(*net.TCPAddr); ok && !tcp.IP.IsUnspecified() {
+				core.serviceTester.UseGatewayAddress(tcp.String())
+			}
 			if status, err := core.rawVault.Status(ctx); err == nil && !status.PasswordSet {
 				logf("no password is set yet: open the web console within %d minutes of start to set it; after that, restart to reopen setup",
 					int(console.SetupWindow/time.Minute))

@@ -98,7 +98,10 @@ type persistentCore struct {
 	control  *controlapi.Handler
 	rawVault *controlapi.Vault
 	// gateway configures the inference plane; the caller adds its host gate.
-	gateway        ingress.Dependencies
+	gateway ingress.Dependencies
+	// serviceTester tests providers; it learns the gateway's address once
+	// the inference plane listens.
+	serviceTester  *servicetest.Tester
 	retentionSweep func(context.Context) error
 	// close stops the background monitors, zeroes raw keys, closes the
 	// store and then the privacy worker.
@@ -360,6 +363,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	// tool tester and the model classification caller used by the classifier
 	// dry-run for existing_model sources.
 	gatewayTester := ingress.NewWithDependencies(gatewayDependencies)
+	serviceTester := servicetest.NewWithDependencies(gatewayDependencies, subscriptionManager.APIBaseURLFor)
 	handler, err := controlapi.NewWithDependencies(options.version, controlapi.Dependencies{
 		ServiceStore: store,
 		PricingStore: store, PricingManager: pricingManager,
@@ -381,7 +385,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		RateLimits:         resolver,
 		CodingPlans:        codingplan.New(store, nil),
 		ServiceModels:      servicemodel.New(store, subscriptionManager, nil).WithPluginProviders(pluginHost),
-		ServiceTester:      servicetest.NewWithDependencies(gatewayDependencies, subscriptionManager.APIBaseURLFor),
+		ServiceTester:      serviceTester,
 		BuiltinToolTester:  gatewayTester,
 		ModelClassifier:    gatewayTester,
 		ControlToken:       options.controlToken,
@@ -433,9 +437,10 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	go func() { defer monitors.Done(); syncEngine.Run(monitorCtx, logf) }()
 	go func() { defer monitors.Done(); taskEngine.Run(monitorCtx) }()
 	return &persistentCore{
-		control:  handler,
-		rawVault: rawVault,
-		gateway:  gatewayDependencies,
+		control:       handler,
+		rawVault:      rawVault,
+		gateway:       gatewayDependencies,
+		serviceTester: serviceTester,
 		retentionSweep: func(ctx context.Context) error {
 			_, err := store.SweepExpiredAuditData(ctx)
 			return err

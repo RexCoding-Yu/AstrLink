@@ -113,17 +113,33 @@ func (secrets taskSecrets) Delete(context.Context, secretstore.Ref) error { retu
 // taskGateway is the inference handler with the official sora and sunoapi
 // plugins, each on a provider of the fake vendor.
 type taskGateway struct {
-	handler http.Handler
-	engine  *taskplugin.Engine
-	store   *taskStore
+	handler  http.Handler
+	engine   *taskplugin.Engine
+	store    *taskStore
+	services taskServices
 }
 
 func newTaskGateway(t *testing.T, vendor http.Handler) *taskGateway {
 	t.Helper()
-	manager := plugin.NewManager(plugin.ManagerOptions{Dir: "../plugin/testdata/newapi", Settings: taskSettings{"sora", "sunoapi"}})
-	if err := manager.Reload(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	return newTaskGatewayOf(t, vendor, func(provider taskProvider) taskServices {
+		return taskServices{
+			provider("sora", []string{"sora-2"},
+				contract.Capability{Protocol: contract.ProtocolOpenAIVideos, Mode: contract.CapabilityModeNative},
+				contract.Capability{Protocol: contract.ProtocolOpenAIResponses, Mode: contract.CapabilityModeNative, Streaming: true}),
+			provider("sunoapi", []string{"suno_music", "suno_lyrics"},
+				contract.Capability{Protocol: contract.ProtocolOpenAIResponses, Mode: contract.CapabilityModeNative, Streaming: true}),
+		}
+	})
+}
+
+// taskProvider makes the provider of a task plugin on the fake vendor, its
+// key sk-<plugin>.
+type taskProvider func(key string, models []string, capabilities ...contract.Capability) contract.Service
+
+// newTaskGatewayOf is the inference handler with the official plugins the
+// providers name, each on a provider of the fake vendor.
+func newTaskGatewayOf(t *testing.T, vendor http.Handler, providers func(taskProvider) taskServices) *taskGateway {
+	t.Helper()
 	server := httptest.NewServer(vendor)
 	t.Cleanup(server.Close)
 	provider := func(key string, models []string, capabilities ...contract.Capability) contract.Service {
@@ -134,12 +150,16 @@ func newTaskGateway(t *testing.T, vendor http.Handler) *taskGateway {
 			Plugin:       &contract.ServicePlugin{Key: key, Provider: contract.PluginProviderTask},
 		}
 	}
-	services := taskServices{
-		provider("sora", []string{"sora-2"},
-			contract.Capability{Protocol: contract.ProtocolOpenAIVideos, Mode: contract.CapabilityModeNative},
-			contract.Capability{Protocol: contract.ProtocolOpenAIResponses, Mode: contract.CapabilityModeNative, Streaming: true}),
-		provider("sunoapi", []string{"suno_music", "suno_lyrics"},
-			contract.Capability{Protocol: contract.ProtocolOpenAIResponses, Mode: contract.CapabilityModeNative, Streaming: true}),
+	services := providers(provider)
+	keys := taskSettings{}
+	secrets := taskSecrets{}
+	for _, service := range services {
+		keys = append(keys, service.Plugin.Key)
+		secrets[secretstore.Ref(service.HTTP.CredentialRef)] = []byte("sk-" + service.Plugin.Key)
+	}
+	manager := plugin.NewManager(plugin.ManagerOptions{Dir: "../plugin/testdata/newapi", Settings: keys})
+	if err := manager.Reload(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	for _, service := range services {
 		if err := service.Validate(); err != nil {
@@ -153,10 +173,9 @@ func newTaskGateway(t *testing.T, vendor http.Handler) *taskGateway {
 	store := &taskStore{}
 	engine := taskplugin.New(taskplugin.Options{
 		Plugins: manager, Store: store, Services: services, Send: transport.New(server.Client().Transport).RoundTrip,
-		Secrets: taskSecrets{"local://service/svc_sora": []byte("sk-sora"), "local://service/svc_sunoapi": []byte("sk-suno")},
-		Dir:     t.TempDir(), SigningKey: []byte("key"), Logf: t.Logf,
+		Secrets: secrets, Dir: t.TempDir(), SigningKey: []byte("key"), Logf: t.Logf,
 	})
-	return &taskGateway{handler: NewWithDependencies(Dependencies{Resolver: resolver, Tasks: engine}), engine: engine, store: store}
+	return &taskGateway{handler: NewWithDependencies(Dependencies{Resolver: resolver, Tasks: engine}), engine: engine, store: store, services: services}
 }
 
 func (gateway *taskGateway) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
@@ -282,6 +301,73 @@ func TestResponsesOfATaskModelStreamTheTask(t *testing.T) {
 	}
 	if kinds[len(kinds)-1] != "response.completed" {
 		t.Fatalf("the stream ends with %s", kinds[len(kinds)-1])
+	}
+}
+
+func TestATaskPluginsProviderIsTestedThroughItsTask(t *testing.T) {
+	gateway := newTaskGateway(t, soraVendor(t))
+	handler := gateway.handler.(*Handler)
+	sora := gateway.services[0]
+	test := func(host string, stream bool) (*httptest.ResponseRecorder, []int, bool) {
+		t.Helper()
+		body := fmt.Sprintf(`{"model":"sora-2","input":[{"role":"user","content":[{"type":"input_text","text":"a paper boat"}]}],"stream":%t,"store":false}`, stream)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+		request.Host = host
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		var statuses []int
+		outbound := false
+		err := handler.ServeServiceTest(recorder, request, sora, contract.ServiceTestRequest{
+			Model: "sora-2", Protocol: contract.ProtocolOpenAIResponses, Stream: stream,
+		}, "", ServiceTestObserver{
+			Outbound: func() { outbound = true },
+			Response: func(status int) { statuses = append(statuses, status) },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return recorder, statuses, outbound
+	}
+	streamed, statuses, outbound := test("127.0.0.1:18417", true)
+	if streamed.Code != http.StatusOK || !outbound || !slices.Equal(statuses, []int{http.StatusOK}) {
+		t.Fatalf("test = %d %v %t\n%s", streamed.Code, statuses, outbound, streamed.Body)
+	}
+	// It finishes with the video linked at the gateway's address.
+	if !strings.Contains(streamed.Body.String(), "http://127.0.0.1:18417/v1/tasks/resp_") || !strings.Contains(streamed.Body.String(), "event: response.completed") {
+		t.Fatalf("stream:\n%s", streamed.Body)
+	}
+	// Made inside the gateway without a host, its links stay relative.
+	answered, _, _ := test("", false)
+	if answered.Code != http.StatusOK || !strings.Contains(answered.Body.String(), `src=\"/v1/tasks/resp_`) || strings.Contains(answered.Body.String(), "http:/") {
+		t.Fatalf("sync test = %d %s", answered.Code, answered.Body)
+	}
+}
+
+func TestAStreamOfATaskDoneAtOnceOpensInProgress(t *testing.T) {
+	// DashScope answers qwen-image-2.0 at once, with the image.
+	vendor := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer sk-alibaba" || request.URL.Path != "/api/v1/services/aigc/multimodal-generation/generation" {
+			http.NotFound(writer, request)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"image":"https://images.example/cat.png"}]}}]},"request_id":"req-1","usage":{"image_count":1}}`)
+	})
+	gateway := newTaskGatewayOf(t, vendor, func(provider taskProvider) taskServices {
+		return taskServices{provider("alibaba", []string{"qwen-image-2.0"},
+			contract.Capability{Protocol: contract.ProtocolOpenAIResponses, Mode: contract.CapabilityModeNative, Streaming: true},
+			contract.Capability{Protocol: contract.ProtocolOpenAIImages, Mode: contract.CapabilityModeNative})}
+	})
+	streamed := gateway.do(t, http.MethodPost, "/v1/responses", `{"model":"qwen-image-2.0","input":"a cat under cherry blossoms","stream":true}`)
+	events := strings.Split(strings.TrimSpace(streamed.Body.String()), "\n\n")
+	if streamed.Code != http.StatusOK || len(events) < 2 {
+		t.Fatalf("stream = %d %s", streamed.Code, streamed.Body)
+	}
+	if !strings.Contains(events[0], "event: response.created") || !strings.Contains(events[0], `"status":"in_progress"`) || strings.Contains(events[0], "completed_at") {
+		t.Fatalf("the stream opens with %s", events[0])
+	}
+	last := events[len(events)-1]
+	if !strings.Contains(last, "event: response.completed") || !strings.Contains(last, `"status":"completed"`) || !strings.Contains(last, "/artifacts/image-1/content?access=") {
+		t.Fatalf("the stream ends with %s", last)
 	}
 }
 
