@@ -3894,11 +3894,13 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
         };
     }
 
+    // Core gives a provider's test a minute, and the test of a task
+    // plugin's provider five, as it waits for the media generated.
     if method == Method::POST
         && path.starts_with(&format!("{SERVICES_PATH}/"))
         && path.ends_with("/test")
     {
-        return Duration::from_secs(75);
+        return Duration::from_secs(320);
     }
     if method == Method::POST && path.starts_with("/control/v1/pricing/") {
         return Duration::from_secs(150);
@@ -7541,7 +7543,7 @@ mod tests {
     fn provider_tests_allow_the_core_deadline_to_finish() {
         assert_eq!(
             control_request_timeout(&Method::POST, "/control/v1/services/service_test/test"),
-            Duration::from_secs(75)
+            Duration::from_secs(320)
         );
         assert_eq!(
             control_request_timeout(&Method::GET, "/control/v1/services/service_test/test"),
