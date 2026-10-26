@@ -110,12 +110,44 @@ func (secrets taskSecrets) Put(context.Context, secretstore.Ref, []byte) error {
 
 func (secrets taskSecrets) Delete(context.Context, secretstore.Ref) error { return nil }
 
+// taskRecords keeps the request records of a task gateway; requests may
+// end together.
+type taskRecords struct {
+	mutex sync.Mutex
+	store memoryRequestRecordStore
+}
+
+func (records *taskRecords) UpsertRequestRecord(ctx context.Context, record contract.RequestRecord) error {
+	records.mutex.Lock()
+	defer records.mutex.Unlock()
+	return records.store.UpsertRequestRecord(ctx, record)
+}
+
+func (records *taskRecords) InsertRequestRecord(ctx context.Context, record contract.RequestRecord) error {
+	records.mutex.Lock()
+	defer records.mutex.Unlock()
+	return records.store.InsertRequestRecord(ctx, record)
+}
+
+func (records *taskRecords) FindSessionLink(ctx context.Context, kind contract.SessionCursorKind, values []string, scope storage.SessionCursorScope) (storage.SessionLinkMatch, bool, error) {
+	records.mutex.Lock()
+	defer records.mutex.Unlock()
+	return records.store.FindSessionLink(ctx, kind, values, scope)
+}
+
+func (records *taskRecords) list() []contract.RequestRecord {
+	records.mutex.Lock()
+	defer records.mutex.Unlock()
+	return slices.Clone(records.store.records)
+}
+
 // taskGateway is the inference handler with the official sora and sunoapi
 // plugins, each on a provider of the fake vendor.
 type taskGateway struct {
 	handler  http.Handler
 	engine   *taskplugin.Engine
 	store    *taskStore
+	records  *taskRecords
 	services taskServices
 }
 
@@ -175,7 +207,11 @@ func newTaskGatewayOf(t *testing.T, vendor http.Handler, providers func(taskProv
 		Plugins: manager, Store: store, Services: services, Send: transport.New(server.Client().Transport).RoundTrip,
 		Secrets: secrets, Dir: t.TempDir(), SigningKey: []byte("key"), Logf: t.Logf,
 	})
-	return &taskGateway{handler: NewWithDependencies(Dependencies{Resolver: resolver, Tasks: engine}), engine: engine, store: store, services: services}
+	records := &taskRecords{}
+	return &taskGateway{
+		handler: NewWithDependencies(Dependencies{Resolver: resolver, Tasks: engine, RequestRecords: records}),
+		engine:  engine, store: store, records: records, services: services,
+	}
 }
 
 func (gateway *taskGateway) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
@@ -374,6 +410,50 @@ func TestAStreamOfATaskDoneAtOnceOpensInProgress(t *testing.T) {
 	last := events[len(events)-1]
 	if !strings.Contains(last, "event: response.completed") || !strings.Contains(last, `"status":"completed"`) || !strings.Contains(last, "/artifacts/image-1/content?access=") {
 		t.Fatalf("the stream ends with %s", last)
+	}
+}
+
+func TestATaskThatSucceedsFinishesItsRecord(t *testing.T) {
+	vendor := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/services/aigc/multimodal-generation/generation" {
+			http.NotFound(writer, request)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"image":"https://images.example/cat.png"}]}}]},"request_id":"req-1","usage":{"image_count":1}}`)
+	})
+	gateway := newTaskGatewayOf(t, vendor, func(provider taskProvider) taskServices {
+		return taskServices{provider("alibaba", []string{"qwen-image-2.0"},
+			contract.Capability{Protocol: contract.ProtocolOpenAIResponses, Mode: contract.CapabilityModeNative, Streaming: true},
+			contract.Capability{Protocol: contract.ProtocolOpenAIImages, Mode: contract.CapabilityModeNative})}
+	})
+	for _, call := range []struct{ path, body string }{
+		{"/v1/images/generations", `{"model":"qwen-image-2.0","prompt":"a cat under cherry blossoms"}`},
+		{"/v1/responses", `{"model":"qwen-image-2.0","input":"a cat under cherry blossoms"}`},
+		{"/v1/responses", `{"model":"qwen-image-2.0","input":"a cat under cherry blossoms","stream":true}`},
+	} {
+		if answered := gateway.do(t, http.MethodPost, call.path, call.body); answered.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s", call.path, answered.Code, answered.Body)
+		}
+	}
+	// A provider's test runs the same task, and keeps a record too.
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"qwen-image-2.0","input":"a cat","store":false}`))
+	request.Header.Set("Content-Type", "application/json")
+	tested := httptest.NewRecorder()
+	if err := gateway.handler.(*Handler).ServeServiceTest(tested, request, gateway.services[0], contract.ServiceTestRequest{
+		Model: "qwen-image-2.0", Protocol: contract.ProtocolOpenAIResponses,
+	}, "", ServiceTestObserver{}); err != nil || tested.Code != http.StatusOK {
+		t.Fatalf("test = %d %v %s", tested.Code, err, tested.Body)
+	}
+	// Each ends as it answered, on the provider that served it, never left
+	// waiting for a provider.
+	records := gateway.records.list()
+	if len(records) != 4 {
+		t.Fatalf("%d records", len(records))
+	}
+	for _, record := range records {
+		if record.Status != contract.RequestStatusSucceeded || record.ServiceID == nil || *record.ServiceID != "svc_alibaba" || record.Plan == nil {
+			t.Fatalf("record %s = %s on %v, plan %+v", record.InputProtocol, record.Status, record.ServiceID, record.Plan)
+		}
 	}
 }
 

@@ -317,8 +317,12 @@ func (current *taskRequest) submit(candidates []endpoint.Resolved, surface, oper
 			RequestID: string(current.session.requestID()),
 		}, []taskplugin.Candidate{{Service: service, UpstreamModel: candidate.UpstreamModel}})
 		if err == nil {
+			// The record holds a plan as the planner makes one: a native plan
+			// converts nothing, and one without its path fails validation, so
+			// the record would stay waiting for a provider.
 			current.session.noteServed(candidate, contract.ExecutionPlan{
 				Type: contract.PlanTypeNative, ServiceID: service.ID, InputProtocol: current.protocol, UpstreamProtocol: current.protocol,
+				ConversionPath: []contract.ConversionEdge{}, Streaming: current.session.classified.Streaming,
 			})
 			return submitted, nil
 		}
