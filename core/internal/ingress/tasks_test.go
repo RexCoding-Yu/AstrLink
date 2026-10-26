@@ -308,6 +308,7 @@ func TestATaskPluginsProviderIsTestedThroughItsTask(t *testing.T) {
 	gateway := newTaskGateway(t, soraVendor(t))
 	handler := gateway.handler.(*Handler)
 	sora := gateway.services[0]
+	var media []contract.ServiceTestMedia
 	test := func(host string, stream bool) (*httptest.ResponseRecorder, []int, bool) {
 		t.Helper()
 		body := fmt.Sprintf(`{"model":"sora-2","input":[{"role":"user","content":[{"type":"input_text","text":"a paper boat"}]}],"stream":%t,"store":false}`, stream)
@@ -322,6 +323,7 @@ func TestATaskPluginsProviderIsTestedThroughItsTask(t *testing.T) {
 		}, "", ServiceTestObserver{
 			Outbound: func() { outbound = true },
 			Response: func(status int) { statuses = append(statuses, status) },
+			Media:    func(found []contract.ServiceTestMedia) { media = found },
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -332,7 +334,11 @@ func TestATaskPluginsProviderIsTestedThroughItsTask(t *testing.T) {
 	if streamed.Code != http.StatusOK || !outbound || !slices.Equal(statuses, []int{http.StatusOK}) {
 		t.Fatalf("test = %d %v %t\n%s", streamed.Code, statuses, outbound, streamed.Body)
 	}
-	// It finishes with the video linked at the gateway's address.
+	// The video it generated is reported as a video at the gateway's
+	// address, and the answer links it too.
+	if len(media) != 1 || media[0].Kind != "video" || media[0].Name != "video" || !strings.HasPrefix(media[0].URL, "http://127.0.0.1:18417/v1/tasks/resp_") {
+		t.Fatalf("media = %+v", media)
+	}
 	if !strings.Contains(streamed.Body.String(), "http://127.0.0.1:18417/v1/tasks/resp_") || !strings.Contains(streamed.Body.String(), "event: response.completed") {
 		t.Fatalf("stream:\n%s", streamed.Body)
 	}

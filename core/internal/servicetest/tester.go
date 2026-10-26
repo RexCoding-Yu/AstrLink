@@ -192,6 +192,12 @@ func (tester *Tester) Test(ctx context.Context, service contract.Service, input 
 		return fail("invalid_response", err.Error())
 	}
 	result.OK = true
+	// A task plugin's media are known once the gateway is done answering.
+	select {
+	case <-exchange.done:
+		result.Media = exchange.media
+	case <-ctx.Done():
+	}
 	return result
 }
 

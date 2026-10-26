@@ -9561,6 +9561,27 @@ components:
         message:
           type: string
           maxLength: 1001
+        media:
+          type: array
+          description: Files the test produced, as the provider of a task plugin generates images, videos or music. Absent when there are none.
+          items:
+            $ref: "#/components/schemas/ServiceTestMedia"
+    ServiceTestMedia:
+      type: object
+      additionalProperties: false
+      required: [kind, url, name]
+      properties:
+        kind:
+          type: string
+          enum: [image, video, audio, file]
+        url:
+          type: string
+          description: The link the gateway serves the file at, with its own access; relative when the test reached the gateway without a host, as through the web console.
+        mime_type:
+          type: string
+        name:
+          type: string
+          description: The plugin's key for the file, such as image-1.
     ServiceResponsesProbe:
       type: object
       required: [service_id, status_code, ok]

@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 // ServiceTestObserver observes one in-process test. Callbacks run synchronously
@@ -19,6 +20,9 @@ type ServiceTestObserver struct {
 	Response      func(int)
 	// WrapResponseBody bounds upstream consumption before restoration buffers it.
 	WrapResponseBody func(io.ReadCloser) io.ReadCloser
+	// Media hears the files a task plugin's provider generated, before the
+	// answer ends.
+	Media func([]contract.ServiceTestMedia)
 }
 
 type serviceTestExecution struct {
@@ -144,8 +148,35 @@ func (handler *Handler) serveTaskServiceTest(writer http.ResponseWriter, request
 		Service: service, Mode: contract.CapabilityModeNative, PlanType: contract.PlanTypeNative,
 	}
 	watched := &statusObserver{ResponseWriter: writer, observe: observer.Response}
-	handler.runTaskProtocol(watched, request, plugin.TaskProtocolResponses, "create", input.Model, []endpoint.Resolved{candidate})
+	finished := func(task storage.PluginTask) {
+		if observer.Media == nil {
+			return
+		}
+		artifacts, err := handler.tasks.Artifacts(request.Context(), task)
+		if err != nil {
+			return
+		}
+		links := handler.artifactLinks(request, task)
+		media := make([]contract.ServiceTestMedia, 0, len(artifacts))
+		for _, artifact := range artifacts {
+			media = append(media, contract.ServiceTestMedia{
+				Kind: mediaKind(artifact.Type), URL: links(artifact.Key), MimeType: artifact.MimeType, Name: artifact.Key,
+			})
+		}
+		observer.Media(media)
+	}
+	handler.runTaskProtocol(watched, request, plugin.TaskProtocolResponses, "create", input.Model, []endpoint.Resolved{candidate}, finished)
 	return request.Context().Err()
+}
+
+// mediaKind is the kind of a file a task plugin lists: image, video and
+// audio as they are, anything else a file.
+func mediaKind(kind string) string {
+	switch kind {
+	case "image", "video", "audio":
+		return kind
+	}
+	return "file"
 }
 
 // statusObserver tells observe the status of the answer once, as it

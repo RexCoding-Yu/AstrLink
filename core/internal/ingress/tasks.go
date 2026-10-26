@@ -191,6 +191,8 @@ type taskRequest struct {
 	session  *recordSession
 	body     *taskplugin.Body
 	protocol contract.ProtocolID
+	// finished hears a task that succeeded, before the answer ends.
+	finished func(storage.PluginTask)
 }
 
 // startTaskRecord starts the request record of a submission and reads its
@@ -333,12 +335,14 @@ func (current *taskRequest) submit(candidates []endpoint.Resolved, surface, oper
 // submitTaskProtocol serves a submission on a gateway protocol: a video,
 // an image or a Responses request for a model a task plugin claims.
 func (handler *Handler) submitTaskProtocol(writer http.ResponseWriter, request *http.Request, protocol, operation, model string) {
-	handler.runTaskProtocol(writer, request, protocol, operation, model, nil)
+	handler.runTaskProtocol(writer, request, protocol, operation, model, nil, nil)
 }
 
 // runTaskProtocol serves a submission on a gateway protocol on the
-// providers routing chooses, or on fixed ones, as a provider's test asks.
-func (handler *Handler) runTaskProtocol(writer http.ResponseWriter, request *http.Request, protocol, operation, model string, fixed []endpoint.Resolved) {
+// providers routing chooses, or on fixed ones, as a provider's test asks;
+// finished, when set, hears a Responses task that succeeded before its
+// answer ends.
+func (handler *Handler) runTaskProtocol(writer http.ResponseWriter, request *http.Request, protocol, operation, model string, fixed []endpoint.Resolved, finished func(storage.PluginTask)) {
 	if _, err := readTaskBody(request); err != nil {
 		writeTaskError(writer, err)
 		return
@@ -359,6 +363,7 @@ func (handler *Handler) runTaskProtocol(writer http.ResponseWriter, request *htt
 	background := protocol == plugin.TaskProtocolResponses && probe.Background()
 	current, finish := handler.startTaskRecord(writer, request, taskProtocols[protocol], model, stream)
 	defer finish()
+	current.finished = finished
 	request = current.request
 	if current.body, err = taskplugin.ReadBody(request, maxTaskBody); err != nil {
 		current.fail(err)
@@ -548,6 +553,9 @@ func (current *taskRequest) answerResponse(task storage.PluginTask, request task
 		current.fail(err)
 		return
 	}
+	if task.Status == contract.PluginTaskSuccess && current.finished != nil {
+		current.finished(task)
+	}
 	writeTaskJSON(current.writer, http.StatusOK, rendered)
 	if task.Status == contract.PluginTaskFailure {
 		current.session.noteFailed(errorSummaryFromInference("task_failed", task.FailReason, false))
@@ -669,6 +677,9 @@ func (current *taskRequest) streamResponse(task storage.PluginTask, request task
 		send("response.failed", map[string]any{"response": object})
 		current.session.noteFailed(errorSummaryFromInference(code, message, false))
 		return
+	}
+	if current.finished != nil {
+		current.finished(final)
 	}
 	send("response.completed", map[string]any{"response": taskplugin.ResponseObject(final, taskplugin.OutputMessage(final.ID, text.String()), nil)})
 	current.session.noteSucceeded()
