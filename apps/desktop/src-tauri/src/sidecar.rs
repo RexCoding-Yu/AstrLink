@@ -444,6 +444,33 @@ pub struct ReadyAnnouncement {
     pub control_url: String,
 }
 
+/// A file the gateway serves for a task, such as a generated image or video:
+/// its link parsed, when the link points at the gateway's own inference
+/// address (or the localhost one clients use) under a task's artifacts.
+/// The link carries its own access; no other address passes.
+fn gateway_file_url(ready: &ReadyAnnouncement, url: &str) -> Option<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let same_origin = |base: &str| {
+        reqwest::Url::parse(base).ok().is_some_and(|base| {
+            base.scheme() == parsed.scheme()
+                && base.host_str() == parsed.host_str()
+                && base.port_or_known_default() == parsed.port_or_known_default()
+        })
+    };
+    let path = parsed.path();
+    let artifact = path.starts_with("/v1/tasks/")
+        && path.contains("/artifacts/")
+        && path.ends_with("/content");
+    ((same_origin(&ready.inference_url) || same_origin(&ready.client_inference_url))
+        && artifact
+        && parsed.username().is_empty()
+        && parsed.password().is_none())
+    .then_some(parsed)
+}
+
+/// How long saving a file of the gateway may take: a video is large.
+const GATEWAY_FILE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: String,
@@ -1423,6 +1450,51 @@ impl CoreManager {
         let changed = inner.raw_key_replaced != replaced;
         inner.raw_key_replaced = replaced;
         changed
+    }
+
+    /// The link of a file the running gateway serves for a task, parsed;
+    /// None for any other link, or while Core is not ready.
+    pub fn gateway_file_url(&self, url: &str) -> Option<reqwest::Url> {
+        let ready = self.lock_inner().ready.clone()?;
+        gateway_file_url(&ready, url)
+    }
+
+    /// Saves a file the gateway serves to path, as it streams in. A download
+    /// that breaks off leaves no partial file behind.
+    pub async fn save_gateway_file(
+        &self,
+        url: reqwest::Url,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
+        let mut response = self
+            .client
+            .get(url)
+            .timeout(GATEWAY_FILE_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| format!("could not read the file from the gateway: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("the gateway answered {}", response.status()));
+        }
+        let mut file = std::fs::File::create(path)
+            .map_err(|error| format!("could not create the file: {error}"))?;
+        let written: Result<(), String> = async {
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|error| format!("could not read the file from the gateway: {error}"))?
+            {
+                std::io::Write::write_all(&mut file, &chunk)
+                    .map_err(|error| format!("could not write the file: {error}"))?;
+            }
+            Ok(())
+        }
+        .await;
+        if written.is_err() {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+        }
+        written
     }
 
     pub fn snapshot(&self) -> CoreSnapshot {
@@ -7537,6 +7609,101 @@ mod tests {
             control_request_timeout(&Method::PATCH, "/control/v1/plugins/powercontext"),
             REQUEST_TIMEOUT
         );
+    }
+
+    #[test]
+    fn only_task_files_of_the_running_gateway_count_as_its_files() {
+        let ready = ReadyAnnouncement {
+            event: "ready".to_string(),
+            core_version: "0.1.0".to_string(),
+            control_api_version: "1".to_string(),
+            protocol_contract_version: "1".to_string(),
+            inference_url: "http://127.0.0.1:8324".to_string(),
+            client_inference_url: "http://localhost:8324".to_string(),
+            control_url: "http://127.0.0.1:8325".to_string(),
+        };
+        let file = "/v1/tasks/resp_1/artifacts/image-1/content?access=abc";
+        assert!(gateway_file_url(&ready, &format!("http://127.0.0.1:8324{file}")).is_some());
+        assert!(gateway_file_url(&ready, &format!("http://localhost:8324{file}")).is_some());
+        for other in [
+            format!("http://127.0.0.1:9999{file}"),
+            format!("http://127.0.0.1:8325{file}"),
+            format!("https://example.com{file}"),
+            format!("http://user:secret@127.0.0.1:8324{file}"),
+            "http://127.0.0.1:8324/v1/chat/completions".to_string(),
+            "http://127.0.0.1:8324/v1/tasks/resp_1".to_string(),
+        ] {
+            assert!(gateway_file_url(&ready, &other).is_none(), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_gateway_file_saves_as_it_streams_and_a_broken_one_leaves_nothing() {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // The first answer is whole; the second promises more than it sends.
+        let server = std::thread::spawn(move || {
+            let mut authorized = false;
+            for (body, length) in [(&b"image bytes"[..], 11), (&b"half a vid"[..], 100)] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(&mut stream);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    authorized |= line.to_ascii_lowercase().starts_with("authorization:");
+                }
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(body);
+            }
+            authorized
+        });
+        let manager = CoreManager::new();
+        {
+            let mut inner = manager.lock_inner();
+            inner.phase = CorePhase::Ready;
+            inner.control_token = Some("local-test-token".into());
+            inner.ready = Some(ReadyAnnouncement {
+                event: "ready".into(),
+                core_version: "0.1.0".into(),
+                control_api_version: "v1".into(),
+                protocol_contract_version: "v1".into(),
+                inference_url: format!("http://{address}"),
+                client_inference_url: format!("http://localhost:{}", address.port()),
+                control_url: "http://127.0.0.1:9".into(),
+            });
+        }
+        let directory =
+            std::env::temp_dir().join(format!("astrlink-gateway-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let url = manager
+            .gateway_file_url(&format!(
+                "http://{address}/v1/tasks/resp_1/artifacts/image-1/content?access=abc"
+            ))
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let image = directory.join("image-1.png");
+        runtime
+            .block_on(manager.save_gateway_file(url.clone(), &image))
+            .unwrap();
+        assert_eq!(std::fs::read(&image).unwrap(), b"image bytes");
+        let video = directory.join("video.mp4");
+        assert!(runtime
+            .block_on(manager.save_gateway_file(url, &video))
+            .is_err());
+        assert!(!video.exists());
+        // The link carries its own access: the control token stays home.
+        assert!(!server.join().unwrap());
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

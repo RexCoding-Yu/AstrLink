@@ -1358,6 +1358,36 @@ export async function saveTextFile(
   });
 }
 
+/**
+ * Saves a file the gateway generated, such as an image or a video: the
+ * desktop asks where to put it; the web console, which shares the
+ * gateway's address, has the browser download it. The path, or null when
+ * the user cancels.
+ */
+export async function saveGatewayFile(
+  url: string,
+  defaultFilename: string,
+): Promise<string | null> {
+  if (!hasNativeBridge()) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = defaultFilename;
+    anchor.rel = "noopener";
+    anchor.style.display = "none";
+    document.body.append(anchor);
+    try {
+      anchor.click();
+    } finally {
+      anchor.remove();
+    }
+    return defaultFilename;
+  }
+  return invoke<string | null>("save_gateway_file", {
+    url,
+    defaultFilename,
+  });
+}
+
 // A routing group's rules may name a user-defined classification dimension,
 // and those live in the classifier-settings singleton rather than on the
 // routing document. Every parse of routing settings therefore needs the

@@ -100,7 +100,21 @@
     "output": "API 提供商回复",
     "requestFailed": "无法执行API 提供商测试。",
     "notConnected": "请先登录此订阅，再进行测试。",
-    "unsupported": "尚未配置可直接测试的文本生成协议，请先配置原生或委托协议。"
+    "unsupported": "尚未配置可直接测试的文本生成协议，请先配置原生或委托协议。",
+    "media": {
+      "open": "打开",
+      "download": "下载",
+      "saved": "已保存到 {{path}}",
+      "saveFailed": "无法保存文件。",
+      "kinds": {
+        "image": "图片",
+        "video": "视频",
+        "audio": "音频",
+        "file": "文件"
+      }
+    },
+    "emptyTitle": "还没有测试结果",
+    "generating": "正在等待生成完成，最长 5 分钟…"
   },
   "common": {
     "previousPage": "上一页",

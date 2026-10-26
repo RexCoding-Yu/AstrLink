@@ -100,7 +100,21 @@
     "output": "API provider response",
     "requestFailed": "Could not run the API provider test.",
     "notConnected": "Sign in to this subscription before testing.",
-    "unsupported": "No directly supported text generation protocol is configured. Configure a native or delegated protocol first."
+    "unsupported": "No directly supported text generation protocol is configured. Configure a native or delegated protocol first.",
+    "media": {
+      "open": "Open",
+      "download": "Download",
+      "saved": "Saved to {{path}}",
+      "saveFailed": "Could not save the file.",
+      "kinds": {
+        "image": "Image",
+        "video": "Video",
+        "audio": "Audio",
+        "file": "File"
+      }
+    },
+    "emptyTitle": "No test result yet",
+    "generating": "Waiting for the generation to finish (up to 5 minutes)…"
   },
   "common": {
     "previousPage": "Previous page",

@@ -331,6 +331,7 @@ export function ServiceTestDialog({
                 running={running}
                 blocked={blocked}
                 stream={stream}
+                generates={service.plugin?.provider === "task"}
               />
             </section>
           </div>

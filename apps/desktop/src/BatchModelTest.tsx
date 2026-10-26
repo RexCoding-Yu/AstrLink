@@ -169,6 +169,7 @@ export function BatchModelTest({
               error={current?.error}
               running={current?.state === "running"}
               stream={current?.result?.stream ?? input.stream}
+              generates={service.plugin?.provider === "task"}
               leading={
                 <>
                   <Button

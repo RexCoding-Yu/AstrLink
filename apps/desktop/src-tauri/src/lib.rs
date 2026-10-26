@@ -1689,13 +1689,47 @@ fn open_authorization_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
+fn open_external_url(url: String, manager: State<'_, Arc<CoreManager>>) -> Result<(), String> {
     let parsed = reqwest::Url::parse(&url).map_err(|_| "invalid external URL".to_string())?;
-    if parsed.scheme() != "https" || parsed.host_str().unwrap_or("").is_empty() {
+    // A file the gateway generated, such as an image, opens there too.
+    let external = parsed.scheme() == "https" && !parsed.host_str().unwrap_or("").is_empty();
+    if !external && manager.gateway_file_url(&url).is_none() {
         return Err("external URL must use https".to_string());
     }
     tauri_plugin_opener::open_url(url, None::<&str>)
         .map_err(|error| format!("unable to open URL in the system browser: {error}"))
+}
+
+/// Saves a file the gateway generated, such as an image or a video, where
+/// the user chooses; None when they cancel.
+#[tauri::command]
+async fn save_gateway_file(
+    app: tauri::AppHandle,
+    manager: State<'_, Arc<CoreManager>>,
+    url: String,
+    default_filename: String,
+) -> Result<Option<String>, String> {
+    let Some(source) = manager.gateway_file_url(&url) else {
+        return Err("not a file of the gateway".to_string());
+    };
+    let name: String = default_filename
+        .chars()
+        .filter(|character| !character.is_control() && !r#"/\:*?"<>|"#.contains(*character))
+        .collect();
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(&name)
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let Some(file) = chosen else {
+        return Ok(None);
+    };
+    let path = file.into_path().map_err(|error| error.to_string())?;
+    manager.save_gateway_file(source, &path).await?;
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -2718,6 +2752,7 @@ pub fn run() {
             complete_service_authorization,
             open_authorization_url,
             open_external_url,
+            save_gateway_file,
             save_text_file,
             service_terminal::list_terminal_apps,
             service_terminal::pick_terminal_directory,

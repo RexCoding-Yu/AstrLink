@@ -21,6 +21,7 @@ export { CircleDollarSign } from "./circle-dollar-sign";
 export { CircleHelp } from "./circle-help";
 export { Connect } from "./connect";
 export { Copy } from "./copy";
+export { Download } from "./download";
 export { Ellipsis } from "./ellipsis";
 export { Eye } from "./eye";
 export { EyeOff } from "./eye-off";
