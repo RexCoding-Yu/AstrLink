@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/engine"
 )
 
 // checkCounter numbers the temporary directories of checks.
@@ -282,6 +282,22 @@ func (bound *instance) fsFunctions() map[string]any {
 				return moejs.Undefined(), fail(realm, err, "open", name, "")
 			}
 			return bytesValue(realm, data)
+		}),
+		// reserve counts a write of n bytes that moejs's node:fs is about to
+		// make in the data directory against the quota.
+		"reserve": bound.function("reserve", 2, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			size, err := number(realm, args, 0)
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			name, err := pathArg(realm, args, 1)
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			if err := dirs.reserve(int64(size)); err != nil {
+				return moejs.Undefined(), fail(realm, err, "open", name, "")
+			}
+			return moejs.Undefined(), nil
 		}),
 		"writeFile": bound.function("writeFile", 4, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			name, err := pathArg(realm, args, 0)

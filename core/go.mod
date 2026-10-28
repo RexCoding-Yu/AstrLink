@@ -3,7 +3,6 @@ module github.com/QuantumNous/astrlink/core
 go 1.26.10
 
 require (
-	github.com/Calcium-Ion/moejs v0.1.0-alpha.9
 	github.com/QuantumNous/astrlink/convo v0.0.0
 	github.com/QuantumNous/new-api/relaykit v0.3.1
 	github.com/andybalholm/brotli v1.2.5
@@ -28,6 +27,7 @@ replace github.com/QuantumNous/astrlink/convo => ../convo
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
+	github.com/MoeForge/moejs v0.1.0-alpha.11
 	github.com/danieljoos/wincred v1.2.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect

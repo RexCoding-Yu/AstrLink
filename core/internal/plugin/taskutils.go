@@ -21,8 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/engine"
 )
 
 // TaskFetch lets a driver hook of a task plugin read upstream data with

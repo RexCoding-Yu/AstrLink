@@ -8,10 +8,12 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/engine"
+	"github.com/MoeForge/moejs/node"
 )
 
 // loaderName is the loader's name in stack traces.
@@ -114,17 +116,43 @@ func (dirs *pluginDirs) root(data bool) (*os.Root, error) {
 	if !data {
 		return os.OpenRoot(dirs.install)
 	}
+	if err := dirs.make(); err != nil {
+		return nil, err
+	}
+	return os.OpenRoot(dirs.data)
+}
+
+// make makes the data directory and its .tmp the first time an operation
+// reaches it.
+func (dirs *pluginDirs) make() error {
 	dirs.mutex.Lock()
+	defer dirs.mutex.Unlock()
 	if !dirs.made {
 		if err := os.MkdirAll(dirs.data, 0o700); err != nil {
-			dirs.mutex.Unlock()
-			return nil, err
+			return err
 		}
 		_ = os.Mkdir(dirs.tmp(), 0o700)
 		dirs.made = true
 	}
-	dirs.mutex.Unlock()
-	return os.OpenRoot(dirs.data)
+	return nil
+}
+
+// allow is the policy of the node:fs of moejs, which works on the
+// directory that holds the data directory and sees each path with its
+// links resolved: the plugin reaches its data directory and nothing beside
+// it, and writes there until the directory holds its quota, as the last
+// count, at most a second old, found.
+func (dirs *pluginDirs) allow(op, path string) error {
+	if _, ok := within(dirs.data, filepath.FromSlash(path)); !ok {
+		return errOutside
+	}
+	if err := dirs.make(); err != nil {
+		return err
+	}
+	if op == "write" && dirs.fullSince(time.Second) {
+		return syscall.ENOSPC
+	}
+	return nil
 }
 
 // errOutside is the error of a path outside the plugin's directories.
@@ -207,10 +235,13 @@ func (dirs *pluginDirs) reserve(n int64) error {
 
 // full reports whether the data directory holds its quota already, for
 // writes whose size is not known before, such as node:sqlite's.
-func (dirs *pluginDirs) full() bool {
+func (dirs *pluginDirs) full() bool { return dirs.fullSince(recount) }
+
+// fullSince is full with a count at most age old.
+func (dirs *pluginDirs) fullSince(age time.Duration) bool {
 	dirs.mutex.Lock()
 	defer dirs.mutex.Unlock()
-	if dirs.counted.IsZero() || time.Since(dirs.counted) > recount {
+	if dirs.counted.IsZero() || time.Since(dirs.counted) > age {
 		dirs.used = directorySize(dirs.data)
 		dirs.counted = time.Now()
 	}
@@ -291,8 +322,77 @@ func (resources *nodeResources) close() {
 	}
 }
 
+// officialFS reports whether node:fs runs on moejs's for the paths of the
+// data directory: for apiVersion 2 plugins, whose calls run the loop its
+// callbacks and promises settle on, where paths are POSIX paths, which its
+// mount is.
+func (loaded *program) officialFS() bool {
+	return loaded.async() && filepath.Separator == '/'
+}
+
+// installFiles installs moejs's node:fs and Buffer (package node) on the
+// runtime's loop. Its node:fs works on the directory that holds the data
+// directory, which it sees at its own path, and reaches only the data
+// directory (pluginDirs.allow); node/fs.js sends it the operations it
+// implements on the data directory's paths and does the rest itself.
+func (bound *instance) installFiles() error {
+	var options node.Options
+	if dirs := bound.program.dirs; bound.program.officialFS() {
+		parent := filepath.Dir(dirs.data)
+		if err := os.MkdirAll(parent, 0o700); err == nil {
+			options.FS = &node.FSOptions{Root: parent, Mount: filepath.ToSlash(parent), Cwd: filepath.ToSlash(dirs.data), Write: true, Allow: dirs.allow}
+		}
+	}
+	api, err := node.Install(nodeLoop{bound}, options)
+	if err != nil {
+		return err
+	}
+	bound.files = api
+	return nil
+}
+
+// nodeLoop is the runtime's loop as package node needs it: the operations
+// of node:fs settle as tasks of the call, its script time.
+type nodeLoop struct{ bound *instance }
+
+func (loop nodeLoop) Runtime() *moejs.Runtime { return loop.bound.runtime }
+
+func (loop nodeLoop) Post(task func(*moejs.Runtime) error) bool { return loop.bound.post(task) }
+
+func (loop nodeLoop) Hold() func() {
+	loop.bound.queue()
+	done := loop.bound.loop.Hold()
+	return func() { done(nil) }
+}
+
+// official returns what the module node:<name> of package node exports in
+// this runtime, undefined when it has none. The package hands a module's
+// binding to its import.meta, which it fills for the runtime it is
+// installed in; the CommonJS loader needs it without an import.
+func (bound *instance) official(realm *moejs.Realm, name string) (moejs.Value, error) {
+	if bound.files == nil || (name != "buffer" && !bound.program.officialFS()) {
+		return moejs.Undefined(), nil
+	}
+	module, err := node.Resolver(nil)(nil, "node:"+name)
+	if err != nil {
+		return moejs.Undefined(), nil
+	}
+	hooks := realm.ImportHooks()
+	if hooks == nil || hooks.Meta == nil {
+		return moejs.Undefined(), nil
+	}
+	meta := realm.NewObject()
+	if err := hooks.Meta(realm, module, meta); err != nil {
+		return moejs.Undefined(), nil
+	}
+	return bound.runtime.Get(engine.ObjectValue(meta), "binding")
+}
+
 // installNode adds the globals of Node and the loader of the node: modules.
 func (bound *instance) installNode() error {
+	if err := bound.installFiles(); err != nil {
+		return err
+	}
 	runtime := bound.runtime
 	names := make([]any, 0, len(nodeModules))
 	for _, entry := range nodeNames() {
@@ -320,8 +420,16 @@ func (bound *instance) installNode() error {
 			}
 			return bound.bindNode(realm, name)
 		}),
-		"filename":   filename,
-		"dirname":    filepath.Dir(filename),
+		"filename": filename,
+		"dirname":  filepath.Dir(filename),
+		"data":     bound.program.dirs.data,
+		"official": runtime.Function("official", 1, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			name, err := stringArg(realm, args, 0, "module name")
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			return bound.official(realm, name)
+		}),
 		"timeOrigin": float64(processStart.UnixMicro()) / 1000,
 		"now": runtime.Function("now", 0, func(*moejs.Realm, moejs.Value, []moejs.Value) (moejs.Value, error) {
 			return moejs.Number(float64(time.Since(processStart).Microseconds()) / 1000), nil
@@ -344,14 +452,11 @@ func (bound *instance) installNode() error {
 			return engine.ObjectValue(realm.NewArray(moejs.Int(int64(code)), result)), nil
 		}),
 	}
-	if err := runtime.SetGlobal("__astrlinkNode", host); err != nil {
-		return err
-	}
 	script, err := nodeLoader()
 	if err != nil {
 		return fmt.Errorf("compile the loader of the node: modules: %w", err)
 	}
-	if _, err := runtime.RunScript(script); err != nil {
+	if err := runWith(runtime, script, host); err != nil {
 		return fmt.Errorf("run the loader of the node: modules: %w", err)
 	}
 	return nil
@@ -398,7 +503,7 @@ func (bound *instance) function(name string, length int, fn moejs.NativeFunc) mo
 
 // blocking runs fn, which waits on the disk: the wait is not script time.
 func (bound *instance) blocking(fn func()) {
-	if c := bound.current; c != nil && c.watchdog != nil {
+	if c := bound.current; c != nil && c.watchdog != nil && c.watchdog.running() {
 		c.watchdog.pause()
 		defer c.watchdog.start()
 	}

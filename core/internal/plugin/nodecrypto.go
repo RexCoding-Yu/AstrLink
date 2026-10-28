@@ -29,8 +29,8 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/scrypt"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/engine"
 )
 
 // nodeHashes are the digests of node:crypto, by the names Node gives them.

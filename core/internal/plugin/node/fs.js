@@ -2,8 +2,9 @@
 // handles, streams, directories and glob. Every path is in the plugin's
 // own directories: its data directory, which is the working directory and
 // which it reads and writes, and its install directory, which it reads.
-// Anywhere else is EACCES. The host does the work at once; the callback and
-// promise forms settle after it, as Node's would.
+// Anywhere else is EACCES. moejs's node:fs does what it implements on the
+// data directory (see the end); here the host does the work at once, and
+// the callback and promise forms settle after it, as Node's would.
 (function (module, exports, require, host) {
   "use strict";
   const native = host.bind("fs");
@@ -868,9 +869,101 @@
     throw unavailable("fs.watch()", "plugins cannot watch files");
   };
 
+  // moejs's node:fs (package node) does the operations it implements on
+  // the paths of the data directory, in its own pool of goroutines; those
+  // of the install directory, and what it does not implement, stay here.
+  // The host gives it to apiVersion 2 plugins on systems with POSIX paths.
+  const official = host.official("fs");
+  const officialPromises = host.official("fs/promises");
+  const exported = { ...callbacks, ...sync };
+  const exportedPromises = promises;
+  if (official !== undefined && officialPromises !== undefined) {
+    const pathModule = require("path");
+    const dataDir = host.data;
+    const inData = (value) => {
+      if (typeof value !== "string" && !(value instanceof URL) && !ArrayBuffer.isView(value)) return false;
+      let path;
+      try {
+        path = toPath(value);
+      } catch {
+        return false;
+      }
+      const resolved = pathModule.resolve(dataDir, path);
+      return resolved === dataDir || resolved.startsWith(dataDir + "/");
+    };
+    const onePath = (args) => inData(args[0]);
+    const twoPaths = (args) => inData(args[0]) && inData(args[1]);
+    // It has no bigint stats.
+    const statPath = (args) => inData(args[0]) && !args[1]?.bigint;
+    const globPaths = (args) => {
+      const options = args[1] !== null && typeof args[1] === "object" ? args[1] : {};
+      if (!inData(options.cwd ?? dataDir)) return false;
+      const patterns = Array.isArray(args[0]) ? args[0] : [args[0]];
+      return patterns.every((pattern) => typeof pattern === "string" && (!pathModule.isAbsolute(pattern) || inData(pattern)));
+    };
+    const route = (ours, theirs, when) => {
+      if (typeof ours !== "function" || typeof theirs !== "function") return ours;
+      const routed = {
+        [ours.name](...args) {
+          return when(args) ? theirs.apply(this, args) : ours.apply(this, args);
+        },
+      }[ours.name];
+      Object.defineProperty(routed, "length", { value: ours.length });
+      return routed;
+    };
+    const routes = {
+      access: onePath, appendFile: onePath, exists: onePath, lstat: statPath, mkdir: onePath,
+      readFile: onePath, readdir: onePath, readlink: onePath, realpath: onePath, rm: onePath,
+      rmdir: onePath, stat: statPath, unlink: onePath, writeFile: onePath,
+      copyFile: twoPaths, cp: twoPaths, rename: twoPaths, glob: globPaths,
+    };
+    // A write of a known size counts against the quota first, as the
+    // host's own do; the host refuses the rest once the directory is full.
+    const sizeOf = (data, options) => {
+      if (typeof data === "string") {
+        const encoding = typeof options === "string" ? options : options?.encoding;
+        return Buffer().byteLength(data, encoding ?? "utf8");
+      }
+      return ArrayBuffer.isView(data) ? data.byteLength : 0;
+    };
+    const counted = (write, form) =>
+      typeof write !== "function"
+        ? write
+        : function (...args) {
+            const options = typeof args[2] === "function" ? undefined : args[2];
+            try {
+              native.reserve(sizeOf(args[1], options), toPath(args[0]));
+            } catch (error) {
+              if (form === "promise") return Promise.reject(error);
+              if (form === "callback") {
+                const callback = args.at(-1);
+                if (typeof callback !== "function") throw invalidArgType("cb", "of type function", callback);
+                later(callback, error);
+                return undefined;
+              }
+              throw error;
+            }
+            return write.apply(this, args);
+          };
+    for (const [name, when] of Object.entries(routes)) {
+      const sized = name === "writeFile" || name === "appendFile";
+      const theirs = (write, form) => (sized ? counted(write, form) : write);
+      exported[name] = route(callbacks[name], theirs(official[name], "callback"), when);
+      exported[`${name}Sync`] = route(sync[`${name}Sync`], theirs(official[`${name}Sync`], "sync"), when);
+      if (name !== "exists") exportedPromises[name] = route(promises[name], theirs(officialPromises[name], "promise"), when);
+    }
+    exported.realpath.native = exported.realpath;
+    exported.realpathSync.native = exported.realpathSync;
+    for (const [ours, theirs] of [[Stats, official.Stats], [Dirent, official.Dirent]]) {
+      if (typeof theirs !== "function") continue;
+      Object.defineProperty(ours, Symbol.hasInstance, {
+        value: (value) => Function.prototype[Symbol.hasInstance].call(ours, value) || value instanceof theirs,
+      });
+    }
+  }
+
   module.exports = {
-    ...callbacks,
-    ...sync,
+    ...exported,
     constants,
     F_OK: constants.F_OK,
     R_OK: constants.R_OK,
@@ -882,7 +975,7 @@
     ReadStream,
     WriteStream,
     FileHandle,
-    promises,
+    promises: exportedPromises,
     createReadStream: (path, options) => new (streamClasses().ReadStream)(path, options),
     createWriteStream: (path, options) => new (streamClasses().WriteStream)(path, options),
     watch,

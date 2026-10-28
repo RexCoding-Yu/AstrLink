@@ -262,3 +262,72 @@ func TestStoreAndSettingsReadTheGatewaySettings(t *testing.T) {
 		t.Fatalf("PluginSettings = %+v", demo)
 	}
 }
+
+func TestFetcherStreamsOnTheSameTerms(t *testing.T) {
+	seen := &received{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		seen.add(request)
+		switch request.URL.Path {
+		case "/moved":
+			http.Redirect(writer, request, "/elsewhere", http.StatusFound)
+		case "/large":
+			writer.Header().Set("Content-Type", "application/octet-stream")
+			flusher := writer.(http.Flusher)
+			chunk := make([]byte, 64<<10)
+			for written := 0; written <= plugin.MaxFetchResponseBytes; written += len(chunk) {
+				_, _ = writer.Write(chunk)
+				flusher.Flush()
+			}
+		default:
+			_, _ = writer.Write([]byte("streamed"))
+		}
+	}))
+	defer server.Close()
+	allowedOrigin := origin(t, server.URL)
+	target := testPlugin(plugin.NetworkOrigin{Origin: allowedOrigin})
+	fetcher := &Fetcher{Credentials: credentials{"demo/token": {secret: "pc-secret", origin: allowedOrigin}}}
+	stream := func(path, credential string) (*http.Response, error) {
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fetcher.Stream(context.Background(), target, request, credential)
+	}
+
+	response, err := stream("/", "token")
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || string(body) != "streamed" {
+		t.Fatalf("body = %q, %v", body, err)
+	}
+	if request := seen.requests[0]; request.Header.Get("Authorization") != "Bearer pc-secret" || request.Header.Get("User-Agent") != "" {
+		t.Fatalf("request headers = %v", request.Header)
+	}
+
+	// A redirect comes back as it is.
+	response, err = stream("/moved", "")
+	if err != nil || response.StatusCode != http.StatusFound || seen.count() != 2 {
+		t.Fatalf("redirect = %v, %v after %d requests", response, err, seen.count())
+	}
+	response.Body.Close()
+
+	// A credential bound elsewhere never leaves.
+	var failure *plugin.FetchError
+	if _, err := stream("/", "key"); !errors.As(err, &failure) || failure.Reason != plugin.FetchDenied || seen.count() != 2 {
+		t.Fatalf("Stream with a credential bound elsewhere = %v after %d requests", err, seen.count())
+	}
+
+	// The body ends past what a plugin may read.
+	response, err = stream("/large", "")
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	_, err = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if !errors.As(err, &failure) || failure.Reason != plugin.FetchTooLarge {
+		t.Fatalf("reading a large body = %v", err)
+	}
+}

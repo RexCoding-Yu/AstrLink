@@ -17,8 +17,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/syntax"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/syntax"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 )

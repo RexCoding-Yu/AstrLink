@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Calcium-Ion/moejs"
+	"github.com/MoeForge/moejs"
 )
 
 // osFunctions are the host's side of node:os: what the system it runs on

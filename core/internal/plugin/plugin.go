@@ -190,7 +190,9 @@ type Limits struct {
 	// ScriptTime is the JavaScript time a call may take. Waiting on the host
 	// (http.fetch, the store) does not count.
 	ScriptTime time.Duration
-	// Memory is what one call's JavaScript may allocate.
+	// Memory is what a runtime's JavaScript may keep: what it retains, as
+	// the runtime last measured it, plus what it allocated since. Garbage
+	// it drops does not count once the runtime measures.
 	Memory int64
 	// ResultBytes and ResultNodes bound a hook's result as JSON text: its
 	// length, and the number of values in it.

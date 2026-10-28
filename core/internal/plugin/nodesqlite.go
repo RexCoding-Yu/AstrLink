@@ -11,8 +11,8 @@ import (
 
 	sqlite "modernc.org/sqlite"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/engine"
 )
 
 // maxDatabases bounds the databases one runtime has open at once.

@@ -12,8 +12,8 @@ import (
 
 	"github.com/andybalholm/brotli"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/engine"
 )
 
 // maxInflated bounds what one decompression produces, against archives

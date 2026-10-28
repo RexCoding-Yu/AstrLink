@@ -12,8 +12,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/engine"
 )
 
 // The modules of Node a plugin imports run in its runtime as CommonJS

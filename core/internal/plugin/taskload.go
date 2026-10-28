@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/syntax"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/syntax"
 )
 
 // taskHooks are the functions of a task plugin the host calls, beside the
@@ -53,8 +53,8 @@ func loadTask(source Source, module *moejs.Module, parsed *syntax.Module, limits
 	if err != nil {
 		return nil, loadFailure(source.File, err)
 	}
-	defer instance.resources.close()
-	stop := interruptAfter(instance.runtime, loadTime, errLoadTime)
+	defer instance.close()
+	stop := interruptAfter(instance.interrupt, loadTime, errLoadTime)
 	defer stop()
 	meta, err := readTaskMeta(instance.runtime, source.File)
 	if err != nil {

@@ -28,7 +28,9 @@ type CredentialReader interface {
 // go only to the server each is bound to, over plain http beyond this
 // machine only where the user allowed it for that server. It follows no
 // redirect, sends no User-Agent of its own and nothing of the gateway's,
-// and reads at most plugin.MaxFetchResponseBytes of a response.
+// and reads at most plugin.MaxFetchResponseBytes of a response. Fetch reads
+// a response whole, for astrlink.http.fetch; Stream hands it back as it
+// arrives, for fetch.
 type Fetcher struct {
 	Credentials CredentialReader
 	// Client sends the requests; nil uses the gateway's proxy settings.
@@ -39,10 +41,6 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 	started := time.Now()
 	fail := func(reason string, status int) plugin.HTTPResponse {
 		return plugin.HTTPResponse{Status: status, Error: reason, Took: time.Since(started)}
-	}
-	origin, err := plugin.NormalizeOrigin(request.URL)
-	if err != nil {
-		return fail(plugin.FetchDenied, 0)
 	}
 	var body io.Reader
 	contentType := ""
@@ -64,36 +62,10 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 	if contentType != "" && outgoing.Header.Get("Content-Type") == "" {
 		outgoing.Header.Set("Content-Type", contentType)
 	}
-	if request.Credential != "" {
-		slot, declared := target.Meta.Credential(request.Credential)
-		if !declared || fetcher.Credentials == nil || !allowed(target.Settings.Origins, origin) {
-			return fail(plugin.FetchDenied, 0)
-		}
-		secret, bound, err := fetcher.Credentials.PluginCredential(ctx, target.Key, slot.Name)
-		if err != nil {
-			return fail(plugin.FetchDenied, 0)
-		}
-		value := string(secret)
-		clear(secret)
-		if bound != origin {
-			return fail(plugin.FetchDenied, 0)
-		}
-		if slot.Scheme != "" {
-			value = slot.Scheme + " " + value
-		}
-		outgoing.Header.Set(slot.Header, value)
+	if reason := fetcher.authorize(ctx, target, outgoing, request.Credential); reason != "" {
+		return fail(reason, 0)
 	}
-	if outgoing.Header.Get("User-Agent") == "" {
-		// An empty value keeps net/http from adding its own.
-		outgoing.Header.Set("User-Agent", "")
-	}
-	client := fetcher.Client
-	if client == nil {
-		client = networkproxy.WrapClient(&http.Client{})
-	}
-	noRedirect := *client
-	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	response, err := noRedirect.Do(outgoing)
+	response, err := fetcher.client().Do(outgoing)
 	if err != nil {
 		return fail(transportFailure(ctx, err), 0)
 	}
@@ -114,6 +86,96 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, target *plugin.Plugin, reques
 		}
 	}
 	return plugin.HTTPResponse{Status: response.StatusCode, Header: header, Values: values, Body: data, Took: time.Since(started)}
+}
+
+// Stream sends a request of fetch on the same terms as Fetch and hands the
+// response back as it arrives. Reading its body past
+// plugin.MaxFetchResponseBytes fails with plugin.FetchTooLarge.
+func (fetcher *Fetcher) Stream(ctx context.Context, target *plugin.Plugin, outgoing *http.Request, credential string) (*http.Response, error) {
+	if reason := fetcher.authorize(ctx, target, outgoing, credential); reason != "" {
+		return nil, &plugin.FetchError{Reason: reason}
+	}
+	response, err := fetcher.client().Do(outgoing)
+	if err != nil {
+		return nil, &plugin.FetchError{Reason: transportFailure(ctx, err), Err: err}
+	}
+	if response.ContentLength > plugin.MaxFetchResponseBytes {
+		response.Body.Close()
+		return nil, &plugin.FetchError{Reason: plugin.FetchTooLarge}
+	}
+	response.Body = &limitedBody{ReadCloser: response.Body, left: plugin.MaxFetchResponseBytes}
+	return response, nil
+}
+
+// authorize puts the user's terms on a plugin's request: the credential it
+// names goes only to the server it is bound to, and the request carries no
+// User-Agent unless the plugin set one. It returns the reason it refuses
+// the request with, "" when it goes.
+func (fetcher *Fetcher) authorize(ctx context.Context, target *plugin.Plugin, outgoing *http.Request, credential string) string {
+	origin, err := plugin.NormalizeOrigin(outgoing.URL.String())
+	if err != nil {
+		return plugin.FetchDenied
+	}
+	if credential != "" {
+		slot, declared := target.Meta.Credential(credential)
+		if !declared || fetcher.Credentials == nil || !allowed(target.Settings.Origins, origin) {
+			return plugin.FetchDenied
+		}
+		secret, bound, err := fetcher.Credentials.PluginCredential(ctx, target.Key, slot.Name)
+		if err != nil {
+			return plugin.FetchDenied
+		}
+		value := string(secret)
+		clear(secret)
+		if bound != origin {
+			return plugin.FetchDenied
+		}
+		if slot.Scheme != "" {
+			value = slot.Scheme + " " + value
+		}
+		outgoing.Header.Set(slot.Header, value)
+	}
+	if outgoing.Header.Get("User-Agent") == "" {
+		// An empty value keeps net/http from adding its own.
+		outgoing.Header.Set("User-Agent", "")
+	}
+	return ""
+}
+
+// client sends the plugins' requests, through the gateway's proxy unless
+// Client says otherwise, and follows no redirect.
+func (fetcher *Fetcher) client() *http.Client {
+	client := fetcher.Client
+	if client == nil {
+		client = networkproxy.WrapClient(&http.Client{})
+	}
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &noRedirect
+}
+
+// limitedBody fails once a response body passes what a plugin may read.
+type limitedBody struct {
+	io.ReadCloser
+	left int64
+}
+
+func (body *limitedBody) Read(p []byte) (int, error) {
+	if body.left <= 0 {
+		// Whether anything is left to read decides between the end and
+		// too much.
+		var probe [1]byte
+		if n, err := body.ReadCloser.Read(probe[:]); n == 0 {
+			return 0, err
+		}
+		return 0, &plugin.FetchError{Reason: plugin.FetchTooLarge}
+	}
+	if int64(len(p)) > body.left {
+		p = p[:body.left]
+	}
+	n, err := body.ReadCloser.Read(p)
+	body.left -= int64(n)
+	return n, err
 }
 
 // allowed reports whether a credential may go to origin: one of the

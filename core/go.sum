@@ -1,7 +1,7 @@
 al.essio.dev/pkg/shellescape v1.5.1 h1:86HrALUujYS/h+GtqoB26SBEdkWfmMI6FubjXlsXyho=
 al.essio.dev/pkg/shellescape v1.5.1/go.mod h1:6sIqp7X2P6mThCQ7twERpZTuigpr6KbZWtls1U8I890=
-github.com/Calcium-Ion/moejs v0.1.0-alpha.9 h1:WY1ebChegtafhPjHSQx3Q+gfnrjqYwHewHuO9k+v7e0=
-github.com/Calcium-Ion/moejs v0.1.0-alpha.9/go.mod h1:9YqHj36EV7pzV/vlEYSw49f3oggeJFdmqcjM9TmDpHs=
+github.com/MoeForge/moejs v0.1.0-alpha.11 h1:VVDuqn14Dzlhcs17gDp3X43uvKkxi7OK7SZvkd0moEc=
+github.com/MoeForge/moejs v0.1.0-alpha.11/go.mod h1:YG2Y3bZuThN7hkSBext9MHPUPSrAIdpiE+6v+QO+LX0=
 github.com/QuantumNous/new-api/relaykit v0.3.1 h1:LWTeWi2ta4tdtlxZB5ZlY78frhK7dlJFrKo4rIZDp3Y=
 github.com/QuantumNous/new-api/relaykit v0.3.1/go.mod h1:WOCRYw5GlldWf/cqoxE5DSVFb+XsAf50AvkEd35XPUY=
 github.com/andybalholm/brotli v1.2.5 h1:BSI8V4zmx/3BAn6OKjF1PmfVq7Aoi52AdFsi6bpCx+s=

@@ -101,6 +101,7 @@ RUN ln -s /opt/astrlink/run-as-astrlink /usr/local/bin/astrlink \
 
 COPY LICENSE LICENSING.md /usr/share/doc/astrlink/licenses/
 COPY LICENSES/AGPL-3.0.txt /usr/share/doc/astrlink/licenses/LICENSES/
+COPY LICENSES/moejs-THIRD_PARTY_NOTICES.txt /usr/share/doc/astrlink/notices/moejs/THIRD_PARTY_NOTICES.txt
 COPY --from=onnxruntime /out/LICENSE /usr/share/doc/astrlink/notices/onnxruntime-1.23.2/LICENSE.txt
 COPY --from=onnxruntime /out/ThirdPartyNotices.txt /usr/share/doc/astrlink/notices/onnxruntime-1.23.2/ThirdPartyNotices.txt
 

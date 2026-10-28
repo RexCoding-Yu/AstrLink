@@ -9,9 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"math"
-	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -19,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Calcium-Ion/moejs"
+	"github.com/MoeForge/moejs"
 )
 
 // Budgets of astrlink.http.fetch within one hook call.
@@ -222,27 +220,46 @@ type LogEntry struct {
 // call is the state of one hook call, which the host functions read: what
 // the plugin may do, its settings and budgets, and what it did.
 type call struct {
-	ctx    context.Context
+	ctx context.Context
+	// end cancels ctx, which ends the requests and host work the call
+	// started, once the call ended.
+	end    context.CancelCauseFunc
 	plugin *Plugin
 	// hook names the hook the call runs.
 	hook     string
 	options  CallOptions
 	pool     *pool
 	runtime  *moejs.Runtime
+	instance *instance
 	watchdog *watchdog
-	// loop runs the continuations of an apiVersion 2 call; nil for an
-	// apiVersion 1 call, whose host functions return their results.
-	loop *asyncLoop
+	// async marks an apiVersion 2 call: its hook runs on the runtime's
+	// loop and may return a promise, and the host functions that wait on
+	// the host return promises. An apiVersion 1 call's return their
+	// results.
+	async bool
 	// slot is whether the call holds an execution slot of its pool, which
 	// it gives up while it waits on the host.
 	slot bool
+	// timers are the timers the call set that are still to fire.
+	timers map[*moejs.Object]callTimer
+	// queued is set once the call gave the loop work, which may outlive
+	// it.
+	queued bool
 
 	networkLeft time.Duration
 	// networkDeadline ends the requests of an apiVersion 2 call, which may
 	// overlap; fetchSlots bounds how many run at once.
 	networkDeadline time.Time
 	fetchSlots      chan struct{}
-	fetched         int
+	// network guards what the call's requests count: fetch's transport
+	// counts on goroutines of its own.
+	network sync.Mutex
+	fetched int
+	// fetchSeq numbers the requests of fetch, and failures keeps why
+	// those the host refused or that failed on its terms did, by id.
+	fetchSeq int
+	failures map[string]string
+	stats    NetworkStats
 	// taskFetches and taskFetchTime count the utils.fetch requests of a
 	// task plugin's hook call and the time they took.
 	taskFetches   int
@@ -262,25 +279,16 @@ func (c *call) now() time.Time {
 // wait runs fn, which waits on the host. The wait does not count as script
 // time, and the call's execution slot goes to another call meanwhile.
 func (c *call) wait(fn func()) error {
-	c.watchdog.pause()
-	if c.slot {
-		c.pool.release()
-		c.slot = false
-	}
+	c.leave()
 	fn()
-	if err := c.pool.acquire(c.ctx); err != nil {
-		return err
-	}
-	c.slot = true
-	c.watchdog.start()
-	return nil
+	return c.enter()
 }
 
 // io runs work, which waits on the host, and returns how it settles: at once
 // in an apiVersion 1 call, as a promise in an apiVersion 2 call.
 func (c *call) io(work func(ctx context.Context) settle) (moejs.Value, error) {
-	if c.loop != nil {
-		return c.async(work), nil
+	if c.async {
+		return c.later(work), nil
 	}
 	var result settle
 	if err := c.wait(func() { result = work(c.ctx) }); err != nil {
@@ -600,7 +608,7 @@ func hostFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, er
 		}
 		return realm.FromGo(values[0])
 	}
-	if c.loop != nil {
+	if c.async {
 		return c.fetchAsync(requests, render), nil
 	}
 	var responses []HTTPResponse
@@ -608,55 +616,6 @@ func hostFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, er
 		return moejs.Undefined(), err
 	}
 	return render(realm, responses)
-}
-
-// hostRawFetch serves the fetch of prelude.js: one request, whose response
-// body comes back as base64 for Response to read as text or bytes.
-func hostRawFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
-	if !c.granted(CapabilityNetwork) {
-		return moejs.Undefined(), realm.TypeError("fetch needs the %s capability", CapabilityNetwork)
-	}
-	if c.plugin.services.Fetcher == nil {
-		return moejs.Undefined(), realm.TypeError("fetch is unavailable")
-	}
-	data, err := plainArg(realm, moejs.Arg(args, 0), MaxFetchBodyBytes*2+64<<10, "request")
-	if err != nil {
-		return moejs.Undefined(), err
-	}
-	request, err := decodeRequest(c, data)
-	if err != nil {
-		return moejs.Undefined(), realm.TypeError("fetch: %v", err)
-	}
-	return c.fetchAsync([]HTTPRequest{request}, func(realm *moejs.Realm, responses []HTTPResponse) (moejs.Value, error) {
-		response := responses[0]
-		value := map[string]any{"status": response.Status, "statusText": http.StatusText(response.Status), "headers": headerPairs(response)}
-		if response.Error != "" {
-			value["error"] = response.Error
-		}
-		if len(response.Body) > 0 {
-			value["body"] = base64.StdEncoding.EncodeToString(response.Body)
-		}
-		return realm.FromGo(value)
-	}), nil
-}
-
-// headerPairs lists a response's headers as [name, value] pairs, each
-// value of a header repeated in its own pair.
-func headerPairs(response HTTPResponse) []any {
-	pairs := []any{}
-	if len(response.Values) > 0 {
-		names := slices.Sorted(maps.Keys(response.Values))
-		for _, name := range names {
-			for _, value := range response.Values[name] {
-				pairs = append(pairs, []any{name, value})
-			}
-		}
-		return pairs
-	}
-	for _, name := range slices.Sorted(maps.Keys(response.Header)) {
-		pairs = append(pairs, []any{name, response.Header[name]})
-	}
-	return pairs
 }
 
 // decodeRequest reads one request strictly and checks its shape. What the
@@ -675,7 +634,7 @@ func decodeRequest(c *call, item any) (HTTPRequest, error) {
 	switch request.Method {
 	case "GET", "POST", "PUT", "PATCH", "DELETE":
 	case "HEAD", "OPTIONS":
-		if c.loop == nil {
+		if !c.async {
 			return HTTPRequest{}, fmt.Errorf("method %q is not one of GET, POST, PUT, PATCH, DELETE", request.Method)
 		}
 	default:
@@ -730,6 +689,7 @@ func decodeRequest(c *call, item any) (HTTPRequest, error) {
 func (c *call) fetchAsync(requests []HTTPRequest, render func(*moejs.Realm, []HTTPResponse) (moejs.Value, error)) moejs.Value {
 	responses := make([]HTTPResponse, len(requests))
 	var sent []int
+	c.network.Lock()
 	for index, request := range requests {
 		requests[index].Headers = ownHeaders(request.Headers)
 		switch {
@@ -740,7 +700,8 @@ func (c *call) fetchAsync(requests []HTTPRequest, render func(*moejs.Realm, []HT
 			sent = append(sent, index)
 		}
 	}
-	return c.async(func(ctx context.Context) settle {
+	c.network.Unlock()
+	return c.later(func(ctx context.Context) settle {
 		started := time.Now()
 		if len(sent) > 0 {
 			ctx, cancel := context.WithDeadlineCause(ctx, c.networkDeadline, errNetworkBudget)
@@ -783,19 +744,29 @@ func (c *call) send(ctx context.Context, request HTTPRequest) HTTPResponse {
 	return response
 }
 
-// count adds a batch of requests to what the call did.
+// count adds a batch of requests to what the call did. It may run on any
+// goroutine.
 func (c *call) count(responses []HTTPResponse, elapsed time.Duration) {
-	c.info.Network.Wait += elapsed
-	c.info.Network.Requests += len(responses)
+	c.network.Lock()
+	defer c.network.Unlock()
+	c.stats.Wait += elapsed
+	c.stats.Requests += len(responses)
 	for _, response := range responses {
 		switch response.Error {
 		case "":
 		case FetchDenied:
-			c.info.Network.Denied++
+			c.stats.Denied++
 		default:
-			c.info.Network.Errors++
+			c.stats.Errors++
 		}
 	}
+}
+
+// networkStats returns what the call's requests counted so far.
+func (c *call) networkStats() NetworkStats {
+	c.network.Lock()
+	defer c.network.Unlock()
+	return c.stats
 }
 
 // fetch runs requests in parallel within what is left of the call's
@@ -803,6 +774,7 @@ func (c *call) count(responses []HTTPResponse, elapsed time.Duration) {
 func (c *call) fetch(requests []HTTPRequest) []HTTPResponse {
 	responses := make([]HTTPResponse, len(requests))
 	var sent []int
+	c.network.Lock()
 	for index, request := range requests {
 		requests[index].Headers = ownHeaders(request.Headers)
 		switch {
@@ -813,6 +785,7 @@ func (c *call) fetch(requests []HTTPRequest) []HTTPResponse {
 			sent = append(sent, index)
 		}
 	}
+	c.network.Unlock()
 	started := time.Now()
 	if len(sent) > 0 {
 		ctx, cancel := context.WithTimeoutCause(c.ctx, c.networkLeft, errNetworkBudget)

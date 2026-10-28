@@ -1,8 +1,9 @@
 // The loader of the node: modules and the globals of Node that every plugin
-// runtime gets: require, process, Buffer, global, setImmediate, timers that
-// return Timeout objects, __dirname and __filename. A module, and a global
-// that needs one, loads the first time code reaches it. host holds the
-// host's functions for the modules; nothing else reaches it.
+// runtime gets: require, process, Buffer, global, CustomEvent, __dirname and
+// __filename. The timers, which return Node's Timeout objects, are the
+// loop's. A module, and a global that needs one, loads the first time code
+// reaches it. The script's value is a function the host calls with host,
+// the host's functions for the modules; nothing else reaches it.
 "use strict";
 (function (host) {
   const { defineProperty, freeze } = Object;
@@ -144,154 +145,17 @@
   define("__dirname", host.dirname);
   lazy("process", () => load("process"));
   lazy("Buffer", () => load("buffer").Buffer);
-  lazy("EventTarget", () => load("internal/event_target").EventTarget);
-  lazy("Event", () => load("internal/event_target").Event);
   lazy("CustomEvent", () => load("internal/event_target").CustomEvent);
 
-  // The timers of Node return Timeout objects: ref, unref, refresh and
-  // close, and the id as their primitive value. A timer set outside a call,
-  // as by a module's top level, never fires: no loop runs for it.
-  const hostTimers = {
+  // node:timers has the timers of the globals.
+  const timers = {
     setTimeout: globalThis.setTimeout,
     setInterval: globalThis.setInterval,
+    setImmediate: globalThis.setImmediate,
     clearTimeout: globalThis.clearTimeout,
     clearInterval: globalThis.clearInterval,
+    clearImmediate: globalThis.clearImmediate,
   };
-  const byId = new Map();
-  const callbackError = (callback) => {
-    const error = new TypeError(
-      `The "callback" argument must be of type function. Received ${callback === null ? "null" : typeof callback}`,
-    );
-    error.code = "ERR_INVALID_ARG_TYPE";
-    return error;
-  };
-  class Timeout {
-    #id = 0;
-    #callback;
-    #delay;
-    #args;
-    #repeat;
-    #ref = true;
-    constructor(callback, delay, args, repeat) {
-      this.#callback = callback;
-      this.#delay = delay;
-      this.#args = args;
-      this.#repeat = repeat;
-      this.#arm();
-    }
-    #arm() {
-      const fire = (...args) => {
-        if (!this.#repeat) byId.delete(this.#id);
-        return this.#callback.apply(this, args);
-      };
-      const set = this.#repeat ? hostTimers.setInterval : hostTimers.setTimeout;
-      this.#id = Number(set(fire, this.#delay, ...this.#args)) || 0;
-      if (this.#id !== 0) byId.set(this.#id, this);
-    }
-    #clear() {
-      if (this.#id === 0) return;
-      byId.delete(this.#id);
-      (this.#repeat ? hostTimers.clearInterval : hostTimers.clearTimeout)(
-        this.#id,
-      );
-    }
-    ref() {
-      this.#ref = true;
-      return this;
-    }
-    unref() {
-      this.#ref = false;
-      return this;
-    }
-    hasRef() {
-      return this.#ref;
-    }
-    refresh() {
-      if (byId.get(this.#id) === this) {
-        this.#clear();
-        this.#arm();
-      }
-      return this;
-    }
-    close() {
-      this.#clear();
-      return this;
-    }
-    [Symbol.toPrimitive]() {
-      return this.#id;
-    }
-    [Symbol.dispose ?? Symbol.for("nodejs.dispose")]() {
-      this.#clear();
-    }
-    static _clear(timer) {
-      timer.#clear();
-    }
-  }
-  const clearTimer = Timeout._clear;
-  delete Timeout._clear;
-  class Immediate {
-    #timer;
-    constructor(callback, args) {
-      this.#timer = new Timeout(
-        () => callback.apply(this, args),
-        0,
-        [],
-        false,
-      );
-    }
-    ref() {
-      this.#timer.ref();
-      return this;
-    }
-    unref() {
-      this.#timer.unref();
-      return this;
-    }
-    hasRef() {
-      return this.#timer.hasRef();
-    }
-    static _clear(immediate) {
-      clearTimer(immediate.#timer);
-    }
-  }
-  const clearImmediateTimer = Immediate._clear;
-  delete Immediate._clear;
-
-  const timer =
-    (repeat) =>
-    (callback, delay, ...args) => {
-      if (typeof callback !== "function") throw callbackError(callback);
-      return new Timeout(callback, delay, args, repeat);
-    };
-  const clear = (handle) => {
-    if (handle instanceof Timeout) {
-      clearTimer(handle);
-    } else if (handle !== null && handle !== undefined) {
-      const found = byId.get(Number(handle));
-      if (found !== undefined) clearTimer(found);
-    }
-  };
-  const timers = {
-    setTimeout: timer(false),
-    setInterval: timer(true),
-    clearTimeout: clear,
-    clearInterval: clear,
-    setImmediate(callback, ...args) {
-      if (typeof callback !== "function") throw callbackError(callback);
-      return new Immediate(callback, args);
-    },
-    clearImmediate(immediate) {
-      if (immediate instanceof Immediate) clearImmediateTimer(immediate);
-    },
-    Timeout,
-    Immediate,
-  };
-  for (const [name, value] of Object.entries(timers)) {
-    if (name !== "Timeout" && name !== "Immediate") {
-      defineProperty(value, "name", { value: name });
-      define(name, value);
-    }
-  }
   modules.set("internal/timers", { exports: freeze(timers), loaded: true });
 
   // The console methods of Node the web console leaves out.
@@ -347,5 +211,4 @@
   if (globalThis.performance && !("timeOrigin" in globalThis.performance)) {
     globalThis.performance.timeOrigin = host.timeOrigin;
   }
-})(globalThis.__astrlinkNode);
-delete globalThis.__astrlinkNode;
+});

@@ -14,7 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Calcium-Ion/moejs"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/eventloop"
+	"github.com/MoeForge/moejs/node"
+	"github.com/MoeForge/moejs/webapi"
 )
 
 // loadTime bounds a module's top level, and the reads of its manifest and
@@ -78,8 +81,8 @@ func load(source Source, limits Limits, dirs *pluginDirs) (*program, error) {
 	if err != nil {
 		return nil, loadFailure(source.File, err)
 	}
-	defer instance.resources.close()
-	stop := interruptAfter(instance.runtime, loadTime, errLoadTime)
+	defer instance.close()
+	stop := interruptAfter(instance.interrupt, loadTime, errLoadTime)
 	defer stop()
 	meta, err := readMeta(instance.runtime, source.File)
 	if err != nil {
@@ -157,7 +160,7 @@ func loadFailure(file string, err error) error {
 	case errors.Is(err, errLoadTime):
 		failure.Message = fmt.Sprintf("the top level ran longer than %s", loadTime)
 	case errors.Is(err, moejs.ErrMemoryLimit):
-		failure.Message = "the top level used more memory than one call may"
+		failure.Message = "the top level kept more memory than a plugin may"
 	case errors.As(err, &exception):
 		failure.Line, failure.Column = stackPosition(stackOf(err), file)
 		failure.Message = cleanText("the top level threw "+exceptionText(exception), maxMessageRunes, "")
@@ -177,6 +180,22 @@ type instance struct {
 	// resources are the files and databases the runtime has open; a
 	// cleanup closes them once the runtime is gone.
 	resources *nodeResources
+
+	// loop runs the runtime's callbacks (async.go); nil for a task
+	// plugin, whose hooks are synchronous and which has no web APIs.
+	loop *eventloop.Loop
+	// web are the web APIs of moejs and files its node:fs and Buffer.
+	web   *webapi.API
+	files *node.API
+	// fetches is the call whose requests the runtime's fetch sends.
+	fetches fetchCalls
+	// then is Promise.prototype.then as the runtime started, and stop the
+	// reaction that stops the loop once a hook's promise settled.
+	then, stop moejs.Value
+	timers     loopTimers
+	// kept are the values only Go holds for a while (keep).
+	kept     map[uint64][]moejs.Value
+	lastKept uint64
 }
 
 // newInstance loads the program in a new runtime. Plugins are trusted
@@ -198,20 +217,33 @@ func newInstance(loaded *program, limits Limits) (*instance, error) {
 			return nil, err
 		}
 	} else {
+		if err := created.newLoop(); err != nil {
+			return nil, err
+		}
 		if err := created.install(); err != nil {
+			created.close()
 			return nil, err
 		}
 		if err := created.installNode(); err != nil {
+			created.close()
 			return nil, err
 		}
 	}
-	stop := interruptAfter(runtime, loadTime, errLoadTime)
-	err := runtime.Load(loaded.module)
+	stop := interruptAfter(created.interrupt, loadTime, errLoadTime)
+	var err error
+	if created.loop == nil {
+		err = runtime.Load(loaded.module)
+	} else {
+		// The loop runs until what the top level started settled, the
+		// promises of node:fs among them; its timers never fire.
+		err = created.loop.Run(func(runtime *moejs.Runtime) error { return runtime.Load(loaded.module) })
+	}
 	stop()
 	created.resources.endCall()
 	if err != nil {
-		created.resources.close()
-		return nil, withStack(runtime, err)
+		err = withStack(runtime, err)
+		created.close()
+		return nil, err
 	}
 	runtime.ClearInterrupt()
 	return created, nil
@@ -244,17 +276,17 @@ func stackOf(err error) string {
 	return ""
 }
 
-// interruptAfter interrupts runtime with cause after d. Once the returned
-// function returns, no interrupt from it is pending or still to come; one
-// that came stays pending for the caller to clear.
-func interruptAfter(runtime *moejs.Runtime, d time.Duration, cause error) func() {
+// interruptAfter interrupts a runtime with cause after d. Once the
+// returned function returns, no interrupt from it is pending or still to
+// come; one that came stays pending for the caller to clear.
+func interruptAfter(interrupt func(error), d time.Duration, cause error) func() {
 	var mutex sync.Mutex
 	stopped := false
 	timer := time.AfterFunc(d, func() {
 		mutex.Lock()
 		defer mutex.Unlock()
 		if !stopped {
-			runtime.Interrupt(cause)
+			interrupt(cause)
 		}
 	})
 	return func() {
@@ -308,15 +340,17 @@ func (pool *pool) put(returned *instance) {
 	select {
 	case pool.idle <- returned:
 	default:
-		returned.resources.close()
+		returned.close()
 	}
 }
 
 // run calls hook with args on a runtime of the pool, with c bound for its
 // host functions, and returns the JSON text of the result, nil for
 // undefined. The hook of an apiVersion 2 plugin may return a promise: the
-// call's loop then runs until it settles. A runtime whose call failed is
-// dropped: the failure may have left its module state half updated.
+// runtime's loop then runs until it settles. Once the call ended, what it
+// left behind is canceled and comes to rest on the loop. A runtime whose
+// call failed, or whose loop did not come to rest, is dropped: the failure
+// may have left its module state half updated.
 func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, args []any) (json.RawMessage, error) {
 	if err := pool.acquire(ctx); err != nil {
 		return nil, err
@@ -325,6 +359,7 @@ func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, args []any)
 	defer func() {
 		if c.slot {
 			pool.release()
+			c.slot = false
 		}
 	}()
 	taken, err := pool.take()
@@ -332,29 +367,33 @@ func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, args []any)
 		return nil, err
 	}
 	runtime := taken.runtime
-	c.runtime = runtime
-	if pool.program.async() {
-		c.loop = newAsyncLoop()
-		defer c.loop.close()
-	}
-	c.watchdog = &watchdog{runtime: runtime, budget: pool.limits.ScriptTime}
-	taken.current = c
+	c.runtime, c.instance = runtime, taken
+	c.watchdog = &watchdog{interrupt: taken.interrupt, budget: pool.limits.ScriptTime}
+	taken.begin(c)
 	interrupted := make(chan struct{})
 	stopContext := context.AfterFunc(ctx, func() {
-		runtime.Interrupt(context.Cause(ctx))
+		taken.interrupt(context.Cause(ctx))
 		close(interrupted)
 	})
-	c.watchdog.start()
-	result, err := invoke(c, runtime, hook, args, pool.limits)
-	c.watchdog.pause()
+	result, err := taken.invoke(c, hook, args, pool.limits)
+	c.leave()
 	if !stopContext() {
 		<-interrupted
 	}
-	taken.current = nil
+	// What the call started on other goroutines, its requests and host
+	// work, ends with it.
+	c.end(errCallEnded)
+	taken.finish(c)
+	rested := err == nil && taken.rest(c)
 	taken.resources.endCall()
 	if err != nil {
-		taken.resources.close()
-		return nil, withStack(runtime, err)
+		err = withStack(runtime, err)
+		taken.close()
+		return nil, err
+	}
+	if !rested {
+		taken.close()
+		return result, nil
 	}
 	runtime.ClearInterrupt()
 	runtime.ReleaseCallData()
@@ -362,7 +401,12 @@ func (pool *pool) run(ctx context.Context, c *call, hook moejs.Hook, args []any)
 	return result, nil
 }
 
-func invoke(c *call, runtime *moejs.Runtime, hook moejs.Hook, args []any, limits Limits) (json.RawMessage, error) {
+// invoke calls hook with args and reads its result as JSON.
+func (bound *instance) invoke(c *call, hook moejs.Hook, args []any, limits Limits) (json.RawMessage, error) {
+	runtime := bound.runtime
+	if err := c.enter(); err != nil {
+		return nil, err
+	}
 	values := make([]moejs.Value, 0, len(args))
 	for _, arg := range args {
 		value, err := runtime.FromGo(arg)
@@ -371,17 +415,16 @@ func invoke(c *call, runtime *moejs.Runtime, hook moejs.Hook, args []any, limits
 		}
 		values = append(values, value)
 	}
-	value, err := runtime.Call(hook, values...)
+	value, err := bound.callHook(c, hook, values)
 	if err != nil {
 		return nil, err
 	}
-	if c.loop != nil && promiseLike(value) {
-		if value, err = c.drive(runtime, value); err != nil {
-			return nil, err
-		}
-	}
 	if value.IsUndefined() {
 		return nil, nil
+	}
+	// Writing the result can run its toJSON methods.
+	if err := c.enter(); err != nil {
+		return nil, err
 	}
 	var result json.RawMessage
 	if err := runtime.UnmarshalWith(value, &result, moejs.DecodeOptions{MaxBytes: limits.ResultBytes, MaxNodes: limits.ResultNodes}); err != nil {
@@ -397,12 +440,14 @@ func invoke(c *call, runtime *moejs.Runtime, hook moejs.Hook, args []any, limits
 // watchdog interrupts a call whose JavaScript runs longer than budget.
 // Waits on the host pause it.
 type watchdog struct {
-	runtime *moejs.Runtime
-	budget  time.Duration
-	mutex   sync.Mutex
-	spent   time.Duration
-	since   time.Time // zero while paused
-	timer   *time.Timer
+	interrupt func(error)
+	budget    time.Duration
+	mutex     sync.Mutex
+	spent     time.Duration
+	since     time.Time // zero while paused
+	// timer fires once what is left of the budget passed; it is made the
+	// first time the dog starts, and stopped while it is paused.
+	timer *time.Timer
 }
 
 func (dog *watchdog) start() {
@@ -414,10 +459,14 @@ func (dog *watchdog) start() {
 	dog.since = time.Now()
 	left := dog.budget - dog.spent
 	if left <= 0 {
-		dog.runtime.Interrupt(errScriptTime)
+		dog.interrupt(errScriptTime)
 		return
 	}
-	dog.timer = time.AfterFunc(left, dog.expire)
+	if dog.timer == nil {
+		dog.timer = time.AfterFunc(left, dog.expire)
+		return
+	}
+	dog.timer.Reset(left)
 }
 
 func (dog *watchdog) pause() {
@@ -430,7 +479,6 @@ func (dog *watchdog) pause() {
 	dog.since = time.Time{}
 	if dog.timer != nil {
 		dog.timer.Stop()
-		dog.timer = nil
 	}
 }
 
@@ -442,7 +490,14 @@ func (dog *watchdog) expire() {
 	if dog.since.IsZero() || dog.spent+time.Since(dog.since) < dog.budget {
 		return
 	}
-	dog.runtime.Interrupt(errScriptTime)
+	dog.interrupt(errScriptTime)
+}
+
+// running reports whether the dog counts script time now.
+func (dog *watchdog) running() bool {
+	dog.mutex.Lock()
+	defer dog.mutex.Unlock()
+	return !dog.since.IsZero()
 }
 
 func (dog *watchdog) used() time.Duration {
@@ -467,7 +522,7 @@ func classify(err error, limits Limits) *CallError {
 	var typeError *json.UnmarshalTypeError
 	switch {
 	case errors.Is(err, moejs.ErrMemoryLimit):
-		failure.Reason, failure.Message = ReasonMemory, fmt.Sprintf("the plugin allocated more than %d MiB in one call", limits.Memory>>20)
+		failure.Reason, failure.Message = ReasonMemory, fmt.Sprintf("the plugin kept more than %d MiB of memory", limits.Memory>>20)
 	case errors.Is(err, errScriptTime):
 		failure.Reason, failure.Message = ReasonTimeout, fmt.Sprintf("the plugin ran JavaScript for longer than %s", limits.ScriptTime)
 	case errors.Is(err, context.DeadlineExceeded):

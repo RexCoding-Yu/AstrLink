@@ -2,7 +2,7 @@
 
 <!-- markdownlint-configure-file { "MD013": { "tables": false } } -->
 
-AstrLink Core 内嵌 [moejs](https://github.com/Calcium-Ion/moejs)，用来运行插件。
+AstrLink Core 内嵌 [moejs](https://github.com/MoeForge/moejs)，用来运行插件；插件用到的 Web API、事件循环和定时器，以及 `node:fs`、`Buffer` 的主要部分，都是 moejs 自己的实现。
 
 插件用 JavaScript 或 TypeScript 编写，负责策略：请求放不放行、走哪个提供商、往请求里加什么、怎么改回复、在请求记录和插件页上展示什么。
 
@@ -194,19 +194,21 @@ apiVersion 2 另有这些能力：
 ## 运行时
 
 apiVersion 2 的钩子可以写成
-`async`。网关自己驱动 Promise 和定时器：等网络、存储、文件和定时器的时候不算脚本时间，也不占插件的执行槽位。一直不兑现的 Promise 算失败。
+`async`，在 moejs 的事件循环上运行，直到钩子返回的 Promise 兑现：等网络、存储、文件和定时器的时候不算脚本时间，也不占插件的执行槽位。一直不兑现的 Promise 算失败。Promise 兑现后，这次调用还没结束的请求和宿主操作会被取消，定时器一并清除，不会带到下一次调用。
 
 可以用的全局：
 
-- `fetch`、`Headers`、`Response`、`AbortController`：可以访问任何地址，规则见「宿主函数」。
-- `URL`、`URLSearchParams`、`TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone`、`queueMicrotask`。
+- `fetch`、`Request`、`Response`、`Headers`：可以访问任何地址，规则见「宿主函数」；响应体可以用 `response.body` 按流读取。
+- `ReadableStream`、`WritableStream`、`TransformStream` 和 `TextDecoderStream`、`TextEncoderStream`，`AbortController`、`AbortSignal`（含 `timeout`、`any`），`Event`、`EventTarget`、`DOMException`。
+- `URL`、`URLSearchParams`（按 WHATWG 标准解析）、`TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone`、`queueMicrotask`。
+- `Intl` 和各类型的 `toLocaleString`，带 11 种语言的数据；默认语言是 `en-US`，时区是 UTC。
 - `crypto.getRandomValues`、`crypto.randomUUID`、`crypto.subtle.digest`，以及 HMAC 的签名和校验。
 - `setTimeout`、`setInterval`、`setImmediate` 和对应的清除函数，返回 Node 的
   `Timeout` 对象（`ref`、`unref`、`refresh`）。只在 apiVersion
   2 的钩子运行时触发，受本次调用的时间上限约束；模块顶层设的定时器不会触发。
 - `console`：写进插件日志。`performance`。
 - Node 的全局：`process`、`Buffer`、`global`、`require`（只能取 Node 的模块）、`__dirname`
-  和 `__filename`（指向安装目录）、`EventTarget`、`Event`。
+  和 `__filename`（指向安装目录）、`CustomEvent`。
 - `eval` 和 `new Function`
   可以用。内置对象每个运行时一份，插件可以修改，不影响别的插件。
 
@@ -250,6 +252,8 @@ apiVersion 2 的钩子可以写成
   `EROFS`。符号链接只能用相对路径指向数据目录里，指到外面同样被拒。
 - 数据目录最多 1 GiB，超出的写入报 `ENOSPC`。
 - 一次调用里打开的文件描述符在调用结束时关闭。
+- apiVersion 2 插件在 Linux 和 macOS 上，数据目录里的读写、`stat`、`readdir`、`mkdir`、`rm`、`cp`、`rename`
+  和 `glob` 由 moejs 的 `node:fs` 完成；安装目录和其余操作（文件描述符、流、`chmod` 等）由网关处理，行为都以 Node 为准。
 - 卸载插件时数据目录保留，和设置一样，重新安装接着用；插件页「数据存储」里可以清除。更新和回滚会整体替换安装目录，所以要留下的数据放在数据目录。
 
 `astrlink.textStream({ map?, replace?, maxMatch? })`
@@ -707,8 +711,8 @@ astrlink plugin test plugin.js --fixture golden.json
   `Promise.all`
   同时等。单个请求默认 10 秒超时，最多 30 秒，钩子的时间上限会更早截止。等网络的时间不计入脚本时间。
 - v2 还提供标准的 `fetch(url, init)` 和
-  `node:http(s)`，按同样的规则访问网络；`fetch` 返回标准的
-  `Response`，`init.credential` 指定凭据位。
+  `node:http(s)`，按同样的规则访问网络，和 `astrlink.http.fetch` 共用请求数和网络时间的预算；`fetch` 返回标准的
+  `Response`，响应体按流到达，`init.credential` 指定凭据位，`init.timeoutMs` 是单个请求的超时。请求没有得到响应时，`fetch` 拒绝为 `TypeError`，网关拒绝或按它的规则失败的（见下面的 `error`）在 `error.cause.code` 里给出原因。
 - 响应：`status`（没收到响应时为 0）、`headers`（每个头的第一个值，键是小写）、`json`
   或 `text`（最多 1 MiB）、`took_ms`，以及出错时的
   `error`：`denied`（凭据不能发往这个地址）、`timeout`、`network`、`too_large`、`budget`。HTTP 错误码照常返回，不算
@@ -732,7 +736,7 @@ astrlink plugin test plugin.js --fixture golden.json
 | 项       | 限制                                                               |
 | -------- | ------------------------------------------------------------------ |
 | 脚本时间 | 每次调用 200 ms，等网络、存储和定时器的时间不计；供应商适配器 1 秒 |
-| 内存     | 每次调用 32 MiB；供应商适配器 256 MiB                              |
+| 内存     | 运行时保留的内存 32 MiB，随用随丢的不算；供应商适配器 256 MiB      |
 | 返回值   | 最多 64 KiB、4096 个值；供应商适配器 64 MiB                        |
 | 定时器   | v2 每次调用同时最多 64 个，调用结束时一并取消                      |
 | 时间上限 | 每个扩展点各自的上限，见「扩展点」                                 |

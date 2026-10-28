@@ -20,7 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Calcium-Ion/moejs"
+	"github.com/MoeForge/moejs"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 )
@@ -359,13 +359,14 @@ func (plugin *Plugin) invoke(ctx context.Context, name string, exported moejs.Ho
 	// Work a call started on other goroutines ends with it.
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(errCallEnded)
-	c := &call{ctx: ctx, plugin: plugin, hook: name, options: options, pool: plugin.pool, networkLeft: options.NetworkBudget}
-	if plugin.program.async() {
+	c := &call{ctx: ctx, end: cancel, plugin: plugin, hook: name, options: options, pool: plugin.pool, networkLeft: options.NetworkBudget, async: plugin.program.async()}
+	if c.async {
 		c.networkDeadline = started.Add(options.NetworkBudget)
 		c.fetchSlots = make(chan struct{}, maxParallelFetches)
 	}
 	result, err := plugin.pool.run(ctx, c, exported, args)
 	c.info.Elapsed = time.Since(started)
+	c.info.Network = c.networkStats()
 	if c.watchdog != nil {
 		c.info.Script = c.watchdog.used()
 	}

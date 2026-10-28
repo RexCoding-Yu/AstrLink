@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
@@ -8,24 +10,28 @@ import (
 	"crypto/sha512"
 	_ "embed"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
-	"net"
-	"net/url"
+	"io"
+	"maps"
+	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Calcium-Ion/moejs"
-	"github.com/Calcium-Ion/moejs/engine"
+	"github.com/MoeForge/moejs"
+	"github.com/MoeForge/moejs/webapi"
 )
 
 //go:embed prelude.js
 var preludeSource string
 
-// prelude is the script that adds the web APIs to every plugin runtime,
-// compiled once.
+// prelude is the script that adds AstrLink's globals to every plugin
+// runtime, compiled once.
 var prelude = sync.OnceValues(func() (*moejs.Script, error) {
 	return moejs.CompileScript(preludeName, preludeSource)
 })
@@ -33,85 +39,69 @@ var prelude = sync.OnceValues(func() (*moejs.Script, error) {
 // preludeName is the prelude's name in stack traces.
 const preludeName = "astrlink:prelude"
 
-// processStart is the zero of performance.now.
+// processStart is the zero of process.hrtime and process.uptime.
 var processStart = time.Now()
 
 // maxRandomBytes is what crypto.getRandomValues fills at most.
 const maxRandomBytes = 65536
 
-// installWeb adds the timers and the web APIs of prelude.js to the runtime.
-// The timers and fetch work only while an apiVersion 2 hook runs; the rest
-// works anywhere.
+// The headers through which fetch tells its transport which call sends a
+// request, and the request's credential and timeout. The transport drops
+// them, with every other X-AstrLink- header, before the request leaves.
+const (
+	fetchHeader      = "X-Astrlink-Fetch"
+	credentialHeader = "X-Astrlink-Credential"
+	timeoutHeader    = "X-Astrlink-Timeout"
+)
+
+// installWeb adds the web APIs of moejs (package webapi) on the runtime's
+// loop, and what prelude.js adds over them: console, crypto,
+// astrlink.textStream, and fetch on the host's terms, with the promises of
+// the web APIs settling as tasks of the call. fetch works only while an
+// apiVersion 2 hook runs; the rest works anywhere.
 func (bound *instance) installWeb() error {
+	client := &http.Client{
+		Transport: fetchTransport{bound},
+		// A redirect comes back as it is, as from astrlink.http.fetch.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	api, err := webapi.Install(bound.loop, webapi.Options{Client: client})
+	if err != nil {
+		return err
+	}
+	bound.web = api
 	runtime := bound.runtime
-	current := func(realm *moejs.Realm, name string) (*call, error) {
-		c := bound.current
-		if c == nil || c.loop == nil {
-			return nil, realm.TypeError("%s works only while the host runs a hook of an apiVersion 2 plugin", name)
-		}
-		return c, nil
-	}
-	timer := func(name string, repeat bool) moejs.Value {
-		return runtime.Function(name, 2, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
-			if bound.current == nil {
-				// A timer set outside a call, as by a module's top level,
-				// never fires: no loop runs for it. Its id is 0.
-				return moejs.Number(0), nil
-			}
-			c, err := current(realm, name)
-			if err != nil {
-				return moejs.Undefined(), err
-			}
-			callback := moejs.Arg(args, 0)
-			if !engine.IsCallable(callback) {
-				return moejs.Undefined(), realm.TypeError("%s takes a function", name)
-			}
-			delay, err := timerDelay(realm, moejs.Arg(args, 1))
-			if err != nil {
-				return moejs.Undefined(), err
-			}
-			var extra []moejs.Value
-			if len(args) > 2 {
-				extra = append(extra, args[2:]...)
-			}
-			id, ok := c.loop.setTimer(callback, extra, delay, repeat)
-			if !ok {
-				return moejs.Undefined(), realm.RangeError("a call may have at most %d timers at once", maxTimers)
-			}
-			return moejs.Number(float64(id)), nil
-		})
-	}
-	clearer := func(name string) moejs.Value {
-		return runtime.Function(name, 1, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
-			c := bound.current
-			if c == nil || c.loop == nil {
-				return moejs.Undefined(), nil
-			}
-			number, err := realm.ToNumber(moejs.Arg(args, 0))
-			if err != nil || number != number {
-				return moejs.Undefined(), nil
-			}
-			c.loop.clearTimer(int64(number))
-			return moejs.Undefined(), nil
-		})
-	}
-	for name, value := range map[string]moejs.Value{
-		"setTimeout":    timer("setTimeout", false),
-		"setInterval":   timer("setInterval", true),
-		"clearTimeout":  clearer("clearTimeout"),
-		"clearInterval": clearer("clearInterval"),
-	} {
-		if err := runtime.SetGlobal(name, value); err != nil {
-			return err
-		}
-	}
 	host := map[string]any{
-		"fetch": runtime.Function("fetch", 1, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
-			c, err := current(realm, "fetch")
-			if err != nil {
+		"fetch": runtime.Function("fetch", 2, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			c := bound.current
+			if c == nil || !c.async {
+				return moejs.Undefined(), realm.TypeError("fetch works only while the host runs a hook of an apiVersion 2 plugin")
+			}
+			return beginFetch(c, realm, args)
+		}),
+		"failure": runtime.Function("failure", 1, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			c := bound.current
+			id, err := stringArg(realm, args, 0, "id")
+			if err != nil || c == nil {
 				return moejs.Undefined(), err
 			}
-			return hostRawFetch(c, realm, args)
+			if reason := c.fetchFailure(id); reason != "" {
+				return moejs.String(reason), nil
+			}
+			return moejs.Undefined(), nil
+		}),
+		// later calls fn with value in a task of the loop, as the call's
+		// script time: how the prelude relays a promise of the web APIs.
+		"later": runtime.Function("later", 2, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			fn, value := moejs.Arg(args, 0), moejs.Arg(args, 1)
+			bound.queue()
+			kept := bound.keep(fn, value)
+			bound.post(func(runtime *moejs.Runtime) error {
+				bound.release(kept)
+				_, err := runtime.CallFunction(fn, moejs.Undefined(), value)
+				return err
+			})
+			return moejs.Undefined(), nil
 		}),
 		"log": runtime.Function("log", 2, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			c := bound.current
@@ -171,38 +161,375 @@ func (bound *instance) installWeb() error {
 			mac.Write(data)
 			return moejs.String(base64.StdEncoding.EncodeToString(mac.Sum(nil))), nil
 		}),
-		"parseURL": runtime.Function("parseURL", 2, func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
-			input, err := stringArg(realm, args, 0, "url")
-			if err != nil {
-				return moejs.Undefined(), err
-			}
-			base, hasBase := "", !moejs.Arg(args, 1).IsUndefined()
-			if hasBase {
-				if base, err = stringArg(realm, args, 1, "base"); err != nil {
-					return moejs.Undefined(), err
-				}
-			}
-			parts, ok := parseURL(input, base, hasBase)
-			if !ok {
-				return moejs.Null(), nil
-			}
-			return realm.FromGo(parts)
-		}),
-		"now": runtime.Function("now", 0, func(*moejs.Realm, moejs.Value, []moejs.Value) (moejs.Value, error) {
-			return moejs.Number(float64(time.Since(processStart).Microseconds()) / 1000), nil
-		}),
-	}
-	if err := runtime.SetGlobal("__astrlinkHost", host); err != nil {
-		return err
 	}
 	script, err := prelude()
 	if err != nil {
 		return fmt.Errorf("compile the plugin prelude: %w", err)
 	}
-	if _, err := runtime.RunScript(script); err != nil {
+	if err := runWith(runtime, script, host); err != nil {
 		return fmt.Errorf("run the plugin prelude: %w", err)
 	}
 	return nil
+}
+
+// runWith runs script, whose value is a function, and calls it with host,
+// so that the host's primitives reach the script without a global: a
+// global deleted afterwards would leave the global object in dictionary
+// mode, where every global read takes the slow path.
+func runWith(runtime *moejs.Runtime, script *moejs.Script, host map[string]any) error {
+	fn, err := runtime.RunScript(script)
+	if err != nil {
+		return err
+	}
+	value, err := runtime.FromGo(host)
+	if err != nil {
+		return err
+	}
+	_, err = runtime.CallFunction(fn, moejs.Undefined(), value)
+	return err
+}
+
+// beginFetch checks that the call may send a request of fetch with the
+// credential and timeout of its init, args[0] and args[1], and returns the
+// request's id, which its X-AstrLink-Fetch header carries to the transport.
+func beginFetch(c *call, realm *moejs.Realm, args []moejs.Value) (moejs.Value, error) {
+	if !c.granted(CapabilityNetwork) {
+		return moejs.Undefined(), realm.TypeError("fetch needs the %s capability", CapabilityNetwork)
+	}
+	if c.plugin.services.Fetcher == nil {
+		return moejs.Undefined(), realm.TypeError("fetch is unavailable")
+	}
+	if credential := moejs.Arg(args, 0); !credential.IsUndefined() {
+		name, err := realm.ToString(credential)
+		if err != nil {
+			return moejs.Undefined(), err
+		}
+		if _, declared := c.plugin.Meta.Credential(name.GoString()); !declared {
+			return moejs.Undefined(), realm.TypeError("fetch: credential %q is not declared in meta.credentials", name.GoString())
+		}
+	}
+	if timeout := moejs.Arg(args, 1); !timeout.IsUndefined() {
+		number, err := realm.ToNumber(timeout)
+		if err != nil {
+			return moejs.Undefined(), err
+		}
+		if number != number || number < 0 || time.Duration(number)*time.Millisecond > MaxFetchTimeout {
+			return moejs.Undefined(), realm.TypeError("fetch: timeoutMs must be between 1 and %d", MaxFetchTimeout.Milliseconds())
+		}
+	}
+	c.queued = true
+	c.network.Lock()
+	c.fetchSeq++
+	id := c.instance.fetches.token + "." + strconv.Itoa(c.fetchSeq)
+	c.network.Unlock()
+	return moejs.String(id), nil
+}
+
+// fetchCalls is the call whose requests the runtime's fetch sends, for the
+// transport, which runs on goroutines of its own. The token of each call is
+// new, so a request of a call that ended is never another's.
+type fetchCalls struct {
+	mutex   sync.Mutex
+	current *call
+	token   string
+	calls   uint64
+}
+
+// begin binds the runtime to c: its host functions serve c, and its fetch
+// sends c's requests within c's context.
+func (bound *instance) begin(c *call) {
+	bound.current = c
+	if bound.web == nil {
+		return
+	}
+	bound.web.SetContext(c.ctx)
+	bound.fetches.mutex.Lock()
+	bound.fetches.calls++
+	bound.fetches.current, bound.fetches.token = c, strconv.FormatUint(bound.fetches.calls, 36)
+	bound.fetches.mutex.Unlock()
+}
+
+// finish unbinds the runtime from the call that ended.
+func (bound *instance) finish(*call) {
+	bound.current = nil
+	bound.fetches.mutex.Lock()
+	bound.fetches.current, bound.fetches.token = nil, ""
+	bound.fetches.mutex.Unlock()
+}
+
+// sender returns the call that sends the request of id, nil for a call
+// that ended.
+func (calls *fetchCalls) sender(id string) *call {
+	token, _, _ := strings.Cut(id, ".")
+	calls.mutex.Lock()
+	defer calls.mutex.Unlock()
+	if token == "" || token != calls.token {
+		return nil
+	}
+	return calls.current
+}
+
+// fetchFailure takes the reason of the request id when the host refused it
+// or it failed on the host's terms.
+func (c *call) fetchFailure(id string) string {
+	c.network.Lock()
+	defer c.network.Unlock()
+	reason := c.failures[id]
+	delete(c.failures, id)
+	return reason
+}
+
+// FetchError is why a request of fetch got no response, or why its body
+// broke off: Reason is one of the Fetch* errors of HTTPResponse.
+type FetchError struct {
+	Reason string
+	Err    error
+}
+
+func (failure *FetchError) Error() string {
+	text := map[string]string{
+		FetchDenied:   "the request is not allowed",
+		FetchTimeout:  "the request timed out",
+		FetchNetwork:  "no response arrived",
+		FetchTooLarge: fmt.Sprintf("the response is larger than %d MiB", MaxFetchResponseBytes>>20),
+		FetchBudget:   "the call's request count or network time ran out",
+	}[failure.Reason]
+	if text == "" {
+		text = failure.Reason
+	}
+	if failure.Err != nil {
+		return text + ": " + failure.Err.Error()
+	}
+	return text
+}
+
+func (failure *FetchError) Unwrap() error { return failure.Err }
+
+// StreamFetcher is a Fetcher that also hands a response of fetch back as it
+// arrives, for its body to stream. The host has dropped the headers it
+// keeps; credential names the slot of meta.credentials the request asked
+// for. The caller reads the body, at most MaxFetchResponseBytes, and
+// closes it. A request that got no response is a *FetchError.
+type StreamFetcher interface {
+	Fetcher
+	Stream(ctx context.Context, plugin *Plugin, request *http.Request, credential string) (*http.Response, error)
+}
+
+// fetchTransport sends the requests of a runtime's fetch for the call that
+// runs, within its budgets: they count with those of astrlink.http.fetch,
+// and the call's network deadline and its own timeout bound each. The
+// Fetcher sends it on the user's terms. It follows no redirect.
+type fetchTransport struct{ bound *instance }
+
+func (transport fetchTransport) RoundTrip(incoming *http.Request) (*http.Response, error) {
+	if incoming.Body != nil {
+		defer incoming.Body.Close()
+	}
+	id := incoming.Header.Get(fetchHeader)
+	credential := incoming.Header.Get(credentialHeader)
+	timeout := defaultFetchTimeout
+	if text := incoming.Header.Get(timeoutHeader); text != "" {
+		if ms, err := strconv.Atoi(text); err == nil && ms > 0 {
+			timeout = min(time.Duration(ms)*time.Millisecond, MaxFetchTimeout)
+		}
+	}
+	c := transport.bound.fetches.sender(id)
+	if c == nil {
+		return nil, &FetchError{Reason: FetchNetwork, Err: errCallEnded}
+	}
+	if incoming.ContentLength > MaxFetchBodyBytes {
+		return nil, errBodyTooLarge
+	}
+	fail := func(reason string, err error) (*http.Response, error) {
+		c.network.Lock()
+		if c.failures == nil {
+			c.failures = make(map[string]string)
+		}
+		c.failures[id] = reason
+		c.network.Unlock()
+		return nil, &FetchError{Reason: reason, Err: err}
+	}
+	c.network.Lock()
+	allowed := c.fetched < maxAsyncFetches && time.Now().Before(c.networkDeadline)
+	if allowed {
+		c.fetched++
+	}
+	c.network.Unlock()
+	if !allowed {
+		c.count([]HTTPResponse{{Error: FetchBudget}}, 0)
+		return fail(FetchBudget, nil)
+	}
+	started := time.Now()
+	ctx, cancel := context.WithDeadlineCause(incoming.Context(), c.networkDeadline, errNetworkBudget)
+	select {
+	case c.fetchSlots <- struct{}{}:
+	case <-ctx.Done():
+		cancel()
+		c.count([]HTTPResponse{{Error: FetchBudget}}, time.Since(started))
+		return fail(FetchBudget, nil)
+	}
+	requestCtx, cancelRequest := context.WithTimeout(ctx, timeout)
+	var once sync.Once
+	// done ends the request: its context and its place among the call's
+	// requests at once.
+	done := func() {
+		once.Do(func() {
+			cancelRequest()
+			cancel()
+			<-c.fetchSlots
+		})
+	}
+	// The request as it leaves: without the headers the host keeps, to the
+	// URL's host.
+	request := incoming.Clone(requestCtx)
+	for name := range request.Header {
+		if transportHeader(name) {
+			delete(request.Header, name)
+		}
+	}
+	request.Host = ""
+	if request.Body != nil && request.Body != http.NoBody {
+		request.Body = &requestBody{ReadCloser: request.Body, left: MaxFetchBodyBytes}
+	}
+	fetcher := c.plugin.services.Fetcher
+	if streamer, ok := fetcher.(StreamFetcher); ok {
+		response, err := streamer.Stream(requestCtx, c.plugin, request, credential)
+		if err != nil {
+			done()
+			reason := FetchNetwork
+			var failure *FetchError
+			if errors.As(err, &failure) {
+				reason = failure.Reason
+			}
+			reason = budgetReason(ctx, reason)
+			c.count([]HTTPResponse{{Error: reason}}, time.Since(started))
+			return fail(reason, err)
+		}
+		c.count([]HTTPResponse{{}}, time.Since(started))
+		// The body streams within the request's timeout and the call's
+		// network deadline; closing it ends the request.
+		response.Body = &fetchBody{ReadCloser: response.Body, ctx: ctx, request: requestCtx, done: done}
+		return response, nil
+	}
+	defer done()
+	converted, err := bufferedRequest(request, credential, timeout)
+	if err != nil {
+		c.count([]HTTPResponse{{Error: FetchNetwork}}, time.Since(started))
+		return nil, err
+	}
+	answer := fetcher.Fetch(requestCtx, c.plugin, converted)
+	reason := answer.Error
+	if reason != "" {
+		reason = budgetReason(ctx, reason)
+	}
+	c.count([]HTTPResponse{{Error: reason}}, time.Since(started))
+	if reason != "" {
+		return fail(reason, nil)
+	}
+	return bufferedResponse(request, answer), nil
+}
+
+// errBodyTooLarge is the error of a request body past MaxFetchBodyBytes.
+var errBodyTooLarge = fmt.Errorf("the body is larger than %d MiB", MaxFetchBodyBytes>>20)
+
+// requestBody is the body of a request of fetch, which may stream: it
+// fails past MaxFetchBodyBytes.
+type requestBody struct {
+	io.ReadCloser
+	left int64
+}
+
+func (body *requestBody) Read(p []byte) (int, error) {
+	n, err := body.ReadCloser.Read(p)
+	if body.left -= int64(n); body.left < 0 {
+		return 0, errBodyTooLarge
+	}
+	return n, err
+}
+
+// budgetReason is FetchBudget for a request the call's network deadline
+// cut short, reason otherwise.
+func budgetReason(ctx context.Context, reason string) string {
+	if (reason == FetchTimeout || reason == FetchNetwork) && errors.Is(context.Cause(ctx), errNetworkBudget) {
+		return FetchBudget
+	}
+	return reason
+}
+
+// fetchBody is the body of a response of fetch as it streams: a read the
+// request's timeout or the call's network deadline cut short fails with
+// the reason, and closing it ends the request.
+type fetchBody struct {
+	io.ReadCloser
+	ctx, request context.Context
+	done         func()
+}
+
+func (body *fetchBody) Read(p []byte) (int, error) {
+	n, err := body.ReadCloser.Read(p)
+	if err != nil && err != io.EOF && body.request.Err() != nil {
+		return n, &FetchError{Reason: budgetReason(body.ctx, FetchTimeout), Err: err}
+	}
+	return n, err
+}
+
+func (body *fetchBody) Close() error {
+	err := body.ReadCloser.Close()
+	body.done()
+	return err
+}
+
+// bufferedRequest is a request of fetch for a Fetcher that only sends whole
+// requests: its body, at most MaxFetchBodyBytes, read into memory.
+func bufferedRequest(request *http.Request, credential string, timeout time.Duration) (HTTPRequest, error) {
+	converted := HTTPRequest{Method: request.Method, URL: request.URL.String(), Headers: map[string]string{}, Credential: credential, TimeoutMS: int(timeout.Milliseconds())}
+	for name, values := range request.Header {
+		converted.Headers[strings.ToLower(name)] = strings.Join(values, ", ")
+	}
+	if request.Body != nil && request.Body != http.NoBody {
+		data, err := io.ReadAll(request.Body)
+		if err != nil {
+			return HTTPRequest{}, err
+		}
+		switch {
+		case len(data) > 0 && strings.Contains(strings.ToLower(request.Header.Get("Content-Type")), "json") && json.Valid(data):
+			converted.JSON = data
+		case len(data) > 0 || request.Method != http.MethodGet && request.Method != http.MethodHead:
+			converted.BodyBytes = data
+			encoded := base64.StdEncoding.EncodeToString(data)
+			converted.BodyBase64 = &encoded
+		}
+	}
+	return converted, nil
+}
+
+// bufferedResponse is the response of a Fetcher that read it whole.
+func bufferedResponse(request *http.Request, answer HTTPResponse) *http.Response {
+	header := http.Header{}
+	if len(answer.Values) > 0 {
+		for _, name := range slices.Sorted(maps.Keys(answer.Values)) {
+			for _, value := range answer.Values[name] {
+				header.Add(name, value)
+			}
+		}
+	} else {
+		for name, value := range answer.Header {
+			header.Set(name, value)
+		}
+	}
+	return &http.Response{
+		Status:        strconv.Itoa(answer.Status) + " " + http.StatusText(answer.Status),
+		StatusCode:    answer.Status,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        header,
+		Body:          io.NopCloser(bytes.NewReader(answer.Body)),
+		ContentLength: int64(len(answer.Body)),
+		Request:       request,
+		// The Fetcher took out any content encoding.
+		Uncompressed: true,
+	}
 }
 
 func hashOf(name string) func() hash.Hash {
@@ -239,163 +566,4 @@ func randomUUID() string {
 	data[8] = data[8]&0x3f | 0x80
 	text := fmt.Sprintf("%x", data[:])
 	return text[0:8] + "-" + text[8:12] + "-" + text[12:16] + "-" + text[16:20] + "-" + text[20:32]
-}
-
-// specialPorts are the default ports of the schemes URL treats as special.
-var specialPorts = map[string]string{"http": "80", "https": "443", "ws": "80", "wss": "443", "ftp": "21", "file": ""}
-
-// parseURL parses input against base, when there is one, the way the URL
-// constructor does, as far as net/url allows: special schemes need a host
-// and get a path of at least "/", the default port goes, and the scheme
-// and host are lowercase. It returns the parts URL keeps.
-func parseURL(input, base string, hasBase bool) (map[string]any, bool) {
-	input = cleanURLText(input)
-	var parsed *url.URL
-	if hasBase {
-		root, err := url.Parse(cleanURLText(base))
-		if err != nil || root.Scheme == "" {
-			return nil, false
-		}
-		reference, err := url.Parse(input)
-		if err != nil {
-			return nil, false
-		}
-		parsed = root.ResolveReference(reference)
-	} else {
-		var err error
-		if parsed, err = url.Parse(input); err != nil || parsed.Scheme == "" {
-			return nil, false
-		}
-	}
-	scheme := strings.ToLower(parsed.Scheme)
-	defaultPort, special := specialPorts[scheme]
-	if special && parsed.Opaque != "" {
-		// "https:example.com" means https://example.com/ to a browser.
-		reparsed, err := url.Parse(scheme + "://" + strings.TrimLeft(parsed.Opaque, "/") + querySuffix(parsed) + fragmentSuffix(parsed))
-		if err != nil {
-			return nil, false
-		}
-		parsed = reparsed
-	}
-	parts := map[string]any{
-		"protocol": scheme + ":",
-		"username": "",
-		"password": "",
-		"hostname": "",
-		"port":     "",
-		"pathname": "",
-		"search":   querySuffix(parsed),
-		"hash":     fragmentSuffix(parsed),
-		"opaque":   false,
-	}
-	if parsed.Opaque != "" || (!special && parsed.Host == "" && !strings.HasPrefix(parsed.Path, "/")) {
-		parts["opaque"] = true
-		parts["pathname"] = parsed.Opaque
-		if parsed.Opaque == "" {
-			parts["pathname"] = parsed.EscapedPath()
-		}
-		return parts, true
-	}
-	hostname := strings.ToLower(parsed.Hostname())
-	if special && scheme != "file" && hostname == "" {
-		return nil, false
-	}
-	if strings.Contains(hostname, ":") {
-		hostname = "[" + hostname + "]"
-	}
-	port := parsed.Port()
-	if port != "" {
-		number, err := strconv.Atoi(port)
-		if err != nil || number > 65535 {
-			return nil, false
-		}
-		port = strconv.Itoa(number)
-		if special && port == defaultPort {
-			port = ""
-		}
-	}
-	if parsed.User != nil {
-		name, password, _ := strings.Cut(parsed.User.String(), ":")
-		parts["username"], parts["password"] = name, password
-	}
-	path := removeDotSegments(parsed.EscapedPath())
-	if special && path == "" {
-		path = "/"
-	}
-	parts["hostname"] = hostname
-	parts["port"] = port
-	parts["pathname"] = path
-	if _, _, err := net.SplitHostPort(hostname + ":0"); err != nil && !strings.HasPrefix(hostname, "[") {
-		return nil, false
-	}
-	return parts, true
-}
-
-func querySuffix(parsed *url.URL) string {
-	if parsed.RawQuery == "" {
-		return ""
-	}
-	return "?" + encodeQuery(parsed.RawQuery)
-}
-
-// encodeQuery percent-encodes what the URL parser encodes in a query: bytes
-// outside printable ASCII, the space, ", # , < and >.
-func encodeQuery(query string) string {
-	var builder strings.Builder
-	for index := 0; index < len(query); index++ {
-		char := query[index]
-		if char <= ' ' || char >= 0x7f || char == '"' || char == '#' || char == '<' || char == '>' {
-			fmt.Fprintf(&builder, "%%%02X", char)
-			continue
-		}
-		builder.WriteByte(char)
-	}
-	return builder.String()
-}
-
-// removeDotSegments resolves the . and .. segments of a path, as RFC 3986
-// does, keeping a trailing slash.
-func removeDotSegments(path string) string {
-	if !strings.Contains(path, ".") {
-		return path
-	}
-	segments := strings.Split(path, "/")
-	var kept []string
-	for index, segment := range segments {
-		last := index == len(segments)-1
-		switch segment {
-		case ".":
-			if last {
-				kept = append(kept, "")
-			}
-		case "..":
-			if len(kept) > 1 {
-				kept = kept[:len(kept)-1]
-			}
-			if last {
-				kept = append(kept, "")
-			}
-		default:
-			kept = append(kept, segment)
-		}
-	}
-	resolved := strings.Join(kept, "/")
-	if strings.HasPrefix(path, "/") && !strings.HasPrefix(resolved, "/") {
-		resolved = "/" + resolved
-	}
-	return resolved
-}
-
-func fragmentSuffix(parsed *url.URL) string {
-	if parsed.Fragment == "" {
-		return ""
-	}
-	return "#" + parsed.EscapedFragment()
-}
-
-// cleanURLText removes what the URL parser ignores: leading and trailing C0
-// controls and spaces, and tabs and line breaks anywhere.
-func cleanURLText(text string) string {
-	text = strings.TrimFunc(text, func(r rune) bool { return r <= ' ' })
-	return strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(text)
 }

@@ -8,9 +8,11 @@
 //
 // apiVersion 2 hooks may be async: the host functions that wait on the host
 // (astrlink.http.fetch, astrlink.store, astrlink.meta.values) return
-// promises, and fetch, URL, URLSearchParams, Headers, Response,
-// AbortController, console, crypto, TextEncoder/TextDecoder, structuredClone,
-// atob/btoa, setTimeout/setInterval and performance.now are available.
+// promises, and the web APIs of moejs are available: fetch, Request,
+// Response (with a streamed body), Headers, the streams, URL,
+// URLSearchParams, AbortController, AbortSignal, Event, EventTarget,
+// DOMException and performance; with console, crypto, Intl,
+// TextEncoder/TextDecoder, structuredClone, atob/btoa and Node's timers.
 // apiVersion 1 plugins stay synchronous: the same host functions return their
 // results, and async functions, await and the timers are refused.
 //
