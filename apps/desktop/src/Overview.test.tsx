@@ -17,6 +17,12 @@ vi.mock("./pricing-bridge", async (importOriginal) => ({
   getBillingSummary: billingMocks.getBillingSummary,
 }));
 
+const pluginMocks = vi.hoisted(() => ({ listPlugins: vi.fn() }));
+vi.mock("./bridge", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./bridge")>()),
+  listPlugins: pluginMocks.listPlugins,
+}));
+
 vi.mock("recharts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("recharts")>();
   return {
@@ -43,6 +49,7 @@ import {
   DEFAULT_OVERVIEW_LAYOUT,
   OVERVIEW_LAYOUT_STORAGE_KEY,
 } from "./overview-layout";
+import type { PluginSummary } from "./plugin-model";
 import type { Service } from "./service-model";
 import {
   aggregateUsage,
@@ -205,6 +212,7 @@ describe("Overview", () => {
     billingMocks.getBillingSummary.mockRejectedValue(
       new Error("billing unavailable"),
     );
+    pluginMocks.listPlugins.mockResolvedValue({ plugins: [] });
     localStorage.removeItem(OVERVIEW_LAYOUT_STORAGE_KEY);
     (
       globalThis as typeof globalThis & {
@@ -236,6 +244,8 @@ describe("Overview", () => {
     onManageServices: ReturnType<typeof vi.fn>;
     onManageTokens: ReturnType<typeof vi.fn>;
     onRestart: ReturnType<typeof vi.fn>;
+    onOpenPlugin: ReturnType<typeof vi.fn>;
+    onOpenPlugins: ReturnType<typeof vi.fn>;
   }> {
     const onOpenService = overrides.onOpenService
       ? vi.fn(overrides.onOpenService)
@@ -248,6 +258,8 @@ describe("Overview", () => {
     const onManageServices = vi.fn();
     const onManageTokens = vi.fn();
     const onRestart = vi.fn();
+    const onOpenPlugin = vi.fn();
+    const onOpenPlugins = vi.fn();
     await act(async () => {
       root.render(
         <Overview
@@ -265,6 +277,8 @@ describe("Overview", () => {
           onRefreshServices={() => undefined}
           onRefresh={() => undefined}
           onRestart={onRestart}
+          onOpenPlugin={onOpenPlugin}
+          onOpenPlugins={onOpenPlugins}
           onUsageRangeChange={onUsageRangeChange}
           snapshot={
             overrides.snapshot === undefined
@@ -291,6 +305,8 @@ describe("Overview", () => {
       onManageServices,
       onManageTokens,
       onRestart,
+      onOpenPlugin,
+      onOpenPlugins,
     };
   }
 
@@ -796,8 +812,152 @@ describe("Overview", () => {
     });
     expect(container.querySelector("#usage-heading")).toBeTruthy();
     expect(
-      container.querySelector("[data-slot='metric-group']")?.textContent,
+      container.querySelector("[data-testid='overview-star-map'] dl")
+        ?.textContent,
     ).toContain("12");
+  });
+
+  it("draws the busiest clients and models on the star map and merges the rest", async () => {
+    const names = [
+      "VS Code",
+      "Terminal",
+      "CI",
+      "Cursor",
+      "Codex",
+      "Zed",
+      "Vim",
+    ];
+    const tokenCatalog: AccessTokenCatalog = {
+      ...readyTokens,
+      items: names.map((name, index) => ({
+        id: `token_0${index + 1}`,
+        name,
+        hint: "astr_…",
+        created_at: "2026-07-24T10:30:00Z",
+      })),
+    };
+    const usage = (index: number) => ({
+      requests: 10 - index,
+      total_tokens: (10 - index) * 100,
+    });
+    const { onOpenRecords } = await renderOverview({
+      tokenCatalog,
+      usage: {
+        status: "ready",
+        summary: readySummary({
+          totals: { ...emptyUsageTotals(), requests: 49, total_tokens: 4900 },
+          by_token: names.map((_, index) =>
+            group(`token_0${index + 1}`, usage(index)),
+          ),
+          by_model: names.map((_, index) =>
+            group(`model-${index + 1}`, usage(index)),
+          ),
+        }),
+        error: null,
+      },
+    });
+    const map = container.querySelector(
+      "[data-testid='overview-star-map']",
+    ) as HTMLElement;
+    const marks = (prefix: string) =>
+      [...map.querySelectorAll<HTMLElement>(`[data-mark^='${prefix}']`)].map(
+        (mark) => mark.textContent ?? "",
+      );
+    // Five by name, the other two as one.
+    expect(marks("client:")).toHaveLength(6);
+    expect(marks("client:").join()).toContain("Codex");
+    expect(marks("client:").join()).not.toContain("Zed");
+    expect(marks("client:").some((text) => text.startsWith("其他"))).toBe(true);
+    expect(marks("model:")).toHaveLength(6);
+    expect(map.textContent).toContain(
+      "7 个客户端通过 AstrLink 完成 49 次请求，用到 7 个模型",
+    );
+    await act(async () =>
+      map
+        .querySelector<HTMLButtonElement>(
+          "[data-mark='client:token_02'] button",
+        )!
+        .click(),
+    );
+    expect(onOpenRecords).toHaveBeenLastCalledWith({ tokenId: "token_02" });
+    await act(async () =>
+      map
+        .querySelector<HTMLButtonElement>("[data-mark='model:model-1'] button")!
+        .click(),
+    );
+    expect(onOpenRecords).toHaveBeenLastCalledWith({ models: ["model-1"] });
+  });
+
+  it("puts the plugins beside the gateway with what they did over the range", async () => {
+    const plugin = (overrides: Partial<PluginSummary>): PluginSummary => ({
+      key: "memory",
+      name: "记忆",
+      version: "1.0.0",
+      source: "directory",
+      enabled: true,
+      state: "loaded",
+      requested_capabilities: [],
+      granted_capabilities: [],
+      needs_network: false,
+      kind: "extension",
+      ...overrides,
+    });
+    pluginMocks.listPlugins.mockResolvedValue({
+      plugins: [
+        plugin({}),
+        plugin({
+          key: "kling",
+          name: "可灵",
+          kind: "task",
+          requested_capabilities: ["provider"],
+        }),
+        plugin({ key: "rules", name: "规则", enabled: false }),
+      ],
+    });
+    const { onOpenPlugin, onOpenPlugins } = await renderOverview({
+      usage: {
+        status: "ready",
+        summary: readySummary({
+          totals: { ...emptyUsageTotals(), requests: 12, total_tokens: 900 },
+          by_plugin: [
+            {
+              plugin: "memory",
+              requests: 10,
+              failed_requests: 1,
+              tasks: 0,
+              failed_tasks: 0,
+            },
+            {
+              plugin: "kling",
+              requests: 0,
+              failed_requests: 0,
+              tasks: 3,
+              failed_tasks: 0,
+            },
+          ],
+        }),
+        error: null,
+      },
+    });
+    const map = container.querySelector(
+      "[data-testid='overview-star-map']",
+    ) as HTMLElement;
+    const pill = (key: string) =>
+      map.querySelector<HTMLButtonElement>(
+        `[data-mark='plugin:${key}'] button`,
+      )!;
+    expect(pill("memory").textContent).toContain("11 次");
+    expect(pill("kling").textContent).toContain("3 个任务");
+    expect(pill("rules").textContent).toContain("已停用");
+    expect(map.textContent).toContain("2 个插件在运行，1 个有问题");
+    await act(async () => pill("memory").click());
+    expect(onOpenPlugin).toHaveBeenCalledWith("memory");
+    await act(async () =>
+      [...map.querySelectorAll("button")]
+        .find((candidate) => candidate.textContent?.includes("查看插件"))!
+        .click(),
+    );
+    expect(onOpenPlugins).toHaveBeenCalled();
   });
 
   it("shows catalog and usage errors in the normal overview", async () => {
@@ -1790,8 +1950,9 @@ describe("Overview", () => {
     );
     expect(container.textContent).toContain("暂时无法加载用量趋势");
     expect(
-      container.querySelector("[data-slot='metric-group']")?.textContent,
+      container.querySelector("[data-testid='overview-star-map']")?.textContent,
     ).not.toContain("747");
+    expect(container.textContent).toContain("暂时无法加载用量");
     expect(container.querySelector("[data-testid='usage-day']")).toBeNull();
     expect(container.textContent).not.toContain("所选区间暂无请求");
     expect(container.textContent).not.toContain("1 个模型");

@@ -1,157 +1,166 @@
-import { useReducedMotion } from "motion/react";
-import {
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ComponentProps,
-  type ReactNode,
-} from "react";
+import { useEffect, useState } from "react";
 
 import astrlinkLogo from "@/assets/astrlink-logo.svg";
 import { HelpPopover } from "@/components/HelpPopover";
 import { Plus } from "@/components/icons";
-import { PluginIcon, pluginAvatar } from "@/components/PluginIcon";
-import { StatusDot, type StatusTone } from "@/components/StatusDot";
+import {
+  StarBody,
+  StarMark,
+  StarSphere,
+  StarStage,
+  bodySize,
+  type StageMark,
+  type StagePoint,
+  type StageRay,
+  type StageScene,
+} from "@/components/StarStage";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import { getUsageSummary } from "./bridge";
+import { formatExactNumber } from "./format-compact-number";
 import { useT } from "./i18n";
-import { offersProviders, pluginState, pluginTone } from "./PluginList";
+import {
+  pluginWork,
+  starPlugins,
+  type StarPlugin,
+} from "./overview-star-model";
 import type { PluginSummary } from "./plugin-model";
+import {
+  PluginStarDetail,
+  pluginStarColor,
+  pluginStarFact,
+} from "./PluginStarParts";
 import type { Service } from "./service-model";
+import { resolveUsageWindow, type UsageSummary } from "./usage-range";
 
-type Translate = ReturnType<typeof useT>;
 type Side = "left" | "right";
 
-// The map's geometry, in CSS pixels.
-/** A plugin's circle. */
-const NODE = 36;
-/** The gateway's circle. */
-const HUB = 64;
-/** A plugin's name and what it did, beside its circle. */
-const LABEL = 152;
-/** Between a circle and its label. */
-const GAP = 10;
-/** Between the plugins of a side, top to bottom: as much as the map's
- * height gives them, within these bounds; past them it scrolls. */
-const STEP = 56;
-const MIN_STEP = 40;
-const MARGIN = 20;
-/** The row of the sides' headings. */
-const HEADING = 36;
-/** The shortest and the longest line from the gateway to a side. */
-const MIN_REACH = 96;
-const MAX_REACH = 300;
-/** The size a map lays itself out at before it is measured, as in tests. */
-const UNMEASURED = { width: 960, height: 520 };
-
-interface Point {
-  x: number;
-  y: number;
-}
-
-/** A plugin, or the place an empty side offers one, on the map. */
-interface Star extends Point {
-  side: Side;
-  plugin?: PluginSummary;
-}
+// The system, in world units: AstrLink in the middle, the plugins that
+// enhance its requests on the left half of their orbit, those that connect it
+// to upstream providers on the right half.
+const WORLD = { width: 1400, height: 900 };
+const CENTER: StagePoint = { x: 700, y: 450 };
+const ORBIT = { rx: 560, ry: 400 };
+/** The arc each side's plugins spread over, in degrees, 90 nearest the viewer. */
+const ARCS: Record<Side, [number, number]> = {
+  left: [100, 260],
+  right: [-80, 80],
+};
+/** How far the plane leans back: less than the overview's, for the room a list of planets needs. */
+const TILT = 54;
+/** A plugin's planet on screen: the least, and the most for the busiest. */
+const PLANET = { least: 14, most: 32 };
+/** The planet with its name beside it, or over or under it at the back and the front. */
+const BODY = { width: 200, height: 38 };
+const STACKED = { width: 150, caption: 32 };
+const PILL = { width: 176, height: 28 };
+const STAR = { width: 72, height: 72 };
+/** The most moons a planet shows, and their sizes. */
+const MOONS = { most: 4, least: 4, largest: 7 };
+/** The headings over the map and the line under it. */
+const INSET = { top: 40, right: 12, bottom: 36, left: 12 };
 
 /**
- * Places a side's plugins on an arc around the gateway: evenly spaced top
- * to bottom, a few almost in a column, many bending round it like an orbit.
+ * Places along a side's arc, top to bottom on screen, each with where its
+ * name goes: away from the star, over a planet at the back, under one at
+ * the front, beside one at the side.
  */
-function orbit(
-  plugins: PluginSummary[],
+function sidePoints(
+  count: number,
   side: Side,
-  center: Point,
-  reach: number,
-  step: number,
-): Star[] {
-  const half = ((Math.max(plugins.length, 1) - 1) * step) / 2;
-  const radius = Math.max(half / 0.92, reach);
-  const place = (dy: number) => {
-    const dx = reach * Math.sqrt(Math.max(0, 1 - (dy / radius) ** 2));
-    return side === "left" ? center.x - dx : center.x + dx;
-  };
-  if (plugins.length === 0) return [{ side, x: place(0), y: center.y }];
-  return plugins.map((plugin, at) => {
-    const dy = at * step - half;
-    return { side, plugin, x: place(dy), y: center.y + dy };
-  });
+): Array<StagePoint & { caption: "above" | "below" | "before" | "after" }> {
+  const [from, to] = ARCS[side];
+  return (
+    Array.from({ length: count }, (_, index) => {
+      const degrees =
+        count === 1
+          ? (from + to) / 2
+          : from + ((to - from) * index) / (count - 1);
+      const angle = (degrees * Math.PI) / 180;
+      const toward = Math.sin(angle);
+      return {
+        x: CENTER.x + ORBIT.rx * Math.cos(angle),
+        y: CENTER.y + ORBIT.ry * toward,
+        caption:
+          toward < -0.6
+            ? ("above" as const)
+            : toward > 0.6
+              ? ("below" as const)
+              : side === "left"
+                ? ("before" as const)
+                : ("after" as const),
+      };
+    })
+      // The left arc runs from the front; both list from the back.
+      .sort((a, b) => a.y - b.y)
+  );
 }
 
-/** The whole of the arc a side's plugins sit on: half an orbit. */
-function orbitPath(
-  stars: Star[],
-  center: Point,
-  reach: number,
-  step: number,
-): string {
-  const half = ((stars.length - 1) * step) / 2;
-  const radius = Math.max(half / 0.92, reach);
-  const points: string[] = [];
-  for (let dy = -radius; dy <= radius + 0.5; dy += 4) {
-    const dx = reach * Math.sqrt(Math.max(0, 1 - (dy / radius) ** 2));
-    const x = stars[0].side === "left" ? center.x - dx : center.x + dx;
-    points.push(`${x.toFixed(1)},${(center.y + dy).toFixed(1)}`);
+/** A planet's box and the point of it on its place, by where its name goes. */
+function bodyBox(caption: "above" | "below" | "before" | "after") {
+  if (caption === "above" || caption === "below") {
+    const height = PLANET.most + 4 + STACKED.caption;
+    return {
+      box: { width: STACKED.width, height },
+      origin: {
+        x: STACKED.width / 2,
+        y: caption === "above" ? height - PLANET.most / 2 : PLANET.most / 2,
+      },
+    };
   }
-  return `M${points.join("L")}`;
-}
-
-/** A line from one circle's edge to another's. */
-function spoke(from: Point, to: Point, fromRadius: number, toRadius: number) {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const length = Math.hypot(dx, dy) || 1;
-  const ux = dx / length;
-  const uy = dy / length;
   return {
-    a: { x: from.x + ux * fromRadius, y: from.y + uy * fromRadius },
-    b: { x: to.x - ux * toRadius, y: to.y - uy * toRadius },
+    box: BODY,
+    origin: {
+      x: caption === "before" ? BODY.width - PLANET.most / 2 : PLANET.most / 2,
+      y: BODY.height / 2,
+    },
   };
 }
 
-function running(plugin: PluginSummary): boolean {
-  return plugin.state === "loaded" && plugin.enabled;
-}
-
-/** A plugin's status on the map: its state, amber while it keeps failing. */
-function starTone(plugin: PluginSummary): StatusTone {
-  if (running(plugin) && (plugin.failures ?? 0) > 0) return "pending";
-  return pluginTone(plugin);
-}
-
 /**
- * The line under a plugin's name: what it is doing, else its state. A
- * provider plugin says how many providers it runs, none until one is
- * added on the providers page.
+ * The plugins' last 30 days, read again whenever what they report changes:
+ * their state, or their counts since the gateway started. Undefined until
+ * the first read ends, null if it failed; a new read keeps the last.
  */
-function starFact(
-  plugin: PluginSummary,
-  bound: number | undefined,
-  t: Translate,
-): string {
-  if (!running(plugin)) return pluginState(plugin, t);
-  if (plugin.running_tasks)
-    return t("plugins.task.runningCount", { count: plugin.running_tasks });
-  if (bound !== undefined)
-    return bound > 0
-      ? t("plugins.map.providers", { count: bound })
-      : t("plugins.map.noProviders");
-  if (plugin.calls)
-    return t("plugins.metrics.callCount", { count: plugin.calls });
-  return pluginState(plugin, t);
+export function useRecentPluginUsage(
+  isReady: boolean,
+  plugins: readonly PluginSummary[],
+): UsageSummary | null | undefined {
+  const [usage, setUsage] = useState<UsageSummary | null>();
+  const revision = plugins
+    .map(
+      (plugin) =>
+        `${plugin.key}:${plugin.state}:${plugin.enabled}:${plugin.calls ?? 0}:${plugin.tasks ?? 0}`,
+    )
+    .join();
+  useEffect(() => {
+    if (!isReady) return;
+    let live = true;
+    getUsageSummary(resolveUsageWindow("30d", new Date()))
+      .then((summary) => {
+        if (live) setUsage(summary);
+      })
+      .catch(() => {
+        // The map shows the plugins without what it could not read.
+        if (live) setUsage(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [isReady, revision]);
+  return usage;
 }
 
 /**
- * The installed plugins as a star map: the gateway in the middle, the
- * plugins that enhance its requests on the left, where requests come in,
- * and those that connect it to upstream providers on the right. A line
- * that carries a signal is a plugin at work; a dashed one is off, a red one
- * did not load. A plugin opens from its star; the gateway opens the
- * settings of every plugin.
+ * The installed plugins as a star map: AstrLink as the star in the middle,
+ * the plugins as its planets, those that enhance its requests on the left,
+ * where requests come in, and those that connect it to upstream providers on
+ * the right, with the providers that run one as its moons. A planet is the
+ * larger the more it did over the last 30 days; sparks run to a plugin at
+ * work, amber marks one that failed over those days, grey one that is off.
+ * A plugin opens from its planet; the star opens the settings of every plugin.
  */
 export function PluginStarMap({
   plugins,
@@ -163,9 +172,11 @@ export function PluginStarMap({
   onHub,
   onAddEnhancer,
   onAddProvider,
+  onShowList,
+  usage,
 }: {
   plugins: PluginSummary[];
-  /** The providers, for how many each provider plugin runs. */
+  /** The providers, for the moons of each provider plugin. */
   services: Service[];
   /** Whether a plugin matches the search; the others fade. */
   matches?: (plugin: PluginSummary) => boolean;
@@ -176,236 +187,276 @@ export function PluginStarMap({
   onHub: () => void;
   onAddEnhancer?: () => void;
   onAddProvider?: () => void;
+  /** The list of every plugin, for a side with more than the map shows. */
+  onShowList: () => void;
+  /** The last 30 days, once read. */
+  usage?: UsageSummary | null;
 }) {
   const t = useT();
-  const reducedMotion = useReducedMotion();
-  const glow = `plugin-star-glow-${useId().replace(/[^A-Za-z0-9_-]/g, "")}`;
-  const viewport = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState(UNMEASURED);
-  const [active, setActive] = useState<string | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
+  const stars = starPlugins(
+    plugins,
+    usage?.by_plugin ?? [],
+    services,
+    usage?.by_service ?? [],
+  );
+  // The plugins keep the order they run in.
+  const sides: Record<Side, StarPlugin[]> = {
+    left: stars.filter((plugin) => plugin.side === "enhancer"),
+    right: stars.filter((plugin) => plugin.side === "provider"),
+  };
+  const busiest = Math.max(0, ...stars.map(pluginWork));
+  const served = new Map(
+    (usage?.by_service ?? []).map((group) => [
+      group.id,
+      group.requests + group.failed_requests,
+    ]),
+  );
+  const moonsOf = (plugin: StarPlugin, color: string) => {
+    const bound = services
+      .filter(
+        (service) =>
+          service.kind === "plugin" &&
+          service.plugin?.key === plugin.plugin.key,
+      )
+      .slice(0, MOONS.most);
+    const most = Math.max(
+      0,
+      ...bound.map((service) => served.get(service.id) ?? 0),
+    );
+    return bound.map((service) => ({
+      size: bodySize(served.get(service.id) ?? 0, most, {
+        least: MOONS.least,
+        most: MOONS.largest,
+      }),
+      color: `color-mix(in srgb, #fff 35%, ${color})`,
+    }));
+  };
+  const faded = (plugin: PluginSummary) =>
+    matches !== undefined && !matches(plugin);
+  const focusOf = (id: string, fade = false) => ({
+    focus:
+      focus === null
+        ? fade
+          ? ("dim" as const)
+          : undefined
+        : focus === id
+          ? ("lit" as const)
+          : ("dim" as const),
+    onBlur: () => setFocus(null),
+    onFocus: () => setFocus(id),
+    onMouseEnter: () => setFocus(id),
+    onMouseLeave: () => setFocus(null),
+  });
 
-  useLayoutEffect(() => {
-    const element = viewport.current;
-    if (!element || typeof ResizeObserver === "undefined") return;
-    const measure = () => {
-      const width = element.clientWidth;
-      const height = element.clientHeight;
-      // Hidden, as in a narrow window, it keeps its last size.
-      if (width > 0 && height > 0)
-        setSize((current) =>
-          current.width === width && current.height === height
-            ? current
-            : { width, height },
-        );
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
-  const enhancers = plugins.filter((plugin) => !offersProviders(plugin));
-  const providers = plugins.filter(offersProviders);
-  const tallest = Math.max(enhancers.length, providers.length, 1);
-  const step =
-    tallest > 1
-      ? Math.min(
-          STEP,
-          Math.max(
-            MIN_STEP,
-            (size.height - HEADING - MARGIN * 2 - NODE) / (tallest - 1),
+  // The plugins with at most `room` on a side, as a scene.
+  const sceneWith = (room: number): StageScene => {
+    const rays: StageRay[] = [];
+    const marks: StageMark[] = [];
+    const dimmed = (id: string) => focus !== null && focus !== id;
+    for (const side of ["left", "right"] as const) {
+      const listed = sides[side];
+      const shown =
+        listed.length > room ? listed.slice(0, Math.max(1, room - 1)) : listed;
+      const more = listed.length - shown.length;
+      const points = sidePoints(
+        Math.max(1, shown.length + (more > 0 ? 1 : 0)),
+        side,
+      );
+      // A pill at the planets' end of the box, toward the star.
+      const pillOrigin = {
+        x: side === "left" ? PILL.width - 8 : 8,
+        y: PILL.height / 2,
+      };
+      if (listed.length === 0) {
+        marks.push({
+          id: `add:${side}`,
+          at: points[0],
+          box: PILL,
+          origin: pillOrigin,
+          children: (
+            <span
+              className={cn(
+                "flex h-full items-center",
+                side === "left" ? "justify-end" : "justify-start",
+              )}
+            >
+              <AddMark
+                label={
+                  side === "left"
+                    ? t("plugins.map.addEnhancer")
+                    : t("plugins.map.addProvider")
+                }
+                onAdd={side === "left" ? onAddEnhancer : onAddProvider}
+                side={side}
+              />
+            </span>
           ),
-        )
-      : STEP;
-  const height = Math.max(
-    size.height,
-    HEADING + MARGIN * 2 + NODE + (tallest - 1) * step,
-  );
-  const center = { x: size.width / 2, y: HEADING + (height - HEADING) / 2 };
-  const reach = Math.max(
-    MIN_REACH,
-    Math.min(size.width / 2 - NODE / 2 - GAP - LABEL - MARGIN, MAX_REACH),
-  );
-  const left = orbit(enhancers, "left", center, reach, step);
-  const right = orbit(providers, "right", center, reach, step);
-  const stars = [...left, ...right];
-  const faded = (plugin?: PluginSummary) =>
-    plugin !== undefined && matches !== undefined && !matches(plugin);
-  // A provider plugin carries requests once a provider runs it.
-  const bound = (plugin: PluginSummary) =>
-    offersProviders(plugin)
-      ? services.filter(
-          (service) =>
-            service.kind === "plugin" && service.plugin?.key === plugin.key,
-        ).length
-      : undefined;
+        });
+        continue;
+      }
+      shown.forEach((plugin, index) => {
+        const at = points[index];
+        const id = `plugin:${plugin.plugin.key}`;
+        const color = pluginStarColor(plugin);
+        const live =
+          !paused && (plugin.state === "running" || plugin.state === "failing");
+        const fade = faded(plugin.plugin);
+        rays.push({
+          id,
+          to: at,
+          color,
+          sparks: live ? "out" : undefined,
+          dimmed: dimmed(id) || (focus === null && fade),
+        });
+        const size = bodySize(pluginWork(plugin), busiest, PLANET);
+        marks.push({
+          id,
+          at,
+          // The planet sits on its orbit; its name runs outward.
+          ...bodyBox(at.caption),
+          children: ({ toStar }) => (
+            <StarBody
+              aria-label={t("plugins.star.open", {
+                name: plugin.plugin.name,
+                fact: pluginStarFact(plugin, t),
+              })}
+              className="h-full"
+              data-faded={fade || undefined}
+              data-plugin-key={plugin.plugin.key}
+              data-side={side}
+              data-testid="plugin-star"
+              fact={
+                <span
+                  className={
+                    plugin.state === "failed" || plugin.state === "failing"
+                      ? "text-star-warn"
+                      : undefined
+                  }
+                >
+                  {pluginStarFact(plugin, t)}
+                </span>
+              }
+              captionAt={at.caption}
+              caption={plugin.plugin.name}
+              onClick={() => onOpen(plugin.plugin.key)}
+              sphere={
+                <span
+                  className="grid place-items-center"
+                  style={{ width: PLANET.most, height: PLANET.most }}
+                >
+                  <StarSphere
+                    color={color}
+                    moons={moonsOf(plugin, color)}
+                    quiet={plugin.state === "off"}
+                    size={size}
+                    toStar={toStar}
+                  />
+                </span>
+              }
+              {...focusOf(id, fade)}
+            />
+          ),
+        });
+      });
+      if (more > 0) {
+        const id = `more:${side}`;
+        marks.push({
+          id,
+          at: points[points.length - 1],
+          box: PILL,
+          origin: pillOrigin,
+          children: (
+            <span
+              className={cn(
+                "flex h-full items-center",
+                side === "left" ? "justify-end" : "justify-start",
+              )}
+            >
+              <StarMark
+                aria-label={t("plugins.star.showList")}
+                className="px-2.5 py-1 text-xs text-star-dim"
+                onClick={onShowList}
+                {...focusOf(id)}
+              >
+                {t("plugins.star.more", { count: more })}
+              </StarMark>
+            </span>
+          ),
+        });
+      }
+    }
+    const shownPlugin = stars.find(
+      (plugin) => `plugin:${plugin.plugin.key}` === focus,
+    );
+    return {
+      center: CENTER,
+      orbits: [ORBIT],
+      rays,
+      marks,
+      star: {
+        box: STAR,
+        tone: paused ? "var(--star-warn)" : undefined,
+        children: <Hub onOpen={onHub} paused={paused} />,
+      },
+      callout: shownPlugin
+        ? {
+            mark: `plugin:${shownPlugin.plugin.key}`,
+            children: <PluginStarDetail plugin={shownPlugin} />,
+          }
+        : undefined,
+      inset: INSET,
+    };
+  };
+
+  // Every plugin on a side, then one fewer, down to two and the rest.
+  function* scenes(): Generator<StageScene> {
+    const most = Math.max(sides.left.length, sides.right.length, 2);
+    for (let room = most; room >= 2; room -= 1) yield sceneWith(room);
+  }
+
+  const calls = stars.reduce((sum, plugin) => sum + plugin.calls, 0);
+  const tasks = stars.reduce((sum, plugin) => sum + plugin.tasks, 0);
 
   return (
-    <div
+    <StarStage
       aria-label={t("plugins.map.label")}
-      className={cn(
-        "relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain rounded-md border bg-card",
-        className,
-      )}
-      data-tab-scroller
+      className={cn("min-h-0 flex-1 rounded-md", className)}
       data-testid="plugin-star-map"
-      ref={viewport}
       role="group"
+      scene={scenes}
+      tilt={TILT}
+      world={WORLD}
     >
-      {/* A faint field of points, the map's sky. */}
-      <div
-        className="relative"
-        style={{
-          height,
-          backgroundImage:
-            "radial-gradient(circle, var(--border) 1px, transparent 1.25px)",
-          backgroundSize: "22px 22px",
-        }}
-      >
-        <svg
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0"
-          height={height}
-          width={size.width}
+      <SideHeading
+        align="left"
+        count={sides.left.length}
+        help={t("plugins.map.enhancersHelp")}
+        title={t("plugins.groups.extensions")}
+      />
+      <SideHeading
+        align="right"
+        count={sides.right.length}
+        help={t("plugins.map.providersHelp")}
+        title={t("plugins.groups.providers")}
+      />
+      {paused ? (
+        <Badge
+          className="absolute top-3 left-1/2 -translate-x-1/2 bg-warning-wash text-warning-foreground"
+          variant="secondary"
         >
-          <defs>
-            <radialGradient id={glow}>
-              <stop
-                offset="0%"
-                style={{ stopColor: "var(--primary)", stopOpacity: 0.14 }}
-              />
-              <stop
-                offset="100%"
-                style={{ stopColor: "var(--primary)", stopOpacity: 0 }}
-              />
-            </radialGradient>
-          </defs>
-          <circle
-            cx={center.x}
-            cy={center.y}
-            fill={`url(#${glow})`}
-            r={HUB * 1.8}
-          />
-          <circle
-            className="fill-none stroke-muted-foreground"
-            cx={center.x}
-            cy={center.y}
-            r={reach * 0.55}
-            strokeDasharray="1 6"
-            strokeLinecap="round"
-            strokeOpacity={0.3}
-          />
-          {[left, right].map((side) => (
-            <path
-              className="fill-none stroke-muted-foreground"
-              d={orbitPath(side, center, reach, step)}
-              key={side[0].side}
-              strokeDasharray="1 6"
-              strokeLinecap="round"
-              strokeOpacity={0.3}
-            />
-          ))}
-          {stars.map((star, index) => {
-            const { a, b } = spoke(center, star, HUB / 2 + 6, NODE / 2 + 4);
-            const plugin = star.plugin;
-            const on = plugin !== undefined && running(plugin) && !paused;
-            // A provider plugin no provider runs carries nothing yet.
-            const live = on && (bound(plugin) ?? 1) > 0;
-            const failed = plugin?.state === "failed";
-            const lit = plugin !== undefined && active === plugin.key;
-            // Requests come in on the left and go out on the right.
-            const route =
-              star.side === "left"
-                ? `M${b.x},${b.y}L${a.x},${a.y}`
-                : `M${a.x},${a.y}L${b.x},${b.y}`;
-            return (
-              <g
-                className={cn(
-                  "transition-opacity",
-                  (faded(plugin) || (active !== null && !lit)) && "opacity-30",
-                )}
-                key={plugin?.key ?? `add:${star.side}`}
-              >
-                <line
-                  className={cn(
-                    on
-                      ? "stroke-primary"
-                      : failed
-                        ? "stroke-destructive"
-                        : "stroke-muted-foreground",
-                  )}
-                  strokeDasharray={on ? undefined : "4 5"}
-                  strokeLinecap="round"
-                  strokeOpacity={on ? (lit ? 0.9 : live ? 0.45 : 0.25) : 0.45}
-                  strokeWidth={lit ? 2 : 1.25}
-                  x1={a.x}
-                  x2={b.x}
-                  y1={a.y}
-                  y2={b.y}
-                />
-                {live && !reducedMotion ? (
-                  // A new route is a new signal: browsers keep a running
-                  // motion on the path it started with.
-                  <circle className="fill-primary" key={route} r={2.5}>
-                    <animateMotion
-                      begin={`${(index % 6) * 0.45}s`}
-                      dur="2.8s"
-                      path={route}
-                      repeatCount="indefinite"
-                    />
-                    <animate
-                      attributeName="opacity"
-                      begin={`${(index % 6) * 0.45}s`}
-                      dur="2.8s"
-                      keyTimes="0;0.15;0.85;1"
-                      repeatCount="indefinite"
-                      values="0;1;1;0"
-                    />
-                  </circle>
-                ) : null}
-              </g>
-            );
+          {t("plugins.host.pausedShort")}
+        </Badge>
+      ) : null}
+      {usage ? (
+        <p className="absolute bottom-3 left-4 text-xs text-star-dim tabular-nums">
+          {t("plugins.star.window", {
+            requests: formatExactNumber(calls),
+            tasks: formatExactNumber(tasks),
           })}
-        </svg>
-        <SideHeading
-          align="left"
-          count={enhancers.length}
-          help={t("plugins.map.enhancersHelp")}
-          title={t("plugins.groups.extensions")}
-        />
-        <SideHeading
-          align="right"
-          count={providers.length}
-          help={t("plugins.map.providersHelp")}
-          title={t("plugins.groups.providers")}
-        />
-        <Hub center={center} onOpen={onHub} paused={paused} />
-        {stars.map((star) =>
-          star.plugin ? (
-            <PluginStar
-              bound={bound(star.plugin)}
-              faded={faded(star.plugin)}
-              key={star.plugin.key}
-              onActive={setActive}
-              onOpen={() => onOpen(star.plugin!.key)}
-              plugin={star.plugin}
-              star={star}
-            />
-          ) : (
-            <AddStar
-              key={`add:${star.side}`}
-              label={
-                star.side === "left"
-                  ? t("plugins.map.addEnhancer")
-                  : t("plugins.map.addProvider")
-              }
-              onAdd={star.side === "left" ? onAddEnhancer : onAddProvider}
-              star={star}
-            />
-          ),
-        )}
-      </div>
-    </div>
+        </p>
+      ) : null}
+    </StarStage>
   );
 }
 
@@ -425,200 +476,69 @@ function SideHeading({
   return (
     <div
       className={cn(
-        "absolute top-3 flex items-center gap-1.5 text-xs font-medium text-muted-foreground",
+        "absolute top-3 flex items-center gap-1.5 text-xs font-medium text-star-dim",
         align === "left" ? "left-4" : "right-4 flex-row-reverse",
       )}
     >
       <span className="flex items-center gap-1.5">
+        <span
+          aria-hidden="true"
+          className={cn(
+            "size-2 rounded-full",
+            align === "left" ? "bg-star-enhancer" : "bg-star-provider",
+          )}
+        />
         {title}
-        <Badge className="px-1.5 py-0 tabular-nums" variant="secondary">
-          {count}
-        </Badge>
+        <span className="text-star-ink tabular-nums">{count}</span>
       </span>
-      <HelpPopover label={t("plugins.map.helpLabel", { kind: title })}>
+      <HelpPopover
+        label={t("plugins.map.helpLabel", { kind: title })}
+        triggerClassName="text-star-dim hover:bg-star-surface hover:text-star-ink [&_svg]:text-current"
+      >
         <p>{help}</p>
       </HelpPopover>
     </div>
   );
 }
 
-/** The gateway: the logo, and whether requests pass the plugins. */
-function Hub({
-  center,
-  paused,
-  onOpen,
-}: {
-  center: Point;
-  paused: boolean;
-  onOpen: () => void;
-}) {
+/** The star: AstrLink's logo in its light, opening the plugins' settings. */
+function Hub({ paused, onOpen }: { paused: boolean; onOpen: () => void }) {
   const t = useT();
   return (
     <Button
       aria-label={t("plugins.host.open")}
-      className="group absolute h-auto -translate-x-1/2 flex-col gap-2 rounded-xl px-2 pt-0 pb-1 font-normal hover:bg-transparent"
+      className="size-full rounded-full p-0 hover:bg-transparent"
       data-testid="plugin-star-hub"
       onClick={onOpen}
-      style={{ left: center.x, top: center.y - HUB / 2 }}
+      title={paused ? t("plugins.host.pausedShort") : t("plugins.host.open")}
       type="button"
       variant="ghost"
     >
-      <span className="relative grid size-16 place-items-center rounded-full border bg-card shadow-sm transition-shadow group-hover:shadow-md">
-        <span
-          aria-hidden="true"
-          className={cn(
-            "absolute -inset-2 rounded-full",
-            paused ? "bg-warning/10" : "bg-primary/[0.06]",
-          )}
-        />
-        <img
-          alt=""
-          className="relative size-9"
-          draggable={false}
-          src={astrlinkLogo}
-        />
-      </span>
-      <span className="grid justify-items-center gap-0.5">
-        <span className="text-xs font-semibold text-foreground">AstrLink</span>
-        <span className="flex items-center gap-1 text-micro text-muted-foreground">
-          <StatusDot tone={paused ? "pending" : "positive"} />
-          {paused ? t("plugins.host.pausedShort") : t("plugins.map.hubRunning")}
-        </span>
-      </span>
+      <img alt="" className="size-10" draggable={false} src={astrlinkLogo} />
     </Button>
-  );
-}
-
-/** Where a star's circle sits: its label away from the gateway. */
-function starStyle(star: Star) {
-  return star.side === "left"
-    ? { left: star.x + NODE / 2, top: star.y - NODE / 2 }
-    : { left: star.x - NODE / 2, top: star.y - NODE / 2 };
-}
-
-function StarButton({
-  star,
-  faded = false,
-  children,
-  ...props
-}: Omit<ComponentProps<"button">, "style"> & {
-  star: Star;
-  faded?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <Button
-      className={cn(
-        "group absolute h-auto gap-2.5 rounded-lg p-0 font-normal transition-opacity hover:bg-transparent",
-        star.side === "left"
-          ? "-translate-x-full flex-row-reverse text-right"
-          : "text-left",
-        faded && "opacity-35",
-      )}
-      data-faded={faded || undefined}
-      data-side={star.side}
-      style={starStyle(star)}
-      type="button"
-      variant="ghost"
-      {...props}
-    >
-      {children}
-    </Button>
-  );
-}
-
-function PluginStar({
-  plugin,
-  star,
-  bound,
-  faded,
-  onOpen,
-  onActive,
-}: {
-  plugin: PluginSummary;
-  star: Star;
-  /** The providers that run a provider plugin. */
-  bound?: number;
-  faded: boolean;
-  onOpen: () => void;
-  onActive: (key: string | null) => void;
-}) {
-  const t = useT();
-  const tone = starTone(plugin);
-  const off = !running(plugin);
-  return (
-    <StarButton
-      data-plugin-key={plugin.key}
-      data-testid="plugin-star"
-      faded={faded}
-      onBlur={() => onActive(null)}
-      onClick={onOpen}
-      onFocus={() => onActive(plugin.key)}
-      onMouseEnter={() => onActive(plugin.key)}
-      onMouseLeave={() => onActive(null)}
-      star={star}
-    >
-      <span
-        className={cn(
-          "relative grid size-9 shrink-0 place-items-center rounded-full border bg-card shadow-xs transition-[border-color,box-shadow] group-hover:border-primary/40 group-hover:shadow-sm",
-          plugin.state === "failed" && "border-destructive/50",
-          off && plugin.state !== "failed" && "border-dashed",
-        )}
-      >
-        <PluginIcon
-          className={cn("size-5 rounded-sm", off && "opacity-55 grayscale")}
-          icon={plugin.icon}
-          label={pluginAvatar(plugin)}
-        />
-        <StatusDot
-          className="absolute right-0 bottom-0 size-2.5 ring-2 ring-card"
-          tone={tone}
-        />
-      </span>
-      <span className="grid w-38 min-w-0 gap-0.5">
-        <span className="truncate text-xs font-medium text-foreground">
-          {plugin.name}
-        </span>
-        <span
-          className={cn(
-            "truncate text-micro",
-            plugin.state === "failed"
-              ? "text-danger-foreground"
-              : plugin.running_tasks
-                ? "text-warning-foreground"
-                : "text-muted-foreground",
-          )}
-        >
-          {starFact(plugin, bound, t)}
-        </span>
-      </span>
-    </StarButton>
   );
 }
 
 /** The place of an empty side, which leads to where its plugins come from. */
-function AddStar({
-  star,
+function AddMark({
+  side,
   label,
   onAdd,
 }: {
-  star: Star;
+  side: Side;
   label: string;
   onAdd?: () => void;
 }) {
   return (
-    <StarButton
+    <StarMark
+      className="gap-1.5 border-dashed px-2.5 py-1 text-xs text-star-dim"
+      data-side={side}
       data-testid="plugin-star-add"
       disabled={!onAdd}
       onClick={onAdd}
-      star={star}
     >
-      <span className="grid size-9 shrink-0 place-items-center rounded-full border border-dashed bg-card/70 text-muted-foreground transition-colors group-hover:border-primary/40 group-hover:text-primary">
-        <Plus aria-hidden="true" className="size-4" />
-      </span>
-      <span className="w-38 truncate text-xs text-muted-foreground group-hover:text-foreground">
-        {label}
-      </span>
-    </StarButton>
+      <Plus aria-hidden="true" className="size-3.5" />
+      {label}
+    </StarMark>
   );
 }

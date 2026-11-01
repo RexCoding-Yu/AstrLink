@@ -27,6 +27,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { RefreshCw } from "@/components/icons";
 
+import { formatExactNumber } from "./format-compact-number";
 import { useT } from "./i18n";
 import { taskSurfaceLabels } from "./plugin-task-labels";
 import type {
@@ -35,6 +36,7 @@ import type {
   PluginLoadError,
   PluginSummary,
 } from "./plugin-model";
+import type { UsageSummary } from "./usage-range";
 
 type Translate = ReturnType<typeof useT>;
 
@@ -101,15 +103,39 @@ export function offersProviders(plugin: PluginSummary): boolean {
 
 /**
  * The band over the list: how many plugins are installed and running, the
- * calls they served since the gateway started, the tasks under way, and
- * the plugins in trouble.
+ * requests they handled over the last 30 days, the tasks under way, and the
+ * plugins in trouble: one that did not load, or a running one that failed
+ * over the same days. Should the days not be read, the calls and failures
+ * since the gateway started stand in.
  */
-export function PluginMetrics({ plugins }: { plugins: PluginSummary[] }) {
+export function PluginMetrics({
+  plugins,
+  recent,
+}: {
+  plugins: PluginSummary[];
+  /** The last 30 days: undefined while they are read, null if they could not be. */
+  recent?: Pick<UsageSummary, "by_plugin"> | null;
+}) {
   const t = useT();
   const running = plugins.filter(
     (plugin) => plugin.state === "loaded" && plugin.enabled,
   ).length;
-  const calls = plugins.reduce((sum, plugin) => sum + (plugin.calls ?? 0), 0);
+  const failedRecently = new Set(
+    (recent?.by_plugin ?? [])
+      .filter((group) => group.failed_requests + group.failed_tasks > 0)
+      .map((group) => group.plugin),
+  );
+  const calls =
+    recent === undefined
+      ? "—"
+      : formatExactNumber(
+          recent
+            ? recent.by_plugin.reduce(
+                (sum, group) => sum + group.requests + group.failed_requests,
+                0,
+              )
+            : plugins.reduce((sum, plugin) => sum + (plugin.calls ?? 0), 0),
+        );
   const tasks = plugins.reduce(
     (sum, plugin) => sum + (plugin.running_tasks ?? 0),
     0,
@@ -117,7 +143,8 @@ export function PluginMetrics({ plugins }: { plugins: PluginSummary[] }) {
   const problems = plugins.filter(
     (plugin) =>
       plugin.state === "failed" ||
-      (plugin.enabled && (plugin.failures ?? 0) > 0),
+      (plugin.enabled &&
+        (recent ? failedRecently.has(plugin.key) : (plugin.failures ?? 0) > 0)),
   ).length;
   return (
     <Panel
@@ -140,7 +167,11 @@ export function PluginMetrics({ plugins }: { plugins: PluginSummary[] }) {
         />
         <Metric
           className="@max-[639px]/workspace-surface:hidden"
-          label={t("plugins.metrics.calls")}
+          label={t(
+            recent === null
+              ? "plugins.metrics.calls"
+              : "plugins.metrics.recentCalls",
+          )}
           size="sm"
           value={calls}
         />

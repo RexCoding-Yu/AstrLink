@@ -32,6 +32,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getPluginMarket: vi.fn(),
   listPluginTasks: vi.fn(),
   clearPluginTasks: vi.fn(),
+  getUsageSummary: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -52,6 +53,7 @@ import {
   installDialogAnimations,
 } from "./lib/test-dialog-animations";
 import { settleClosedLayer } from "./lib/test-layer-settle";
+import { emptyUsageSummary, resolveUsageWindow } from "./usage-range";
 
 const memory: PluginDetail = {
   limits: [],
@@ -599,6 +601,7 @@ describe("PluginManager", () => {
     vi.clearAllMocks();
     removeAnimations = installDialogAnimations();
     bridgeMocks.listPlugins.mockResolvedValue(list);
+    bridgeMocks.getUsageSummary.mockRejectedValue(new Error("no usage"));
     bridgeMocks.getPluginCreditStars.mockResolvedValue({
       "https://github.com/oceanbase/powercontext": 1367,
     });
@@ -1996,6 +1999,50 @@ describe("PluginManager", () => {
       expect(document.querySelector('[data-testid="plugin-market"]')).not.toBe(
         null,
       );
+    });
+
+    it("lights each plugin with what it did over the last 30 days", async () => {
+      const summary = emptyUsageSummary(resolveUsageWindow("30d", new Date()));
+      summary.by_plugin = [
+        {
+          plugin: "powercontext",
+          requests: 40,
+          failed_requests: 2,
+          tasks: 0,
+          failed_tasks: 0,
+        },
+        {
+          plugin: "sora",
+          requests: 0,
+          failed_requests: 0,
+          tasks: 5,
+          failed_tasks: 0,
+        },
+      ];
+      bridgeMocks.getUsageSummary.mockResolvedValue(summary);
+      await renderMap(
+        [
+          { ...memory, enabled: true },
+          { ...sora, running_tasks: 0 },
+        ],
+        [soraService],
+      );
+      expect(bridgeMocks.getUsageSummary.mock.calls[0][0].preset).toBe("30d");
+      expect(stars()[0].textContent).toContain("42 次");
+      expect(stars()[1].textContent).toContain("5 个任务");
+      expect(
+        document.querySelector('[data-testid="plugin-star-map"]')?.textContent,
+      ).toContain("近 30 天：处理 42 次请求，生成 5 个任务");
+      // A planet is as large as its work, a task counting as ten requests;
+      // sparks run to each plugin at work.
+      const size = (key: string) =>
+        parseFloat(
+          document.querySelector<HTMLElement>(
+            `[data-plugin-key="${key}"] .star-stage-sphere`,
+          )!.style.width,
+        );
+      expect(size("sora")).toBeGreaterThan(size("powercontext"));
+      expect(document.querySelectorAll(".star-stage-spark")).toHaveLength(2);
     });
   });
 

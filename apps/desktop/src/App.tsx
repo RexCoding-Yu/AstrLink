@@ -123,7 +123,8 @@ type WorkspacePage =
       editGroup?: string;
     }
   | { kind: "agentTools"; preselectSkill?: AgentSkillId }
-  | { kind: "plugins" }
+  /** The plugins; `plugin` opens one, e.g. from the overview's star map. */
+  | { kind: "plugins"; plugin?: string }
   /** A page a plugin's interface registered, by its registration. */
   | { kind: "pluginPage"; entry: string }
   | { kind: "settings" }
@@ -1236,6 +1237,8 @@ export default function App() {
                   void refreshAccessTokens({ silent: true });
                 }}
                 onRestart={() => void handleRestart()}
+                onOpenPlugin={(plugin) => navigate({ kind: "plugins", plugin })}
+                onOpenPlugins={() => navigate({ kind: "plugins" })}
                 onUsageRangeChange={setUsageRange}
                 snapshot={snapshot}
                 tokenCatalog={tokenCatalog}
@@ -1316,6 +1319,7 @@ export default function App() {
               <PluginManager
                 coreSessionKey={coreSessionKey}
                 isReady={isReady}
+                open={page.plugin}
                 onAddProvider={(plugin) =>
                   navigate({ kind: "create", serviceKind: "plugin", plugin })
                 }

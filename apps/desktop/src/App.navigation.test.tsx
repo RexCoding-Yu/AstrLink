@@ -66,6 +66,7 @@ const bridgeMocks = vi.hoisted(() => ({
   listServices: vi.fn(),
   listPrivacyModelInstallations: vi.fn(),
   listPrivacyPolicies: vi.fn(),
+  listPlugins: vi.fn(async () => ({ plugins: [] })),
   listRequestRecords: vi.fn(),
   getUsageSummary: vi.fn(),
   listRequestSessions: vi.fn(),
@@ -558,6 +559,7 @@ describe("App workspace navigation", () => {
       by_service: [],
       by_model: [],
       by_token: [],
+      by_plugin: [],
       scanned_records: 0,
       capped: false,
     }));

@@ -4,6 +4,7 @@ import {
   emptyUsageTotals,
   type ServicePerformance,
   type UsageGroup,
+  type UsagePluginGroup,
   type UsageSummary,
   type UsageTotals,
   type UsageWindow,
@@ -76,6 +77,38 @@ function groupsAt(value: unknown): UsageGroup[] {
   });
 }
 
+const pluginKeys = [
+  "plugin",
+  "requests",
+  "failed_requests",
+  "tasks",
+  "failed_tasks",
+] as const;
+
+function pluginGroupsAt(value: unknown): UsagePluginGroup[] {
+  const seen = new Set<string>();
+  return arrayAt(value).map((value) => {
+    const object = objectAt(value, [...pluginKeys]);
+    const plugin = object.plugin;
+    if (
+      typeof plugin !== "string" ||
+      plugin.length === 0 ||
+      plugin.length > 32
+    ) {
+      throw new Error("Invalid usage summary plugin");
+    }
+    if (seen.has(plugin)) throw new Error("Duplicate usage summary plugin");
+    seen.add(plugin);
+    return {
+      plugin,
+      requests: count(object.requests),
+      failed_requests: count(object.failed_requests),
+      tasks: count(object.tasks),
+      failed_tasks: count(object.failed_tasks),
+    };
+  });
+}
+
 export function parseUsagePerformance(value: unknown): ServicePerformance {
   const object = objectAt(value, [
     "cache_hit_rate",
@@ -125,6 +158,7 @@ export function parseUsageSummary(
     "by_service",
     "by_model",
     "by_token",
+    "by_plugin",
     "scanned_records",
   ]);
   const summary = emptyUsageSummary(window);
@@ -147,6 +181,7 @@ export function parseUsageSummary(
   summary.by_service = groupsAt(object.by_service);
   summary.by_model = groupsAt(object.by_model);
   summary.by_token = groupsAt(object.by_token);
+  summary.by_plugin = pluginGroupsAt(object.by_plugin);
   const fill = (raw: unknown, hourly: boolean) => {
     const buckets = hourly ? summary.by_hour : summary.by_day;
     const keyOf = (date: unknown, hour: unknown) =>

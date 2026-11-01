@@ -384,6 +384,7 @@ describe("desktop bridge contract", () => {
       by_service: [],
       by_model: [],
       by_token: [],
+      by_plugin: [],
       scanned_records: 0,
     });
     const result = await getUsageSummary(window);
@@ -407,6 +408,7 @@ describe("desktop bridge contract", () => {
       by_service: [],
       by_model: [],
       by_token: [],
+      by_plugin: [],
       scanned_records: 0,
     };
     invokeMock.mockResolvedValue(empty);

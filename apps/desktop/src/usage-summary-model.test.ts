@@ -24,6 +24,15 @@ const response = {
   by_service: [{ id: null, ...totals }],
   by_model: [{ id: "model_a", ...totals }],
   by_token: [{ id: "token_a", ...totals }],
+  by_plugin: [
+    {
+      plugin: "memory",
+      requests: 4000,
+      failed_requests: 2,
+      tasks: 0,
+      failed_tasks: 0,
+    },
+  ],
   scanned_records: 5001,
 };
 
@@ -82,6 +91,7 @@ describe("usage summary contract", () => {
     expect(summary.status_counts).toEqual(statusCounts);
     expect(summary.scanned_records).toBe(5001);
     expect(summary.by_token).toEqual(response.by_token);
+    expect(summary.by_plugin).toEqual(response.by_plugin);
     expect(summary.capped).toBe(false);
     expect(summary.by_hour).toHaveLength(24);
     expect(summary.by_hour[9].total_tokens).toBe(10002);
@@ -104,6 +114,17 @@ describe("usage summary contract", () => {
     { ...response, by_day: [{ date: "2026-09-18", ...totals }] },
     { ...response, by_hour: [{ date, hour: 24, ...totals }] },
     { ...response, by_model: [...response.by_model, ...response.by_model] },
+    { ...response, by_plugin: undefined },
+    {
+      ...response,
+      by_plugin: [...response.by_plugin, ...response.by_plugin],
+    },
+    { ...response, by_plugin: [{ ...response.by_plugin[0], plugin: "" }] },
+    { ...response, by_plugin: [{ ...response.by_plugin[0], tasks: -1 }] },
+    {
+      ...response,
+      by_plugin: [{ ...response.by_plugin[0], requests: undefined }],
+    },
     { ...response, extra: true },
   ])("rejects malformed or inconsistent statistics", (value) => {
     expect(() => parseUsageSummary(value, window)).toThrow();

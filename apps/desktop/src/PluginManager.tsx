@@ -76,7 +76,7 @@ import {
   pluginState,
   pluginTone,
 } from "./PluginList";
-import { PluginStarMap } from "./PluginStarMap";
+import { PluginStarMap, useRecentPluginUsage } from "./PluginStarMap";
 import { PluginMarketView } from "./PluginMarket";
 import { TaskPluginOverview, TaskPluginTasks } from "./PluginTaskDetail";
 import {
@@ -173,10 +173,13 @@ export function PluginManager({
   services = [],
   onAddProvider,
   onOpenService,
+  open,
   visit,
 }: {
   coreSessionKey: string | null;
   isReady: boolean;
+  /** The plugin this visit opens, once the list has it. */
+  open?: string;
   /** The providers, for a task plugin's page to list those that run it. */
   services?: Service[];
   /** Opens the editor of a new provider of a plugin. */
@@ -195,9 +198,14 @@ export function PluginManager({
   const [listError, setListError] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // The plugin a visit opens waits for the list that holds it.
+  const opening = useRef<string | null>(null);
   // The sidebar's 插件 leads to the list, from a plugin's page too.
   useEffect(() => {
-    setSelectedKey(null);
+    opening.current = open ?? null;
+    setSelectedKey(open ?? null);
+    // A visit is a new page value; `open` comes with it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visit]);
   const [detail, setDetail] = useState<PluginDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -312,7 +320,8 @@ export function PluginManager({
 
   useEffect(() => {
     if (!isReady) return;
-    setSelectedKey(null);
+    setSelectedKey(opening.current);
+    opening.current = null;
     void loadList();
   }, [coreSessionKey, isReady, loadList]);
 
@@ -659,6 +668,7 @@ export function PluginManager({
 
   // The list shows the plugins in the order their extension points run.
   const plugins = orderedPlugins(list?.plugins ?? [], host?.order);
+  const recent = useRecentPluginUsage(isReady && list !== null, plugins);
   const shown = plugins.filter((plugin) => pluginMatches(plugin, query, t));
   const listed = plugins.find((plugin) => plugin.key === selectedKey) ?? null;
   // The page of a plugin shows it as its detail has it, once read.
@@ -894,7 +904,7 @@ export function PluginManager({
               value={listTab}
             >
               <div className="pb-3">
-                <PluginMetrics plugins={plugins} />
+                <PluginMetrics plugins={plugins} recent={recent} />
               </div>
               <div className="flex min-w-0 shrink-0 items-center gap-2 border-b">
                 <TabsList
@@ -1004,7 +1014,9 @@ export function PluginManager({
                         onAddProvider={() => setListTab("market")}
                         onHub={() => setHostOpen(true)}
                         onOpen={setSelectedKey}
+                        onShowList={() => setView("list")}
                         paused={host?.paused === true}
+                        usage={recent}
                         plugins={plugins}
                         services={services}
                       />

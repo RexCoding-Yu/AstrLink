@@ -12,18 +12,14 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
-  Activity,
   ArrowRight,
-  Boxes,
   Check,
-  CircleDollarSign,
   Copy,
   Plus,
   RefreshCw,
   RotateCcw,
   Settings,
   SlidersHorizontal,
-  SquareStack,
 } from "@/components/icons";
 
 import { ActionHint } from "@/components/ActionHint";
@@ -42,11 +38,11 @@ import { IconButton } from "@/components/IconButton";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { InferencePortNotice } from "@/components/InferencePortNotice";
 import { LoadingState } from "@/components/LoadingState";
-import { Metric, MetricGroup } from "@/components/Metric";
 import { ModelBrandIcon } from "@/components/ModelBrandIcon";
 import { Panel, PanelHeader } from "@/components/Panel";
 import { OrderedList } from "@/components/OrderedList";
 import { useOverviewLayout, type OverviewModuleId } from "./overview-layout";
+import { OverviewStarMap } from "./OverviewStarMap";
 import { PluginSlot } from "./plugin-ui";
 import { PaginatedList } from "@/components/PaginatedList";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -126,10 +122,8 @@ export interface ServiceCatalog {
   stale: boolean;
 }
 
-// Four equal tiles, as in the privacy statistics; secondary numbers go in a
-// tile's detail line so a long value never wraps the row.
-const USAGE_METRIC_GRID =
-  "gap-3 bg-transparent [&>div]:rounded-md [&>div]:border";
+/** The star map's height: wide enough a workspace gives it more. */
+const STAR_MAP_HEIGHT = "h-[clamp(24rem,42cqw,28rem)]";
 
 const USAGE_BREAKDOWN_HEADER = "min-h-14 flex-wrap items-center py-2";
 
@@ -165,6 +159,8 @@ export function Overview({
   onRefreshServices,
   onRefresh,
   onRestart,
+  onOpenPlugin,
+  onOpenPlugins,
   onUsageRangeChange,
   snapshot,
   tokenCatalog,
@@ -190,6 +186,9 @@ export function Overview({
   onRefreshServices: () => void;
   onRefresh: () => void;
   onRestart: () => void;
+  /** A plugin's page, from the star map. */
+  onOpenPlugin: (key: string) => void;
+  onOpenPlugins: () => void;
   onUsageRangeChange: (range: UsageRange) => void;
   snapshot: AppSnapshot | null;
   tokenCatalog: AccessTokenCatalog;
@@ -243,12 +242,6 @@ export function Overview({
   const inferenceURL = snapshot?.ready?.client_inference_url ?? "";
   const apiAddressLabel = t("overview.apiAddress");
   const apiCopied = copyState === "copied";
-  // A retained summary survives a failed refresh so the panel does not flash
-  // empty, but its numbers must not be presented as current.
-  const totals =
-    usage.status === "blocked" || usage.status === "error"
-      ? undefined
-      : summary?.totals;
   const serviceRows = mergeCatalogServiceUsage(
     catalog.items,
     summary?.by_service ?? [],
@@ -338,6 +331,7 @@ export function Overview({
                     : "overview.usageNote",
                 )}
               </p>
+              <p className="mt-2">{t("overview.star.help")}</p>
               <p className="mt-2">{t("overview.heatmapNote")}</p>
             </HelpPopover>
           </div>
@@ -382,50 +376,27 @@ export function Overview({
           <UsagePanelSkeleton />
         ) : (
           <div className="relative grid min-w-0 grid-cols-1 gap-3">
-            <MetricGroup className={USAGE_METRIC_GRID}>
-              <UsageMetric
-                icon={<Activity />}
-                label={t("overview.requests")}
-                metric={compactMetric(totals?.requests, usage.status)}
-              />
-              <UsageMetric
-                detail={
-                  totals && totals.input_tokens + totals.output_tokens > 0 ? (
-                    <TokenSplit
-                      input={totals.input_tokens}
-                      output={totals.output_tokens}
-                    />
-                  ) : undefined
-                }
-                icon={<Boxes />}
-                label={t("overview.totalTokens")}
-              >
-                <CompactCount
-                  value={usageCountValue(totals?.total_tokens, usage.status)}
-                />
-              </UsageMetric>
-              <UsageMetric
-                icon={<SquareStack />}
-                label={t("overview.cacheHits")}
-                metric={{
-                  text: cacheHitMetric(totals, usage.status),
-                  title: null,
-                }}
-              />
-              <UsageMetric
-                detail={
-                  billingSummary
-                    ? billingNoteText(t, billingSummary) || undefined
-                    : undefined
-                }
-                icon={<CircleDollarSign />}
-                label={t("pricing.officialAmount")}
-                metric={{
-                  text: billingSummary ? billingAmount(billingSummary) : "—",
-                  title: t("overview.costNote"),
-                }}
-              />
-            </MetricGroup>
+            <OverviewStarMap
+              billingAmountText={
+                billingSummary ? billingAmount(billingSummary) : "—"
+              }
+              billingTitle={[
+                t("overview.costNote"),
+                billingSummary ? billingNoteText(t, billingSummary) : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              className={STAR_MAP_HEIGHT}
+              costs={costs}
+              isReady={isReady}
+              onOpenPlugin={onOpenPlugin}
+              onOpenPlugins={onOpenPlugins}
+              onOpenRecords={onOpenRecords}
+              services={catalog.items}
+              status={usage.status}
+              summary={summary}
+              tokens={tokenCatalog.items}
+            />
             <Panel aria-labelledby="activity-heading">
               <h3 className="sr-only" id="activity-heading">
                 {t("overview.activity")}
@@ -1342,19 +1313,12 @@ function UsagePanelSkeleton() {
       data-slot="usage-skeleton"
       role="status"
     >
-      <MetricGroup className={USAGE_METRIC_GRID}>
-        {Array.from({ length: 4 }, (_, index) => (
-          <Metric
-            key={index}
-            label={
-              <span className="block h-4 w-12 animate-pulse rounded bg-muted motion-reduce:animate-none" />
-            }
-            value={
-              <span className="block h-7 w-20 animate-pulse rounded bg-muted motion-reduce:animate-none" />
-            }
-          />
-        ))}
-      </MetricGroup>
+      <div
+        className={cn(
+          "animate-pulse rounded-md bg-muted motion-reduce:animate-none",
+          STAR_MAP_HEIGHT,
+        )}
+      />
       <div className="px-4 py-3.5">
         <span className="block h-4 w-20 animate-pulse rounded bg-muted motion-reduce:animate-none" />
         <div className="mt-3 h-40 animate-pulse rounded-md bg-muted motion-reduce:animate-none" />
@@ -2431,13 +2395,17 @@ function tokenTotals(rows: Array<Pick<UsageGroup, "total_tokens">>) {
   return rows.map((row) => row.total_tokens);
 }
 
-/** What the range cost per API provider and per model, for the rows. */
+/** What the range cost per API provider, model and access token. */
 function breakdownCosts(billing: BillingSummary | null): {
   byService: ReadonlyMap<string, BillingAmounts>;
   byModel: ReadonlyMap<string, BillingAmounts>;
+  byToken: ReadonlyMap<string, BillingAmounts>;
 } {
   const byService = new Map(
     (billing?.by_service ?? []).map((row) => [row.service_id, row]),
+  );
+  const byToken = new Map(
+    (billing?.by_token ?? []).map((row) => [row.token_id, row]),
   );
   // Usage lists a model once; billing lists it once per official provider
   // that priced it, so those listings are added up for the row.
@@ -2460,7 +2428,7 @@ function breakdownCosts(billing: BillingSummary | null): {
         : row,
     );
   }
-  return { byService, byModel };
+  return { byService, byModel, byToken };
 }
 
 function UsageBreakdownRow({
@@ -2521,48 +2489,6 @@ function UsageBreakdownRow({
   );
 }
 
-function UsageMetric({
-  children,
-  detail,
-  label,
-  metric,
-  icon,
-}: {
-  children?: ReactNode;
-  detail?: ReactNode;
-  label: string;
-  icon?: ReactNode;
-  metric?: CompactMetric;
-}) {
-  return (
-    <Metric
-      detail={detail}
-      icon={icon}
-      label={label}
-      title={metric?.title ?? undefined}
-      value={children ?? metric?.text}
-    />
-  );
-}
-
-/**
- * Input and output under the total. A narrow tile stacks them, and the
- * clipped box hides the separator that would start the second line.
- */
-function TokenSplit({ input, output }: { input: number; output: number }) {
-  const t = useT();
-  return (
-    <span className="flex flex-wrap gap-x-3 overflow-hidden">
-      <span className="whitespace-nowrap">
-        {t("overview.input")} <CompactCount value={input} />
-      </span>
-      <span className="relative whitespace-nowrap before:absolute before:-left-2 before:content-['·']">
-        {t("overview.output")} <CompactCount value={output} />
-      </span>
-    </span>
-  );
-}
-
 function OverviewCount({
   label,
   unknown,
@@ -2611,14 +2537,6 @@ function compactMetric(
   const text = formatCompactNumber(value);
   const exact = formatExactNumber(value);
   return { text, title: exact === text ? null : exact };
-}
-
-function cacheHitMetric(
-  totals: UsageTotals | undefined,
-  status: UsageStatus,
-): string {
-  if (!totals || status === "blocked" || status === "error") return "—";
-  return formatCacheHitPercent(totals);
 }
 
 const dayFormats = new Map<string, Intl.DateTimeFormat>();
