@@ -4232,6 +4232,22 @@ components:
           description: Output tokens divided by total generation seconds for streaming requests with positive output and valid latency and TTFT. Each generation duration is max(latency - TTFT, 500 ms).
         cache_samples: { type: integer, minimum: 0 }
         speed_samples: { type: integer, minimum: 0 }
+    UsagePluginGroup:
+      type: object
+      additionalProperties: false
+      description: >-
+        One plugin's part in the window. requests counts the root inference
+        requests of the totals its hooks acted on without failing and
+        failed_requests those where one of its calls failed; a request the
+        plugin only skipped counts in neither. tasks counts the tasks its
+        providers took in the window and failed_tasks those that failed.
+      required: [plugin, requests, failed_requests, tasks, failed_tasks]
+      properties:
+        plugin: { type: string, minLength: 1, maxLength: 32 }
+        requests: { type: integer, minimum: 0 }
+        failed_requests: { type: integer, minimum: 0 }
+        tasks: { type: integer, minimum: 0 }
+        failed_tasks: { type: integer, minimum: 0 }
     UsageSummary:
       type: object
       additionalProperties: false
@@ -4244,6 +4260,7 @@ components:
           by_service,
           by_model,
           by_token,
+          by_plugin,
           scanned_records,
         ]
       properties:
@@ -4267,6 +4284,10 @@ components:
         by_token:
           type: array
           items: { $ref: "#/components/schemas/UsageGroup" }
+        by_plugin:
+          type: array
+          description: Plugins by requests and failed_requests, then tasks.
+          items: { $ref: "#/components/schemas/UsagePluginGroup" }
         scanned_records: { type: integer, minimum: 0 }
     PrivacyTotals:
       type: object

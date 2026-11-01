@@ -71,14 +71,28 @@ type UsageTimeBucket struct {
 	UsageTotals
 }
 
+// UsagePluginGroup is one plugin's part in the window. Requests counts the
+// requests of Totals its hooks acted on without failing and FailedRequests
+// those where one of its calls failed; a request the plugin only skipped
+// counts in neither. Tasks counts the tasks its providers took in the window
+// and FailedTasks those that failed.
+type UsagePluginGroup struct {
+	Plugin         string `json:"plugin"`
+	Requests       int64  `json:"requests"`
+	FailedRequests int64  `json:"failed_requests"`
+	Tasks          int64  `json:"tasks"`
+	FailedTasks    int64  `json:"failed_tasks"`
+}
+
 // UsageSummary contains sparse calendar buckets; clients can pad empty periods.
 type UsageSummary struct {
-	Totals         UsageTotals       `json:"totals"`
-	StatusCounts   UsageStatusCounts `json:"status_counts"`
-	ByDay          []UsageTimeBucket `json:"by_day"`
-	ByHour         []UsageTimeBucket `json:"by_hour"`
-	ByService      []UsageGroup      `json:"by_service"`
-	ByModel        []UsageGroup      `json:"by_model"`
-	ByToken        []UsageGroup      `json:"by_token"`
-	ScannedRecords int64             `json:"scanned_records"`
+	Totals         UsageTotals        `json:"totals"`
+	StatusCounts   UsageStatusCounts  `json:"status_counts"`
+	ByDay          []UsageTimeBucket  `json:"by_day"`
+	ByHour         []UsageTimeBucket  `json:"by_hour"`
+	ByService      []UsageGroup       `json:"by_service"`
+	ByModel        []UsageGroup       `json:"by_model"`
+	ByToken        []UsageGroup       `json:"by_token"`
+	ByPlugin       []UsagePluginGroup `json:"by_plugin"`
+	ScannedRecords int64              `json:"scanned_records"`
 }

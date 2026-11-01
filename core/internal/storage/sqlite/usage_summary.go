@@ -26,6 +26,7 @@ func getUsageSummary(ctx context.Context, reader historyReader, options storage.
 	result := storage.UsageSummary{
 		ByDay: []storage.UsageTimeBucket{}, ByHour: []storage.UsageTimeBucket{},
 		ByService: []storage.UsageGroup{}, ByModel: []storage.UsageGroup{}, ByToken: []storage.UsageGroup{},
+		ByPlugin: []storage.UsagePluginGroup{},
 	}
 	zone, err := options.Validate()
 	if err != nil {
@@ -44,12 +45,13 @@ func getUsageSummary(ctx context.Context, reader historyReader, options storage.
 	// request or a failure; they only add to StatusCounts. This matches the
 	// desktop, where a recorded "blocked" is its own outcome rather than a
 	// failure, and where a legacy row stored as succeeded with a 4xx/5xx
-	// counts as failed.
+	// counts as failed. The plugin records are read here, not with SQLite's
+	// JSON functions, which take several times as long as the whole scan.
 	rows, err := reader.QueryContext(ctx, `SELECT started_at, status, http_status,
     service_id, COALESCE(
         NULLIF(json_extract(NULLIF(recovery_json, ''), '$.upstream_model'), ''),
         NULLIF(json_extract(NULLIF(model_redirect_json, ''), '$.to'), ''),
-        requested_model), local_access_token_id, usage_json, latency_ms
+        requested_model), local_access_token_id, usage_json, latency_ms, plugin_records_json
 FROM request_records
 WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
   AND input_protocol NOT IN (?, ?)`,
@@ -63,11 +65,14 @@ WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
 	services, models, tokens := map[string]*storage.UsageGroup{}, map[string]*storage.UsageGroup{}, map[string]*storage.UsageGroup{}
 	performance := map[string]*servicePerformance{}
 	tokenPerformance := map[string]*servicePerformance{}
+	plugins := map[string]*storage.UsagePluginGroup{}
+	var outcomes []pluginOutcome
 	var startedAt, status string
 	var httpStatus, latency sql.NullInt64
 	var service, model, localAccessTokenID, usageJSON sql.NullString
+	var pluginRecords []byte
 	for rows.Next() {
-		if err := rows.Scan(&startedAt, &status, &httpStatus, &service, &model, &localAccessTokenID, &usageJSON, &latency); err != nil {
+		if err := rows.Scan(&startedAt, &status, &httpStatus, &service, &model, &localAccessTokenID, &usageJSON, &latency, &pluginRecords); err != nil {
 			return result, fmt.Errorf("scan usage summary: %w", err)
 		}
 		switch contract.RequestStatus(status) {
@@ -119,6 +124,12 @@ WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
 		}
 
 		result.ScannedRecords++
+		// Records the summary cannot read are left out, as in the plugin
+		// statistics.
+		var readable bool
+		if outcomes, readable = readPluginOutcomes(pluginRecords, outcomes[:0]); readable {
+			countPluginOutcomes(plugins, outcomes)
+		}
 		// The same definition the desktop shows per call: an explicit failure,
 		// or a call stored as succeeded that came back 4xx/5xx. A failure
 		// consumes no tokens and is not a request here, so it only ever adds to
@@ -185,6 +196,50 @@ WHERE parent_request_id IS NULL AND started_at >= ? AND started_at < ?
 	result.ByService = sortedUsageGroups(services)
 	result.ByModel = sortedUsageGroups(models)
 	result.ByToken = sortedUsageGroups(tokens)
+	if result.ByPlugin, err = pluginUsage(ctx, reader, options, plugins); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// pluginUsage adds the tasks each plugin took in the window to the requests
+// it acted on, and sorts the plugins by how much they did.
+func pluginUsage(ctx context.Context, reader historyReader, options storage.UsageSummaryOptions, plugins map[string]*storage.UsagePluginGroup) ([]storage.UsagePluginGroup, error) {
+	rows, err := reader.QueryContext(ctx, `SELECT plugin_key, COUNT(*), SUM(status = ?) FROM plugin_tasks
+WHERE created_at >= ? AND created_at < ? GROUP BY plugin_key`,
+		contract.PluginTaskFailure, formatTaskTime(options.From), formatTaskTime(options.To))
+	if err != nil {
+		return nil, fmt.Errorf("query plugin task usage: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var plugin string
+		var tasks, failed int64
+		if err := rows.Scan(&plugin, &tasks, &failed); err != nil {
+			return nil, fmt.Errorf("scan plugin task usage: %w", err)
+		}
+		if plugins[plugin] == nil {
+			plugins[plugin] = &storage.UsagePluginGroup{Plugin: plugin}
+		}
+		plugins[plugin].Tasks, plugins[plugin].FailedTasks = tasks, failed
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read plugin task usage: %w", err)
+	}
+	result := make([]storage.UsagePluginGroup, 0, len(plugins))
+	for _, group := range plugins {
+		result = append(result, *group)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		a, b := result[i], result[j]
+		if calls, other := a.Requests+a.FailedRequests, b.Requests+b.FailedRequests; calls != other {
+			return calls > other
+		}
+		if a.Tasks != b.Tasks {
+			return a.Tasks > b.Tasks
+		}
+		return a.Plugin < b.Plugin
+	})
 	return result, nil
 }
 
