@@ -335,6 +335,12 @@ export interface PluginMarketEntry {
   link: string;
   /** The version installed now. */
   installed?: string;
+  /**
+   * Parts of the newest version AstrLink does not run yet: new-api's
+   * provider and request processing parts. Such a plugin cannot be
+   * installed.
+   */
+  unsupported?: string[];
 }
 
 /** What a plugin marketplace offers. */
@@ -1273,6 +1279,7 @@ export function parsePluginMarket(value: unknown): PluginMarket {
         routes: parseTaskRoutes(entry.routes, `${at}.routes`),
         link: plugin.string(entry.link, `${at}.link`),
         installed: plugin.optionalString(entry.installed, `${at}.installed`),
+        unsupported: optionalStrings(entry.unsupported, `${at}.unsupported`),
       });
     }),
   };

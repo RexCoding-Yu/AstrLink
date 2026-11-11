@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -195,6 +196,19 @@ func (engine *Engine) ServeContent(ctx context.Context, writer http.ResponseWrit
 		if err != nil {
 			return err
 		}
+		if len(desc.ContentPath) > 0 {
+			path, err := contentPath(desc.ContentPath)
+			if err != nil {
+				return err
+			}
+			// The bytes are a value of the reply, so the client's range
+			// and validators do not go with the request.
+			response, err := call.send(ctx, "buildContentRequest", desc, http.Header{})
+			if err != nil {
+				return err
+			}
+			return serveInlineContent(writer, method, response, path, desc.MimeType)
+		}
 		headers := client
 		if !desc.Credentialless {
 			// The plugin's own headers carry the key; the client's
@@ -231,6 +245,106 @@ func (engine *Engine) ServeContent(ctx context.Context, writer http.ResponseWrit
 		return err
 	}
 	return relayContent(writer, response, artifact)
+}
+
+// maxInlineContent bounds the reply of a long-running operation that holds
+// an artifact in base64, which is read whole: four thirds of a 64 MiB
+// artifact, as new-api's default MAX_FILE_DOWNLOAD_MB, and 1 MiB.
+const maxInlineContent = (64<<20)/3*4 + 1<<20
+
+// contentPath reads a contentPath: string keys and non-negative integer
+// indices, at most 32 of them.
+func contentPath(raw []json.RawMessage) ([]any, error) {
+	if len(raw) > 32 {
+		return nil, failure(http.StatusBadGateway, "plugin_error", "buildContentRequest returned a contentPath of more than 32 segments")
+	}
+	path := make([]any, 0, len(raw))
+	for _, segment := range raw {
+		var key string
+		if json.Unmarshal(segment, &key) == nil {
+			path = append(path, key)
+			continue
+		}
+		var index int
+		if json.Unmarshal(segment, &index) != nil || index < 0 {
+			return nil, failure(http.StatusBadGateway, "plugin_error", "buildContentRequest returned a contentPath segment that is neither a key nor an index")
+		}
+		path = append(path, index)
+	}
+	return path, nil
+}
+
+// serveInlineContent serves the artifact a long-running operation holds in
+// base64 at path, as new-api does: an error member answers 502, an
+// operation not yet done 409 and a missing value 410. Other statuses are
+// read as any download's.
+func serveInlineContent(writer http.ResponseWriter, method string, response *http.Response, path []any, mediaType string) error {
+	if response.StatusCode != http.StatusOK {
+		return relayContent(writer, response, &Artifact{})
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxInlineContent+1))
+	if err != nil {
+		return &Error{Status: http.StatusBadGateway, Code: "artifact_upstream_error", Message: "the artifact could not be read"}
+	}
+	if len(body) > maxInlineContent {
+		return &Error{Status: http.StatusBadGateway, Code: "artifact_request_rejected", Message: "the artifact is too large"}
+	}
+	var operation map[string]any
+	if json.Unmarshal(body, &operation) != nil {
+		return &Error{Status: http.StatusBadGateway, Code: "artifact_upstream_error", Message: "the operation is not JSON"}
+	}
+	if failed, ok := operation["error"]; ok && failed != nil {
+		message := "the operation failed"
+		if detail, ok := failed.(map[string]any); ok {
+			if text, ok := detail["message"].(string); ok && text != "" {
+				message = text
+			}
+		}
+		return &Error{Status: http.StatusBadGateway, Code: "artifact_upstream_error", Message: message}
+	}
+	if operation["done"] != true && operation["status"] != "completed" {
+		return &Error{Status: http.StatusConflict, Code: "artifact_not_ready", Message: "the operation has not finished"}
+	}
+	var value any = operation
+	for _, segment := range path {
+		switch key := segment.(type) {
+		case string:
+			object, _ := value.(map[string]any)
+			value = object[key]
+		case int:
+			array, _ := value.([]any)
+			if key >= len(array) {
+				value = nil
+			} else {
+				value = array[key]
+			}
+		}
+	}
+	encoded, _ := value.(string)
+	if encoded == "" {
+		return &Error{Status: http.StatusGone, Code: "artifact_gone", Message: "the operation no longer holds the artifact"}
+	}
+	var content []byte
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
+		if content, err = encoding.DecodeString(encoded); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return &Error{Status: http.StatusBadGateway, Code: "artifact_upstream_error", Message: "the artifact is not base64"}
+	}
+	if mediaType == "" {
+		mediaType = "video/mp4"
+	}
+	header := writer.Header()
+	header.Set("Content-Type", mediaType)
+	header.Set("Content-Length", strconv.Itoa(len(content)))
+	writer.WriteHeader(http.StatusOK)
+	if method != http.MethodHead {
+		_, _ = writer.Write(content)
+	}
+	return nil
 }
 
 // relayContent passes a download back to the client: its status, the

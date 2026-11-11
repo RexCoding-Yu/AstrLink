@@ -22,7 +22,10 @@ type Route struct {
 	Render      string
 	Models      []string
 	Retain      bool
-	segments    []string
+	// Vendor marks the vendor's own path, which yields to a route of the
+	// gateway's; the copy under /{key} never does.
+	Vendor   bool
+	segments []string
 }
 
 // routeIndex is the native routes of one generation of plugins.
@@ -105,17 +108,23 @@ func (engine *Engine) nativeRoutes() []Route {
 			continue
 		}
 		for _, route := range found.Task().Routes {
-			shape := route.Method + " " + strings.ToLower(normalizedShape(route.Path))
-			if owner, taken := shapes[shape]; taken {
-				engine.logf("task plugin %s: the route %s %s is %s's", found.Key, route.Method, route.Path, owner)
-				continue
+			for index, path := range plugin.TaskRoutePaths(found.Key, route.Path) {
+				shape := route.Method + " " + strings.ToLower(normalizedShape(path))
+				if owner, taken := shapes[shape]; taken {
+					// A copy under /{key} that the plugin declares as well
+					// is that route.
+					if owner != found.Key {
+						engine.logf("task plugin %s: the route %s %s is %s's", found.Key, route.Method, path, owner)
+					}
+					continue
+				}
+				shapes[shape] = found.Key
+				indexed = append(indexed, Route{
+					Plugin: found.Key, Method: route.Method, Path: path, Type: route.Type, Action: route.Action,
+					TaskIDParam: route.TaskIDName(), Decode: route.Decode, Render: route.Render, Models: route.Models,
+					Retain: route.Retains(), Vendor: index == 0, segments: strings.Split(strings.Trim(path, "/"), "/"),
+				})
 			}
-			shapes[shape] = found.Key
-			indexed = append(indexed, Route{
-				Plugin: found.Key, Method: route.Method, Path: route.Path, Type: route.Type, Action: route.Action,
-				TaskIDParam: route.TaskIDName(), Decode: route.Decode, Render: route.Render, Models: route.Models,
-				Retain: route.Retains(), segments: strings.Split(strings.Trim(route.Path, "/"), "/"),
-			})
 		}
 	}
 	engine.routes = &routeIndex{generation: generation, routes: indexed}
@@ -133,14 +142,20 @@ func normalizedShape(path string) string {
 }
 
 // MatchRoute finds the native route a request's method and path take, and
-// the path's parameters.
-func (engine *Engine) MatchRoute(method, path string) (Route, map[string]string, bool) {
+// the path's parameters: of the routes that match, the one with the most
+// fixed segments. A vendor's path the gateway answers itself, as gateway
+// says, is served under /{key} alone.
+func (engine *Engine) MatchRoute(method, path string, gateway func(method, path string) bool) (Route, map[string]string, bool) {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
+	var best Route
+	var bestParams map[string]string
+	fixed := -1
 	for _, route := range engine.nativeRoutes() {
 		if route.Method != method || len(route.segments) != len(segments) {
 			continue
 		}
 		params := map[string]string{}
+		literal := 0
 		matched := true
 		for index, segment := range route.segments {
 			switch {
@@ -151,8 +166,36 @@ func (engine *Engine) MatchRoute(method, path string) (Route, map[string]string,
 				params[segment[1:]] = segments[index]
 			case segment != segments[index]:
 				matched = false
+			default:
+				literal++
 			}
 			if !matched {
+				break
+			}
+		}
+		if !matched || literal <= fixed || route.Vendor && gateway != nil && gateway(method, path) {
+			continue
+		}
+		best, bestParams, fixed = route, params, literal
+	}
+	return best, bestParams, fixed >= 0
+}
+
+// QueryRoute finds the plugin's query route that answers method and path,
+// for a task the gateway's own route has found.
+func (engine *Engine) QueryRoute(pluginKey, method, path string) (Route, map[string]string, bool) {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for _, route := range engine.nativeRoutes() {
+		if route.Plugin != pluginKey || route.Type != "query" || !route.Vendor || route.Method != method || len(route.segments) != len(segments) {
+			continue
+		}
+		params := map[string]string{}
+		matched := true
+		for index, segment := range route.segments {
+			if strings.HasPrefix(segment, ":") {
+				params[segment[1:]] = segments[index]
+			} else if segment != segments[index] {
+				matched = false
 				break
 			}
 		}

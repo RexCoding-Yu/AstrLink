@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -220,9 +219,6 @@ func (engine *Engine) Submit(ctx context.Context, submission Submission, candida
 	}
 	if !meta.Has("json-order@1") {
 		submission.Intent.RequestBody = sortedJSON(submission.Intent.RequestBody)
-	}
-	if err := checkDurations(submission.Intent.RequestBody, meta.Has("duration-auto@1")); err != nil {
-		return nil, err
 	}
 	origins, pinned, err := engine.originTasks(ctx, submission, meta)
 	if err != nil {
@@ -551,56 +547,4 @@ func (engine *Engine) applyResult(task *storage.PluginTask, result taskResult, d
 		task.FinishedAt, task.NextPollAt = now, time.Time{}
 	}
 	task.UpdatedAt = now
-}
-
-// checkDurations refuses a length the gateway would not bill: every
-// duration or seconds member of a request, at any depth, between 0 and
-// 3600 seconds, or -1, the model's choice, for a plugin that settles on what
-// the vendor reports.
-func checkDurations(raw json.RawMessage, auto bool) error {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if decoder.Decode(&value) != nil {
-		return nil
-	}
-	normalize := strings.NewReplacer("_", "", "-", "")
-	var walk func(value any) error
-	walk = func(value any) error {
-		switch typed := value.(type) {
-		case map[string]any:
-			for key, member := range typed {
-				switch normalize.Replace(strings.ToLower(key)) {
-				case "duration", "seconds", "durationseconds":
-					var number float64
-					var err error
-					switch scalar := member.(type) {
-					case json.Number:
-						number, err = scalar.Float64()
-					case string:
-						number, err = strconv.ParseFloat(strings.TrimSpace(scalar), 64)
-					default:
-						err = errors.New("not a number")
-					}
-					if err == nil && !(number >= 0 && number <= 3600) && !(auto && number == -1) {
-						return failure(http.StatusBadRequest, "invalid_request", "%s must be between 0 and 3600 seconds", key)
-					}
-				}
-				if err := walk(member); err != nil {
-					return err
-				}
-			}
-		case []any:
-			for _, item := range typed {
-				if err := walk(item); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	return walk(value)
 }

@@ -6137,7 +6137,15 @@
       "installVersion": "Install this version",
       "fewerModels": "Show fewer",
       "moreModels_one": "{{count}} more",
-      "moreModels_other": "{{count}} more"
+      "moreModels_other": "{{count}} more",
+      "incompatible": "Not compatible",
+      "incompatibleReason": "Needs new-api's {{parts}}, which AstrLink does not run yet.",
+      "parts": {
+        "provider": "provider part",
+        "transform": "request processing part",
+        "other": "{{part}} part"
+      },
+      "partSeparator": ", "
     },
     "task": {
       "protocols": {

@@ -79,9 +79,31 @@ function newer(candidate: string, current: string): boolean {
 /** What the card's button does for an entry: install, update, or nothing. */
 function entryState(
   entry: PluginMarketEntry,
-): "install" | "update" | "installed" {
+): "install" | "update" | "installed" | "incompatible" {
+  if (entry.unsupported?.length) return "incompatible";
   if (!entry.installed) return "install";
   return newer(entry.latest, entry.installed) ? "update" : "installed";
+}
+
+/** Why AstrLink cannot install an entry: the new-api parts it needs. */
+function incompatibleReason(
+  entry: PluginMarketEntry,
+  t: ReturnType<typeof useT>,
+): string {
+  return t("plugins.market.incompatibleReason", {
+    parts: (entry.unsupported ?? [])
+      .map((part) =>
+        t(
+          part === "provider"
+            ? "plugins.market.parts.provider"
+            : part === "transform"
+              ? "plugins.market.parts.transform"
+              : "plugins.market.parts.other",
+          { part },
+        ),
+      )
+      .join(t("plugins.market.partSeparator")),
+  });
 }
 
 /**
@@ -310,6 +332,16 @@ function EntryAction({
     return (
       <StatusBadge className="shrink-0" tone="positive">
         {t("plugins.market.installed")}
+      </StatusBadge>
+    );
+  if (state === "incompatible")
+    return (
+      <StatusBadge
+        className="shrink-0"
+        title={incompatibleReason(entry, t)}
+        tone="neutral"
+      >
+        {t("plugins.market.incompatible")}
       </StatusBadge>
     );
   return (
@@ -553,7 +585,8 @@ function MarketEntryDialog({
                         </span>
                       ) : null}
                     </span>
-                    {version.version !== entry.installed ? (
+                    {version.version !== entry.installed &&
+                    state !== "incompatible" ? (
                       <Button
                         onClick={() => onInstall(version.link)}
                         size="xs"
@@ -581,7 +614,15 @@ function MarketEntryDialog({
           <Button onClick={onClose} size="sm" type="button" variant="outline">
             {t("common.close")}
           </Button>
-          {state !== "installed" ? (
+          {state === "incompatible" ? (
+            <StatusBadge
+              className="self-center"
+              title={incompatibleReason(entry, t)}
+              tone="neutral"
+            >
+              {t("plugins.market.incompatible")}
+            </StatusBadge>
+          ) : state !== "installed" ? (
             <Button
               onClick={() => onInstall(entry.link)}
               size="sm"

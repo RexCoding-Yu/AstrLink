@@ -98,6 +98,12 @@ func (handler *Handler) serveTasks(writer http.ResponseWriter, request *http.Req
 		return false
 	}
 	path := request.URL.Path
+	// A plugin's native route comes first, unless the gateway answers the
+	// vendor's path itself; the route is then served under /{key} alone.
+	if route, params, ok := handler.tasks.MatchRoute(request.Method, path, gatewayAnswers); ok {
+		handler.serveNativeRoute(writer, request, route, params)
+		return true
+	}
 	switch {
 	case path == "/v1/videos":
 		if request.Method != http.MethodPost {
@@ -133,12 +139,42 @@ func (handler *Handler) serveTasks(writer http.ResponseWriter, request *http.Req
 		handler.serveTaskAPI(writer, request, strings.Split(strings.TrimPrefix(path, "/v1/tasks/"), "/"))
 		return true
 	}
-	route, params, ok := handler.tasks.MatchRoute(request.Method, path)
-	if !ok {
+	return false
+}
+
+// taskSurfaceNative is the surface of a task a native route or /v1/tasks
+// took.
+const taskSurfaceNative = "native"
+
+// gatewayAnswers reports whether a route of the gateway's own answers
+// method and path, ahead of a task plugin's route on the vendor's path. A
+// task id segment takes only a gateway task id, as new-api's do, so
+// GET /v1/videos/text2video/:id stays a plugin's beside the gateway's
+// GET /v1/videos/:id/content.
+func gatewayAnswers(method, path string) bool {
+	if _, _, ok := matchProtocolRoute(path); ok {
+		return true
+	}
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) < 2 || segments[0] != "v1" {
 		return false
 	}
-	handler.serveNativeRoute(writer, request, route, params)
-	return true
+	switch {
+	case segments[1] == "videos" && len(segments) == 2:
+		return method == http.MethodPost
+	case segments[1] == "videos" && len(segments) >= 3 && taskplugin.ValidTaskID(segments[2]):
+		switch {
+		case len(segments) == 3:
+			return method == http.MethodGet
+		case len(segments) == 4 && segments[3] == "content":
+			return method == http.MethodGet || method == http.MethodHead
+		case len(segments) == 4 && segments[3] == "remix":
+			return method == http.MethodPost
+		}
+	case segments[1] == "responses" && len(segments) == 3:
+		return method == http.MethodGet && taskplugin.ValidTaskID(segments[2])
+	}
+	return false
 }
 
 // readTaskBody reads a task request's body up to maxTaskBody, and leaves
@@ -413,7 +449,7 @@ func (handler *Handler) runTaskProtocol(writer http.ResponseWriter, request *htt
 		return
 	}
 	decodeRequest := taskplugin.Request{
-		Method: request.Method, Path: request.URL.Path, Query: request.URL.Query(), Body: current.body,
+		Method: request.Method, Path: request.URL.Path, Query: request.URL.Query(), Headers: request.Header, Body: current.body,
 		Protocol: protocol, Operation: operation, Model: model, Stream: stream,
 	}
 	decode := func(pluginKey string) (taskplugin.Intent, error) {
@@ -710,13 +746,22 @@ func (handler *Handler) serveVideo(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		task, err := handler.tasks.Task(request.Context(), id, ownerOf(request))
+		// A task its plugin's native route took is answered as that
+		// plugin's query route at this path answers, as xAI's
+		// GET /v1/videos/:request_id does.
+		if err == nil && task.Surface == taskSurfaceNative && !strings.HasPrefix(task.Operation, "POST /v1/tasks/") {
+			if route, params, ok := handler.tasks.QueryRoute(task.PluginKey, request.Method, request.URL.Path); ok {
+				handler.serveNativeRoute(writer, request, route, params)
+				return
+			}
+		}
 		if err != nil || task.Surface != plugin.TaskProtocolVideo {
 			writeTaskError(writer, &taskplugin.Error{Status: http.StatusNotFound, Code: "video_not_found", Message: "no video " + id})
 			return
 		}
 		rendered, err := handler.tasks.RenderVideo(request.Context(), task, taskplugin.Request{
 			Method: request.Method, Path: request.URL.Path, Params: map[string]string{"task_id": id}, Query: request.URL.Query(),
-			Protocol: plugin.TaskProtocolVideo, Operation: "retrieve", Model: task.Model,
+			Headers: request.Header, Protocol: plugin.TaskProtocolVideo, Operation: "retrieve", Model: task.Model,
 		})
 		if err != nil {
 			writeTaskError(writer, err)
@@ -784,7 +829,7 @@ func (handler *Handler) remixVideo(writer http.ResponseWriter, request *http.Req
 		current.fail(err)
 		return
 	}
-	current.answerVideo(submitted.Task, taskplugin.Request{Method: request.Method, Path: request.URL.Path, Params: map[string]string{"video_id": id}, Body: current.body, Protocol: plugin.TaskProtocolVideo, Operation: "remix", Model: origin.Model})
+	current.answerVideo(submitted.Task, taskplugin.Request{Method: request.Method, Path: request.URL.Path, Params: map[string]string{"video_id": id}, Headers: request.Header, Body: current.body, Protocol: plugin.TaskProtocolVideo, Operation: "remix", Model: origin.Model})
 }
 
 // retrieveResponse serves GET /v1/responses/:id for a response a task
@@ -797,7 +842,7 @@ func (handler *Handler) retrieveResponse(writer http.ResponseWriter, request *ht
 	}
 	rendered, err := handler.tasks.RenderResponse(request.Context(), task, taskplugin.Request{
 		Method: request.Method, Path: request.URL.Path, Params: map[string]string{"response_id": id}, Query: request.URL.Query(),
-		Protocol: plugin.TaskProtocolResponses, Operation: "retrieve", Model: task.Model,
+		Headers: request.Header, Protocol: plugin.TaskProtocolResponses, Operation: "retrieve", Model: task.Model,
 	}, handler.artifactLinks(request, task))
 	if err != nil {
 		writeTaskError(writer, err)
@@ -891,7 +936,7 @@ func (handler *Handler) submitTaskIntent(writer http.ResponseWriter, request *ht
 	decode := func(string) (taskplugin.Intent, error) {
 		return taskplugin.Intent{Kind: "submit", Model: intent.Model, Action: intent.Action, RequestBody: intent.RequestBody, OriginTaskIDs: intent.OriginTaskIDs}, nil
 	}
-	submitted, err := current.submit(candidates, "native", "POST /v1/tasks/"+pluginKey, decode, true, nil)
+	submitted, err := current.submit(candidates, taskSurfaceNative, "POST /v1/tasks/"+pluginKey, decode, true, nil)
 	if err != nil {
 		current.fail(err)
 		return
@@ -904,20 +949,34 @@ func (handler *Handler) submitTaskIntent(writer http.ResponseWriter, request *ht
 // a query of tasks, or a dynamic route that decodes into either.
 func (handler *Handler) serveNativeRoute(writer http.ResponseWriter, request *http.Request, route taskplugin.Route, params map[string]string) {
 	ctx := request.Context()
-	native := taskplugin.Request{Method: request.Method, Path: request.URL.Path, Params: params, Query: request.URL.Query()}
+	native := taskplugin.Request{Method: request.Method, Path: request.URL.Path, Params: params, Query: request.URL.Query(), Headers: request.Header}
 	answerError := func(writer http.ResponseWriter, err error) {
 		var known *taskplugin.Error
 		if !errors.As(err, &known) {
 			known = &taskplugin.Error{Status: http.StatusBadGateway, Code: "task_failed", Message: err.Error()}
 		}
-		if rendered, ok := handler.tasks.NativeError(ctx, route.Plugin, native, known); ok {
-			writeTaskJSON(writer, known.Status, rendered)
+		if rendered, ok := handler.tasks.NativeError(ctx, route.Plugin, native, known); ok && writeNativeReply(writer, known.Status, rendered) == nil {
 			return
 		}
 		writeTaskError(writer, known)
 	}
+	// answer writes a presenter's reply; a reply wrapper that breaks the
+	// rules fails the presenter.
+	answer := func(writer http.ResponseWriter, rendered json.RawMessage) error {
+		if err := writeNativeReply(writer, http.StatusOK, rendered); err != nil {
+			answerError(writer, &taskplugin.Error{Status: http.StatusInternalServerError, Code: "plugin_error", Message: err.Error()})
+			return err
+		}
+		return nil
+	}
 	if route.Type == "query" {
-		id := params[route.TaskIDParam]
+		// The task id is the path parameter or, when the path has none,
+		// the query-string parameter, as MiniMax's
+		// GET /v1/query/video_generation?task_id= reads it.
+		id, inPath := params[route.TaskIDParam]
+		if !inPath {
+			id = request.URL.Query().Get(route.TaskIDParam)
+		}
 		task, err := handler.tasks.Task(ctx, id, ownerOf(request))
 		if err == nil && task.PluginKey != route.Plugin {
 			err = &taskplugin.Error{Status: http.StatusNotFound, Code: "task_not_found", Message: "no task " + id}
@@ -926,12 +985,12 @@ func (handler *Handler) serveNativeRoute(writer http.ResponseWriter, request *ht
 			answerError(writer, err)
 			return
 		}
-		rendered, err := handler.tasks.Present(ctx, route.Plugin, route.Render, native, []storage.PluginTask{task}, false, nil)
+		rendered, err := handler.tasks.Present(ctx, route.Plugin, route.Render, native, []storage.PluginTask{task}, false, nil, handler.artifactLinks(request, task))
 		if err != nil {
 			answerError(writer, err)
 			return
 		}
-		writeTaskJSON(writer, http.StatusOK, rendered)
+		_ = answer(writer, rendered)
 		return
 	}
 	if _, err := readTaskBody(request); err != nil {
@@ -966,12 +1025,12 @@ func (handler *Handler) serveNativeRoute(writer http.ResponseWriter, request *ht
 				tasks = append(tasks, task)
 			}
 		}
-		rendered, err := handler.tasks.Present(ctx, route.Plugin, route.Render, native, tasks, true, nil)
+		rendered, err := handler.tasks.Present(ctx, route.Plugin, route.Render, native, tasks, true, nil, handler.artifactLinks(request, storage.PluginTask{}))
 		if err != nil {
 			answerError(writer, err)
 			return
 		}
-		writeTaskJSON(writer, http.StatusOK, rendered)
+		_ = answer(writer, rendered)
 		return
 	}
 	current, finish := handler.startTaskRecord(writer, request, contract.ProtocolPluginNative, intent.Model, false)
@@ -994,7 +1053,7 @@ func (handler *Handler) serveNativeRoute(writer http.ResponseWriter, request *ht
 		intent.Action = route.Action
 	}
 	decode := func(string) (taskplugin.Intent, error) { return intent, nil }
-	submitted, err := current.submit(candidates, "native", route.Method+" "+route.Path, decode, route.Retain, nil)
+	submitted, err := current.submit(candidates, taskSurfaceNative, route.Method+" "+route.Path, decode, route.Retain, nil)
 	if err != nil {
 		var known *taskplugin.Error
 		if !errors.As(err, &known) {
@@ -1004,12 +1063,57 @@ func (handler *Handler) serveNativeRoute(writer http.ResponseWriter, request *ht
 		current.session.noteFailed(errorSummaryFromInference(known.Code, known.Message, known.Retryable))
 		return
 	}
-	rendered, err := handler.tasks.Present(ctx, route.Plugin, route.Render, native, []storage.PluginTask{submitted.Task}, false, submitted.Data)
+	rendered, err := handler.tasks.Present(ctx, route.Plugin, route.Render, native, []storage.PluginTask{submitted.Task}, false, submitted.Data, nil)
 	if err != nil {
 		answerError(current.writer, err)
 		current.session.noteFailed(errorSummaryFromInference("plugin_error", err.Error(), false))
 		return
 	}
-	writeTaskJSON(current.writer, http.StatusOK, rendered)
+	if err := answer(current.writer, rendered); err != nil {
+		current.session.noteFailed(errorSummaryFromInference("plugin_error", err.Error(), false))
+		return
+	}
 	current.session.noteSucceeded()
+}
+
+// writeNativeReply writes what a native presenter returned: its JSON as the
+// body of a reply of status, or a reply wrapper's own status, Location and
+// Retry-After and body, as new-api reads {__status, __headers, __body}. A
+// wrapper without __body has no body. It writes nothing for a wrapper that
+// breaks the rules.
+func writeNativeReply(writer http.ResponseWriter, status int, rendered json.RawMessage) error {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(rendered, &members) != nil || members["__status"] == nil {
+		writeTaskJSON(writer, status, rendered)
+		return nil
+	}
+	var reply struct {
+		Status  int               `json:"__status"`
+		Headers map[string]string `json:"__headers"`
+	}
+	for name := range members {
+		if name != "__status" && name != "__headers" && name != "__body" {
+			return fmt.Errorf("a reply wrapper has no member %s", name)
+		}
+	}
+	if err := json.Unmarshal(rendered, &reply); err != nil || reply.Status < 200 || reply.Status > 599 {
+		return errors.New("a reply wrapper's __status is a status from 200 to 599")
+	}
+	for name := range reply.Headers {
+		if name != "Location" && name != "Retry-After" {
+			return fmt.Errorf("a reply wrapper sets Location and Retry-After, not %s", name)
+		}
+	}
+	header := writer.Header()
+	for name, value := range reply.Headers {
+		header.Set(name, value)
+	}
+	body, ok := members["__body"]
+	if !ok {
+		header.Set("Cache-Control", "no-store")
+		writer.WriteHeader(reply.Status)
+		return nil
+	}
+	writeTaskJSON(writer, reply.Status, body)
+	return nil
 }

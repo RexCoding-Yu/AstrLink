@@ -6137,7 +6137,15 @@
       "installVersion": "安装这个版本",
       "fewerModels": "收起",
       "moreModels_one": "还有 {{count}} 个",
-      "moreModels_other": "还有 {{count}} 个"
+      "moreModels_other": "还有 {{count}} 个",
+      "incompatible": "不兼容",
+      "incompatibleReason": "需要 new-api 的{{parts}}，AstrLink 还不能运行。",
+      "parts": {
+        "provider": "提供商插件",
+        "transform": "请求处理插件",
+        "other": "{{part}}"
+      },
+      "partSeparator": "、"
     },
     "task": {
       "protocols": {

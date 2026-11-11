@@ -246,6 +246,8 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 		return invalid("meta.key %q must be a lowercase letter followed by up to 29 lowercase letters, digits or hyphens", meta.Key)
 	case key != "" && meta.Key != key:
 		return invalid("meta.key %q does not match the plugin directory %q", meta.Key, key)
+	case slices.Contains(reservedTaskKeys, meta.Key):
+		return invalid("meta.key %q is a path of the gateway; its routes could not be served under /%s", meta.Key, meta.Key)
 	case strings.TrimSpace(meta.Name) == "" || utf8.RuneCountInString(meta.Name) > 128:
 		return invalid("meta.name must be 1 to 128 characters")
 	case utf8.RuneCountInString(meta.Icon) > 128 || strings.HasPrefix(meta.Icon, "data:") || strings.Contains(meta.Icon, "://"):
@@ -345,7 +347,7 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 			return invalid("%s.method must be GET, POST, PUT, PATCH or DELETE", where)
 		}
 		if !strings.HasPrefix(route.Path, "/") || strings.HasPrefix(route.Path, "/:") || reservedTaskRoute(route.Path) {
-			return invalid("%s.path %q must start with a fixed segment and stay off the gateway's own paths", where, route.Path)
+			return invalid("%s.path %q must start with a fixed segment and stay out of %s", where, route.Path, strings.Join(reservedTaskPaths, ", "))
 		}
 		for _, segment := range strings.Split(strings.Trim(route.Path, "/"), "/") {
 			if strings.HasPrefix(segment, ":") && !routeParamPattern.MatchString(segment) {
@@ -364,9 +366,8 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 			if route.Decode != "" || len(route.Models) > 0 || route.RetainResult != nil {
 				return invalid("%s: a query route takes no decode, models or retainResult", where)
 			}
-			if !strings.Contains(route.Path, ":"+route.TaskIDName()) {
-				return invalid("%s.path does not hold :%s", where, route.TaskIDName())
-			}
+			// The task id is the path parameter of that name or, when the
+			// path has none, the query-string parameter.
 		default:
 			return invalid("%s.type must be submit, query or dynamic", where)
 		}
@@ -429,12 +430,27 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 }
 
 // reservedTaskPaths are the paths of the inference port, with what lies
-// below them, that a native route may not take: the gateway's own, and /api,
-// which new-api keeps for itself.
-var reservedTaskPaths = []string{
-	"/api", "/astrlink", "/plugins", "/tools", "/control", "/v1beta/models",
-	"/v1/responses", "/v1/videos", "/v1/tasks", "/v1/images", "/v1/models", "/v1/chat", "/v1/completions",
-	"/v1/messages", "/v1/embeddings", "/v1/rerank", "/v1/alpha",
+// below them, that no native route may take: the gateway's own pages and
+// plugin endpoints, and the task API. A route on another path the gateway
+// answers, such as /v1/chat/completions, is still declared; it is served
+// under /{key} alone.
+var reservedTaskPaths = []string{"/v1/tasks", "/assets", "/astrlink", "/console", "/control", "/plugins", "/tools"}
+
+// reservedTaskKeys are the keys a task plugin may not have, as its routes
+// are also served under /{key}: the first segments of the gateway's paths,
+// and api, which new-api keeps.
+var reservedTaskKeys = []string{"api", "v1", "v1beta", "assets", "astrlink", "console", "control", "plugins", "tools"}
+
+// TaskRoutePaths are the addresses of a native route of the plugin key: the
+// vendor's path and the same under /{key}, unless its first segment is the
+// key or a proper prefix of it (alibaba's /ali/..., sunoapi's /suno/...),
+// which is already the plugin's own address.
+func TaskRoutePaths(key, path string) []string {
+	first, _, _ := strings.Cut(strings.TrimPrefix(path, "/"), "/")
+	if first != "" && !strings.HasPrefix(first, ":") && strings.HasPrefix(key, strings.ToLower(first)) {
+		return []string{path}
+	}
+	return []string{path, "/" + key + path}
 }
 
 func reservedTaskRoute(path string) bool {

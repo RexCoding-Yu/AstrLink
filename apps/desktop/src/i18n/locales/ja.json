@@ -6137,7 +6137,15 @@
       "installVersion": "このバージョンをインストール",
       "fewerModels": "折りたたむ",
       "moreModels_one": "ほか {{count}} 個",
-      "moreModels_other": "ほか {{count}} 個"
+      "moreModels_other": "ほか {{count}} 個",
+      "incompatible": "非対応",
+      "incompatibleReason": "new-api の{{parts}}が必要ですが、AstrLink ではまだ実行できません。",
+      "parts": {
+        "provider": "プロバイダー部分",
+        "transform": "リクエスト処理部分",
+        "other": "{{part}}"
+      },
+      "partSeparator": "、"
     },
     "task": {
       "protocols": {

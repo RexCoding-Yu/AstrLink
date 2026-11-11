@@ -143,8 +143,22 @@ describe("plugin model", () => {
           link: "https://example.com/index.json#sora@1.1.0",
           installed: "1.0.0",
         },
+        {
+          key: "relay",
+          name: "Relay",
+          latest: "1.0.0",
+          versions: [
+            { version: "1.0.0", link: "https://example.com/index.json#relay" },
+          ],
+          models: [],
+          protocols: [],
+          routes: [],
+          link: "https://example.com/index.json#relay@1.0.0",
+          unsupported: ["provider", "transform"],
+        },
       ],
     });
+    expect(market.plugins[1].unsupported).toEqual(["provider", "transform"]);
     expect(market.plugins[0]).toMatchObject({
       latest: "1.1.0",
       installed: "1.0.0",

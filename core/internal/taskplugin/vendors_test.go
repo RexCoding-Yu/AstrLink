@@ -106,15 +106,17 @@ func TestAlibabaInterleavedImagesBuildTheirAnswerFromEvents(t *testing.T) {
 	h := newHarness(t, handler, "alibaba")
 	service := h.provider("alibaba", "sk-ali", "wan2.6-image")
 	ctx := context.Background()
+	// Interleaved output streams when the client asks DashScope for it.
+	sse := http.Header{"X-Dashscope-Sse": {"enable"}}
 	request := Request{
-		Method: http.MethodPost, Path: "/ali/api/v1/services/aigc/multimodal-generation/generation",
+		Method: http.MethodPost, Path: "/ali/api/v1/services/aigc/multimodal-generation/generation", Headers: sse,
 		Body: jsonBody(`{"model":"wan2.6-image","input":{"messages":[{"role":"user","content":[{"text":"draw a fox and say something"}]}]},"parameters":{"enable_interleave":true}}`),
 	}
 	intent, err := h.engine.Decode(ctx, "alibaba", "native.createImageTask", request)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	done, err := h.engine.Submit(ctx, Submission{PluginKey: "alibaba", Surface: "native", Operation: request.Path, Intent: intent, Owner: "tok", Retain: false}, []Candidate{{Service: service}})
+	done, err := h.engine.Submit(ctx, Submission{PluginKey: "alibaba", Surface: "native", Operation: request.Path, Intent: intent, RequestHeaders: sse, Owner: "tok", Retain: false}, []Candidate{{Service: service}})
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -140,7 +142,7 @@ func TestAlibabaInterleavedImagesBuildTheirAnswerFromEvents(t *testing.T) {
 	if built.RequestID != "r2" || !built.Output.Finished || len(content) != 2 || content[0]["text"] != "Here it is" || content[1]["image"] != "https://cdn.example/fox.png" {
 		t.Fatalf("built = %s", done.Data)
 	}
-	presented, err := h.engine.Present(ctx, "alibaba", "imageCreated", request, []storage.PluginTask{done.Task}, false, done.Data)
+	presented, err := h.engine.Present(ctx, "alibaba", "imageCreated", request, []storage.PluginTask{done.Task}, false, done.Data, nil)
 	if err != nil || !strings.Contains(string(presented), "Here it is") {
 		t.Fatalf("Present = %s, %v", presented, err)
 	}
@@ -260,41 +262,25 @@ func TestVertexExchangesItsServiceAccountAndKeepsTheInlineVideo(t *testing.T) {
 	if exchanges != 1 {
 		t.Fatalf("the service account was exchanged %d times, want once", exchanges)
 	}
-	if task.ResultURL != "stored:video/mp4" || strings.Contains(string(task.Data), base64.StdEncoding.EncodeToString([]byte("VERTEXMP4"))) && len(task.Data) > maxKeptData {
-		t.Fatalf("result = %q, data = %s", task.ResultURL, task.Data)
-	}
+	// Since 1.2.0 the plugin lists the inline video and fetches it again
+	// from the operation, its bytes at a contentPath of the reply.
 	artifacts, err := h.engine.Artifacts(ctx, task)
-	if err != nil || len(artifacts) != 1 || artifacts[0].Key != resultArtifact || artifacts[0].Type != "video" {
+	if err != nil || len(artifacts) != 1 || artifacts[0].Key != "video" || artifacts[0].Type != "video" {
 		t.Fatalf("artifacts = %+v, %v", artifacts, err)
 	}
 	recorder := httptest.NewRecorder()
 	get := httptest.NewRequest(http.MethodGet, "/v1/videos/"+task.ID+"/content", nil)
 	get.Header.Set("Range", "bytes=0-5")
-	if err := h.engine.ServeContent(ctx, recorder, get, task, resultArtifact); err != nil {
+	if err := h.engine.ServeContent(ctx, recorder, get, task, "video"); err != nil {
 		t.Fatalf("ServeContent: %v", err)
 	}
-	if recorder.Code != http.StatusPartialContent || recorder.Body.String() != "VERTEX" {
-		t.Fatalf("content = %d %q", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "VERTEXMP4" || recorder.Header().Get("Content-Type") != "video/mp4" {
+		t.Fatalf("content = %d %q %v", recorder.Code, recorder.Body.String(), recorder.Header())
 	}
-}
-
-func TestDurationsOutsideWhatIsBilledAreRefused(t *testing.T) {
-	for _, test := range []struct {
-		body string
-		auto bool
-		ok   bool
-	}{
-		{`{"duration":8}`, false, true},
-		{`{"metadata":{"durationSeconds":"7200"}}`, false, false},
-		{`{"seconds":-1}`, false, false},
-		{`{"seconds":-1}`, true, true},
-		{`{"duration":-2}`, true, false},
-		{`{"duration":"auto"}`, false, true},
-	} {
-		err := checkDurations(json.RawMessage(test.body), test.auto)
-		if (err == nil) != test.ok {
-			t.Errorf("checkDurations(%s, %v) = %v", test.body, test.auto, err)
-		}
+	recorder = httptest.NewRecorder()
+	head := httptest.NewRequest(http.MethodHead, "/v1/videos/"+task.ID+"/content", nil)
+	if err := h.engine.ServeContent(ctx, recorder, head, task, "video"); err != nil || recorder.Body.Len() != 0 || recorder.Header().Get("Content-Length") != "9" {
+		t.Fatalf("HEAD = %d %q %v, %v", recorder.Code, recorder.Body.String(), recorder.Header(), err)
 	}
 }
 

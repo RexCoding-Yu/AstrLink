@@ -34,6 +34,11 @@ type descriptor struct {
 	RewriteModel   string                     `json:"rewriteModel"`
 	BodyType       string                     `json:"bodyType"`
 	Parts          []descriptorPart           `json:"parts"`
+	// ContentPath, of buildContentRequest alone, is where the artifact's
+	// bytes are in base64 in the JSON reply of a long-running operation;
+	// MimeType is their media type.
+	ContentPath []json.RawMessage `json:"contentPath"`
+	MimeType    string            `json:"mimeType"`
 }
 
 type descriptorPart struct {

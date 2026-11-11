@@ -75,6 +75,11 @@ type marketPlugin struct {
 	Versions     []marketVersion            `json:"versions"`
 	Routes       []plugin.TaskRoute         `json:"routes"`
 	Protocols    []plugin.TaskProtocolClaim `json:"protocols"`
+	// Provider and Transform say the newest version has a provider part
+	// or a request processing part, which new-api's index lists beside
+	// the task part.
+	Provider  bool `json:"provider"`
+	Transform bool `json:"transform"`
 }
 
 type marketFile struct {
@@ -514,6 +519,12 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 		}
 		if listed.Models == nil {
 			listed.Models = []string{}
+		}
+		if entry.Provider {
+			listed.Unsupported = append(listed.Unsupported, contract.PluginPartProvider)
+		}
+		if entry.Transform {
+			listed.Unsupported = append(listed.Unsupported, contract.PluginPartTransform)
 		}
 		for _, claim := range entry.Protocols {
 			listed.Protocols = append(listed.Protocols, contract.PluginTaskProtocol{Name: claim.Name, Supports: claim.Supports, Models: claim.Models})

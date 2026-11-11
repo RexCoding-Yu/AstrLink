@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +49,7 @@ func newFakeMarket(t *testing.T) *fakeMarket {
 	index := fmt.Sprintf(`{"indexVersion": 1, "name": "New API Official Plugins", "plugins": [
 		{"key": "incho", "name": "Incho", "icon": "text", "iconFile": {"path": "plugins/tasks/incho/icon.svg", "sha256": %q},
 		 "latest": "1.0.2", "versions": [{"version": "1.0.2", "path": "plugins/tasks/incho/1.0.2/plugin.js", "sha256": "00"}], "models": ["incho-1"]},
-		{"key": "kling", "name": "Kling", "icon": "Kling.Color",
+		{"key": "kling", "name": "Kling", "icon": "Kling.Color", "task": true, "provider": true, "transform": false,
 		 "latest": "1.1.1", "versions": [{"version": "1.1.1", "path": "plugins/tasks/kling/1.1.1/plugin.js", "sha256": "00"}]},
 		{"key": "sora", "name": "Sora", "icon": "Sora.Color",
 		 "latest": "1.1.0", "versions": [{"version": "1.1.0", "path": "plugins/tasks/sora/1.1.0/plugin.js", "sha256": "00"}]},
@@ -188,6 +189,12 @@ func TestAMarketListsItsPluginsBeforeIconsThatTakeTooLong(t *testing.T) {
 	}
 	if len(listed.Plugins) != 4 {
 		t.Fatalf("listed = %+v", listed)
+	}
+	// A provider part, which this gateway does not run, is listed so.
+	for _, entry := range listed.Plugins {
+		if want := entry.Key == "kling"; want != slices.Equal(entry.Unsupported, []string{contract.PluginPartProvider}) {
+			t.Fatalf("%s unsupported = %v", entry.Key, entry.Unsupported)
+		}
 	}
 	if icons := iconsOf(listed); icons["incho"] {
 		t.Fatalf("icons = %v", icons)

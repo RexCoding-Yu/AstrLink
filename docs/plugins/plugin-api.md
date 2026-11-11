@@ -2,7 +2,10 @@
 
 <!-- markdownlint-configure-file { "MD013": { "tables": false } } -->
 
-AstrLink Core 内嵌 [moejs](https://github.com/MoeForge/moejs)，用来运行插件；插件用到的 Web API、事件循环和定时器，以及 `node:fs`、`Buffer` 的主要部分，都是 moejs 自己的实现。
+AstrLink Core 内嵌
+[moejs](https://github.com/MoeForge/moejs)，用来运行插件；插件用到的 Web
+API、事件循环和定时器，以及 `node:fs`、`Buffer`
+的主要部分，都是 moejs 自己的实现。
 
 插件用 JavaScript 或 TypeScript 编写，负责策略：请求放不放行、走哪个提供商、往请求里加什么、怎么改回复、在请求记录和插件页上展示什么。
 
@@ -198,10 +201,14 @@ apiVersion 2 的钩子可以写成
 
 可以用的全局：
 
-- `fetch`、`Request`、`Response`、`Headers`：可以访问任何地址，规则见「宿主函数」；响应体可以用 `response.body` 按流读取。
-- `ReadableStream`、`WritableStream`、`TransformStream` 和 `TextDecoderStream`、`TextEncoderStream`，`AbortController`、`AbortSignal`（含 `timeout`、`any`），`Event`、`EventTarget`、`DOMException`。
+- `fetch`、`Request`、`Response`、`Headers`：可以访问任何地址，规则见「宿主函数」；响应体可以用
+  `response.body` 按流读取。
+- `ReadableStream`、`WritableStream`、`TransformStream` 和
+  `TextDecoderStream`、`TextEncoderStream`，`AbortController`、`AbortSignal`（含
+  `timeout`、`any`），`Event`、`EventTarget`、`DOMException`。
 - `URL`、`URLSearchParams`（按 WHATWG 标准解析）、`TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone`、`queueMicrotask`。
-- `Intl` 和各类型的 `toLocaleString`，带 11 种语言的数据；默认语言是 `en-US`，时区是 UTC。
+- `Intl` 和各类型的 `toLocaleString`，带 11 种语言的数据；默认语言是
+  `en-US`，时区是 UTC。
 - `crypto.getRandomValues`、`crypto.randomUUID`、`crypto.subtle.digest`，以及 HMAC 的签名和校验。
 - `setTimeout`、`setInterval`、`setImmediate` 和对应的清除函数，返回 Node 的
   `Timeout` 对象（`ref`、`unref`、`refresh`）。只在 apiVersion
@@ -252,8 +259,11 @@ apiVersion 2 的钩子可以写成
   `EROFS`。符号链接只能用相对路径指向数据目录里，指到外面同样被拒。
 - 数据目录最多 1 GiB，超出的写入报 `ENOSPC`。
 - 一次调用里打开的文件描述符在调用结束时关闭。
-- apiVersion 2 插件在 Linux 和 macOS 上，数据目录里的读写、`stat`、`readdir`、`mkdir`、`rm`、`cp`、`rename`
-  和 `glob` 由 moejs 的 `node:fs` 完成；安装目录和其余操作（文件描述符、流、`chmod` 等）由网关处理，行为都以 Node 为准。
+- apiVersion
+  2 插件在 Linux 和 macOS 上，数据目录里的读写、`stat`、`readdir`、`mkdir`、`rm`、`cp`、`rename`
+  和 `glob` 由 moejs 的 `node:fs`
+  完成；安装目录和其余操作（文件描述符、流、`chmod`
+  等）由网关处理，行为都以 Node 为准。
 - 卸载插件时数据目录保留，和设置一样，重新安装接着用；插件页「数据存储」里可以清除。更新和回滚会整体替换安装目录，所以要留下的数据放在数据目录。
 
 `astrlink.textStream({ map?, replace?, maxMatch? })`
@@ -640,6 +650,7 @@ AstrLink 也能运行 [new-api](https://github.com/QuantumNous/new-api)
 - 插件页「插件市场」读官方市场的
   `index.json`，也可以换成其他市场的地址。读取走 raw 地址，不占 GitHub 接口次数。
 - 安装前按市场列出的 sha256 校验文件，再按 v1 的规则检查清单和导出。
+- 市场的索引写明了插件有哪几部分（`task`、`provider`、`transform`）。需要 new-api 的提供商部分或请求处理部分的插件照常列出，标为「不兼容」，不能安装。
 - 「安装插件」里也可以粘贴 GitHub 上单个 `plugin.js`
   的链接；官方插件仓库里的链接认作市场安装，同样校验。
 - 插件的图标（`iconFile`、旁边的 `icon.svg` 或
@@ -666,10 +677,29 @@ AstrLink 也能运行 [new-api](https://github.com/QuantumNous/new-api)
 | `POST /v1/videos`、`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content`、`POST /v1/videos/{id}/remix`                           | OpenAI 的视频接口：创建、查询、下载和再创作                |
 | `POST /v1/images/generations`、`POST /v1/images/edits`                                                                          | OpenAI 的图片接口，任务完成后一次返回，最多等 10 分钟      |
 | `POST /v1/responses`、`GET /v1/responses/{id}`                                                                                  | Responses 接口的流式、同步和后台（`background: true`）用法 |
-| 插件声明的原生接口                                                                                                              | 厂商自己的请求格式，路径按插件声明的写                     |
+| 插件声明的原生接口                                                                                                              | 厂商自己的请求格式和路径，同样的接口也在 `/{插件 key}` 下  |
 | `POST /v1/tasks/{插件 key}`、`GET /v1/tasks/{id}`、`GET /v1/tasks/{id}/artifacts`、`GET /v1/tasks/{id}/artifacts/{key}/content` | 通用的任务接口                                             |
 
 - 请求里的模型决定由哪个插件处理；同一模型有多个提供商时按提供商路由挑选，提交时上游出错可以故障切换。
+- 原生接口和 new-api 一样，用厂商自己的路径，例如豆包的
+  `POST /api/v3/contents/generations/tasks`，同时在 `/doubao/api/v3/...`
+  下提供；路径的第一段已经是插件 key 或它的前缀（阿里百炼的
+  `/ali/...`）时不另加。网关自己的接口优先：和 `/v1/chat/completions`
+  这类路径相同的原生接口只在 `/{插件 key}` 下提供；`/v1/videos/{id}`
+  这类带任务 ID 的路径只认网关的任务 ID，所以 `/v1/videos/text2video/{id}`
+  仍归插件。`/v1/tasks`、`/plugins`、`/tools`、`/control`、`/console`、`/assets`、`/astrlink`
+  不能声明，插件 key 也不能是 `api`、`v1`、`v1beta` 或这些路径的第一段。
+- 查询接口的任务 ID 在路径参数里，路径没有时读同名的查询参数（如 MiniMax 的
+  `?task_id=`）。原生接口提交的任务，`GET /v1/videos/{id}`
+  由插件自己匹配的查询接口作答。
+- 原生接口的解析钩子收到
+  `requestHeaders`（不含带凭据的头）；查询接口的展示钩子收到
+  `ctx.artifacts`，抛出 `artifact_not_found` 时回 404；展示钩子可以返回
+  `{ __status, __headers, __body }` 按厂商自己的状态码作答，头只能设 `Location`
+  和 `Retry-After`。
+- `buildContentRequest` 可以返回
+  `contentPath`：产物是长任务应答 JSON 里的 base64，网关取出后按 `mimeType`
+  下载；任务没完成回 409，没有内容回 410。
 - 任务存进数据库，网关在后台按插件的方式逐个或批量查询进度。结果文件经网关下载：返回给客户端的下载地址带
   `access` 参数，不带令牌也能下载。
 - 插件页「任务」页签列出最近的任务，可以清除已完成的任务，网关保存的结果文件一起删除。
@@ -710,9 +740,12 @@ astrlink plugin test plugin.js --fixture golden.json
 - 传数组时并行执行，一次最多 8 个；v1 的每次钩子调用最多 16 个，v2 的最多 32 个，可以用
   `Promise.all`
   同时等。单个请求默认 10 秒超时，最多 30 秒，钩子的时间上限会更早截止。等网络的时间不计入脚本时间。
-- v2 还提供标准的 `fetch(url, init)` 和
-  `node:http(s)`，按同样的规则访问网络，和 `astrlink.http.fetch` 共用请求数和网络时间的预算；`fetch` 返回标准的
-  `Response`，响应体按流到达，`init.credential` 指定凭据位，`init.timeoutMs` 是单个请求的超时。请求没有得到响应时，`fetch` 拒绝为 `TypeError`，网关拒绝或按它的规则失败的（见下面的 `error`）在 `error.cause.code` 里给出原因。
+- v2 还提供标准的 `fetch(url, init)` 和 `node:http(s)`，按同样的规则访问网络，和
+  `astrlink.http.fetch` 共用请求数和网络时间的预算；`fetch` 返回标准的
+  `Response`，响应体按流到达，`init.credential` 指定凭据位，`init.timeoutMs`
+  是单个请求的超时。请求没有得到响应时，`fetch` 拒绝为
+  `TypeError`，网关拒绝或按它的规则失败的（见下面的 `error`）在
+  `error.cause.code` 里给出原因。
 - 响应：`status`（没收到响应时为 0）、`headers`（每个头的第一个值，键是小写）、`json`
   或 `text`（最多 1 MiB）、`took_ms`，以及出错时的
   `error`：`denied`（凭据不能发往这个地址）、`timeout`、`network`、`too_large`、`budget`。HTTP 错误码照常返回，不算

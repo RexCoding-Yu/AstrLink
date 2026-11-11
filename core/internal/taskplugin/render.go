@@ -28,7 +28,10 @@ type Request struct {
 	Path   string
 	Params map[string]string
 	Query  url.Values
-	Body   *Body
+	// Headers are the client's request headers; hooks read them without
+	// the ones that carry credentials.
+	Headers http.Header
+	Body    *Body
 	// Protocol and Operation are set for a protocol: openai_video and
 	// create, retrieve or content.
 	Protocol      string
@@ -49,8 +52,15 @@ func (request Request) view(clientOrder bool, requestBody json.RawMessage, artif
 	if query == nil {
 		query = map[string][]string{}
 	}
+	headers := clientHeaders(request.Headers)
+	for _, name := range []string{"Content-Type", "Accept"} {
+		if _, ok := headers[name]; !ok {
+			headers[name] = ""
+		}
+	}
 	value := map[string]any{
-		"method": request.Method, "path": request.Path, "params": params, "query": query, "body": request.Body.decoded(clientOrder),
+		"method": request.Method, "path": request.Path, "params": params, "query": query,
+		"requestHeaders": headers, "body": request.Body.decoded(clientOrder),
 	}
 	if request.Protocol != "" {
 		value["protocol"] = request.Protocol
@@ -146,10 +156,21 @@ func TaskView(task storage.PluginTask) json.RawMessage {
 
 // Present runs a native presenter on tasks: one task, or a list for a
 // query of several.
-func (engine *Engine) Present(ctx context.Context, pluginKey, presenter string, request Request, tasks []storage.PluginTask, list bool, full json.RawMessage) (json.RawMessage, error) {
+//
+// links, set for a query route, makes the download links of ctx.artifacts:
+// those of the one task when it has succeeded, none otherwise. A presenter
+// that throws artifact_not_found answers 404, as for a missing task.
+func (engine *Engine) Present(ctx context.Context, pluginKey, presenter string, request Request, tasks []storage.PluginTask, list bool, full json.RawMessage, links func(key string) string) (json.RawMessage, error) {
 	target, meta, err := engine.plugin(pluginKey)
 	if err != nil {
 		return nil, err
+	}
+	var artifacts map[string]artifactLink
+	if links != nil {
+		artifacts = map[string]artifactLink{}
+		if !list && len(tasks) == 1 && tasks[0].Status == contract.PluginTaskSuccess && target.HasTaskHook("listArtifacts") {
+			artifacts = engine.artifactLinks(ctx, target, tasks[0], links)
+		}
 	}
 	views := make([]taskView, 0, len(tasks))
 	for _, task := range tasks {
@@ -163,8 +184,11 @@ func (engine *Engine) Present(ctx context.Context, pluginKey, presenter string, 
 	if !list && len(views) == 1 {
 		argument = views[0]
 	}
-	raw, err := engine.renderCall(ctx, target, "native."+presenter, request.view(meta.Has("json-order@1"), nil, nil), argument)
+	raw, err := engine.renderCall(ctx, target, "native."+presenter, request.view(meta.Has("json-order@1"), nil, artifacts), argument)
 	if err != nil {
+		if strings.Contains(err.Error(), "artifact_not_found") {
+			return nil, failure(http.StatusNotFound, "task_not_found", "no such task")
+		}
 		return nil, err
 	}
 	return jsonOrNull(raw), nil

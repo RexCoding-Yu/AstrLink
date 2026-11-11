@@ -2203,6 +2203,45 @@ describe("PluginManager", () => {
       expect(bridgeMocks.listPluginTasks).toHaveBeenCalledTimes(2);
     });
 
+    it("lists a plugin that needs a new-api part AstrLink does not run as not compatible", async () => {
+      bridgeMocks.getPluginMarket.mockResolvedValue({
+        ...market,
+        plugins: [
+          ...market.plugins,
+          {
+            ...market.plugins[0],
+            key: "relay",
+            name: "Relay",
+            installed: undefined,
+            unsupported: ["provider"],
+            link: market.index + "#relay@1.0.0",
+          },
+        ],
+      });
+      await renderTasks();
+      await openTab("插件市场");
+      const card = [
+        ...document.querySelectorAll<HTMLElement>(
+          '[data-testid="plugin-market-card"]',
+        ),
+      ].find((item) => item.textContent?.includes("Relay"))!;
+      const badge = card.querySelector<HTMLElement>("[data-tone]")!;
+      expect(badge.textContent).toBe("不兼容");
+      expect(badge.title).toBe(
+        "需要 new-api 的提供商插件，AstrLink 还不能运行。",
+      );
+      expect(card.querySelector("button")).toBeNull();
+      await click(card);
+      const entry = document.querySelector(
+        '[data-testid="plugin-market-entry"]',
+      ) as HTMLElement;
+      expect(entry.textContent).toContain("不兼容");
+      expect(
+        [...entry.querySelectorAll("button")].map((item) => item.textContent),
+      ).not.toContain("安装");
+      expect(bridgeMocks.previewPluginInstall).not.toHaveBeenCalled();
+    });
+
     it("browses the marketplace and installs from it after the review", async () => {
       bridgeMocks.previewPluginInstall.mockResolvedValue(alibabaReview);
       bridgeMocks.installPlugin.mockResolvedValue({
