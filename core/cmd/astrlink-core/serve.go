@@ -169,6 +169,7 @@ func serve(
 		Listening: func(address net.Addr) {
 			// The console shares the inference port, so a provider test's links
 			// stay relative to it: the tester learns no address here.
+			core.claudeOfficial.listening(address.String())
 			logf("listening on %s for the client API and the web console", address)
 			if status, err := core.rawVault.Status(ctx); err == nil && !status.PasswordSet {
 				logf("no password is set yet: open the web console within %d minutes of start to set it; after that, restart to reopen setup",
@@ -203,6 +204,7 @@ func serveCoreOptions(
 		maxConcurrentInspections: ingress.DefaultMaxConcurrentInspections,
 		responseStartTimeout:     time.Duration(ingress.DefaultResponseStartTimeoutSeconds) * time.Second,
 		noLoopbackCallback:       true,
+		installClaudeCLI:         true,
 		consoleSessions:          sessions,
 		rawBackoffCap:            serveRawBackoffCap,
 		testNetwork:              config.testNetwork,

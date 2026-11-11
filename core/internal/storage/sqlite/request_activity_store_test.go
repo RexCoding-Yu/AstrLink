@@ -163,3 +163,101 @@ func TestListRequestActivityKeepsCallsWhoseToolsMayStillRun(t *testing.T) {
 		t.Fatalf("waiting call output = %+v", output)
 	}
 }
+
+func TestListRequestActivityReadsFinalOutputTokens(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "activity.db"))
+	defer store.Close()
+	ctx := context.Background()
+	since := time.Date(2026, 10, 23, 6, 0, 0, 0, time.UTC)
+	call := func(id string, started time.Duration, usage *contract.Usage) contract.RequestRecord {
+		session := contract.SessionID("session_" + id)
+		return contract.RequestRecord{
+			ID: contract.RequestID("request_" + id), SessionID: &session,
+			StartedAt: since.Add(started), CompletedAt: ptrTime(since.Add(started + 10*time.Second)),
+			Status: contract.RequestStatusSucceeded, InputProtocol: contract.ProtocolAnthropicMessages,
+			Usage: usage, Audit: contract.NotCapturedAuditSummary(),
+		}
+	}
+	final := call("final", 3*time.Minute, &contract.Usage{InputTokens: 900, OutputTokens: 120, TotalTokens: 1020})
+	// The stream stopped before its last usage event; the count is partial.
+	cut := call("cut", 2*time.Minute, &contract.Usage{InputTokens: 900, OutputTokens: 1, TotalTokens: 901, BillingIncomplete: true})
+	cut.Status = contract.RequestStatusCancelled
+	unreported := call("unreported", time.Minute, nil)
+	for _, record := range []contract.RequestRecord{final, cut, unreported} {
+		if err := store.InsertRequestRecord(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	calls, err := store.ListRequestActivity(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[contract.SessionID]int, len(calls))
+	for _, item := range calls {
+		got[item.SessionID] = item.OutputTokens
+	}
+	want := map[contract.SessionID]int{"session_final": 120, "session_cut": 0, "session_unreported": 0}
+	if len(got) != len(want) {
+		t.Fatalf("output tokens = %v, want %v", got, want)
+	}
+	for session, tokens := range want {
+		if got[session] != tokens {
+			t.Fatalf("output tokens = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestListRequestActivityReadsTheModelEachCallRanWith(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "activity.db"))
+	defer store.Close()
+	ctx := context.Background()
+	since := time.Date(2026, 10, 23, 6, 0, 0, 0, time.UTC)
+	call := func(id string, started time.Duration, model string) contract.RequestRecord {
+		session := contract.SessionID("session_" + id)
+		record := contract.RequestRecord{
+			ID: contract.RequestID("request_" + id), SessionID: &session, StartedAt: since.Add(started),
+			Status: contract.RequestStatusPending, InputProtocol: contract.ProtocolAnthropicMessages,
+			Audit: contract.NotCapturedAuditSummary(),
+		}
+		if model != "" {
+			record.RequestedModel = &model
+		}
+		return record
+	}
+	asked := call("asked", time.Minute, "claude-opus-5-5")
+	// A routing redirect sent the call to another model.
+	redirected := call("redirected", 2*time.Minute, "claude-opus-5-5")
+	redirected.ModelRedirect = &contract.RequestModelRedirect{From: "claude-opus-5-5", To: "kimi-k3"}
+	// The provider maps the model to its own name; that one ran.
+	served := call("served", 3*time.Minute, "claude-opus-5-5")
+	served.ModelRedirect = &contract.RequestModelRedirect{From: "claude-opus-5-5", To: "deepseek-v4"}
+	served.Recovery = &contract.RequestRecovery{UpstreamModel: "deepseek-v4-0901"}
+	unnamed := call("unnamed", 4*time.Minute, "")
+	for _, record := range []contract.RequestRecord{asked, redirected, served, unnamed} {
+		if err := store.InsertRequestRecord(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	calls, err := store.ListRequestActivity(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[contract.SessionID]string, len(calls))
+	for _, item := range calls {
+		got[item.SessionID] = item.Model
+	}
+	want := map[contract.SessionID]string{
+		"session_asked": "claude-opus-5-5", "session_redirected": "kimi-k3",
+		"session_served": "deepseek-v4-0901", "session_unnamed": "",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+	for session, model := range want {
+		if got[session] != model {
+			t.Fatalf("models = %v, want %v", got, want)
+		}
+	}
+}

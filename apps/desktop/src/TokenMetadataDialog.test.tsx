@@ -21,6 +21,7 @@ const token: AccessTokenSummary = {
   id: "token_01",
   name: "VS Code",
   hint: "astr_…K8Q2",
+  source: "user",
   created_at: "2026-07-24T10:30:00Z",
 };
 

@@ -4,7 +4,9 @@ import {
   compareReleaseVersions,
   defaultPrivacyAllowlistRules,
   defaultPrivacyKindRules,
+  isAcceleratedVariantID,
   isCoreMLVariantID,
+  isDirectMLVariantID,
   isResourceHeavyVariant,
   localModelActive,
   missingDefaultPrivacyAllowlistRules,
@@ -422,6 +424,29 @@ describe("privacy-policy IPC contract", () => {
         inspect_additional_tools: true,
       }),
     ).toBe(false);
+  });
+
+  it("mirrors Core's defaults: credentials only, example domains allowed", () => {
+    expect(
+      defaultPrivacyKindRules()
+        .filter((rule) => rule.enabled)
+        .map((rule) => rule.kind),
+    ).toEqual(["common_secret"]);
+    expect(
+      defaultPrivacyAllowlistRules()
+        .filter((rule) => rule.type === "domain_suffix")
+        .map((rule) => rule.value),
+    ).toEqual([
+      "localhost",
+      "github.com",
+      "githubusercontent.com",
+      "example.com",
+      "example.net",
+      "example.org",
+      "example",
+      "test",
+      "invalid",
+    ]);
   });
 
   it("lists the default allowlist entries a policy no longer has", () => {
@@ -904,6 +929,16 @@ describe("privacy-policy IPC contract", () => {
     expect(isCoreMLVariantID("coreml_fp16_ane")).toBe(true);
     expect(isCoreMLVariantID(variant.id)).toBe(false);
     expect(isCoreMLVariantID("gpu_f16")).toBe(false);
+    expect(isCoreMLVariantID("directml_fp16_gpu")).toBe(false);
+    expect(isDirectMLVariantID("directml_fp16_gpu")).toBe(true);
+    expect(isDirectMLVariantID("coreml_fp16_gpu")).toBe(false);
+    expect(isDirectMLVariantID("gpu_f16")).toBe(false);
+    for (const id of ["coreml_fp16_gpu", "directml_fp16_gpu"]) {
+      expect(isAcceleratedVariantID(id)).toBe(true);
+    }
+    for (const id of [variant.id, "gpu_f16", "cpu_int8"]) {
+      expect(isAcceleratedVariantID(id)).toBe(false);
+    }
     expect(
       isResourceHeavyVariant({
         bytes_total: 1024 ** 3,

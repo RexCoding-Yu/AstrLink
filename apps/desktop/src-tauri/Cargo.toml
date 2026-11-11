@@ -34,6 +34,10 @@ serde_json = "=1.0.145"
 sha2 = "=0.10.9"
 sys-locale = "=0.3.2"
 toml_edit = "=0.22.22"
+# YAML client configs: yaml-edit edits in place, keeping comments and layout;
+# yaml_serde re-reads every result to check it before a write.
+yaml-edit = { version = "=0.3.6", default-features = false }
+yaml_serde = "=0.10.7"
 # macos-private-api: the tray popover is a transparent window with its own
 # rounded panel; macOS only allows a transparent NSWindow through this flag.
 tauri = { version = "=2.11.5", features = ["macos-private-api", "tray-icon"] }
@@ -48,12 +52,27 @@ tauri-plugin-single-instance = { version = "=2.4.3", features = ["deep-link"] }
 tauri-plugin-shell = "=2.3.5"
 # Release updates use v2 installers; legacy v1 ZIP support pulls in vulnerable zip.
 tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
-tokio = { version = "=1.47.1", features = ["sync", "time", "macros"] }
+tokio = { version = "=1.51.6", features = ["sync", "time", "macros"] }
 zeroize = { version = "=1.9.0", features = ["serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Touch ID for raw content and the screen lock and sleep notifications; the
+# objc2 crates are the ones AppKit is bound with, already in the tree.
+block2 = "=0.6.2"
 core-foundation = "=0.10.1"
 mac-notification-sys = "=0.6.15"
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "NSDistributedNotificationCenter",
+  "NSError",
+  "NSLocale",
+  "NSNotification",
+  "NSOperation",
+  "NSString",
+] }
+objc2-local-authentication = { version = "=0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError"] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
   "std",
   "libc",
@@ -73,11 +92,16 @@ libc = "=0.2.189"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
   "Win32_System_Registry",
   "Win32_System_JobObjects",
+  "Win32_System_RemoteDesktop",
   "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

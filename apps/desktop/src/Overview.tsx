@@ -1,3 +1,4 @@
+import { useDisplayCurrency } from "./currency-display";
 import { isWebEdition } from "./edition";
 import { useBillingSummary, type BillingStatus } from "./BillingOverview";
 import {
@@ -12,14 +13,18 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
+  Activity,
   ArrowRight,
+  Boxes,
   Check,
+  CircleDollarSign,
   Copy,
   Plus,
   RefreshCw,
   RotateCcw,
   Settings,
   SlidersHorizontal,
+  SquareStack,
 } from "@/components/icons";
 
 import { ActionHint } from "@/components/ActionHint";
@@ -38,12 +43,18 @@ import { IconButton } from "@/components/IconButton";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { InferencePortNotice } from "@/components/InferencePortNotice";
 import { LoadingState } from "@/components/LoadingState";
+import { Metric, MetricGroup } from "@/components/Metric";
 import { ModelBrandIcon } from "@/components/ModelBrandIcon";
 import { Panel, PanelHeader } from "@/components/Panel";
 import { OrderedList } from "@/components/OrderedList";
 import { useOverviewLayout, type OverviewModuleId } from "./overview-layout";
 import { OverviewStarMap } from "./OverviewStarMap";
 import { PluginSlot } from "./plugin-ui";
+import { STAR_TRAIL_RANGES } from "./star-trail-model";
+import { UsageStarTrail, UsageStarTrailSkeleton } from "./UsageStarTrail";
+import { LiveCrew } from "./LiveCrew";
+import { RequestSky } from "./RequestSky";
+import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { PaginatedList } from "@/components/PaginatedList";
 import { StatusBadge } from "@/components/StatusBadge";
 import { StatusDot } from "@/components/StatusDot";
@@ -84,7 +95,7 @@ import {
   formatExactNumber,
 } from "./format-compact-number";
 import type { CopyState } from "./copy-feedback";
-import { clientsUsing, useClientConfigs } from "./use-client-configs";
+import { useClientConfigs } from "./use-client-configs";
 import type { RecordsTarget } from "./request-live-model";
 import { statusLabel, type RequestStatus } from "./request-record-model";
 import { currentLocale, i18n, useT } from "./i18n";
@@ -99,6 +110,7 @@ import {
   emptyUsageTotals,
   formatCacheHitPercent,
   hourlyUsageWindow,
+  localDayKey,
   mergeCatalogServiceUsage,
   modelUsageLabel,
   usageRangeKey,
@@ -125,6 +137,9 @@ export interface ServiceCatalog {
 /** The star map's height: wide enough a workspace gives it more. */
 const STAR_MAP_HEIGHT = "h-[clamp(24rem,42cqw,28rem)]";
 
+const USAGE_METRIC_GRID =
+  "gap-3 bg-transparent [&>div]:rounded-md [&>div]:border";
+
 const USAGE_BREAKDOWN_HEADER = "min-h-14 flex-wrap items-center py-2";
 
 /** Rows a breakdown page shows; see `PaginatedList`. */
@@ -144,6 +159,7 @@ const BREAKDOWN_LIST_HEIGHT = [
 export function Overview({
   catalog,
   copyState,
+  coreSessionKey = null,
   isNativeApp,
   isReady,
   isRestarting,
@@ -169,6 +185,8 @@ export function Overview({
 }: {
   catalog: ServiceCatalog;
   copyState: CopyState;
+  /** Keys the live request feed the sky flies comets from. */
+  coreSessionKey?: string | null;
   isNativeApp: boolean;
   isReady: boolean;
   isRestarting: boolean;
@@ -196,8 +214,16 @@ export function Overview({
   usageRange: UsageRange;
 }) {
   const t = i18n.t.bind(i18n);
-  const [view, setView] = useState<"chart" | "heatmap">(() =>
-    usageRange === "1d" || usageRange === "7d" ? "chart" : "heatmap",
+  // The star trail opens first; a view picked by hand stays for the session.
+  const [view, setView] = useWorkspaceSnapshot<
+    "chart" | "galaxy" | "heatmap" | "trail"
+  >(
+    "overview-usage-view",
+    () =>
+      STAR_TRAIL_RANGES.some((range) => range === usageRange)
+        ? "trail"
+        : "heatmap",
+    "desktop",
   );
   const rangeKey = usageRangeKey(usageRange);
   const [editingLayout, setEditingLayout] = useState(false);
@@ -242,6 +268,30 @@ export function Overview({
   const inferenceURL = snapshot?.ready?.client_inference_url ?? "";
   const apiAddressLabel = t("overview.apiAddress");
   const apiCopied = copyState === "copied";
+  // A retained summary survives a failed refresh so the panel does not flash
+  // empty, but its numbers must not be presented as current.
+  const totals =
+    usage.status === "blocked" || usage.status === "error"
+      ? undefined
+      : summary?.totals;
+  // The star trail holds its numbers; built once per read so the trail
+  // keeps its own renders. Over a day, today's requests would repeat them.
+  const trailMetrics = useMemo(
+    () => (
+      <UsageMetrics
+        billing={billingSummary}
+        inline
+        status={usage.status}
+        today={
+          summary && !hourlyUsageWindow(summary.window)
+            ? todayRequests(summary)
+            : null
+        }
+        totals={totals}
+      />
+    ),
+    [billingSummary, summary, totals, usage.status],
+  );
   const serviceRows = mergeCatalogServiceUsage(
     catalog.items,
     summary?.by_service ?? [],
@@ -302,13 +352,40 @@ export function Overview({
   const systemDetails = systemDetailRows.filter((row) => row !== null);
 
   const moduleLabels: Record<OverviewModuleId, string> = {
+    "live-crew": t("overview.liveCrew.title"),
+    "request-sky": t("overview.sky"),
     usage: t("overview.usageSummary"),
     "providers-models": t("overview.providersAndModels"),
     tokens: t("overview.statusAndTokens"),
     access: t("overview.apiAddress"),
     system: t("overview.systemDetails"),
   };
+  // The sky shows these 30 days instead of reading them a second time.
+  const skyMonth =
+    usageRange !== "30d"
+      ? undefined
+      : summary?.window.preset === "30d"
+        ? summary
+        : usage.status === "error"
+          ? undefined
+          : null;
   const moduleContent: Record<OverviewModuleId, ReactNode> = {
+    "live-crew": (
+      <LiveCrew
+        coreSessionKey={coreSessionKey}
+        isReady={isReady}
+        todayTokens={summary ? todayTokens(summary) : null}
+      />
+    ),
+    "request-sky": (
+      <RequestSky
+        coreSessionKey={coreSessionKey}
+        isReady={isReady}
+        overviewMonth={skyMonth}
+        revision={summary}
+        services={catalog.items}
+      />
+    ),
     usage: (
       <section
         aria-labelledby="usage-heading"
@@ -331,8 +408,17 @@ export function Overview({
                     : "overview.usageNote",
                 )}
               </p>
-              <p className="mt-2">{t("overview.star.help")}</p>
-              <p className="mt-2">{t("overview.heatmapNote")}</p>
+              <p className="mt-2">
+                {t(
+                  view === "galaxy"
+                    ? "overview.star.help"
+                    : view !== "trail"
+                      ? "overview.heatmapNote"
+                      : usageRange === "1d"
+                        ? "overview.starTrailModelNote"
+                        : "overview.starTrailNote",
+                )}
+              </p>
             </HelpPopover>
           </div>
           <ActionGroup className="gap-4">
@@ -347,8 +433,17 @@ export function Overview({
                   (usageRange === "1d" || usageRange === "7d")
                 )
                   onUsageRangeChange("1y");
+                // A ring per model for a day, or per day for a week or a
+                // month, fits the disc.
+                if (
+                  next === "trail" &&
+                  !STAR_TRAIL_RANGES.some((range) => range === usageRange)
+                )
+                  onUsageRangeChange("1d");
               }}
               options={[
+                { value: "trail", label: t("overview.starTrail") },
+                { value: "galaxy", label: t("overview.galaxy") },
                 { value: "heatmap", label: t("overview.heatmap") },
                 { value: "chart", label: t("overview.chart") },
               ]}
@@ -357,6 +452,7 @@ export function Overview({
             <UsageRangePicker
               ariaLabel={t("overview.rangeLabel")}
               className="min-w-24"
+              custom={view !== "trail"}
               onChange={(next) => {
                 if (next !== null) onUsageRangeChange(next);
               }}
@@ -366,37 +462,50 @@ export function Overview({
                   ? USAGE_RANGE_PRESETS.filter(
                       (preset) => preset !== "1d" && preset !== "7d",
                     )
-                  : USAGE_RANGE_PRESETS
+                  : view === "trail"
+                    ? STAR_TRAIL_RANGES
+                    : USAGE_RANGE_PRESETS
               }
               value={usageRange}
             />
           </ActionGroup>
         </div>
         {usage.status === "loading" && !summary ? (
-          <UsagePanelSkeleton />
+          <UsagePanelSkeleton
+            galaxy={view === "galaxy"}
+            trail={view === "trail"}
+          />
         ) : (
           <div className="relative grid min-w-0 grid-cols-1 gap-3">
-            <OverviewStarMap
-              billingAmountText={
-                billingSummary ? billingAmount(billingSummary) : "—"
-              }
-              billingTitle={[
-                t("overview.costNote"),
-                billingSummary ? billingNoteText(t, billingSummary) : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              className={STAR_MAP_HEIGHT}
-              costs={costs}
-              isReady={isReady}
-              onOpenPlugin={onOpenPlugin}
-              onOpenPlugins={onOpenPlugins}
-              onOpenRecords={onOpenRecords}
-              services={catalog.items}
-              status={usage.status}
-              summary={summary}
-              tokens={tokenCatalog.items}
-            />
+            {view === "galaxy" ? (
+              <OverviewStarMap
+                billingAmountText={
+                  billingSummary ? billingAmount(billingSummary) : "—"
+                }
+                billingTitle={[
+                  t("overview.costNote"),
+                  billingSummary ? billingNoteText(t, billingSummary) : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                className={STAR_MAP_HEIGHT}
+                costs={costs}
+                isReady={isReady}
+                onOpenPlugin={onOpenPlugin}
+                onOpenPlugins={onOpenPlugins}
+                onOpenRecords={onOpenRecords}
+                services={catalog.items}
+                status={usage.status}
+                summary={summary}
+                tokens={tokenCatalog.items}
+              />
+            ) : view === "trail" ? null : (
+              <UsageMetrics
+                billing={billingSummary}
+                status={usage.status}
+                totals={totals}
+              />
+            )}
             <Panel aria-labelledby="activity-heading">
               <h3 className="sr-only" id="activity-heading">
                 {t("overview.activity")}
@@ -405,6 +514,12 @@ export function Overview({
                 <UsageHeatmap
                   points={summary?.by_day ?? []}
                   status={usage.status}
+                />
+              ) : view === "trail" ? (
+                <UsageStarTrail
+                  metrics={trailMetrics}
+                  status={usage.status}
+                  summary={summary}
                 />
               ) : (
                 <UsageDayChart
@@ -1051,7 +1166,9 @@ function TokenUsagePanel({
   usage: UsageSummary | null;
 }) {
   const t = i18n.t.bind(i18n);
-  const { configs: clientConfigs } = useClientConfigs(inferenceURL);
+  useDisplayCurrency();
+  const { configs: clientConfigs, available: clientModels } =
+    useClientConfigs(inferenceURL);
   const rows = useMemo(
     () => mergeTokenUsageRows(tokenCatalog, usage, billingSummary),
     [billingSummary, tokenCatalog, usage],
@@ -1205,8 +1322,11 @@ function TokenUsagePanel({
                         {row.name}
                       </span>
                       <TokenClientMarks
+                        available={clientModels}
                         className="pointer-events-auto"
-                        clients={clientsUsing(clientConfigs, row.id)}
+                        configs={clientConfigs}
+                        tokenId={row.id}
+                        tokenName={row.name}
                       />
                     </span>
                     <span className="pointer-events-none relative text-right text-sm font-semibold tabular-nums">
@@ -1304,8 +1424,24 @@ const DAY_STACK_BARS = [
   },
 ] as const;
 
-function UsagePanelSkeleton() {
+function UsagePanelSkeleton({
+  galaxy = false,
+  trail = false,
+}: {
+  galaxy?: boolean;
+  trail?: boolean;
+}) {
   const t = i18n.t.bind(i18n);
+  if (trail)
+    return (
+      <Panel
+        aria-label={t("overview.aggregating")}
+        data-slot="usage-skeleton"
+        role="status"
+      >
+        <UsageStarTrailSkeleton />
+      </Panel>
+    );
   return (
     <div
       aria-label={t("overview.aggregating")}
@@ -1313,12 +1449,28 @@ function UsagePanelSkeleton() {
       data-slot="usage-skeleton"
       role="status"
     >
-      <div
-        className={cn(
-          "animate-pulse rounded-md bg-muted motion-reduce:animate-none",
-          STAR_MAP_HEIGHT,
-        )}
-      />
+      {galaxy ? (
+        <div
+          className={cn(
+            "animate-pulse rounded-md bg-muted motion-reduce:animate-none",
+            STAR_MAP_HEIGHT,
+          )}
+        />
+      ) : (
+        <MetricGroup className={USAGE_METRIC_GRID}>
+          {Array.from({ length: 4 }, (_, index) => (
+            <Metric
+              key={index}
+              label={
+                <span className="block h-4 w-12 animate-pulse rounded bg-muted motion-reduce:animate-none" />
+              }
+              value={
+                <span className="block h-7 w-20 animate-pulse rounded bg-muted motion-reduce:animate-none" />
+              }
+            />
+          ))}
+        </MetricGroup>
+      )}
       <div className="px-4 py-3.5">
         <span className="block h-4 w-20 animate-pulse rounded bg-muted motion-reduce:animate-none" />
         <div className="mt-3 h-40 animate-pulse rounded-md bg-muted motion-reduce:animate-none" />
@@ -2460,6 +2612,7 @@ function UsageBreakdownRow({
   tokens: number;
 }) {
   const t = i18n.t.bind(i18n);
+  useDisplayCurrency();
   const requestMetric = compactMetric(requests, status);
   // An unpriced row has no amount to show; its title says why.
   const amount = cost && cost.priced > 0 ? billingAmount(cost) : null;
@@ -2486,6 +2639,152 @@ function UsageBreakdownRow({
       share={showBar ? barPercent : null}
       value={<CompactCount value={usageCountValue(tokens, status)} />}
     />
+  );
+}
+
+/** Today's totals when the range reaches today, otherwise null. */
+function todayTotals(summary: UsageSummary): UsageTotals | null {
+  const now = new Date();
+  const at = now.getTime();
+  if (
+    at < Date.parse(summary.window.from) ||
+    at >= Date.parse(summary.window.to)
+  )
+    return null;
+  const today = localDayKey(now);
+  return summary.by_day.find((day) => day.date === today) ?? emptyUsageTotals();
+}
+
+/** Today's requests when the range reaches today, otherwise null. */
+function todayRequests(summary: UsageSummary): number | null {
+  return todayTotals(summary)?.requests ?? null;
+}
+
+/** Today's tokens when the range reaches today, otherwise null. */
+function todayTokens(summary: UsageSummary): number | null {
+  return todayTotals(summary)?.total_tokens ?? null;
+}
+
+/**
+ * Requests, tokens, cache hits and cost for the range: four tiles above the
+ * heatmap and chart, or one bare row inside the star trail's panel.
+ */
+const UsageMetrics = memo(function UsageMetrics({
+  billing,
+  inline = false,
+  status,
+  today = null,
+  totals,
+}: {
+  billing: BillingSummary | null;
+  inline?: boolean;
+  status: UsageStatus;
+  /** Today's requests, shown under the total while the range reaches today. */
+  today?: number | null;
+  totals: UsageTotals | undefined;
+}) {
+  const t = useT();
+  useDisplayCurrency();
+  const size = inline ? "inline" : undefined;
+  // The panel's columns are narrow: fewer decimals as numbers grow.
+  const short = inline;
+  const requests = compactMetric(totals?.requests, status, short);
+  const tokens = usageCountValue(totals?.total_tokens, status);
+  const amount = billing ? billingAmount(billing, { short }) : "—";
+  const exactAmount = billing ? billingAmount(billing) : "—";
+  const note = billing ? billingNoteText(t, billing) || undefined : undefined;
+  return (
+    <MetricGroup
+      className={inline ? undefined : USAGE_METRIC_GRID}
+      variant={inline ? "inline" : "tiles"}
+    >
+      <Metric
+        detail={
+          totals && today !== null
+            ? t("overview.requestsToday", {
+                count: formatCompactNumber(today, { short }),
+              })
+            : undefined
+        }
+        icon={inline ? undefined : <Activity />}
+        label={t("overview.requests")}
+        size={size}
+        title={requests.title ?? undefined}
+        value={requests.text}
+      />
+      <Metric
+        detail={
+          totals && totals.input_tokens + totals.output_tokens > 0 ? (
+            inline ? (
+              <TokenLine
+                input={totals.input_tokens}
+                output={totals.output_tokens}
+              />
+            ) : (
+              <TokenSplit
+                input={totals.input_tokens}
+                output={totals.output_tokens}
+              />
+            )
+          ) : undefined
+        }
+        icon={inline ? undefined : <Boxes />}
+        label={t("overview.totalTokens")}
+        size={size}
+        value={<CompactCount short={short} value={tokens} />}
+      />
+      <Metric
+        icon={inline ? undefined : <SquareStack />}
+        label={t("overview.cacheHits")}
+        size={size}
+        value={cacheHitMetric(totals, status)}
+      />
+      <Metric
+        detail={inline && note ? <span title={note}>{note}</span> : note}
+        icon={inline ? undefined : <CircleDollarSign />}
+        label={t("pricing.officialAmount")}
+        size={size}
+        title={
+          amount === exactAmount
+            ? t("overview.costNote")
+            : `${exactAmount}\n${t("overview.costNote")}`
+        }
+        value={amount}
+      />
+    </MetricGroup>
+  );
+});
+
+/**
+ * Input and output under the total. A narrow tile stacks them, and the
+ * clipped box hides the separator that would start the second line.
+ */
+function TokenSplit({ input, output }: { input: number; output: number }) {
+  const t = useT();
+  return (
+    <span className="flex flex-wrap gap-x-3 overflow-hidden">
+      <span className="whitespace-nowrap">
+        {t("overview.input")} <CompactCount value={input} />
+      </span>
+      <span className="relative whitespace-nowrap before:absolute before:-left-2 before:content-['·']">
+        {t("overview.output")} <CompactCount value={output} />
+      </span>
+    </span>
+  );
+}
+
+/** Input and output on one line, cut short with the exact split on hover. */
+function TokenLine({ input, output }: { input: number; output: number }) {
+  const t = useT();
+  const part = (label: string, value: number, short: boolean) =>
+    `${label} ${short ? formatCompactNumber(value, { short }) : formatExactNumber(value)}`;
+  return (
+    <span
+      title={`${part(t("overview.input"), input, false)} · ${part(t("overview.output"), output, false)}`}
+    >
+      {part(t("overview.input"), input, true)} ·{" "}
+      {part(t("overview.output"), output, true)}
+    </span>
   );
 }
 
@@ -2530,13 +2829,22 @@ function usageCountValue(
 function compactMetric(
   value: number | undefined,
   status: UsageStatus,
+  short = false,
 ): CompactMetric {
   if (value === undefined || status === "blocked" || status === "error") {
     return { text: "—", title: null };
   }
-  const text = formatCompactNumber(value);
+  const text = formatCompactNumber(value, { short });
   const exact = formatExactNumber(value);
   return { text, title: exact === text ? null : exact };
+}
+
+function cacheHitMetric(
+  totals: UsageTotals | undefined,
+  status: UsageStatus,
+): string {
+  if (!totals || status === "blocked" || status === "error") return "—";
+  return formatCacheHitPercent(totals);
 }
 
 const dayFormats = new Map<string, Intl.DateTimeFormat>();

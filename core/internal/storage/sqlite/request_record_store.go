@@ -27,7 +27,9 @@ const requestRecordSelectColumns = `
            WHERE request_record_cursors.request_id = request_records.id
            ORDER BY kind, direction, value)) AS cursors_json, first_token_ms, model_redirect_json,
     routing_decision_json, model_routing_json, client_type, privacy_decision, privacy_findings_json, conversion_diagnostics_json,
-    first_answer_ms, privacy_ignored_json, metadata_json, plugin_records_json, output_json`
+    first_answer_ms, privacy_ignored_json, metadata_json, plugin_records_json, output_json, parent_session_id, context_json,
+    (SELECT project FROM context_sets WHERE context_sets.id = request_records.context_set_id) AS context_project,
+    (SELECT items_json FROM context_sets WHERE context_sets.id = request_records.context_set_id) AS context_items`
 
 const requestRecordInsertColumns = `
     id, parent_request_id, attempt_index, started_at, completed_at, status, input_protocol,
@@ -36,9 +38,10 @@ const requestRecordInsertColumns = `
     session_id, previous_response_id, output_response_id, input_preview, events_json, created_at,
     turn_index, session_link_json, turn_user_messages, turn_user_fingerprint, recovery_json, first_token_ms,
     model_redirect_json, routing_decision_json, model_routing_json, client_type, privacy_decision, privacy_findings_json,
-    conversion_diagnostics_json, first_answer_ms, privacy_ignored_json, metadata_json, plugin_records_json, output_json`
+    conversion_diagnostics_json, first_answer_ms, privacy_ignored_json, metadata_json, plugin_records_json, output_json,
+    parent_session_id, context_json, context_set_id`
 
-const requestRecordInsertValues = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const requestRecordInsertValues = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (row requestRecordRow) insertArgs() []any {
 	return []any{
@@ -50,6 +53,7 @@ func (row requestRecordRow) insertArgs() []any {
 		row.turnIndex, row.sessionLinkJSON, row.turnUserMessages, row.turnUserFingerprint, row.recoveryJSON, row.firstTokenMs,
 		row.modelRedirectJSON, row.routingDecisionJSON, row.modelRoutingJSON, row.clientType, row.privacyDecision, row.privacyFindingsJSON,
 		row.conversionDiagnosticsJSON, row.firstAnswerMs, row.privacyIgnoredJSON, row.metadataJSON, row.pluginRecordsJSON, row.outputJSON,
+		row.parentSessionID, row.contextJSON, row.contextSetID,
 	}
 }
 
@@ -66,6 +70,9 @@ func (store *Store) InsertRequestRecord(ctx context.Context, record contract.Req
 		return fmt.Errorf("begin request insert: %w", err)
 	}
 	defer rollbackOnError(transaction, &err)
+	if row.contextSetID, err = recordContextSet(ctx, transaction, record); err != nil {
+		return err
+	}
 	if _, err = transaction.ExecContext(ctx,
 		`INSERT INTO request_records (`+requestRecordInsertColumns+`) VALUES `+requestRecordInsertValues,
 		row.insertArgs()...,
@@ -102,6 +109,9 @@ func (store *Store) UpsertRequestRecord(ctx context.Context, record contract.Req
 		return fmt.Errorf("begin request upsert: %w", err)
 	}
 	defer rollbackOnError(transaction, &err)
+	if row.contextSetID, err = recordContextSet(ctx, transaction, record); err != nil {
+		return err
+	}
 	result, err := transaction.ExecContext(ctx, `INSERT INTO request_records (`+requestRecordInsertColumns+`
 ) VALUES `+requestRecordInsertValues+`
 ON CONFLICT(id) DO UPDATE SET
@@ -146,7 +156,10 @@ ON CONFLICT(id) DO UPDATE SET
     metadata_json = excluded.metadata_json,
     plugin_records_json = excluded.plugin_records_json,
     conversion_diagnostics_json = excluded.conversion_diagnostics_json,
-    output_json = excluded.output_json
+    output_json = excluded.output_json,
+    parent_session_id = COALESCE(excluded.parent_session_id, request_records.parent_session_id),
+    context_json = excluded.context_json,
+    context_set_id = excluded.context_set_id
 WHERE request_records.status = 'pending' OR excluded.status <> 'pending'`,
 		row.insertArgs()...,
 	)
@@ -166,6 +179,8 @@ WHERE request_records.status = 'pending' OR excluded.status <> 'pending'`,
 		if err = recordBilling(ctx, transaction, record, false); err != nil {
 			return err
 		}
+	} else if err = dropUnusedContextSet(ctx, transaction, row.contextSetID); err != nil {
+		return err
 	}
 	if err = transaction.Commit(); err != nil {
 		return fmt.Errorf("commit request upsert: %w", err)
@@ -441,6 +456,10 @@ FROM request_records WHERE parent_request_id IS NULL`)
 		query.WriteString(` AND input_preview LIKE ? ESCAPE '\'`)
 		args = append(args, "%"+escapeLikePattern(options.Query)+"%")
 	}
+	if options.ClientType != nil {
+		query.WriteString(` AND client_type = ?`)
+		args = append(args, string(*options.ClientType))
+	}
 	if options.Protocol != nil || options.ServiceID != nil || options.Status != nil {
 		query.WriteString(` AND (`)
 		directParts := make([]string, 0, 3)
@@ -672,10 +691,11 @@ WHERE parent_request_id IN (
 	}
 }
 
-// purgeRequestSessions deletes the named conversations: their roots with
-// every retry attempt, cursor and audit part. A root still running stays,
-// since its attempts and final snapshot are yet to be written; the
-// conversation keeps it and loses the rest.
+// purgeRequestSessions deletes the named conversations and the subagent
+// conversations they started: their roots with every retry attempt, cursor
+// and audit part. A root still running stays, since its attempts and final
+// snapshot are yet to be written; the conversation keeps it and loses the
+// rest.
 func purgeRequestSessions(
 	ctx context.Context,
 	transaction *sql.Tx,
@@ -687,9 +707,9 @@ func purgeRequestSessions(
 	if _, err := transaction.ExecContext(ctx, `UPDATE request_records SET id = id WHERE 0`); err != nil {
 		return contract.PurgeResult{}, fmt.Errorf("lock request records: %w", err)
 	}
-	args := make([]any, len(sessionIDs))
-	for index, id := range sessionIDs {
-		args[index] = string(id)
+	args, err := withSubagentSessions(ctx, transaction, sessionIDs)
+	if err != nil {
+		return contract.PurgeResult{}, err
 	}
 	withDoomed := `WITH roots AS (
     SELECT id FROM request_records INDEXED BY request_records_session_turns_idx
@@ -733,6 +753,34 @@ func purgeRequestSessions(
 		return contract.PurgeResult{}, fmt.Errorf("purge request records: %w", err)
 	}
 	return result, nil
+}
+
+// withSubagentSessions returns sessionIDs plus every conversation they
+// started as subagents, theirs included, as query arguments.
+func withSubagentSessions(ctx context.Context, transaction *sql.Tx, sessionIDs []contract.SessionID) ([]any, error) {
+	roots := make([]string, len(sessionIDs))
+	for index, id := range sessionIDs {
+		roots[index] = string(id)
+	}
+	parents, err := subagentParents(ctx, transaction, roots)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(roots)+len(parents))
+	args := make([]any, 0, len(roots)+len(parents))
+	for _, id := range roots {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			args = append(args, id)
+		}
+	}
+	for id := range parents {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			args = append(args, id)
+		}
+	}
+	return args, nil
 }
 
 type requestRecordRow struct {
@@ -780,6 +828,9 @@ type requestRecordRow struct {
 	metadataJSON              any
 	pluginRecordsJSON         any
 	outputJSON                any
+	parentSessionID           any
+	contextJSON               any
+	contextSetID              any
 }
 
 func encodeRequestRecordRow(record contract.RequestRecord, createdAt time.Time) (requestRecordRow, error) {
@@ -937,6 +988,16 @@ func encodeRequestRecordRow(record contract.RequestRecord, createdAt time.Time) 
 	if record.SessionID != nil {
 		row.sessionID = string(*record.SessionID)
 	}
+	if record.ParentSessionID != nil {
+		row.parentSessionID = string(*record.ParentSessionID)
+	}
+	if record.Context != nil {
+		encoded, err := encodeRecordContext(*record.Context)
+		if err != nil {
+			return requestRecordRow{}, err
+		}
+		row.contextJSON = encoded
+	}
 	if record.PreviousResponseID != nil {
 		row.previousResponseID = *record.PreviousResponseID
 	}
@@ -979,7 +1040,7 @@ type scannable interface {
 func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 	var recoveryJSON, modelRedirectJSON, routingDecisionJSON, modelRoutingJSON, clientType sql.NullString
 	var privacyDecision, privacyFindingsJSON, privacyIgnoredJSON, conversionDiagnosticsJSON sql.NullString
-	var metadataJSON, pluginRecordsJSON, outputJSON sql.NullString
+	var metadataJSON, pluginRecordsJSON, outputJSON, parentSessionID, contextJSON, contextProject, contextItems sql.NullString
 	var firstTokenMs, firstAnswerMs sql.NullInt64
 	var (
 		id, startedAt, status, inputProtocol, auditJSON, createdAt        string
@@ -1001,6 +1062,7 @@ func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 		&createdAt, &turnIndex, &sessionLinkJSON, &turnUserMessages, &turnUserFingerprint, &recoveryJSON, &childCount, &cursorsJSON, &firstTokenMs,
 		&modelRedirectJSON, &routingDecisionJSON, &modelRoutingJSON, &clientType, &privacyDecision, &privacyFindingsJSON,
 		&conversionDiagnosticsJSON, &firstAnswerMs, &privacyIgnoredJSON, &metadataJSON, &pluginRecordsJSON, &outputJSON,
+		&parentSessionID, &contextJSON, &contextProject, &contextItems,
 	); err != nil {
 		return contract.RequestRecord{}, err
 	}
@@ -1047,6 +1109,10 @@ func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 	if parentRequestID.Valid {
 		value := contract.RequestID(parentRequestID.String)
 		record.ParentRequestID = &value
+	}
+	if parentSessionID.Valid && parentSessionID.String != "" {
+		value := contract.SessionID(parentSessionID.String)
+		record.ParentSessionID = &value
 	}
 	if completedAt.Valid {
 		completed, err := time.Parse(time.RFC3339Nano, completedAt.String)
@@ -1160,6 +1226,21 @@ func scanRequestRecord(row scannable) (contract.RequestRecord, error) {
 		record.Output = &contract.OutputActivity{}
 		if err := json.Unmarshal([]byte(outputJSON.String), record.Output); err != nil {
 			return contract.RequestRecord{}, fmt.Errorf("%w: request %q output", storagecontract.ErrInvalidRecord, id)
+		}
+	}
+	if contextJSON.Valid && contextJSON.String != "" {
+		var items []contract.ContextItem
+		if contextItems.Valid {
+			if items, err = decodeContextItems(contextItems.String); err != nil {
+				return contract.RequestRecord{}, fmt.Errorf("%w: request %q context items", storagecontract.ErrInvalidRecord, id)
+			}
+		}
+		if record.Context, err = assembleContext(contextJSON.String, items, record.Usage); err != nil {
+			return contract.RequestRecord{}, fmt.Errorf("%w: request %q context", storagecontract.ErrInvalidRecord, id)
+		}
+		if contextProject.Valid && contextProject.String != "" {
+			value := contextProject.String
+			record.Project = &value
 		}
 	}
 	if sessionID.Valid {

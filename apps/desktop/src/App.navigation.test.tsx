@@ -46,9 +46,10 @@ const bridgeMocks = vi.hoisted(() => ({
     clients: [],
     wsl_unchecked: [],
     wsl_localhost: false,
-    cc_switch_wsl: { claude: null, codex: null },
   }),
-  previewClientConfigSnippet: vi.fn().mockResolvedValue("{}"),
+  previewClientConfigSnippet: vi
+    .fn()
+    .mockResolvedValue([{ path: "~/.claude/settings.json", contents: "{}" }]),
   copyClientConfigSnippet: vi.fn(),
   uninstallAgentDebug: vi.fn(),
   getService: vi.fn(),
@@ -64,6 +65,7 @@ const bridgeMocks = vi.hoisted(() => ({
   listRawAccess: vi.fn().mockResolvedValue([]),
   listAccessTokenUsage: vi.fn().mockResolvedValue({ items: [] }),
   listServices: vi.fn(),
+  getServicePackages: vi.fn().mockResolvedValue([]),
   listPrivacyModelInstallations: vi.fn(),
   listPrivacyPolicies: vi.fn(),
   listPlugins: vi.fn(async () => ({ plugins: [] })),
@@ -243,6 +245,19 @@ async function setInput(selector: string, value: string): Promise<void> {
   });
 }
 
+/** Radix activates a tab on mouse down, not on click. */
+async function openTab(label: string): Promise<void> {
+  const tab = [
+    ...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+  ].find((candidate) => candidate.textContent === label);
+  if (!tab) throw new Error(`Missing tab: ${label}`);
+  await act(async () => {
+    tab.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
+  });
+}
+
 /** Picks a card in the open provider-type dialog. */
 async function chooseKindCard(option: string): Promise<void> {
   const card = [
@@ -293,32 +308,6 @@ const noRawPassword = rawSealing({
 
 function proofDialog(): HTMLElement | null {
   return document.querySelector('[data-slot="proof-confirm-dialog"]');
-}
-
-function queryButton(label: string, scope: ParentNode): HTMLElement | null {
-  return (
-    [...scope.querySelectorAll("button")].find(
-      (candidate) => candidate.textContent?.trim() === label,
-    ) ?? null
-  );
-}
-
-async function typeNewPassword(password: string): Promise<void> {
-  const inputs = document.querySelectorAll<HTMLInputElement>(
-    'input[autocomplete="new-password"]',
-  );
-  if (inputs.length !== 2) throw new Error("Missing new password fields");
-  const valueSetter = Object.getOwnPropertyDescriptor(
-    HTMLInputElement.prototype,
-    "value",
-  )?.set;
-  if (!valueSetter) throw new Error("Missing HTMLInputElement value setter");
-  for (const input of inputs) {
-    await act(async () => {
-      valueSetter.call(input, password);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-  }
 }
 
 async function pressEscape(): Promise<void> {
@@ -556,9 +545,12 @@ describe("App workspace navigation", () => {
       },
       by_day: [],
       by_hour: [],
+      by_hour_model: [],
       by_service: [],
       by_model: [],
       by_token: [],
+      by_client: [],
+      by_route: [],
       by_plugin: [],
       scanned_records: 0,
       capped: false,
@@ -847,8 +839,7 @@ describe("App workspace navigation", () => {
     });
     await renderApp();
     expect(workspaceHeading().textContent).toBe("开始使用 AstrLink");
-    // The raw password is set, so the guide opens on the provider step.
-    expect(container.textContent).toContain("已完成 1 / 4 步");
+    expect(container.textContent).toContain("已完成 0 / 3 步");
     expect(container.querySelector("#usage-heading")).toBeNull();
     expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBe("active");
     await act(async () => button("添加 API 提供商").click());
@@ -880,90 +871,75 @@ describe("App workspace navigation", () => {
     expect(button("上手引导")).toBeTruthy();
   });
 
-  it("asks a first launch for the raw password before anything else", async () => {
+  it("opens the guide on a fresh install, whose only token Core issued itself", async () => {
+    bridgeMocks.listServices.mockResolvedValue({
+      items: [],
+      next_cursor: null,
+    });
+    // What a real first start lists: the bootstrap token, nothing else.
+    bridgeMocks.listAccessTokens.mockResolvedValue({
+      items: [
+        {
+          id: "access_token_bootstrap",
+          name: "默认令牌",
+          hint: "astr_…B00T",
+          source: "system_default",
+          created_at: "2026-10-24T08:00:00Z",
+        },
+      ],
+      next_cursor: null,
+    });
+    // Nothing raw is kept without a password, so the first run asks for none.
+    bridgeMocks.getRawSealingStatus.mockResolvedValue(noRawPassword);
+    await renderApp();
+
+    expect(workspaceHeading().textContent).toBe("开始使用 AstrLink");
+    expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBe("active");
+    expect(container.textContent).toContain("已完成 1 / 3 步");
+    expect(
+      container.querySelector('[aria-current="step"]')?.textContent,
+    ).toContain("接入 API 提供商");
+    expect(container.textContent).not.toContain("保护请求原文");
+    expect(proofDialog()).toBeNull();
+
+    await act(async () => button("添加 API 提供商").click());
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      "选择 API 提供商类型",
+    );
+    expect(bridgeMocks.setRawPassword).not.toHaveBeenCalled();
+  });
+
+  it("keeps the guide closed once someone created a token", async () => {
     bridgeMocks.listServices.mockResolvedValue({
       items: [],
       next_cursor: null,
     });
     bridgeMocks.listAccessTokens.mockResolvedValue({
-      items: [],
+      items: [
+        {
+          id: "token_laptop",
+          name: "laptop",
+          hint: "astr_…L4PT",
+          source: "user",
+          created_at: "2026-10-24T08:00:00Z",
+        },
+      ],
       next_cursor: null,
     });
-    bridgeMocks.getRawSealingStatus.mockResolvedValue(noRawPassword);
-    bridgeMocks.setRawPassword.mockResolvedValue({
-      outcome: "sealing",
-      status: rawSealing(),
-      reset: null,
-    });
     await renderApp();
-
-    expect(workspaceHeading().textContent).toBe("开始使用 AstrLink");
-    expect(container.textContent).toContain("已完成 0 / 4 步");
-    expect(
-      container.querySelector('[aria-current="step"]')?.textContent,
-    ).toContain("保护请求原文");
-    // The guide asks in its own step, so the required dialog waits.
-    expect(proofDialog()).toBeNull();
-
-    await act(async () => button("开始设置").click());
-    expect(proofDialog()?.textContent).toContain("保护请求原文");
-    await act(async () => button("取消").click());
-    expect(proofDialog()).toBeNull();
-
-    // Skipping the guide does not skip the password.
-    await act(async () => button("稍后设置").click());
     expect(workspaceHeading().textContent).toBe("运行概览");
-    expect(proofDialog()?.textContent).toContain("设置口令并继续");
-    expect(queryButton("取消", proofDialog()!)).toBeNull();
-
-    await typeNewPassword("correct horse");
-    await act(async () => button("设置口令并继续").click());
-    expect(bridgeMocks.setRawPassword).toHaveBeenCalledExactlyOnceWith(
-      "set",
-      "correct horse",
-      undefined,
-    );
-    expect(proofDialog()).toBeNull();
-    await act(async () => button("上手引导").click());
-    expect(container.textContent).toContain("已完成 1 / 4 步");
-    expect(
-      container.querySelector('[aria-current="step"]')?.textContent,
-    ).toContain("接入 API 提供商");
+    expect(localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBeNull();
   });
 
-  it("keeps an upgraded workspace behind the raw password until one is set", async () => {
+  it("leaves an upgraded workspace without a raw password as it was", async () => {
     localStorage.setItem(ONBOARDING_STORAGE_KEY, "complete");
     bridgeMocks.getRawSealingStatus.mockResolvedValue(noRawPassword);
-    bridgeMocks.setRawPassword.mockResolvedValue({
-      outcome: "sealing",
-      status: rawSealing(),
-      reset: null,
-    });
     await renderApp();
 
-    // The workspace is there behind it; the gateway keeps serving.
+    // No dialog stands in front; the password waits for capture or Settings.
     expect(workspaceHeading().textContent).toBe("运行概览");
-    const dialog = proofDialog();
-    expect(dialog?.textContent).toContain("设置口令并继续");
-    expect(dialog?.textContent).toContain("新请求的原文不会保存");
-    expect(dialog?.textContent).toContain("忘记后只能重置");
-    expect(queryButton("取消", dialog!)).toBeNull();
-    await pressEscape();
-    await act(async () => {
-      document
-        .querySelector('[data-slot="alert-dialog-overlay"]')
-        ?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
-    });
-    expect(proofDialog()).not.toBeNull();
-
-    await typeNewPassword("correct horse");
-    await act(async () => button("设置口令并继续").click());
-    expect(bridgeMocks.setRawPassword).toHaveBeenCalledExactlyOnceWith(
-      "set",
-      "correct horse",
-      undefined,
-    );
     expect(proofDialog()).toBeNull();
+    expect(bridgeMocks.setRawPassword).not.toHaveBeenCalled();
   });
 
   it("resumes at token creation and continues to client setup after saving", async () => {
@@ -1122,8 +1098,27 @@ describe("App workspace navigation", () => {
     bridgeMocks.previewClientConfigSnippet.mockImplementation(
       async ({ client }: { client: string }) =>
         client === "codex"
-          ? 'model_provider = "astrlink"\n'
-          : '{ "env": { "ANTHROPIC_AUTH_TOKEN": "astr_…abcd" } }',
+          ? [
+              {
+                path: "~/.codex/config.toml",
+                contents: 'model_provider = "astrlink"\n',
+              },
+            ]
+          : client === "pi"
+            ? [
+                { path: "~/.pi/agent/models.json", contents: "{}\n" },
+                {
+                  path: "~/.pi/agent/settings.json",
+                  contents: '{ "defaultProvider": "astrlink" }\n',
+                },
+              ]
+            : [
+                {
+                  path: "~/.claude/settings.json",
+                  contents:
+                    '{ "env": { "ANTHROPIC_AUTH_TOKEN": "astr_…abcd" } }',
+                },
+              ],
     );
     bridgeMocks.copyClientConfigSnippet.mockResolvedValue(true);
     await renderApp();
@@ -1137,14 +1132,26 @@ describe("App workspace navigation", () => {
       models: { model: "gpt-5" },
       inferenceUrl: "http://localhost:8317",
     });
-    await act(async () => button("复制配置").click());
+    await act(async () => button("复制配置：~/.codex/config.toml").click());
     expect(bridgeMocks.copyClientConfigSnippet).toHaveBeenCalledExactlyOnceWith(
       {
         tokenId: "token_01",
         client: "codex",
         models: { model: "gpt-5" },
         inferenceUrl: "http://localhost:8317",
+        file: 0,
       },
+    );
+
+    // A client with two files gets a block and a copy button for each.
+    await act(async () => button("Pi").click());
+    expect(container.textContent).toContain("~/.pi/agent/models.json");
+    expect(container.textContent).toContain('"defaultProvider": "astrlink"');
+    await act(async () =>
+      button("复制配置：~/.pi/agent/settings.json").click(),
+    );
+    expect(bridgeMocks.copyClientConfigSnippet).toHaveBeenLastCalledWith(
+      expect.objectContaining({ client: "pi", file: 1 }),
     );
   });
 
@@ -1227,6 +1234,7 @@ describe("App workspace navigation", () => {
         locale: "zh-CN",
         theme: "system",
         quota_display_mode: "remaining" as const,
+        display_currency: "auto" as const,
         tray: defaultTrayPreferences(),
         updates: defaultUpdatePreferences(),
       },
@@ -1239,6 +1247,7 @@ describe("App workspace navigation", () => {
     bridgeMocks.getPreferences.mockResolvedValue(preferences);
     await renderApp();
     await act(async () => button("设置").click());
+    await openTab("网关与网络");
     await setInput('input[type="number"]', "9123");
     await act(async () => button("概览").click());
     await act(async () => button("放弃修改并离开").click());
@@ -1249,6 +1258,7 @@ describe("App workspace navigation", () => {
       }),
     );
     await act(async () => button("设置").click());
+    await openTab("网关与网络");
     const port = container.querySelector<HTMLInputElement>(
       'input[type="number"]',
     );
@@ -1328,7 +1338,7 @@ describe("App workspace navigation", () => {
     expect(container.textContent).toContain("API 地址");
     expect(container.textContent).toContain("用量概览");
     expect(
-      container.querySelector("[data-slot='activity-heatmap']"),
+      container.querySelector("[data-slot='usage-star-trail']"),
     ).not.toBeNull();
     expect(container.textContent).toContain("按 API 提供商");
     expect(container.textContent).toContain("按模型");
@@ -1362,7 +1372,7 @@ describe("App workspace navigation", () => {
     expect(
       document.querySelector('[aria-current="page"]')?.textContent,
     ).toContain("提供商");
-    expect(workspaceHeading().textContent).toBe("API 提供商");
+    expect(workspaceHeading().textContent).toBe("提供商");
     expect(container.textContent).toContain("Primary gateway");
     expect(container.textContent).toContain("Codex 订阅");
     expect(
@@ -1373,7 +1383,7 @@ describe("App workspace navigation", () => {
     await act(async () => {
       button("添加 API 提供商").click();
     });
-    expect(workspaceHeading().textContent).toBe("API 提供商");
+    expect(workspaceHeading().textContent).toBe("提供商");
     await chooseKindCard("New API");
     expect(workspaceHeading().textContent).toBe("添加 API 提供商");
     expect(
@@ -1394,7 +1404,7 @@ describe("App workspace navigation", () => {
     await act(async () => {
       back?.click();
     });
-    expect(workspaceHeading().textContent).toBe("API 提供商");
+    expect(workspaceHeading().textContent).toBe("提供商");
   });
 
   it("opens a provider's requests from its usage row and its settings from the gear", async () => {
@@ -1498,7 +1508,7 @@ describe("App workspace navigation", () => {
     expect(
       document.querySelector('[aria-current="page"]')?.textContent,
     ).toContain("提供商");
-    expect(workspaceHeading().textContent).toBe("API 提供商");
+    expect(workspaceHeading().textContent).toBe("提供商");
     expect(container.textContent).toContain("Codex 订阅");
     expect(
       container.querySelector('[aria-label="更多 Codex 订阅 操作"]'),
@@ -1523,6 +1533,7 @@ describe("App workspace navigation", () => {
         locale: "zh-CN",
         theme: "system",
         quota_display_mode: "remaining" as const,
+        display_currency: "auto" as const,
         tray: defaultTrayPreferences(),
         updates: defaultUpdatePreferences(),
       },
@@ -1542,9 +1553,9 @@ describe("App workspace navigation", () => {
       await Promise.resolve();
     });
     expect(workspaceHeading().textContent).toBe("设置");
-    expect(container.textContent).toContain("推理入口");
-    expect(container.textContent).toContain("检查并发");
-    expect(container.textContent).toContain("响应头等待");
+    expect(container.textContent).toContain("外观");
+    expect(container.textContent).toContain("关闭主窗口时");
+    expect(container.textContent).toContain("网关与网络");
     expect(container.textContent).not.toContain("工具接入");
     expect(
       container.querySelector('[data-slot="local-data-notice"]'),
@@ -1567,6 +1578,7 @@ describe("App workspace navigation", () => {
         locale: "zh-CN",
         theme: "system",
         quota_display_mode: "remaining" as const,
+        display_currency: "auto" as const,
         tray: defaultTrayPreferences(),
         updates: defaultUpdatePreferences(),
       },
@@ -1599,7 +1611,7 @@ describe("App workspace navigation", () => {
       button("前往提供商").click();
       await Promise.resolve();
     });
-    expect(workspaceHeading().textContent).toBe("API 提供商");
+    expect(workspaceHeading().textContent).toBe("提供商");
 
     await openSettings();
     await act(async () => {
@@ -1719,6 +1731,7 @@ describe("App workspace navigation", () => {
         locale: "zh-CN",
         theme: "system",
         quota_display_mode: "remaining" as const,
+        display_currency: "auto" as const,
         tray: defaultTrayPreferences(),
         updates: defaultUpdatePreferences(),
       },
@@ -1733,6 +1746,7 @@ describe("App workspace navigation", () => {
       button("设置").click();
       await Promise.resolve();
     });
+    await openTab("网关与网络");
     const port = container.querySelector<HTMLInputElement>(
       'input[type="number"]',
     );
@@ -1791,29 +1805,25 @@ describe("App workspace navigation", () => {
     expect(bridgeMocks.getUsageSummary).toHaveBeenCalledTimes(requestCalls);
   });
 
-  it("summarizes usage over the default yearly window", async () => {
+  it("reads the last 24 hours once when the overview first opens", async () => {
     await renderApp();
+    await act(async () => {
+      await Promise.resolve();
+    });
 
+    // The request sky is hidden by default and reads nothing.
+    expect(container.querySelector('[data-slot="request-sky"]')).toBeNull();
     const query = bridgeMocks.getUsageSummary.mock.calls[0]?.[0];
     expect(bridgeMocks.getUsageSummary).toHaveBeenCalledTimes(1);
     expect(bridgeMocks.listRequestRecords).not.toHaveBeenCalled();
-    expect(query).toMatchObject({ preset: "1y" });
+    expect(query).toMatchObject({ preset: "1d" });
     const from = new Date(query.from as string);
     const to = new Date(query.to as string);
-    expect(from.getHours()).toBe(0);
-    expect(from.getMinutes()).toBe(0);
-    expect(to.getHours()).toBe(0);
-    // 365 inclusive local days, ending today.
-    expect(Math.round((to.getTime() - from.getTime()) / 86_400_000)).toBe(365);
-
-    const today = new Date();
-    expect(to.getDate()).toBe(
-      new Date(
-        today.getFullYear(),
-        today.getMonth(),
-        today.getDate() + 1,
-      ).getDate(),
-    );
+    // 24 local hours, ending with the current one.
+    expect(to.getTime() - from.getTime()).toBe(24 * 3_600_000);
+    expect(to.getMinutes()).toBe(0);
+    expect(from.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(to.getTime()).toBeGreaterThan(Date.now());
   });
 
   it("revalidates the overview silently on return, on a timer, and when shown again", async () => {
@@ -2024,7 +2034,7 @@ describe("App workspace navigation", () => {
     });
 
     expect(bridgeMocks.createService).toHaveBeenCalledOnce();
-    expect(workspaceHeading().textContent).toBe("API 提供商");
+    expect(workspaceHeading().textContent).toBe("提供商");
     expect(container.textContent).not.toContain("放弃未保存的修改？");
     expect(document.querySelector('[role="alertdialog"]')).toBeNull();
   });

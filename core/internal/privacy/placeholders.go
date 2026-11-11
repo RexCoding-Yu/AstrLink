@@ -325,6 +325,54 @@ func isTokenPlaceholder(value string) bool {
 	return strings.HasPrefix(inner, "PRIVATE") || strings.HasPrefix(inner, "SECRET")
 }
 
+// isTokenPlaceholderSpan also recognizes findings inside a marker, such as a
+// model matching its body without the angle brackets or only its hex suffix.
+// The whole finding must fit within one marker; adjacent text stays protected.
+func isTokenPlaceholderSpan(text string, start, end int) bool {
+	if start < 0 || end > len(text) || start >= end {
+		return false
+	}
+	value := text[start:end]
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	start += strings.Index(value, trimmed)
+	end = start + len(trimmed)
+	opening := start
+	if text[opening] != '<' {
+		opening = strings.LastIndexAny(text[:start], "<>")
+	}
+	if opening < 0 || text[opening] != '<' {
+		return false
+	}
+	closing := strings.IndexAny(text[opening+1:], "<>")
+	if closing < 0 {
+		return false
+	}
+	closing += opening + 1
+	if text[closing] != '>' || end > closing+1 {
+		return false
+	}
+	marker := text[opening : closing+1]
+	if start == opening && end == closing+1 {
+		return isTokenPlaceholder(marker)
+	}
+	// Partial matches must belong to a format the allocator emits, not just
+	// arbitrary text wrapped in a tag whose name starts with SECRET or PRIVATE.
+	name := marker[1 : len(marker)-1]
+	if body, ok := markerBody(marker); ok {
+		name = body[:len(body)-placeholderTokenHexLength-1]
+	}
+	for _, kind := range contract.PrivacyKinds() {
+		base := replacementFor(Kind(kind))
+		if name == base[1:len(base)-1] {
+			return true
+		}
+	}
+	return false
+}
+
 func isReservedInvalidHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host == naturalPlaceholderDomain ||

@@ -83,7 +83,9 @@ import {
   compareReleaseVersions,
   DEFAULT_PRIVACY_RESTORE_SETTINGS,
   defaultPrivacyKindRules,
+  isAcceleratedVariantID,
   isCoreMLVariantID,
+  isDirectMLVariantID,
   isResourceHeavyVariant,
   localModelActive,
   MAX_PRIVACY_ALLOWLIST_RULES,
@@ -498,8 +500,9 @@ function formatBytes(bytes: number): string {
   return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
-// Core names variants in English. The Core ML variants it offers are shown
-// in the user's language, by id; any other id keeps the name Core sent.
+// Core names variants in English. The Core ML and DirectML variants it
+// offers are shown in the user's language, by id; any other id keeps the
+// name Core sent.
 function variantName(id: string, name: string): string {
   switch (id) {
     case "coreml_fp16_gpu":
@@ -508,9 +511,32 @@ function variantName(id: string, name: string): string {
       return i18n.t("safety.coreMLVariantNeuralEngine");
     case "coreml_fp16_all":
       return i18n.t("safety.coreMLVariantAllUnits");
+    case "directml_fp16_gpu":
+      return i18n.t("safety.directMLVariantGPU");
     default:
       return name;
   }
+}
+
+// The catalog recommends INT8 on the CPU, so its Core ML GPU variant does
+// not also claim to be recommended, as it does next to the Neural Engine one
+// in a Core ML import.
+function catalogVariantName(variant: PrivacyModelVariant): string {
+  return variant.id === "coreml_fp16_gpu"
+    ? i18n.t("safety.coreMLVariantGPUInCatalog")
+    : variantName(variant.id, variant.name);
+}
+
+// What happens when the policy starts using an accelerated variant: Core ML
+// compiles the model for this Mac, DirectML loads it onto the GPU.
+function enableHint(variantID: string): string | null {
+  if (isCoreMLVariantID(variantID)) {
+    return i18n.t("safety.coreMLCompileOnEnable");
+  }
+  if (isDirectMLVariantID(variantID)) {
+    return i18n.t("safety.directMLLoadOnEnable");
+  }
+  return null;
 }
 
 function unsupportedVariantSuffix(variant: PrivacyModelVariant): string {
@@ -558,6 +584,94 @@ function mergeInstallation(
   const index = current.findIndex((item) => item.id === next.id);
   if (index < 0) return [...current, next];
   return current.map((item) => (item.id === next.id ? next : item));
+}
+
+function ModelInstallationStatus({
+  installation,
+  selected = false,
+}: {
+  installation: PrivacyModelInstallation;
+  selected?: boolean;
+}) {
+  const t = useT();
+  return (
+    <StatusBadge
+      tone={
+        installation.status === "ready"
+          ? "positive"
+          : installation.status === "error"
+            ? "negative"
+            : "pending"
+      }
+    >
+      {selected
+        ? t("safety.policySelected")
+        : installation.source === "local" &&
+            installation.status === "downloading"
+          ? t("safety.importing")
+          : installationStatusLabel(installation.status)}
+    </StatusBadge>
+  );
+}
+
+function ModelInstallationProgress({
+  installation,
+}: {
+  installation: PrivacyModelInstallation;
+}) {
+  const t = useT();
+  const hasDownloadTotal = installation.bytes_total > 0;
+  const progress = hasDownloadTotal
+    ? Math.min(
+        100,
+        Math.round(
+          (installation.bytes_downloaded / installation.bytes_total) * 100,
+        ),
+      )
+    : 0;
+
+  return (
+    <>
+      {installation.status === "downloading" ||
+      installation.status === "paused" ? (
+        <div className="grid gap-1.5">
+          <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
+            <span>
+              {hasDownloadTotal
+                ? `${formatBytes(
+                    installation.bytes_downloaded,
+                  )} / ${formatBytes(installation.bytes_total)}`
+                : installation.source === "local"
+                  ? t("safety.preparingImport")
+                  : t("safety.preparingDownload")}
+            </span>
+            <strong>
+              {hasDownloadTotal ? `${progress}%` : t("safety.preparing")}
+            </strong>
+          </div>
+          <Progress
+            aria-label={t("safety.progressAria", {
+              name: installation.name,
+              action:
+                installation.source === "local"
+                  ? t("safety.import")
+                  : t("safety.download"),
+            })}
+            value={progress}
+          />
+        </div>
+      ) : (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {installation.error === null
+            ? t("safety.diskAndRam", {
+                disk: formatBytes(installation.bytes_total),
+                ram: formatBytes(installation.estimated_ram_bytes),
+              })
+            : installationErrorLabel(installation.error, installation.source)}
+        </p>
+      )}
+    </>
+  );
 }
 
 function initialLabelMapping(probe: PrivacyModelProbe): PrivacyLabelMapping {
@@ -731,25 +845,29 @@ function LabelMappingDialog({
 }
 
 /**
- * How Core is getting the policy's Core ML model ready on this Mac. While it
- * compiles, the previous detector keeps checking requests, or requests wait.
+ * How Core is getting the policy's accelerated model ready: a Core ML model
+ * compiles for this Mac, a DirectML model loads onto the GPU. Meanwhile the
+ * previous detector keeps checking requests, or requests wait.
  */
 function ModelPreparationNotice({
+  variantID,
   preparation,
   retrying,
   onRetry,
 }: {
+  variantID: string;
   preparation: PrivacyModelPreparation;
   retrying: boolean;
   onRetry: () => void;
 }) {
   const t = useT();
+  const gpu = isDirectMLVariantID(variantID);
   if (preparation.state === "preparing") {
     return (
       <div className="grid gap-0.5" data-testid="model-preparation">
         <LoadingState
           className="justify-start text-xs"
-          label={t("safety.modelCompiling")}
+          label={t(gpu ? "safety.modelLoadingOnGPU" : "safety.modelCompiling")}
         />
         <p className="pl-5.5 text-xs text-muted-foreground">
           {preparation.fallback === "local_model"
@@ -764,7 +882,7 @@ function ModelPreparationNotice({
   if (preparation.state === "ready") {
     return (
       <FormMessage data-testid="model-preparation" tone="success">
-        {t("safety.modelReadyOnMac")}
+        {t(gpu ? "safety.modelReadyOnGPU" : "safety.modelReadyOnMac")}
       </FormMessage>
     );
   }
@@ -778,10 +896,22 @@ function ModelPreparationNotice({
       <div>
         <span>
           {preparation.fallback === "local_model"
-            ? t("safety.modelPrepareFailedLocalFallback")
+            ? t(
+                gpu
+                  ? "safety.modelLoadFailedOnGPULocalFallback"
+                  : "safety.modelPrepareFailedLocalFallback",
+              )
             : preparation.fallback === "regex"
-              ? t("safety.modelPrepareFailedRegexFallback")
-              : t("safety.modelPrepareFailedBlocked")}
+              ? t(
+                  gpu
+                    ? "safety.modelLoadFailedOnGPURegexFallback"
+                    : "safety.modelPrepareFailedRegexFallback",
+                )
+              : t(
+                  gpu
+                    ? "safety.modelLoadFailedOnGPUBlocked"
+                    : "safety.modelPrepareFailedBlocked",
+                )}
         </span>
         <Button
           disabled={retrying}
@@ -878,9 +1008,9 @@ function ModelActionDialog({
           <FormMessage tone={heavy ? "warning" : "notice"}>
             {heavy ? t("safety.heavyConfirm") : t("safety.normalConfirm")}
           </FormMessage>
-          {isCoreMLVariantID(installation.variant_id) ? (
+          {enableHint(installation.variant_id) !== null ? (
             <FormMessage tone="notice">
-              {t("safety.coreMLCompileOnEnable")}
+              {enableHint(installation.variant_id)}
             </FormMessage>
           ) : null}
         </>
@@ -997,9 +1127,9 @@ function InstalledModelPicker({
             {t(heavy ? "safety.heavyConfirm" : "safety.normalConfirm")}
           </FormMessage>
         ) : null}
-        {selected && isCoreMLVariantID(selected.variant_id) ? (
+        {selected && enableHint(selected.variant_id) !== null ? (
           <FormMessage tone="notice">
-            {t("safety.coreMLCompileOnEnable")}
+            {enableHint(selected.variant_id)}
           </FormMessage>
         ) : null}
         {error ? <FormMessage tone="error">{error}</FormMessage> : null}
@@ -1633,8 +1763,8 @@ export function SafetyPolicy({
     if (initialView) setWorkspace(initialView);
   }, [initialView]);
 
-  // Downloads report progress, and Core reports when the policy's Core ML
-  // model finishes compiling, only when asked.
+  // Downloads report progress, and Core reports when the policy's
+  // accelerated model is ready, only when asked.
   const pollingIDs = useMemo(
     () =>
       installations
@@ -1733,7 +1863,7 @@ export function SafetyPolicy({
     void load(generation, true);
   };
 
-  // Core reports a preparation only for the policy's Core ML model, and
+  // Core reports a preparation only for the policy's accelerated model, and
   // starts it as the policy changes, so read that model again after a save.
   const syncPreparation = (
     policy: PrivacyPolicyRecord["policy"],
@@ -1773,7 +1903,8 @@ export function SafetyPolicy({
     const previous = record;
     policyMutationVersion.current += 1;
     const nextPolicy = { ...record.policy, ...patch };
-    // Core keeps the previous detector while a Core ML model compiles.
+    // Core keeps the previous detector while an accelerated model gets
+    // ready.
     const unloadsModel =
       patchUnloadsLocalModel(record.policy, patch) &&
       !(
@@ -1781,7 +1912,7 @@ export function SafetyPolicy({
         installations.some(
           (installation) =>
             installation.id === nextPolicy.local_model_id &&
-            isCoreMLVariantID(installation.variant_id),
+            isAcceleratedVariantID(installation.variant_id),
         )
       );
     setRecord({
@@ -2312,7 +2443,12 @@ export function SafetyPolicy({
       setInstallations((current) => mergeInstallation(current, installation));
       setCatalogPreparation(null);
       setCustomMappingOpen(false);
-      setView("installed");
+      if (key === "custom" || key === "local") {
+        setProbe(null);
+        setProbeView(null);
+        if (key === "custom" && installation.source === "catalog")
+          setView("catalog");
+      }
       notify.success(
         key === "local"
           ? t("safety.importStarted")
@@ -2713,7 +2849,7 @@ export function SafetyPolicy({
     return (
       <div className="gutter-frame flex h-full min-h-0 w-full min-w-0 flex-col">
         <PageHeader
-          description={t("safety.description")}
+          description={t("safety.pageDescription")}
           title={t("safety.title")}
           titleId="safety-policy-heading"
         />
@@ -2771,6 +2907,10 @@ export function SafetyPolicy({
     policy?.enabled === false &&
     policy.detector === "local_model" &&
     !selectedModelReady;
+  const completedInstallations = installations.filter(
+    (installation) =>
+      installation.status === "ready" || installation.installed_at !== null,
+  );
   const readyCount = installations.filter(
     (installation) => installation.status === "ready",
   ).length;
@@ -2778,6 +2918,12 @@ export function SafetyPolicy({
     probe?.variants.find(
       (variant) => variant.id === probeVariantID && variant.supported,
     ) ?? null;
+  // A system offers one kind of accelerated variant, so one hint covers them.
+  const importHint =
+    probe?.variants
+      .filter((variant) => variant.supported)
+      .map((variant) => enableHint(variant.id))
+      .find((hint) => hint !== null) ?? null;
   const unresolvedCustomLabels =
     probe?.labels.filter(
       (label) =>
@@ -2881,6 +3027,227 @@ export function SafetyPolicy({
             installation.id === pendingModelAction.installationID,
         ) ?? null);
 
+  const renderInstallationActions = (
+    installation: PrivacyModelInstallation,
+    activateLabel?: string,
+  ) => {
+    const selected = policy?.local_model_id === installation.id;
+    return (
+      <>
+        {installation.status === "ready" ? (
+          <Button
+            disabled={saving || selected}
+            onClick={() => chooseInstallation(installation)}
+            size="sm"
+            type="button"
+            variant={selected ? "secondary" : "default"}
+          >
+            {selected
+              ? t("safety.currentModel")
+              : (activateLabel ?? t("safety.usedByPolicy"))}
+          </Button>
+        ) : null}
+        {installation.source !== "local" && installation.status !== "ready" ? (
+          <Button
+            disabled={operationBusy !== null}
+            onClick={() => void changeDownloadState(installation)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {operationBusy === installation.id
+              ? t("common.processing")
+              : installation.status === "downloading"
+                ? t("safety.pauseDownload")
+                : installation.status === "paused"
+                  ? t("safety.resumeDownload")
+                  : t("safety.retry")}
+          </Button>
+        ) : null}
+        <Button
+          disabled={operationBusy !== null || selected}
+          onClick={() => void removeInstallation(installation)}
+          size="sm"
+          type="button"
+          variant="destructive"
+        >
+          {operationBusy === installation.id
+            ? t("common.processing")
+            : installation.status === "downloading"
+              ? t("common.cancel")
+              : t("common.delete")}
+        </Button>
+      </>
+    );
+  };
+
+  const renderDownload = (installation: PrivacyModelInstallation) => (
+    <Panel className="grid gap-2 p-3" key={installation.id} tone="inset">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-medium">
+          {installationSummary(installation)}
+        </span>
+        <ModelInstallationStatus installation={installation} />
+      </div>
+      <ModelInstallationProgress installation={installation} />
+      <div className="flex flex-wrap justify-end gap-2">
+        {renderInstallationActions(installation)}
+      </div>
+    </Panel>
+  );
+
+  const renderInstallationCard = (installation: PrivacyModelInstallation) => {
+    const selected = policy?.local_model_id === installation.id;
+    const sourceLabel =
+      installation.source === "local"
+        ? t("safety.localImport")
+        : installation.catalog_source === "official"
+          ? t("safety.officialCatalog")
+          : installation.catalog_source === "community"
+            ? t("safety.communityCatalog")
+            : t("safety.customRepo");
+    const licenseLabel = installation.license ?? t("safety.licenseUnknown");
+    const languageLabel =
+      installation.languages.length > 0
+        ? installation.languages.join(" / ")
+        : t("safety.languageUnknown");
+    const release = installationRelease(installation);
+    const update = installationUpdate(installation);
+    const download =
+      update !== null && update.downloaded === null ? update : null;
+    const rowSwitch = selected ? switchTarget : null;
+    return (
+      <Panel
+        asChild
+        className={cn(
+          "flex h-full flex-col",
+          selected && "border-primary/40 bg-accent/50 ring-1 ring-primary/10",
+        )}
+        key={installation.id}
+      >
+        <article aria-label={installation.name}>
+          <div className="grid gap-3 p-4">
+            <div className="flex min-w-0 flex-wrap items-start justify-between gap-2.5">
+              <div className="min-w-0">
+                <strong className="block text-sm font-semibold break-words">
+                  {installation.name}
+                </strong>
+                <span className="mt-1 block text-xs leading-snug text-muted-foreground">
+                  {variantName(
+                    installation.variant_id,
+                    installation.variant_name,
+                  )}{" "}
+                  · {installation.quantization}
+                  {release === null ? null : ` · ${release}`}
+                </span>
+              </div>
+              <ModelInstallationStatus
+                installation={installation}
+                selected={selected}
+              />
+            </div>
+            <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
+              <p>
+                {sourceLabel} · {licenseLabel} · {languageLabel}
+              </p>
+              <p className="break-all">{installation.repo_id}</p>
+            </div>
+            {download === null ? null : (
+              <StatusBadge tone="pending">
+                {t("safety.updateAvailableHint", {
+                  version: download.version,
+                })}
+              </StatusBadge>
+            )}
+            {rowSwitch === null ? null : (
+              <StatusBadge tone="pending">
+                {t("safety.updateDownloadedHint", {
+                  version: rowSwitch.version,
+                })}
+              </StatusBadge>
+            )}
+            {update?.downloaded && update.downloaded.status !== "ready"
+              ? renderDownload(update.downloaded)
+              : null}
+            <ModelInstallationProgress installation={installation} />
+            {selected && activePreparation !== null ? (
+              <ModelPreparationNotice
+                variantID={installation.variant_id}
+                preparation={activePreparation}
+                retrying={saving}
+                onRetry={retryPreparation}
+              />
+            ) : null}
+            {Object.keys(installation.label_mapping).length > 0 ? (
+              <details className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
+                <summary className="cursor-pointer font-semibold">
+                  {t("safety.labelMappingCount", {
+                    count: Object.keys(installation.label_mapping).length,
+                  })}
+                </summary>
+                <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                  {Object.entries(installation.label_mapping).map(
+                    ([label, kind]) => (
+                      <span key={label}>
+                        <code>{label}</code>
+                        {" → "}
+                        {kind ?? t("safety.ignore")}
+                      </span>
+                    ),
+                  )}
+                </div>
+              </details>
+            ) : null}
+          </div>
+          <PanelFooter
+            actions={
+              <>
+                {renderInstallationActions(installation)}
+                {download === null ? null : (
+                  <Button
+                    disabled={
+                      operationBusy !== null ||
+                      catalogProbeBusy !== null ||
+                      probing
+                    }
+                    onClick={() =>
+                      void prepareCatalogInstallation(
+                        download.model,
+                        download.variant,
+                      )
+                    }
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {catalogProbeBusy === download.model.id
+                      ? t("common.checking")
+                      : t("safety.updateTo", {
+                          version: download.version,
+                        })}
+                  </Button>
+                )}
+                {rowSwitch === null ? null : (
+                  <Button
+                    disabled={saving}
+                    onClick={() => chooseInstallation(rowSwitch.installation)}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    {t("safety.switchTo", {
+                      version: rowSwitch.version,
+                    })}
+                  </Button>
+                )}
+              </>
+            }
+          />
+        </article>
+      </Panel>
+    );
+  };
+
   return (
     <div
       className="@container/privacy gutter-frame flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
@@ -2958,7 +3325,7 @@ export function SafetyPolicy({
             </Button>
           </>
         }
-        description={t("safety.description")}
+        description={t("safety.pageDescription")}
         title={t("safety.title")}
         titleId="safety-policy-heading"
       />
@@ -3077,7 +3444,9 @@ export function SafetyPolicy({
                       onClick={() => {
                         setWorkspace("models");
                         setView(
-                          installations.length > 0 ? "installed" : "catalog",
+                          completedInstallations.length > 0
+                            ? "installed"
+                            : "catalog",
                         );
                       }}
                       size="sm"
@@ -3134,6 +3503,7 @@ export function SafetyPolicy({
                   {activePreparation === null ? null : (
                     <div className="mt-2">
                       <ModelPreparationNotice
+                        variantID={selectedInstallation?.variant_id ?? ""}
                         preparation={activePreparation}
                         retrying={saving}
                         onRetry={retryPreparation}
@@ -4290,7 +4660,7 @@ export function SafetyPolicy({
                     value="installed"
                   >
                     {t("safety.installedCount", {
-                      count: installations.length,
+                      count: completedInstallations.length,
                     })}
                   </TabsTrigger>
                   <TabsTrigger onClick={() => setView("local")} value="local">
@@ -4340,15 +4710,24 @@ export function SafetyPolicy({
                                 candidate.variant.id === variant.id,
                             ) ?? null)
                         : null;
+                    const otherDownloads = installations.filter(
+                      (installation) =>
+                        installation.repo_id === model.repo_id &&
+                        installation.id !== existing?.id &&
+                        installation.status !== "ready" &&
+                        installation.installed_at === null,
+                    );
                     const cardSwitch =
                       existing !== null &&
                       switchTarget?.installation.id === existing.id
                         ? switchTarget
                         : null;
                     const variantSelectID = `privacy-catalog-variant-${model.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+                    const variantHint =
+                      variant === null ? null : enableHint(variant.id);
                     return (
                       <Panel asChild className="flex flex-col" key={model.id}>
-                        <article>
+                        <article aria-label={model.name}>
                           <div className="flex flex-1 flex-col gap-3 p-4">
                             <div className="min-w-0">
                               <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -4433,10 +4812,7 @@ export function SafetyPolicy({
                                       key={candidate.id}
                                       value={candidate.id}
                                     >
-                                      {variantName(
-                                        candidate.id,
-                                        candidate.name,
-                                      )}
+                                      {catalogVariantName(candidate)}
                                       {candidate.recommended
                                         ? t("safety.recommended")
                                         : ""}
@@ -4446,6 +4822,36 @@ export function SafetyPolicy({
                                 </SelectContent>
                               </Select>
                             </Field>
+                            {variantHint === null ? null : (
+                              <FormMessage tone="notice">
+                                {variantHint}
+                              </FormMessage>
+                            )}
+                            {existing === null ? null : (
+                              <div className="grid gap-2">
+                                <ModelInstallationStatus
+                                  installation={existing}
+                                  selected={
+                                    policy.local_model_id === existing.id
+                                  }
+                                />
+                                {existing.status === "ready" ? null : (
+                                  <ModelInstallationProgress
+                                    installation={existing}
+                                  />
+                                )}
+                                {policy.local_model_id === existing.id &&
+                                activePreparation !== null ? (
+                                  <ModelPreparationNotice
+                                    variantID={existing.variant_id}
+                                    preparation={activePreparation}
+                                    retrying={saving}
+                                    onRetry={retryPreparation}
+                                  />
+                                ) : null}
+                              </div>
+                            )}
+                            {otherDownloads.map(renderDownload)}
                           </div>
                           <PanelFooter
                             actions={
@@ -4502,36 +4908,14 @@ export function SafetyPolicy({
                                   </Button>
                                 </>
                               ) : (
-                                <>
-                                  <Button
-                                    onClick={() => setView("installed")}
-                                    size="sm"
-                                    type="button"
-                                    variant="outline"
-                                  >
-                                    {t("safety.viewStatus", {
-                                      status: installationStatusLabel(
-                                        existing.status,
-                                      ),
-                                    })}
-                                  </Button>
-                                  {cardSwitch === null ? null : (
-                                    <Button
-                                      disabled={saving}
-                                      onClick={() =>
-                                        chooseInstallation(
-                                          cardSwitch.installation,
-                                        )
-                                      }
-                                      size="sm"
-                                      type="button"
-                                    >
-                                      {t("safety.switchTo", {
+                                renderInstallationActions(
+                                  existing,
+                                  cardSwitch === null
+                                    ? undefined
+                                    : t("safety.switchTo", {
                                         version: cardSwitch.version,
-                                      })}
-                                    </Button>
-                                  )}
-                                </>
+                                      }),
+                                )
                               )
                             }
                           >
@@ -4554,7 +4938,19 @@ export function SafetyPolicy({
                       </Panel>
                     );
                   })}
-                  {catalog.length === 0 ? (
+                  {installations
+                    .filter(
+                      (installation) =>
+                        installation.source === "catalog" &&
+                        !catalog.some(
+                          (model) => model.repo_id === installation.repo_id,
+                        ),
+                    )
+                    .map(renderInstallationCard)}
+                  {catalog.length === 0 &&
+                  !installations.some(
+                    (installation) => installation.source === "catalog",
+                  ) ? (
                     <EmptyState
                       className="col-span-full"
                       title={t("safety.catalogEmpty")}
@@ -4568,287 +4964,8 @@ export function SafetyPolicy({
                 value="installed"
               >
                 <div className="grid items-start gap-3 pb-3 pr-1 @[760px]/models:grid-cols-2">
-                  {installations.map((installation) => {
-                    const selected = policy.local_model_id === installation.id;
-                    const hasDownloadTotal = installation.bytes_total > 0;
-                    const progress = hasDownloadTotal
-                      ? Math.min(
-                          100,
-                          Math.round(
-                            (installation.bytes_downloaded /
-                              installation.bytes_total) *
-                              100,
-                          ),
-                        )
-                      : 0;
-                    const sourceLabel =
-                      installation.source === "local"
-                        ? t("safety.localImport")
-                        : installation.catalog_source === "official"
-                          ? t("safety.officialCatalog")
-                          : installation.catalog_source === "community"
-                            ? t("safety.communityCatalog")
-                            : t("safety.customRepo");
-                    const licenseLabel =
-                      installation.license ?? t("safety.licenseUnknown");
-                    const languageLabel =
-                      installation.languages.length > 0
-                        ? installation.languages.join(" / ")
-                        : t("safety.languageUnknown");
-                    const release = installationRelease(installation);
-                    const update = installationUpdate(installation);
-                    const download =
-                      update !== null && update.downloaded === null
-                        ? update
-                        : null;
-                    const rowSwitch = selected ? switchTarget : null;
-                    return (
-                      <Panel
-                        asChild
-                        className={cn(
-                          "flex h-full flex-col",
-                          selected &&
-                            "border-primary/40 bg-accent/50 ring-1 ring-primary/10",
-                        )}
-                        key={installation.id}
-                      >
-                        <article>
-                          <div className="grid gap-3 p-4">
-                            <div className="flex min-w-0 flex-wrap items-start justify-between gap-2.5">
-                              <div className="min-w-0">
-                                <strong className="block text-sm font-semibold break-words">
-                                  {installation.name}
-                                </strong>
-                                <span className="mt-1 block text-xs leading-snug text-muted-foreground">
-                                  {variantName(
-                                    installation.variant_id,
-                                    installation.variant_name,
-                                  )}{" "}
-                                  · {installation.quantization}
-                                  {release === null ? null : ` · ${release}`}
-                                </span>
-                              </div>
-                              <StatusBadge
-                                tone={
-                                  installation.status === "ready"
-                                    ? "positive"
-                                    : installation.status === "error"
-                                      ? "negative"
-                                      : "pending"
-                                }
-                              >
-                                {selected
-                                  ? t("safety.policySelected")
-                                  : installation.source === "local" &&
-                                      installation.status === "downloading"
-                                    ? t("safety.importing")
-                                    : installationStatusLabel(
-                                        installation.status,
-                                      )}
-                              </StatusBadge>
-                            </div>
-                            <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
-                              <p>
-                                {sourceLabel} · {licenseLabel} · {languageLabel}
-                              </p>
-                              <p className="break-all">
-                                {installation.repo_id}
-                              </p>
-                            </div>
-                            {download === null ? null : (
-                              <StatusBadge tone="pending">
-                                {t("safety.updateAvailableHint", {
-                                  version: download.version,
-                                })}
-                              </StatusBadge>
-                            )}
-                            {rowSwitch === null ? null : (
-                              <StatusBadge tone="pending">
-                                {t("safety.updateDownloadedHint", {
-                                  version: rowSwitch.version,
-                                })}
-                              </StatusBadge>
-                            )}
-                            {installation.status === "downloading" ||
-                            installation.status === "paused" ? (
-                              <div className="grid gap-1.5">
-                                <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
-                                  <span>
-                                    {hasDownloadTotal
-                                      ? `${formatBytes(
-                                          installation.bytes_downloaded,
-                                        )} / ${formatBytes(
-                                          installation.bytes_total,
-                                        )}`
-                                      : installation.source === "local"
-                                        ? t("safety.preparingImport")
-                                        : t("safety.preparingDownload")}
-                                  </span>
-                                  <strong>
-                                    {hasDownloadTotal
-                                      ? `${progress}%`
-                                      : t("safety.preparing")}
-                                  </strong>
-                                </div>
-                                <Progress
-                                  aria-label={t("safety.progressAria", {
-                                    name: installation.name,
-                                    action:
-                                      installation.source === "local"
-                                        ? t("safety.import")
-                                        : t("safety.download"),
-                                  })}
-                                  value={progress}
-                                />
-                              </div>
-                            ) : (
-                              <p className="text-xs leading-relaxed text-muted-foreground">
-                                {installation.error === null
-                                  ? t("safety.diskAndRam", {
-                                      disk: formatBytes(
-                                        installation.bytes_total,
-                                      ),
-                                      ram: formatBytes(
-                                        installation.estimated_ram_bytes,
-                                      ),
-                                    })
-                                  : installationErrorLabel(
-                                      installation.error,
-                                      installation.source,
-                                    )}
-                              </p>
-                            )}
-                            {selected && activePreparation !== null ? (
-                              <ModelPreparationNotice
-                                preparation={activePreparation}
-                                retrying={saving}
-                                onRetry={retryPreparation}
-                              />
-                            ) : null}
-                            {Object.keys(installation.label_mapping).length >
-                            0 ? (
-                              <details className="rounded-md border bg-muted/40 px-3 py-2 text-xs">
-                                <summary className="cursor-pointer font-semibold">
-                                  {t("safety.labelMappingCount", {
-                                    count: Object.keys(
-                                      installation.label_mapping,
-                                    ).length,
-                                  })}
-                                </summary>
-                                <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
-                                  {Object.entries(
-                                    installation.label_mapping,
-                                  ).map(([label, kind]) => (
-                                    <span key={label}>
-                                      <code>{label}</code>
-                                      {" → "}
-                                      {kind ?? t("safety.ignore")}
-                                    </span>
-                                  ))}
-                                </div>
-                              </details>
-                            ) : null}
-                          </div>
-                          <PanelFooter
-                            actions={
-                              <>
-                                {installation.status === "ready" ? (
-                                  <Button
-                                    disabled={saving || selected}
-                                    onClick={() =>
-                                      chooseInstallation(installation)
-                                    }
-                                    size="sm"
-                                    type="button"
-                                    variant={selected ? "secondary" : "default"}
-                                  >
-                                    {selected
-                                      ? t("safety.currentModel")
-                                      : t("safety.usedByPolicy")}
-                                  </Button>
-                                ) : null}
-                                {download === null ? null : (
-                                  <Button
-                                    disabled={
-                                      operationBusy !== null ||
-                                      catalogProbeBusy !== null ||
-                                      probing
-                                    }
-                                    onClick={() =>
-                                      void prepareCatalogInstallation(
-                                        download.model,
-                                        download.variant,
-                                      )
-                                    }
-                                    size="sm"
-                                    type="button"
-                                    variant="outline"
-                                  >
-                                    {catalogProbeBusy === download.model.id
-                                      ? t("common.checking")
-                                      : t("safety.updateTo", {
-                                          version: download.version,
-                                        })}
-                                  </Button>
-                                )}
-                                {rowSwitch === null ? null : (
-                                  <Button
-                                    disabled={saving}
-                                    onClick={() =>
-                                      chooseInstallation(rowSwitch.installation)
-                                    }
-                                    size="sm"
-                                    type="button"
-                                    variant="outline"
-                                  >
-                                    {t("safety.switchTo", {
-                                      version: rowSwitch.version,
-                                    })}
-                                  </Button>
-                                )}
-                                {installation.source !== "local" &&
-                                installation.status !== "ready" ? (
-                                  <Button
-                                    disabled={operationBusy !== null}
-                                    onClick={() =>
-                                      void changeDownloadState(installation)
-                                    }
-                                    size="sm"
-                                    type="button"
-                                    variant="outline"
-                                  >
-                                    {operationBusy === installation.id
-                                      ? t("common.processing")
-                                      : installation.status === "downloading"
-                                        ? t("safety.pauseDownload")
-                                        : installation.status === "paused"
-                                          ? t("safety.resumeDownload")
-                                          : t("safety.retry")}
-                                  </Button>
-                                ) : null}
-                                <Button
-                                  disabled={operationBusy !== null || selected}
-                                  onClick={() =>
-                                    void removeInstallation(installation)
-                                  }
-                                  size="sm"
-                                  type="button"
-                                  variant="destructive"
-                                >
-                                  {operationBusy === installation.id
-                                    ? t("common.processing")
-                                    : installation.status === "downloading"
-                                      ? t("common.cancel")
-                                      : t("common.delete")}
-                                </Button>
-                              </>
-                            }
-                          />
-                        </article>
-                      </Panel>
-                    );
-                  })}
-                  {installations.length === 0 ? (
+                  {completedInstallations.map(renderInstallationCard)}
+                  {completedInstallations.length === 0 ? (
                     <EmptyState
                       className="col-span-full"
                       title={t("safety.noneInstalled")}
@@ -4861,6 +4978,11 @@ export function SafetyPolicy({
                 className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto"
                 value="local"
               >
+                <div className="grid gap-3 pb-3 pr-1 empty:hidden @[760px]/models:grid-cols-2">
+                  {installations
+                    .filter((installation) => installation.source === "local")
+                    .map(renderInstallationCard)}
+                </div>
                 <Panel className="grid max-w-3xl gap-4 p-4">
                   <div className="grid gap-3 @[560px]:grid-cols-[minmax(0,1fr)_auto] @[560px]:items-end">
                     <Label
@@ -4963,13 +5085,8 @@ export function SafetyPolicy({
                           </SelectContent>
                         </Select>
                       </Label>
-                      {probe.variants.some(
-                        (variant) =>
-                          variant.supported && isCoreMLVariantID(variant.id),
-                      ) ? (
-                        <FormMessage tone="notice">
-                          {t("safety.coreMLCompileOnEnable")}
-                        </FormMessage>
+                      {importHint !== null ? (
+                        <FormMessage tone="notice">{importHint}</FormMessage>
                       ) : null}
 
                       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -5036,6 +5153,11 @@ export function SafetyPolicy({
                 className="gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto"
                 value="custom"
               >
+                <div className="grid gap-3 pb-3 pr-1 empty:hidden @[760px]/models:grid-cols-2">
+                  {installations
+                    .filter((installation) => installation.source === "custom")
+                    .map(renderInstallationCard)}
+                </div>
                 <Panel className="grid max-w-3xl gap-4 p-4">
                   <div className="grid gap-3 @[560px]:grid-cols-2">
                     <Label
@@ -5301,7 +5423,9 @@ export function SafetyPolicy({
           onManage={() => {
             setModelPickerOpen(false);
             setWorkspace("models");
-            setView(installations.length > 0 ? "installed" : "catalog");
+            setView(
+              completedInstallations.length > 0 ? "installed" : "catalog",
+            );
           }}
           onConfirm={(installation) => {
             if (saving) return;
@@ -5343,8 +5467,8 @@ export function SafetyPolicy({
           pendingReset === "kind_rules" ? (
             <p>
               {t("safety.resetKindRulesHint", {
-                off: defaultPrivacyKindRules()
-                  .filter((rule) => !rule.enabled)
+                on: defaultPrivacyKindRules()
+                  .filter((rule) => rule.enabled)
                   .map((rule) => canonicalKindLabel(rule.kind))
                   .join(t("safety.listJoin")),
               })}

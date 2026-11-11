@@ -17,6 +17,8 @@ func BaseURL(kind contract.ServiceKind, protocol contract.ProtocolID, base *url.
 	var roots []string
 	var target string
 	switch kind {
+	case contract.ServiceKindVertex:
+		return vertexBaseURL(base)
 	case contract.ServiceKindDeepSeek, contract.ServiceKindMoonshot, contract.ServiceKindMiniMax, contract.ServiceKindMiniMaxCoding:
 		roots = []string{"/anthropic/v1", "/anthropic", "/v1"}
 		switch protocol {

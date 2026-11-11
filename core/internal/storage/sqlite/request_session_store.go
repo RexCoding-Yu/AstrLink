@@ -49,11 +49,11 @@ func (store *Store) FindSessionLink(
 	query, args := sessionLinkQuery(kind, cleaned, scope)
 
 	var (
-		sessionID, turnUserFingerprint, value, status sql.NullString
-		turnIndex, turnUserMessages                   sql.NullInt64
+		sessionID, turnUserFingerprint, value, status, parentSessionID sql.NullString
+		turnIndex, turnUserMessages                                    sql.NullInt64
 	)
 	err := store.db.QueryRowContext(ctx, query, args...).Scan(
-		&sessionID, &turnIndex, &turnUserMessages, &turnUserFingerprint, &value, &status,
+		&sessionID, &turnIndex, &turnUserMessages, &turnUserFingerprint, &value, &status, &parentSessionID,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -69,6 +69,10 @@ func (store *Store) FindSessionLink(
 		return storagecontract.SessionLinkMatch{}, false, fmt.Errorf("%w: session %q", storagecontract.ErrInvalidRecord, sessionID.String)
 	}
 	match := storagecontract.SessionLinkMatch{SessionID: id, Value: value.String, Status: contract.RequestStatus(status.String)}
+	if parentSessionID.Valid && parentSessionID.String != "" && parentSessionID.String != sessionID.String {
+		parent := contract.SessionID(parentSessionID.String)
+		match.ParentSessionID = &parent
+	}
 	if turnIndex.Valid && turnIndex.Int64 >= 1 {
 		turn := int(turnIndex.Int64)
 		match.TurnIndex = &turn
@@ -83,16 +87,64 @@ func (store *Store) FindSessionLink(
 	return match, true, nil
 }
 
+// FindSessionTurn returns the newest root of a session: the turn state a
+// helper call of that conversation keeps, its status and its parent link. ok
+// is false for an unknown session.
+func (store *Store) FindSessionTurn(
+	ctx context.Context,
+	sessionID contract.SessionID,
+) (storagecontract.SessionLinkMatch, bool, error) {
+	if err := sessionID.Validate(); err != nil {
+		return storagecontract.SessionLinkMatch{}, false, fmt.Errorf("%w: %v", storagecontract.ErrInvalidArgument, err)
+	}
+	var (
+		turnUserFingerprint, status, parentSessionID sql.NullString
+		turnIndex, turnUserMessages                  sql.NullInt64
+	)
+	err := store.db.QueryRowContext(ctx, `SELECT turn_index, turn_user_messages, turn_user_fingerprint, status, parent_session_id
+FROM request_records INDEXED BY request_records_session_turns_idx
+WHERE parent_request_id IS NULL AND COALESCE(session_id, id) = ?
+ORDER BY started_at DESC, id DESC LIMIT 1`, string(sessionID)).Scan(
+		&turnIndex, &turnUserMessages, &turnUserFingerprint, &status, &parentSessionID,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storagecontract.SessionLinkMatch{}, false, nil
+	}
+	if err != nil {
+		return storagecontract.SessionLinkMatch{}, false, fmt.Errorf("find session turn: %w", err)
+	}
+	match := storagecontract.SessionLinkMatch{SessionID: sessionID, Status: contract.RequestStatus(status.String)}
+	if turnIndex.Valid && turnIndex.Int64 >= 1 {
+		turn := int(turnIndex.Int64)
+		match.TurnIndex = &turn
+		if turnUserMessages.Valid && turnUserMessages.Int64 >= 0 {
+			users := int(turnUserMessages.Int64)
+			match.TurnUserMessages = &users
+		}
+		match.TurnUserFingerprint = turnUserFingerprint.String
+	}
+	if parentSessionID.Valid && parentSessionID.String != "" && parentSessionID.String != string(sessionID) {
+		parent := contract.SessionID(parentSessionID.String)
+		match.ParentSessionID = &parent
+	}
+	return match, true, nil
+}
+
 func (store *Store) ListRequestSessions(
 	ctx context.Context,
 	options storagecontract.RequestSessionListOptions,
 ) (storagecontract.RequestSessionPage, error) {
 	return cachedHistoryRead(ctx, store.db, &store.requestSessions, options, func(conn *sql.Conn) (storagecontract.RequestSessionPage, error) {
-		return listRequestSessions(ctx, conn, options)
+		return listRequestSessions(ctx, conn, &store.modelWindows, options)
 	})
 }
 
-func listRequestSessions(ctx context.Context, reader historyReader, options storagecontract.RequestSessionListOptions) (storagecontract.RequestSessionPage, error) {
+func listRequestSessions(
+	ctx context.Context,
+	reader historyReader,
+	windows *modelWindowCache,
+	options storagecontract.RequestSessionListOptions,
+) (storagecontract.RequestSessionPage, error) {
 	if options.Kind != "" && options.Kind != "inference" && options.Kind != "discovery" {
 		return storagecontract.RequestSessionPage{}, fmt.Errorf("%w: kind must be inference or discovery", storagecontract.ErrInvalidArgument)
 	}
@@ -188,10 +240,184 @@ func listRequestSessions(ctx context.Context, reader historyReader, options stor
 	for _, item := range matched {
 		page.Items = append(page.Items, summaries[item.id])
 	}
-	if err := loadSessionRuntimes(ctx, reader, page.Items); err != nil {
+	contexts, err := loadSessionRuntimes(ctx, reader, page.Items)
+	if err != nil {
+		return storagecontract.RequestSessionPage{}, err
+	}
+	if err := loadContextWindows(ctx, reader, windows, page.Items, contexts); err != nil {
+		return storagecontract.RequestSessionPage{}, err
+	}
+	if err := loadSubagentCounts(ctx, reader, page.Items); err != nil {
 		return storagecontract.RequestSessionPage{}, err
 	}
 	return page, nil
+}
+
+// maxSubagentDepth bounds how many levels of subagents a walk follows.
+const maxSubagentDepth = 8
+
+// subagentParents walks down from roots through the conversations each one
+// started as subagents, to maxSubagentDepth levels, and maps every
+// conversation it meets to the one that started it. A root that another root
+// started is a key too.
+func subagentParents(ctx context.Context, reader historyReader, roots []string) (map[string]string, error) {
+	parents := make(map[string]string)
+	walked := make(map[string]struct{}, len(roots))
+	frontier := make([]any, 0, len(roots))
+	for _, id := range roots {
+		if _, ok := walked[id]; !ok {
+			walked[id] = struct{}{}
+			frontier = append(frontier, id)
+		}
+	}
+	for depth := 0; depth < maxSubagentDepth && len(frontier) > 0; depth++ {
+		rows, err := reader.QueryContext(ctx, `SELECT DISTINCT parent_session_id, COALESCE(session_id, id) FROM request_records
+WHERE parent_session_id IS NOT NULL AND parent_session_id IN (`+sessionPlaceholders(len(frontier))+`)
+  AND parent_request_id IS NULL`, frontier...)
+		if err != nil {
+			return nil, fmt.Errorf("list subagent sessions: %w", err)
+		}
+		var next []any
+		for rows.Next() {
+			var parent, id string
+			if err := rows.Scan(&parent, &id); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan subagent session: %w", err)
+			}
+			if _, ok := parents[id]; ok || id == parent {
+				continue
+			}
+			parents[id] = parent
+			if _, ok := walked[id]; !ok {
+				walked[id] = struct{}{}
+				next = append(next, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("iterate subagent sessions: %w", err)
+		}
+		rows.Close()
+		frontier = next
+	}
+	return parents, nil
+}
+
+// loadSubagentCounts counts the conversations each of sessions started,
+// theirs included.
+func loadSubagentCounts(ctx context.Context, reader historyReader, sessions []contract.RequestSession) error {
+	if len(sessions) == 0 {
+		return nil
+	}
+	byID := make(map[string]*contract.RequestSession, len(sessions))
+	ids := make([]string, len(sessions))
+	for index := range sessions {
+		byID[string(sessions[index].ID)] = &sessions[index]
+		ids[index] = string(sessions[index].ID)
+	}
+	parents, err := subagentParents(ctx, reader, ids)
+	if err != nil {
+		return err
+	}
+	// Credit each subagent to every listed conversation above it.
+	for id := range parents {
+		seen := map[string]struct{}{id: {}}
+		for parent, ok := parents[id]; ok; parent, ok = parents[parent] {
+			if _, loop := seen[parent]; loop {
+				break
+			}
+			seen[parent] = struct{}{}
+			if session := byID[parent]; session != nil {
+				session.SubagentCount++
+			}
+		}
+	}
+	return nil
+}
+
+// listSubagentSessions summarises the conversations root started, theirs
+// included: each follows the one that started it, siblings oldest first.
+func (store *Store) listSubagentSessions(ctx context.Context, root contract.SessionID) ([]contract.RequestSession, error) {
+	parents, err := subagentParents(ctx, store.db, []string{string(root)})
+	if err != nil {
+		return nil, err
+	}
+	delete(parents, string(root))
+	if len(parents) == 0 {
+		return nil, nil
+	}
+	items := make([]sessionAggregate, 0, len(parents))
+	for id := range parents {
+		items = append(items, sessionAggregate{id: id})
+	}
+	summaries, err := loadSessionSummaries(ctx, store.db, items)
+	if err != nil {
+		return nil, err
+	}
+	// Nest by the parent each summary names, the one a client indents by;
+	// one that names no conversation here hangs off root.
+	children := make(map[contract.SessionID][]contract.RequestSession, len(summaries))
+	for _, summary := range summaries {
+		parent := root
+		if summary.ParentSessionID != nil {
+			if _, ok := summaries[string(*summary.ParentSessionID)]; ok {
+				parent = *summary.ParentSessionID
+			}
+		}
+		children[parent] = append(children[parent], summary)
+	}
+	for _, siblings := range children {
+		slices.SortStableFunc(siblings, func(left, right contract.RequestSession) int {
+			if order := left.StartedAt.Compare(right.StartedAt); order != 0 {
+				return order
+			}
+			return strings.Compare(string(left.ID), string(right.ID))
+		})
+	}
+	subagents := make([]contract.RequestSession, 0, len(summaries))
+	var visit func(contract.SessionID)
+	visit = func(parent contract.SessionID) {
+		siblings := children[parent]
+		delete(children, parent)
+		for _, summary := range siblings {
+			subagents = append(subagents, summary)
+			visit(summary.ID)
+		}
+	}
+	visit(root)
+	contexts, err := store.loadSessionRuntimes(ctx, subagents)
+	if err != nil {
+		return nil, err
+	}
+	if err := loadContextWindows(ctx, store.db, &store.modelWindows, subagents, contexts); err != nil {
+		return nil, err
+	}
+	return subagents, nil
+}
+
+// loadSessionTokens sums the tokens every call of sessions reported,
+// retries included.
+func loadSessionTokens(ctx context.Context, reader historyReader, sessions []contract.SessionID) (input, output int64, err error) {
+	args := make([]any, len(sessions))
+	for index, id := range sessions {
+		args[index] = string(id)
+	}
+	rows, err := reader.QueryContext(ctx, `
+SELECT COALESCE(SUM(json_extract(call.usage_json, '$.input_tokens')), 0),
+       COALESCE(SUM(json_extract(call.usage_json, '$.output_tokens')), 0)
+FROM request_records root INDEXED BY request_records_session_turns_idx
+JOIN request_records call ON call.id = root.id OR call.parent_request_id = root.id
+WHERE root.parent_request_id IS NULL AND COALESCE(root.session_id, root.id) IN (`+sessionPlaceholders(len(args))+`)`, args...)
+	if err != nil {
+		return 0, 0, fmt.Errorf("sum session tokens: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&input, &output); err != nil {
+			return 0, 0, fmt.Errorf("scan session tokens: %w", err)
+		}
+	}
+	return input, output, rows.Err()
 }
 
 // requestSessionScan selects the roots the options match, newest first. Its
@@ -270,55 +496,111 @@ func (store *Store) GetRequestSession(
 		return contract.RequestSessionDetail{}, err
 	}
 	sessions := []contract.RequestSession{session}
-	if err := store.loadSessionRuntimes(ctx, sessions); err != nil {
+	contexts, err := store.loadSessionRuntimes(ctx, sessions)
+	if err != nil {
 		return contract.RequestSessionDetail{}, err
 	}
-	return contract.RequestSessionDetail{RequestSession: sessions[0], Turns: turns}, nil
+	if err := loadContextWindows(ctx, store.db, &store.modelWindows, sessions, contexts); err != nil {
+		return contract.RequestSessionDetail{}, err
+	}
+	// Cost and the context view are worked out for a detail only: they read
+	// the billing ledger and price every cache miss.
+	ledger, err := store.loadSessionLedger(ctx, session.ID)
+	if err != nil {
+		return contract.RequestSessionDetail{}, err
+	}
+	if sessions[0].Cost, err = sessionCost(ledger); err != nil {
+		return contract.RequestSessionDetail{}, fmt.Errorf("%w: session cost: %v", storagecontract.ErrInvalidRecord, err)
+	}
+	subagents, err := store.listSubagentSessions(ctx, session.ID)
+	if err != nil {
+		return contract.RequestSessionDetail{}, err
+	}
+	sessions[0].SubagentCount = len(subagents)
+	detail := contract.RequestSessionDetail{RequestSession: sessions[0], Turns: turns, Subagents: subagents}
+	if len(subagents) > 0 {
+		totals := &contract.SessionTotals{CallCount: session.CallCount}
+		tree := []contract.SessionID{session.ID}
+		for _, subagent := range subagents {
+			totals.CallCount += subagent.CallCount
+			tree = append(tree, subagent.ID)
+		}
+		if totals.InputTokens, totals.OutputTokens, err = loadSessionTokens(ctx, store.db, tree); err != nil {
+			return contract.RequestSessionDetail{}, err
+		}
+		detail.WithSubagents = totals
+	}
+	if entry := contexts[string(session.ID)]; entry != nil && len(entry.fold.main) > 0 {
+		detail.Context = sessionContextDetail(entry.calls, entry.fold, turns, ledger)
+	}
+	return detail, nil
 }
 
-// Sum actual call durations, including demoted retry attempts. Root records
-// contain only the final attempt's latency. Idle gaps between calls never count.
-// Keep open starts separate so clients can tick without changing idle snapshots.
-func (store *Store) loadSessionRuntimes(ctx context.Context, sessions []contract.RequestSession) error {
+// Model time is the union of actual call runtimes, including demoted retry
+// attempts. Root records contain only the final attempt's latency. Overlapping
+// calls count once and idle gaps between calls never count. Calls still running
+// end at "now", so they merge with any finished call they overlap into one
+// final block; clients add the elapsed time since its start once, instead of
+// once per running call.
+//
+// The same pass sums each session's token usage and folds its root calls
+// into the context it carries; the calls it returns, by session, feed a
+// detail's context view.
+func (store *Store) loadSessionRuntimes(ctx context.Context, sessions []contract.RequestSession) (map[string]*sessionContextCalls, error) {
 	return loadSessionRuntimes(ctx, store.db, sessions)
 }
 
-func loadSessionRuntimes(ctx context.Context, reader historyReader, sessions []contract.RequestSession) error {
+func loadSessionRuntimes(ctx context.Context, reader historyReader, sessions []contract.RequestSession) (map[string]*sessionContextCalls, error) {
 	if len(sessions) == 0 {
-		return nil
+		return nil, nil
 	}
 	byID := make(map[string]*contract.RequestSession, len(sessions))
 	performance := make(map[string]*sessionPerformance, len(sessions))
+	runtimes := make(map[string][]runtimeInterval, len(sessions))
+	usage := make(map[string]*sessionUsageTotals, len(sessions))
+	contexts := make(map[string]*sessionContextCalls, len(sessions))
 	args := make([]any, len(sessions))
 	for i := range sessions {
 		session := &sessions[i]
-		session.DurationMs = 0
 		session.ActiveRequestStarts = make([]time.Time, 0)
 		byID[string(session.ID)] = session
 		performance[string(session.ID)] = &sessionPerformance{}
+		usage[string(session.ID)] = &sessionUsageTotals{}
+		contexts[string(session.ID)] = &sessionContextCalls{}
 		args[i] = string(session.ID)
 	}
 	rows, err := reader.QueryContext(ctx, sessionRuntimeQuery(len(args)), args...)
 	if err != nil {
-		return fmt.Errorf("load session runtimes: %w", err)
+		return nil, fmt.Errorf("load session runtimes: %w", err)
 	}
 	defer rows.Close()
 	var id, startedAt, status string
-	var completedAt, errorCode sql.NullString
+	var completedAt, errorCode, rootModel, contextMarks sql.NullString
 	var latency sql.NullInt64
 	var rootID, callID, protocol string
 	var turn, firstToken, outputTokens sql.NullInt64
+	var inputTokens, cacheRead, cacheWrite, cacheWrite1h sql.NullInt64
 	var streaming bool
 	var incomplete sql.NullBool
 	for rows.Next() {
 		if err := rows.Scan(&id, &startedAt, &completedAt, &status, &latency, &errorCode,
-			&rootID, &turn, &callID, &protocol, &streaming, &firstToken, &outputTokens, &incomplete); err != nil {
-			return fmt.Errorf("scan session runtime: %w", err)
+			&rootID, &turn, &callID, &protocol, &streaming, &firstToken, &outputTokens, &incomplete,
+			&inputTokens, &cacheRead, &cacheWrite, &cacheWrite1h, &rootModel, &contextMarks); err != nil {
+			return nil, fmt.Errorf("scan session runtime: %w", err)
 		}
 		session := byID[id]
 		started, err := time.Parse(time.RFC3339Nano, startedAt)
 		if err != nil {
-			return fmt.Errorf("parse session runtime start: %w", err)
+			return nil, fmt.Errorf("parse session runtime start: %w", err)
+		}
+		reported := inputTokens.Valid || outputTokens.Valid
+		if reported {
+			usage[id].observe(inputTokens.Int64, outputTokens.Int64, cacheRead, cacheWrite)
+		}
+		if callID == rootID {
+			call := newContextCall(callID, started, protocol, rootModel, reported, inputTokens, cacheRead, cacheWrite, cacheWrite1h)
+			call.readMarks(contextMarks)
+			contexts[id].calls = append(contexts[id].calls, call)
 		}
 		record := contract.RequestRecord{ID: contract.RequestID(callID), StartedAt: started,
 			InputProtocol: contract.ProtocolID(protocol), Streaming: streaming}
@@ -339,34 +621,101 @@ func loadSessionRuntimes(ctx context.Context, reader historyReader, sessions []c
 		if completedAt.Valid && errorCode.String != "core_interrupted" {
 			completed, err := time.Parse(time.RFC3339Nano, completedAt.String)
 			if err != nil {
-				return fmt.Errorf("parse session runtime completion: %w", err)
+				return nil, fmt.Errorf("parse session runtime completion: %w", err)
 			}
 			record.CompletedAt = &completed
 		}
 		performance[id].observe(rootID, int(turn.Int64), record)
-		if latency.Valid {
-			session.DurationMs += max(0, latency.Int64)
-		} else if completedAt.Valid {
+		switch {
+		case latency.Valid:
+			runtimes[id] = append(runtimes[id], runtimeInterval{
+				start: started,
+				end:   started.Add(time.Duration(max(0, latency.Int64)) * time.Millisecond),
+			})
+		case completedAt.Valid:
 			// Startup recovery timestamps say when the interruption was discovered,
 			// not when execution stopped. Unknown runtime must not include downtime.
 			if errorCode.String == "core_interrupted" {
 				continue
 			}
-			session.DurationMs += max(0, record.CompletedAt.Sub(started).Milliseconds())
-		} else if status == string(contract.RequestStatusPending) {
+			ended := *record.CompletedAt
+			if ended.Before(started) {
+				ended = started
+			}
+			runtimes[id] = append(runtimes[id], runtimeInterval{start: started, end: ended})
+		case status == string(contract.RequestStatusPending):
 			session.ActiveRequestStarts = append(session.ActiveRequestStarts, started)
+			runtimes[id] = append(runtimes[id], runtimeInterval{start: started, open: true})
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate session runtimes: %w", err)
+		return nil, fmt.Errorf("iterate session runtimes: %w", err)
 	}
-	for id, stats := range performance {
-		stats.apply(byID[id])
+	for id, session := range byID {
+		session.DurationMs, session.RunningSince = mergeRuntimeIntervals(runtimes[id])
+		performance[id].apply(session)
 		// Calls arrive in index order; a long session would spill a sort by
 		// start time to disk on every poll, and only these starts need it.
-		slices.SortFunc(byID[id].ActiveRequestStarts, time.Time.Compare)
+		slices.SortFunc(session.ActiveRequestStarts, time.Time.Compare)
+		usage[id].apply(session)
+		entry := contexts[id]
+		sortContextCalls(entry.calls)
+		entry.fold = foldContext(entry.calls)
+		applyContextFold(session, entry.fold)
 	}
-	return nil
+	return contexts, nil
+}
+
+// runtimeInterval is one call's runtime. A call still running has no end: it
+// extends into the future, so every later interval overlaps it.
+type runtimeInterval struct {
+	start time.Time
+	end   time.Time
+	open  bool
+}
+
+// mergeRuntimeIntervals returns the total length of the finished intervals
+// outside the open block, and that block's start. Intervals are sorted by start
+// and merged while they overlap. Every running call reaches into the future, so
+// they form one final block; a finished call that overlaps it extends its start
+// backwards, which also removes the overlap from the total.
+func mergeRuntimeIntervals(intervals []runtimeInterval) (int64, *time.Time) {
+	slices.SortFunc(intervals, func(left, right runtimeInterval) int {
+		return left.start.Compare(right.start)
+	})
+	var (
+		total                int64
+		blockStart, blockEnd time.Time
+		blockOpen, merged    bool
+	)
+	closeBlock := func() {
+		if !blockOpen {
+			total += blockEnd.Sub(blockStart).Milliseconds()
+		}
+	}
+	for _, interval := range intervals {
+		if !merged {
+			blockStart, blockEnd, blockOpen, merged = interval.start, interval.end, interval.open, true
+			continue
+		}
+		if blockOpen || !interval.start.After(blockEnd) {
+			if interval.end.After(blockEnd) {
+				blockEnd = interval.end
+			}
+			blockOpen = blockOpen || interval.open
+			continue
+		}
+		closeBlock()
+		blockStart, blockEnd, blockOpen = interval.start, interval.end, interval.open
+	}
+	if !merged {
+		return 0, nil
+	}
+	if blockOpen {
+		return total, &blockStart
+	}
+	closeBlock()
+	return total, nil
 }
 
 type sessionAggregate struct {
@@ -397,7 +746,7 @@ const requestSessionSummaryColumns = `
     http_status, turn_index, input_preview,
     (SELECT COUNT(*) FROM request_records children
      WHERE children.parent_request_id = request_records.id), model_redirect_json, client_type, privacy_decision,
-    output_json`
+    output_json, parent_session_id`
 
 // sessionSummaryQuery reads the root turns of sessions, each session's in
 // time order. Without statistics SQLite takes `parent_request_id IS NULL`,
@@ -417,7 +766,12 @@ func sessionRuntimeQuery(sessions int) string {
 SELECT COALESCE(root.session_id, root.id), call.started_at, call.completed_at,
        call.status, call.latency_ms, json_extract(call.error_json, '$.code'),
        root.id, root.turn_index, call.id, call.input_protocol, call.streaming, call.first_token_ms,
-       json_extract(call.usage_json, '$.output_tokens'), json_extract(call.usage_json, '$.billing_incomplete')
+       json_extract(call.usage_json, '$.output_tokens'), json_extract(call.usage_json, '$.billing_incomplete'),
+       json_extract(call.usage_json, '$.input_tokens'), json_extract(call.usage_json, '$.cache_read_tokens'),
+       json_extract(call.usage_json, '$.cache_write_tokens'), json_extract(call.usage_json, '$.cache_write_1h_tokens'),
+       root.requested_model,
+       CASE WHEN call.id = root.id
+            THEN json_extract(root.context_json, '$.helper', '$.summary', '$.compacted', '$.failed_repeats') END
 FROM request_records root INDEXED BY request_records_session_turns_idx
 JOIN request_records call ON call.id = root.id OR call.parent_request_id = root.id
 WHERE root.parent_request_id IS NULL AND COALESCE(root.session_id, root.id) IN (` + sessionPlaceholders(sessions) + `)`
@@ -442,7 +796,7 @@ func loadSessionSummaries(ctx context.Context, reader historyReader, items []ses
 	}
 	defer rows.Close()
 	var id, sessionID, startedAt, status, protocol string
-	var completedAt, model, reasoning, service, token, preview, redirect, client, decision, output sql.NullString
+	var completedAt, model, reasoning, service, token, preview, redirect, client, decision, output, parent sql.NullString
 	// The latest call's output, decoded once per session rather than per call.
 	var latestOutput string
 	var httpStatus, turn sql.NullInt64
@@ -475,7 +829,7 @@ func loadSessionSummaries(ctx context.Context, reader historyReader, items []ses
 	for rows.Next() {
 		if err := rows.Scan(&id, &sessionID, &startedAt, &completedAt, &status, &protocol,
 			&model, &reasoning, &service, &token, &httpStatus, &turn, &preview,
-			&children, &redirect, &client, &decision, &output); err != nil {
+			&children, &redirect, &client, &decision, &output, &parent); err != nil {
 			return nil, err
 		}
 		if string(current.ID) != sessionID {
@@ -566,6 +920,10 @@ func loadSessionSummaries(ctx context.Context, reader historyReader, items []ses
 		current.ServiceID, current.LocalAccessTokenID = record.ServiceID, record.LocalAccessTokenID
 		current.ModelRedirect = record.ModelRedirect
 		current.PrivacyWarned = current.PrivacyWarned || decision.String == string(contract.PrivacyDecisionWarn)
+		if current.ParentSessionID == nil && parent.Valid && parent.String != "" && parent.String != sessionID {
+			value := contract.SessionID(parent.String)
+			current.ParentSessionID = &value
+		}
 		latestOutput = output.String
 	}
 	if err := rows.Err(); err != nil {
@@ -624,10 +982,15 @@ func sessionFromTurns(turns []contract.RequestRecord) (contract.RequestSession, 
 	}
 	callCount := 0
 	warned := false
+	var parent *contract.SessionID
 	for _, turn := range turns {
 		callCount += 1 + turn.ChildCount
 		if turn.PrivacyDecision != nil && *turn.PrivacyDecision == contract.PrivacyDecisionWarn {
 			warned = true
+		}
+		if parent == nil && turn.ParentSessionID != nil && *turn.ParentSessionID != id {
+			value := *turn.ParentSessionID
+			parent = &value
 		}
 	}
 	session := contract.RequestSession{
@@ -648,6 +1011,7 @@ func sessionFromTurns(turns []contract.RequestRecord) (contract.RequestSession, 
 		ServiceID:          latest.ServiceID,
 		LocalAccessTokenID: latest.LocalAccessTokenID,
 		PrivacyWarned:      warned,
+		ParentSessionID:    parent,
 	}
 	if err := session.Validate(); err != nil {
 		return contract.RequestSession{}, fmt.Errorf("%w: session %q: %v", storagecontract.ErrInvalidRecord, id, err)

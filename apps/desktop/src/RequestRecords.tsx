@@ -3,8 +3,8 @@ import { SessionChannelBindings } from "./SessionChannelBindings";
 import { SessionMemory } from "./SessionMemory";
 import { PluginSlotView, usePluginSlot } from "./plugin-ui";
 import { SessionMetadataChips } from "./SessionMetadata";
-import { RecoveryChain, RecoveryDetails } from "./components/RecoveryDetails";
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -16,6 +16,8 @@ import {
   type ReactNode,
 } from "react";
 import {
+  ArrowUp,
+  Bot,
   Brain,
   ChevronDown,
   ChevronUp,
@@ -88,6 +90,8 @@ import { cn } from "@/lib/utils";
 
 import { AuditPartSection, HTTPMetaSection } from "./AuditReviewer";
 import { AuditSettingsDialog } from "./AuditSettingsDialog";
+import { RequestMemory } from "./RequestMemory";
+import type { MemoryFocus } from "./request-memory-model";
 import {
   buildRecordBundle,
   bundleFilename,
@@ -116,13 +120,13 @@ import { compactTitle } from "./file-path-spans";
 import { formatCompactNumber } from "./format-compact-number";
 import { formatClockTime, formatDateTime } from "./format-time";
 import { i18n, useT } from "./i18n";
-import { LIVE_CLOCK_INTERVAL_MS, useLiveClock } from "./live-clock";
+import { useLiveClock } from "./live-clock";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
 import {
   RawSealingDialogs,
   rawPasswordMissing,
-  unlockIdleMinutes,
+  unlockEndText,
   type RawDialog,
 } from "./RawSealingControls";
 import {
@@ -141,7 +145,6 @@ import {
 } from "./request-service-model";
 import {
   formatDuration,
-  liveDurationMs,
   sessionRuntimeMs,
   type RecordFilters,
   type RecordsTarget,
@@ -162,7 +165,9 @@ import {
   type RequestSessionKind,
   type RequestSessionListQuery,
   type RequestStatus,
+  type SessionContext,
   type SessionStatus,
+  type SessionTotals,
 } from "./request-record-model";
 import {
   RequestActivityBoard,
@@ -172,10 +177,16 @@ import {
   conversationActivity,
   laneAction,
   laneTrail,
+  nestSubagents,
   splitActiveSessions,
   type LaneAction,
   type LaneStep,
 } from "./request-activity-model";
+import {
+  RequestContext,
+  SessionContextMeter,
+  SessionFailedRepeats,
+} from "./RequestContext";
 import { RequestConversation } from "./RequestConversation";
 import { RequestModelRoutingPanel } from "./components/RequestModelRoutingPanel";
 import { RequestPrivacyAudit } from "./RequestPrivacyAudit";
@@ -206,6 +217,9 @@ const PAGE_LIMIT = 50;
 const POLL_INTERVAL_MS = 1000;
 // Core's contract.MaxPurgeSessionIDs: one sessions purge names at most this many.
 const MAX_PURGE_SESSIONS = 1000;
+// The desktop host's REQUEST_PURGE_STILL_RUNNING: it stopped waiting for a
+// purge that Core keeps running.
+const PURGE_STILL_RUNNING = "request_purge_still_running";
 const AUDIT_CACHE_MAX_RECORDS = 5;
 const AUDIT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const STATUSES: SessionStatus[] = [
@@ -250,6 +264,7 @@ type RecordsView = "monitor" | "detail";
 type RecordsKind = RequestSessionKind | "all";
 type DetailTab =
   | "conversation"
+  | "context"
   | "trajectory"
   | "content"
   | "audit"
@@ -267,6 +282,7 @@ const MENU_COPY_KEYS: ReadonlySet<string> = new Set([
 ]);
 const DETAIL_TABS: readonly DetailTab[] = [
   "conversation",
+  "context",
   "trajectory",
   "content",
   "audit",
@@ -277,8 +293,14 @@ const DETAIL_TABS: readonly DetailTab[] = [
 type PendingConfirm =
   | { kind: "audit-risk"; patch: AuditSettingsPatch }
   | { kind: "delete"; requestId: string }
-  // Whole sessions, from the list selection or the open detail.
-  | { kind: "delete-sessions"; sessionIds: string[]; calls: number }
+  // Whole sessions, from the list selection or the open detail, with the
+  // subagent conversations they started, which go with them.
+  | {
+      kind: "delete-sessions";
+      sessionIds: string[];
+      calls: number;
+      subagents: number;
+    }
   | { kind: "purge-all" }
   | { kind: "purge-before"; before: string };
 
@@ -335,6 +357,7 @@ function sessionSummaryKey(session: RequestSession): string {
     session.last_started_at,
     session.completed_at ?? "",
     session.duration_ms,
+    session.running_since ?? "",
     session.tool_duration_ms ?? "",
     session.average_ttft_ms ?? "",
     session.output_tokens_per_second ?? "",
@@ -424,6 +447,15 @@ export function RequestRecords({
   const [view, setView] = useState<RecordsView>("monitor");
   const moreFiltersTriggerRef = useRef<HTMLButtonElement>(null);
   const [kind, setKind] = useState<RecordsKind>("inference");
+  // The memory tab sits beside the lists and keeps the one last read.
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const memoryReloadRef = useRef<(() => void) | null>(null);
+  // A memory a conversation asked to open; the key opens it again.
+  const [memoryFocus, setMemoryFocus] = useState<
+    (MemoryFocus & { key: number }) | null
+  >(null);
+  const listScrollTopRef = useRef<number | null>(null);
+  const [detailOpenTab, setDetailOpenTab] = useState<DetailTab | null>(null);
   const [filters, setFilters] = useState<RecordFilters>(() =>
     targetFilters(target),
   );
@@ -1158,40 +1190,82 @@ export function RequestRecords({
   // Stable, so the memoized list rows skip the page's re-renders. A session
   // opens once its detail is in hand: switching first blanked the whole
   // workspace, or dropped the session being read, until the detail arrived.
-  const openDetail = useCallback((sessionId: string) => {
-    const generation = ++openGenerationRef.current;
-    const show = (turnId: string | null) => {
-      if (viewRef.current === "monitor") {
-        monitorScrollTopRef.current = monitorScrollRef.current?.scrollTop ?? 0;
-      }
-      selectedFocusRef.current = sessionId;
-      setOpeningId(null);
-      setSelectedId(sessionId);
-      setSelectedTurnId(turnId);
-      viewRef.current = "detail";
-      setView("detail");
-    };
-    if (overlaySessionsRef.current[sessionId]) {
-      show(null);
-      return;
-    }
-    setOpeningId(sessionId);
-    getRequestSession(sessionId).then(
-      (detail) => {
-        if (openGenerationRef.current !== generation) return;
-        if (selectedIdRef.current !== sessionId) {
-          freshDetailRef.current = sessionId;
+  const openDetail = useCallback(
+    (sessionId: string, at?: { requestId: string; tab: DetailTab }) => {
+      const generation = ++openGenerationRef.current;
+      const show = (turnId: string | null) => {
+        if (viewRef.current === "monitor") {
+          monitorScrollTopRef.current =
+            monitorScrollRef.current?.scrollTop ?? 0;
         }
-        setOverlaySessions((current) => ({ ...current, [detail.id]: detail }));
-        show(detail.turns[detail.turns.length - 1]?.id ?? null);
-      },
-      (requestError: unknown) => {
-        if (openGenerationRef.current !== generation) return;
+        selectedFocusRef.current = sessionId;
         setOpeningId(null);
-        notify.error(messageOf(requestError, i18n.t("records.readFailed")));
-      },
-    );
-  }, []);
+        setSelectedId(sessionId);
+        setSelectedTurnId(at?.requestId ?? turnId);
+        setDetailOpenTab(at?.tab ?? null);
+        viewRef.current = "detail";
+        setView("detail");
+      };
+      if (overlaySessionsRef.current[sessionId]) {
+        show(null);
+        return;
+      }
+      setOpeningId(sessionId);
+      getRequestSession(sessionId).then(
+        (detail) => {
+          if (openGenerationRef.current !== generation) return;
+          if (selectedIdRef.current !== sessionId) {
+            freshDetailRef.current = sessionId;
+          }
+          setOverlaySessions((current) => ({
+            ...current,
+            [detail.id]: detail,
+          }));
+          show(detail.turns[detail.turns.length - 1]?.id ?? null);
+        },
+        (requestError: unknown) => {
+          if (openGenerationRef.current !== generation) return;
+          setOpeningId(null);
+          notify.error(messageOf(requestError, i18n.t("records.readFailed")));
+        },
+      );
+    },
+    [],
+  );
+  // A call the memory tab names opens in its conversation.
+  const openMemoryCall = useCallback(
+    (sessionId: string, requestId: string) =>
+      openDetail(sessionId, { requestId, tab: "conversation" }),
+    [openDetail],
+  );
+  // A memory a conversation wrote opens in the memory tab. The list keeps
+  // its place for when the reader goes back to it.
+  const openMemoryEntry = useCallback(
+    (focus: MemoryFocus) => {
+      openGenerationRef.current += 1;
+      setOpeningId(null);
+      if (!memoryOpen) {
+        listScrollTopRef.current = monitorScrollTopRef.current;
+        monitorScrollTopRef.current = null;
+        setSelecting(false);
+        setCheckedIds(new Set());
+        setMemoryOpen(true);
+      }
+      viewRef.current = "monitor";
+      setView("monitor");
+      setMemoryFocus((current) => ({ ...focus, key: (current?.key ?? 0) + 1 }));
+    },
+    [memoryOpen],
+  );
+  // WKWebView drops the list's offset while the memory tab hides it, so it
+  // comes back where the reader left it.
+  useLayoutEffect(() => {
+    const top = listScrollTopRef.current;
+    const scroller = monitorScrollRef.current;
+    if (memoryOpen || top === null || !scroller) return;
+    listScrollTopRef.current = null;
+    scroller.scrollTop = top;
+  }, [memoryOpen]);
 
   // Before paint, so going back never flashes the top of the list.
   useLayoutEffect(() => {
@@ -1410,7 +1484,9 @@ export function RequestRecords({
       else exitSelection();
       notify.success(i18n.t("records.sessionsDeleted", { count: deleted }));
     } catch (requestError: unknown) {
-      const message = messageOf(requestError, i18n.t("records.deleteFailed"));
+      const message =
+        unansweredPurgeMessage(requestError) ??
+        messageOf(requestError, i18n.t("records.deleteFailed"));
       if (fromDetail) notify.error(message);
       else setError(message);
     } finally {
@@ -1465,6 +1541,10 @@ export function RequestRecords({
       kind: "delete-sessions",
       sessionIds: checkedItems.map((session) => session.id),
       calls: checkedItems.reduce((sum, session) => sum + session.call_count, 0),
+      subagents: checkedItems.reduce(
+        (sum, session) => sum + (session.subagent_count ?? 0),
+        0,
+      ),
     });
   };
 
@@ -1494,7 +1574,12 @@ export function RequestRecords({
       });
       setOverlaySessions({});
     } catch (requestError: unknown) {
-      setError(messageOf(requestError, i18n.t("records.purgeFailed")));
+      const unanswered = unansweredPurgeMessage(requestError);
+      // Nothing is left for the dialog to do; the page says what happened.
+      if (unanswered) setPurgeOpen(false);
+      setError(
+        unanswered ?? messageOf(requestError, i18n.t("records.purgeFailed")),
+      );
     } finally {
       setPurgeBusy(false);
     }
@@ -1822,8 +1907,19 @@ export function RequestRecords({
           aria-labelledby="request-records-heading"
           className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-hidden"
           hidden={view !== "monitor"}
-          value={kind}
+          value={memoryOpen ? "memory" : kind}
           onValueChange={(value) => {
+            if (value === "memory") {
+              listScrollTopRef.current =
+                monitorScrollRef.current?.scrollTop ?? null;
+              setSelecting(false);
+              setCheckedIds(new Set());
+              setMemoryOpen(true);
+              return;
+            }
+            setMemoryOpen(false);
+            // Back from the memory tab, the list is as it was left.
+            if (value === kind) return;
             setKind(value as RecordsKind);
             setFilters((current) => ({ ...current, protocol: "" }));
             // The counts cover model calls only. Kept on another list, the
@@ -1836,7 +1932,8 @@ export function RequestRecords({
           }}
         >
           <ScrollWorkspace
-            className="gap-0"
+            // The memory panel below takes the room the list leaves.
+            className={cn("gap-0", memoryOpen && "h-auto flex-none")}
             contentAsChild
             headerClassName="gap-0"
             header={
@@ -2005,18 +2102,10 @@ export function RequestRecords({
                     }
                   />
                 ) : null}
-                <div className="py-3 [@media(max-height:680px)]:py-2">
-                  <RequestActivityBoard
-                    coreSessionKey={coreSessionKey}
-                    isReady={isReady}
-                    onShowFailures={() =>
-                      setFilters((current) => ({
-                        ...current,
-                        status: "failed",
-                      }))
-                    }
-                  />
-                </div>
+                <RequestActivityBoard
+                  coreSessionKey={coreSessionKey}
+                  isReady={isReady}
+                />
                 {/* The list's own actions share the tab line, so the filters
                     below keep a full row of equal columns. */}
                 <div className="flex min-w-0 shrink-0 items-center gap-2 border-b">
@@ -2036,8 +2125,12 @@ export function RequestRecords({
                     <TabsTrigger className="flex-none" value="all">
                       {t("common.all")}
                     </TabsTrigger>
+                    <TabsTrigger className="flex-none" value="memory">
+                      <Brain aria-hidden="true" />
+                      {t("memoryView.tab")}
+                    </TabsTrigger>
                   </TabsList>
-                  {callStatus ? (
+                  {callStatus && !memoryOpen ? (
                     // Set from a count elsewhere, so it reads as a filter in
                     // force rather than one more control to pick from.
                     <Button
@@ -2055,9 +2148,15 @@ export function RequestRecords({
                   ) : null}
                   <IconButton
                     variant="outline"
-                    disabled={!isReady || listStatus === "loading"}
+                    disabled={
+                      !isReady || (!memoryOpen && listStatus === "loading")
+                    }
                     label={t("common.refresh")}
-                    onClick={() => manualPollRef.current?.()}
+                    onClick={() =>
+                      memoryOpen
+                        ? memoryReloadRef.current?.()
+                        : manualPollRef.current?.()
+                    }
                     type="button"
                   >
                     <RefreshCw aria-hidden="true" />
@@ -2077,7 +2176,10 @@ export function RequestRecords({
                     {syncWarning}
                   </FormMessage>
                 ) : null}
-                <div className="w-full min-w-0 border-b bg-background py-2">
+                <div
+                  className="w-full min-w-0 border-b bg-background py-2"
+                  hidden={memoryOpen}
+                >
                   <div className="grid min-w-0 grid-cols-6 gap-2 @[640px]:grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
                     {/* Keep the common scopes available while secondary filters live in the menu. */}
                     <FilterSelect
@@ -2317,6 +2419,10 @@ export function RequestRecords({
           >
             <TabsContent
               value={kind}
+              // The memory tab hides the list rather than unmounting it, so
+              // its rows are there when the reader comes back.
+              forceMount
+              hidden={memoryOpen}
               className="@container/request-list min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain"
               data-testid="request-records-scroll"
               onScroll={(event) => {
@@ -2403,6 +2509,18 @@ export function RequestRecords({
               ) : null}
             </TabsContent>
           </ScrollWorkspace>
+          <TabsContent
+            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pe-(--scrollbar-gutter-width)"
+            value="memory"
+          >
+            <RequestMemory
+              focus={memoryFocus}
+              isReady={isReady}
+              live={view === "monitor"}
+              onOpenCall={openMemoryCall}
+              reloadRef={memoryReloadRef}
+            />
+          </TabsContent>
         </Tabs>
 
         {view === "detail" && selectedSession && selected ? (
@@ -2414,6 +2532,7 @@ export function RequestRecords({
             conversationCache={conversationCacheRef.current}
             deleting={deleting}
             initialTab={initialDetailTab}
+            openTab={detailOpenTab}
             newerAvailable={
               neighborSession(visibleItems, selectedId, -1) !== null
             }
@@ -2438,13 +2557,20 @@ export function RequestRecords({
                 kind: "delete-sessions",
                 sessionIds: [selectedSession.id],
                 calls: selectedSession.call_count,
+                subagents:
+                  overlaySessions[selectedSession.id]?.subagents?.length ??
+                  selectedSession.subagent_count ??
+                  0,
               })
             }
             onLockRaw={() => void lockRawContent()}
             onRegisterRecords={(records) =>
               setOverlayRecords((current) => ({ ...current, ...records }))
             }
+            onOpenMemory={openMemoryEntry}
+            onOpenSession={openDetail}
             onSelectTurn={setSelectedTurnId}
+            onSetRawPassword={() => setRawDialog({ kind: "set" })}
             onUnlockRaw={() => void unlockRawContent()}
             rawSealing={rawSealing}
             record={selected}
@@ -2459,6 +2585,9 @@ export function RequestRecords({
             onOpenService={onOpenService}
             onServicesChanged={onServicesChanged}
             session={selectedSession}
+            sessionContext={overlaySessions[selectedSession.id]?.context}
+            subagents={overlaySessions[selectedSession.id]?.subagents}
+            withSubagents={overlaySessions[selectedSession.id]?.with_subagents}
             turns={selectedTurns}
           />
         ) : null}
@@ -2566,15 +2695,8 @@ export function RequestRecords({
  * a label counting up.
  */
 function SessionDuration({ session }: { session: RequestSession }) {
-  const nowMs = useLiveClock(session.active_request_starts.length > 0);
+  const nowMs = useLiveClock(session.running_since !== null);
   return <>{formatDuration(sessionRuntimeMs(session, nowMs))}</>;
-}
-
-function RecordLatency({ record }: { record: RequestRecord }) {
-  const nowMs = useLiveClock(
-    record.latency_ms === null && !record.completed_at,
-  );
-  return <>{formatDuration(liveDurationMs(record, nowMs))}</>;
 }
 
 // The shortest row, a model discovery, is about 40px tall.
@@ -2646,14 +2768,21 @@ function SessionStream({
   const t = i18n.t.bind(i18n);
   // The live board's read of the last few minutes tells each lane its steps.
   const recentCalls = useRequestActivityFeed(coreSessionKey)?.calls ?? NO_CALLS;
+  // A subagent sits under the conversation that started it; one whose parent
+  // is not on this page stands on its own.
+  const { roots, subagentsOf } = useMemo(
+    () => nestSubagents(sessions),
+    [sessions],
+  );
   // Conversations in progress lead the list. One waiting between calls moves
   // down into its day once its wait runs out, so the list re-reads the clock
   // every second while any is in progress, even if no poll brings news.
-  const { active, rest } = splitActiveSessions(sessions, Date.now());
+  const nowMs = Date.now();
+  const { active, rest } = splitActiveSessions(roots, nowMs, subagentsOf);
   useLiveClock(active.length > 0, 1000);
   // Only the date buckets need "now", and those turn over once a day.
   const groups = groupSessionsByDate(rest);
-  let remaining = useProgressiveRowCount(sessions.length) - active.length;
+  let remaining = useProgressiveRowCount(roots.length) - active.length;
   const statusColumn = useStatusColumnWidth();
   return (
     <div
@@ -2695,17 +2824,38 @@ function SessionStream({
               {t("records.countItems", { count: active.length })}
             </Badge>
           </div>
-          {active.map((session) => (
-            <SessionLane
-              checked={checkedIds?.has(session.id)}
-              key={session.id}
-              onOpen={onOpen}
-              recentCalls={recentCalls}
-              selected={session.id === selectedId}
-              services={services}
-              session={session}
-            />
-          ))}
+          {active.map((session) => {
+            // Only subagents still at work get a row; the rest are a
+            // click away in the conversation's details.
+            const working = (subagentsOf.get(session.id) ?? []).filter(
+              (subagent) => conversationActivity(subagent, nowMs) !== null,
+            );
+            return (
+              <Fragment key={session.id}>
+                <SessionLane
+                  checked={checkedIds?.has(session.id)}
+                  onOpen={onOpen}
+                  recentCalls={recentCalls}
+                  selected={session.id === selectedId}
+                  services={services}
+                  session={session}
+                  subagents={subagentCount(session, subagentsOf)}
+                  trunk={working.length > 0}
+                />
+                {working.map((subagent, index) => (
+                  <SubagentLane
+                    checked={checkedIds?.has(subagent.id)}
+                    key={subagent.id}
+                    last={index === working.length - 1}
+                    onOpen={onOpen}
+                    recentCalls={recentCalls}
+                    selected={subagent.id === selectedId}
+                    session={subagent}
+                  />
+                ))}
+              </Fragment>
+            );
+          })}
         </section>
       ) : null}
       {groups.map((group) => {
@@ -2738,6 +2888,7 @@ function SessionStream({
                   selected={session.id === selectedId}
                   services={services}
                   session={session}
+                  subagents={subagentCount(session, subagentsOf)}
                 />
               ),
             )}
@@ -2745,6 +2896,20 @@ function SessionStream({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * How many subagents a conversation started: the gateway's count, or the
+ * ones on this page when it has none.
+ */
+function subagentCount(
+  session: RequestSession,
+  subagentsOf: ReadonlyMap<string, readonly RequestSession[]>,
+): number {
+  return Math.max(
+    session.subagent_count ?? 0,
+    subagentsOf.get(session.id)?.length ?? 0,
   );
 }
 
@@ -2792,7 +2957,7 @@ const DiscoveryRow = memo(function DiscoveryRow({
   onOpen: (sessionId: string) => void;
 }) {
   const t = useT();
-  const nowMs = useLiveClock(session.active_request_starts.length > 0);
+  const nowMs = useLiveClock(session.running_since !== null);
   const service = requestServiceIdentity(session, services);
   const behavior = rowBehavior(session, checked, selected, onOpen, t);
   return (
@@ -2809,7 +2974,7 @@ const DiscoveryRow = memo(function DiscoveryRow({
         variant="ghost"
       >
         <StatusBadge
-          className="col-start-1 row-start-1"
+          className="col-start-1 row-span-2 row-start-1 self-center justify-self-center @[680px]:row-span-1"
           tone={
             session.status === "cancelled"
               ? "neutral"
@@ -2862,6 +3027,7 @@ const SessionRow = memo(function SessionRow({
   selected,
   checked,
   onOpen,
+  subagents = 0,
 }: {
   session: RequestSession;
   services: RequestServiceMap;
@@ -2869,12 +3035,14 @@ const SessionRow = memo(function SessionRow({
   /** Set in selection mode, where the row is a checkbox. */
   checked: boolean | undefined;
   onOpen: (sessionId: string) => void;
+  /** Subagents the conversation started; their rows fold into this one. */
+  subagents?: number;
 }) {
   // Memoized, so it subscribes to the language itself.
   const t = useT();
   // The elapsed time is interpolated into a translated sentence, so the row is
   // the smallest thing that can repaint it. Only active requests tick.
-  const nowMs = useLiveClock(session.active_request_starts.length > 0);
+  const nowMs = useLiveClock(session.running_since !== null);
   const service = requestServiceIdentity(session, services);
   const behavior = rowBehavior(session, checked, selected, onOpen, t);
   const title = compactTitle(session.title) || t("records.untitledSession");
@@ -2892,7 +3060,7 @@ const SessionRow = memo(function SessionRow({
         variant="ghost"
       >
         <StatusBadge
-          className="col-start-1 row-start-1"
+          className="col-start-1 row-span-2 row-start-1 self-center justify-self-center"
           tone={
             session.status === "cancelled"
               ? "neutral"
@@ -2958,6 +3126,9 @@ const SessionRow = memo(function SessionRow({
                 duration: formatDuration(sessionRuntimeMs(session, nowMs)),
               },
             )}
+            {subagents > 0 ? (
+              <span>{` · ${t("records.subagentCount", { count: subagents })}`}</span>
+            ) : null}
             {session.output_tokens_per_second != null ? (
               <span title={t("records.outputSpeed")}>
                 {` · ${session.output_tokens_per_second.toFixed(1)} tok/s`}
@@ -2987,7 +3158,7 @@ const SessionRow = memo(function SessionRow({
 
 /**
  * A conversation in progress, drawn like a worker on a job board: the model
- * serving it on the left and the conversation in its slot. The slot sweeps
+ * serving it on the left and the conversation in its slot. The slot is tinted
  * while a call runs; between calls it shows how long the conversation has
  * waited and how its last call ended.
  */
@@ -2998,6 +3169,8 @@ const SessionLane = memo(function SessionLane({
   checked,
   onOpen,
   recentCalls,
+  subagents = 0,
+  trunk = false,
 }: {
   session: RequestSession;
   services: RequestServiceMap;
@@ -3007,6 +3180,10 @@ const SessionLane = memo(function SessionLane({
   onOpen: (sessionId: string) => void;
   /** Every conversation's calls of the last few minutes. */
   recentCalls: readonly RequestActivityCall[];
+  /** Subagents the conversation started. */
+  subagents?: number;
+  /** Set when subagent rows follow, which hang off this lane's slot. */
+  trunk?: boolean;
 }) {
   const t = useT();
   const trail = useMemo(
@@ -3014,8 +3191,8 @@ const SessionLane = memo(function SessionLane({
     [recentCalls, session],
   );
   const calling = sessionRunning(session);
-  // A running call shows tenths of a second; a wait counts whole seconds.
-  const nowMs = useLiveClock(true, calling ? LIVE_CLOCK_INTERVAL_MS : 1000);
+  // Lanes count whole seconds, so their clock ticks once a second.
+  const nowMs = useLiveClock(true, 1000);
   const since = conversationActivity(session, nowMs)?.since ?? nowMs;
   const calls = Math.max(1, session.active_request_starts.length);
   const service = requestServiceIdentity(session, services);
@@ -3032,6 +3209,7 @@ const SessionLane = memo(function SessionLane({
         selecting
           ? "grid-cols-[1.25rem_minmax(0,1fr)] @[560px]/request-list:grid-cols-[1.25rem_minmax(0,11rem)_minmax(0,1fr)]"
           : "grid-cols-1 @[560px]/request-list:grid-cols-[minmax(0,11rem)_minmax(0,1fr)]",
+        trunk && "border-b-0",
       )}
     >
       <Button
@@ -3068,73 +3246,233 @@ const SessionLane = memo(function SessionLane({
             service={service}
           />
         </span>
-        <ActivitySlot
-          className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-2.5 py-1.5"
-          state={calling ? "running" : "idle"}
-        >
-          <ClientTypeIcon clientType={session.client_type} />
-          <span className="flex min-w-0 items-center gap-2">
-            <strong
-              className="min-w-0 truncate text-sm font-medium"
+        <span className="relative block min-w-0">
+          <ActivitySlot
+            className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-2.5 py-1.5"
+            state={calling ? "running" : "idle"}
+          >
+            <ClientTypeIcon clientType={session.client_type} />
+            <span className="flex min-w-0 items-center gap-2">
+              <strong
+                className="min-w-0 truncate text-sm font-medium"
+                title={session.title || title}
+              >
+                {title}
+              </strong>
+              {session.privacy_warned ? (
+                <StatusBadge
+                  className="shrink-0"
+                  data-testid="privacy-warned-marker"
+                  title={t("records.privacyWarnedHint")}
+                  tone="pending"
+                >
+                  {t("records.privacyWarned")}
+                </StatusBadge>
+              ) : null}
+            </span>
+            {calling || !outcome ? (
+              <LaneActionLabel
+                action={laneAction(session)}
+                calls={calls}
+                elapsedMs={nowMs - since}
+              />
+            ) : (
+              <span
+                className="inline-flex items-center gap-1.5 justify-self-end text-xs whitespace-nowrap tabular-nums text-muted-foreground"
+                data-testid="lane-state"
+                title={t("records.laneIdleHint")}
+              >
+                <StatusBadge
+                  tone={
+                    outcome === "cancelled" ? "neutral" : statusTone(outcome)
+                  }
+                >
+                  {statusLabel(outcome)}
+                </StatusBadge>
+                {t("records.laneIdle", {
+                  duration: formatLaneDuration(nowMs - since),
+                })}
+              </span>
+            )}
+            <span className="col-span-2 col-start-2 flex min-w-0 items-center justify-between gap-3 text-xs leading-5 text-muted-foreground">
+              <LaneTrail firstCall={session.call_count === 1} steps={trail} />
+              <span className="min-w-0 truncate tabular-nums">
+                {t(
+                  session.turn_count === session.call_count
+                    ? "records.sessionMetaTurns"
+                    : "records.sessionMeta",
+                  {
+                    count: session.turn_count,
+                    turns: session.turn_count,
+                    calls: session.call_count,
+                    duration: formatLaneDuration(
+                      sessionRuntimeMs(session, nowMs),
+                    ),
+                  },
+                )}
+                {subagents > 0 ? (
+                  <span>{` · ${t("records.subagentCount", { count: subagents })}`}</span>
+                ) : null}
+                {session.output_tokens_per_second != null ? (
+                  <span title={t("records.outputSpeed")}>
+                    {` · ${session.output_tokens_per_second.toFixed(1)} tok/s`}
+                  </span>
+                ) : null}
+              </span>
+              <SessionContextMeter
+                className="hidden @[480px]/request-list:inline-flex"
+                session={session}
+              />
+            </span>
+            <SessionFailedRepeats
+              className="col-span-2 col-start-2"
+              session={session}
+            />
+          </ActivitySlot>
+          {trunk ? (
+            // The trunk the subagent rows below branch off.
+            <span
+              aria-hidden="true"
+              className="absolute top-full left-2.5 h-2.5 border-l border-border"
+            />
+          ) : null}
+        </span>
+      </Button>
+    </DataRow>
+  );
+});
+
+/**
+ * A subagent at work for the conversation above, in one compact row under
+ * its lane: what it was asked, its last steps and what it does now. Its
+ * counts are on hover.
+ */
+const SubagentLane = memo(function SubagentLane({
+  session,
+  selected,
+  checked,
+  onOpen,
+  recentCalls,
+  last,
+}: {
+  session: RequestSession;
+  selected: boolean;
+  /** Set in selection mode, where the row is a checkbox. */
+  checked: boolean | undefined;
+  onOpen: (sessionId: string) => void;
+  /** Every conversation's calls of the last few minutes. */
+  recentCalls: readonly RequestActivityCall[];
+  /** The last row under its conversation, where the branch ends. */
+  last: boolean;
+}) {
+  const t = useT();
+  const trail = useMemo(
+    () => laneTrail(recentCalls, session),
+    [recentCalls, session],
+  );
+  const calling = sessionRunning(session);
+  const nowMs = useLiveClock(true, 1000);
+  const since = conversationActivity(session, nowMs)?.since ?? nowMs;
+  const calls = Math.max(1, session.active_request_starts.length);
+  const behavior = rowBehavior(session, checked, selected, onOpen, t);
+  const title = compactTitle(session.title) || t("records.untitledSession");
+  const selecting = checked !== undefined;
+  const meta = t(
+    session.turn_count === session.call_count
+      ? "records.sessionMetaTurns"
+      : "records.sessionMeta",
+    {
+      count: session.turn_count,
+      turns: session.turn_count,
+      calls: session.call_count,
+      duration: formatLaneDuration(sessionRuntimeMs(session, nowMs)),
+    },
+  );
+  const outcome =
+    !calling && session.status !== "succeeded" ? session.status : null;
+  return (
+    <DataRow
+      asChild
+      className={cn(
+        "grid items-center gap-x-3 px-3 py-1.5",
+        selecting
+          ? "grid-cols-[1.25rem_minmax(0,1fr)] @[560px]/request-list:grid-cols-[1.25rem_minmax(0,11rem)_minmax(0,1fr)]"
+          : "grid-cols-1 @[560px]/request-list:grid-cols-[minmax(0,11rem)_minmax(0,1fr)]",
+        !last && "border-b-0",
+      )}
+    >
+      <Button
+        {...behavior.props}
+        className="h-auto w-full rounded-none bg-transparent text-left font-normal whitespace-normal text-foreground hover:bg-muted/60 focus-visible:bg-accent focus-visible:ring-inset aria-checked:bg-accent aria-[current=true]:bg-accent"
+        data-activity={calling ? "calling" : "idle"}
+        data-session-id={session.id}
+        data-testid="subagent-session-row"
+        type="button"
+        variant="ghost"
+      >
+        {selecting ? (
+          <CheckboxMark
+            checked={checked}
+            className="justify-self-center"
+            disabled={behavior.locked}
+          />
+        ) : null}
+        {/* The model column stays empty: the lane above names the model. */}
+        <span
+          aria-hidden="true"
+          className="hidden @[560px]/request-list:block"
+        />
+        <span className="relative block min-w-0 pl-6">
+          {/* A hairline elbow from the trunk into this row. */}
+          <span
+            aria-hidden="true"
+            className="absolute top-[-0.375rem] left-2.5 h-[calc(50%+0.375rem)] w-3.5 rounded-bl-md border-b border-l border-border"
+          />
+          {last ? null : (
+            <span
+              aria-hidden="true"
+              className="absolute top-1/2 bottom-[-0.375rem] left-2.5 border-l border-border"
+            />
+          )}
+          <ActivitySlot
+            className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto_auto] items-center gap-x-3 px-2.5 py-1"
+            state={calling ? "running" : "idle"}
+            title={meta}
+          >
+            <span
+              className="inline-flex justify-center text-muted-foreground"
+              title={t("records.subagent")}
+            >
+              <Bot
+                animateOnHover={false}
+                aria-hidden="true"
+                className="size-4"
+              />
+            </span>
+            <span
+              className="min-w-0 truncate text-sm"
               title={session.title || title}
             >
               {title}
-            </strong>
-            {session.privacy_warned ? (
-              <StatusBadge
-                className="shrink-0"
-                data-testid="privacy-warned-marker"
-                title={t("records.privacyWarnedHint")}
-                tone="pending"
-              >
-                {t("records.privacyWarned")}
-              </StatusBadge>
-            ) : null}
-          </span>
-          {calling || !outcome ? (
-            <LaneActionLabel
-              action={laneAction(session)}
-              calls={calls}
-              elapsedMs={nowMs - since}
-            />
-          ) : (
-            <span
-              className="inline-flex items-center gap-1.5 justify-self-end text-xs whitespace-nowrap tabular-nums text-muted-foreground"
-              data-testid="lane-state"
-              title={t("records.laneIdleHint")}
-            >
+            </span>
+            <span className="hidden text-xs text-muted-foreground @[720px]/request-list:flex">
+              <LaneTrail firstCall={session.call_count === 1} steps={trail} />
+            </span>
+            {calling || !outcome ? (
+              <LaneActionLabel
+                action={laneAction(session)}
+                calls={calls}
+                elapsedMs={nowMs - since}
+              />
+            ) : (
               <StatusBadge
                 tone={outcome === "cancelled" ? "neutral" : statusTone(outcome)}
               >
                 {statusLabel(outcome)}
               </StatusBadge>
-              {t("records.laneIdle", {
-                duration: formatWait(nowMs - since),
-              })}
-            </span>
-          )}
-          <span className="col-span-2 col-start-2 flex min-w-0 items-center justify-between gap-3 text-xs leading-5 text-muted-foreground">
-            <LaneTrail firstCall={session.call_count === 1} steps={trail} />
-            <span className="min-w-0 truncate tabular-nums">
-              {t(
-                session.turn_count === session.call_count
-                  ? "records.sessionMetaTurns"
-                  : "records.sessionMeta",
-                {
-                  count: session.turn_count,
-                  turns: session.turn_count,
-                  calls: session.call_count,
-                  duration: formatDuration(sessionRuntimeMs(session, nowMs)),
-                },
-              )}
-              {session.output_tokens_per_second != null ? (
-                <span title={t("records.outputSpeed")}>
-                  {` · ${session.output_tokens_per_second.toFixed(1)} tok/s`}
-                </span>
-              ) : null}
-            </span>
-          </span>
-        </ActivitySlot>
+            )}
+          </ActivitySlot>
+        </span>
       </Button>
     </DataRow>
   );
@@ -3222,17 +3560,21 @@ function LaneTrail({
   );
 }
 
-/** A wait between calls in whole seconds, as minutes once tools run longer. */
-function formatWait(elapsedMs: number): string {
-  const waited = Math.max(0, elapsedMs);
-  return waited < 60_000
-    ? `${Math.floor(waited / 1000)} s`
-    : formatDuration(waited);
+/**
+ * A lane's time in whole seconds, as minutes past one. Lanes tick once a
+ * second, so tenths would only flicker.
+ */
+function formatLaneDuration(elapsedMs: number): string {
+  const elapsed = Math.max(0, elapsedMs);
+  return elapsed < 60_000
+    ? `${Math.floor(elapsed / 1000)} s`
+    : formatDuration(elapsed);
 }
 
 /**
- * What a lane says its conversation is doing and for how long: a running
- * call counts tenths of a second, a wait between calls whole seconds.
+ * What a lane says its conversation is doing and for how long, in whole
+ * seconds. While a call runs, the label shimmers and a wait spins; the slot
+ * around it holds still, so several lanes do not flicker as a whole.
  */
 function LaneActionLabel({
   action,
@@ -3249,9 +3591,7 @@ function LaneActionLabel({
     action.kind === "thinking" ||
     action.kind === "writing" ||
     action.kind === "calling";
-  const duration = running
-    ? formatDuration(Math.max(0, elapsedMs))
-    : formatWait(elapsedMs);
+  const duration = formatLaneDuration(elapsedMs);
   const iconClass = "size-3.5 shrink-0";
   let icon: ReactNode = null;
   let label: string;
@@ -3365,6 +3705,7 @@ function RecordDetail({
   deleting,
   rawSealing,
   initialTab,
+  openTab,
   newerAvailable,
   olderAvailable,
   onBack,
@@ -3375,12 +3716,18 @@ function RecordDetail({
   onLockRaw,
   onSelectTurn,
   onRegisterRecords,
+  onSetRawPassword,
   onUnlockRaw,
   routingServices,
   conversionEngine,
   onEditRoutingGroup,
   onOpenService,
   onServicesChanged,
+  onOpenSession,
+  onOpenMemory,
+  sessionContext,
+  subagents,
+  withSubagents,
 }: {
   record: RequestRecord;
   serviceNames: Record<string, string>;
@@ -3392,6 +3739,8 @@ function RecordDetail({
   onOpenService?: (serviceID: string) => void;
   onServicesChanged?: () => void;
   session: RequestSession;
+  /** What the conversation sent the model call by call, from its detail. */
+  sessionContext?: SessionContext;
   turns: RequestRecord[];
   serviceName: string | null;
   auditContent: AuditContent | null;
@@ -3402,6 +3751,8 @@ function RecordDetail({
   deleting: boolean;
   rawSealing: RawSealingState | null;
   initialTab: "conversation" | "trajectory";
+  /** The tab a link opened the session on, over the remembered one. */
+  openTab?: DetailTab | null;
   newerAvailable: boolean;
   olderAvailable: boolean;
   onBack: () => void;
@@ -3414,7 +3765,20 @@ function RecordDetail({
   onLockRaw: () => void;
   onSelectTurn: (requestId: string) => void;
   onRegisterRecords: (records: Record<string, RequestRecord>) => void;
+  /** Sets up the raw password, for parts kept out while there was none. */
+  onSetRawPassword: () => void;
   onUnlockRaw: () => void;
+  /** Opens another conversation: a subagent or the one that started this. */
+  onOpenSession: (sessionId: string) => void;
+  /** Opens a memory a call wrote in the memory tab. */
+  onOpenMemory?: (focus: MemoryFocus) => void;
+  /**
+   * The conversations this one started as subagents, theirs included, each
+   * right after the one that started it.
+   */
+  subagents?: readonly RequestSession[];
+  /** This conversation together with every subagent under it. */
+  withSubagents?: SessionTotals;
 }) {
   const t = useT();
   const copyFeedback = useCopyFeedback();
@@ -3431,7 +3795,9 @@ function RecordDetail({
     rememberedTab === "conversation" && discovery
       ? "trajectory"
       : rememberedTab;
-  const [detailTab, setDetailTabState] = useState<DetailTab>(defaultTab);
+  const [detailTab, setDetailTabState] = useState<DetailTab>(
+    openTab ?? defaultTab,
+  );
   const setDetailTab = (tab: DetailTab) => {
     setDetailTabState(tab);
     if (tab === "conversation" || tab === "trajectory") setRememberedTab(tab);
@@ -3467,12 +3833,9 @@ function RecordDetail({
   const [childrenByRoot, setChildrenByRoot] = useState<
     Record<string, RequestRecord[]>
   >({});
-  const rootId = record.parent_request_id ?? record.id;
-  const rootRecord = turns.find((turn) => turn.id === rootId) ?? record;
   // Running calls keep their records, so the whole conversation waits.
   const sessionLive =
     sessionRunning(session) || turns.some((turn) => turn.status === "pending");
-  const recoveryRecords = [...(childrenByRoot[rootId] ?? []), rootRecord];
   const isChild = record.parent_request_id !== null;
   const requestPart = auditContent?.request_body ?? null;
   const responsePart = auditContent?.response_content ?? null;
@@ -3480,7 +3843,7 @@ function RecordDetail({
   const upstreamResponsePart = auditContent?.upstream_response_content ?? null;
 
   useEffect(() => {
-    setDetailTabState(defaultTab);
+    setDetailTabState(openTab ?? defaultTab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
 
@@ -3554,6 +3917,17 @@ function RecordDetail({
     };
   }, null);
 
+  // A subagent of a subagent sits one step in from the one that started it,
+  // which the list puts right before it.
+  const subagentDepth = useMemo(() => {
+    const depth = new Map<string, number>();
+    for (const subagent of subagents ?? []) {
+      const parent = depth.get(subagent.parent_session_id ?? "");
+      depth.set(subagent.id, parent == null ? 0 : parent + 1);
+    }
+    return depth;
+  }, [subagents]);
+
   const exportEnvironment = useExportEnvironment(auditSettings);
   // The same diagnosis context for copy and export: a record alone cannot
   // show the session failures or settings that explain it.
@@ -3621,18 +3995,87 @@ function RecordDetail({
         titleId="request-detail-heading"
         titlePrefix={<ClientTypeIcon clientType={record.client_type} />}
         overline={
-          <StatusBadge
-            className="shrink-0"
-            data-testid="record-status"
-            tone={statusTone(session.status)}
-          >
-            {statusLabel(session.status)}
-            {session.status === "pending" ? (
-              <span className="ml-1.5 tabular-nums">
-                <SessionDuration session={session} />
-              </span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <StatusBadge
+              className="shrink-0"
+              data-testid="record-status"
+              tone={statusTone(session.status)}
+            >
+              {statusLabel(session.status)}
+              {session.status === "pending" ? (
+                <span className="ml-1.5 tabular-nums">
+                  <SessionDuration session={session} />
+                </span>
+              ) : null}
+            </StatusBadge>
+            {/* Subagent links sit beside the status, clear of the title row. */}
+            {subagents && subagents.length > 0 ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    className="text-muted-foreground"
+                    data-testid="session-subagents"
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <Bot animateOnHover={false} aria-hidden="true" />
+                    {t("records.subagentCount", { count: subagents.length })}
+                    <ChevronDown aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="start"
+                  aria-label={t("records.subagentList")}
+                  className="max-w-96"
+                >
+                  {subagents.map((subagent) => (
+                    <DropdownMenuItem
+                      data-depth={subagentDepth.get(subagent.id) ?? 0}
+                      data-session-id={subagent.id}
+                      key={subagent.id}
+                      onSelect={() => onOpenSession(subagent.id)}
+                      style={{
+                        paddingInlineStart: `${0.5 + (subagentDepth.get(subagent.id) ?? 0)}rem`,
+                      }}
+                    >
+                      <StatusDot
+                        label={statusLabel(subagent.status)}
+                        tone={statusTone(subagent.status)}
+                      />
+                      <span className="min-w-0 truncate">
+                        {compactTitle(subagent.title) ||
+                          t("records.untitledSession")}
+                      </span>
+                      <span className="ml-auto shrink-0 pl-3 text-micro tabular-nums text-muted-foreground">
+                        {t("records.turnsCount", {
+                          count: subagent.turn_count,
+                        })}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
             ) : null}
-          </StatusBadge>
+            {session.parent_session_id ? (
+              <Button
+                className="text-muted-foreground"
+                data-testid="parent-session"
+                onClick={() => {
+                  if (session.parent_session_id) {
+                    onOpenSession(session.parent_session_id);
+                  }
+                }}
+                size="xs"
+                title={t("records.parentConversationHint")}
+                type="button"
+                variant="ghost"
+              >
+                <ArrowUp animateOnHover={false} aria-hidden="true" />
+                {t("records.parentConversation")}
+              </Button>
+            ) : null}
+          </span>
         }
         titleSuffix={
           <>
@@ -3837,6 +4280,14 @@ function RecordDetail({
                 {t("conversation.tab")}
               </TabsTrigger>
             )}
+            {!discovery && (
+              <TabsTrigger
+                onClick={() => setDetailTab("context")}
+                value="context"
+              >
+                {t("sessionContext.tab")}
+              </TabsTrigger>
+            )}
             <TabsTrigger
               onClick={() => setDetailTab("trajectory")}
               value="trajectory"
@@ -3963,6 +4414,25 @@ function RecordDetail({
                   {t("conversation.tokens", {
                     input: formatCompactNumber(sessionTokens.input),
                     output: formatCompactNumber(sessionTokens.output),
+                  })}
+                </dd>
+              </div>
+            ) : null}
+            {withSubagents ? (
+              <div
+                className="flex items-center gap-1.5"
+                data-testid="session-with-subagents"
+                title={`${t("records.subagentCount", { count: subagents?.length ?? 0 })} · ${t("records.inputTokens")} ${withSubagents.input_tokens.toLocaleString()} · ${t("records.outputTokens")} ${withSubagents.output_tokens.toLocaleString()}`}
+              >
+                <dt>{t("conversation.withSubagents")}</dt>
+                <dd className="tabular-nums text-foreground">
+                  {t("conversation.calls", {
+                    count: withSubagents.call_count,
+                  })}
+                  {" · "}
+                  {t("conversation.tokens", {
+                    input: formatCompactNumber(withSubagents.input_tokens),
+                    output: formatCompactNumber(withSubagents.output_tokens),
                   })}
                 </dd>
               </div>
@@ -4101,13 +4571,34 @@ function RecordDetail({
               auditLoading={auditLoading}
               childrenByRoot={childrenByRoot}
               contentCache={conversationCache}
+              context={sessionContext}
               copyFeedback={copyFeedback}
+              onOpenMemory={onOpenMemory}
               onSelectRequest={onSelectTurn}
               onUnlockRaw={onUnlockRaw}
               outlineOpen={outlineOpen}
               rawSealing={rawSealing}
               selectedRequestId={record.id}
               services={services}
+              session={session}
+              turns={turns}
+            />
+          </TabsContent>
+        )}
+
+        {!discovery && (
+          <TabsContent
+            className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+            value="context"
+          >
+            <RequestContext
+              context={sessionContext}
+              onOpenCall={(id) => {
+                onSelectTurn(id);
+                setDetailTab("conversation");
+              }}
+              onSelectRequest={onSelectTurn}
+              selectedRequestId={record.id}
               session={session}
               turns={turns}
             />
@@ -4134,248 +4625,6 @@ function RecordDetail({
 
         <TabsContent
           className="min-h-0 min-w-0 flex-1 space-y-3 overflow-auto overscroll-contain py-4 [scrollbar-gutter:stable]"
-          value="overview"
-        >
-          <DetailSection title={t("records.identity")}>
-            <div className="grid grid-cols-4 gap-3 @max-[720px]:grid-cols-2">
-              <DetailField
-                label={t("records.model")}
-                value={
-                  <ModelLabel
-                    model={record.requested_model}
-                    reasoningEffort={record.reasoning_effort}
-                    redirectedTo={record.model_redirect?.to}
-                  />
-                }
-              />
-              <DetailField
-                label={t("records.entry")}
-                value={protocolEntryPath(record.input_protocol, {
-                  streaming: record.streaming,
-                })}
-                code
-              />
-              <DetailField
-                label={t("records.protocol")}
-                value={record.input_protocol}
-                code
-              />
-              <DetailField
-                label={t("records.transport")}
-                value={
-                  record.streaming
-                    ? t("records.streaming")
-                    : t("records.notStreaming")
-                }
-              />
-              <DetailField
-                label={t("records.service")}
-                value={serviceName ?? record.service_id ?? "—"}
-              />
-              <DetailField
-                label={t("records.started")}
-                value={formatDateTime(record.started_at)}
-              />
-              <DetailField
-                label={t("records.finished")}
-                value={
-                  record.completed_at
-                    ? formatDateTime(record.completed_at)
-                    : "—"
-                }
-              />
-              <div className="col-span-full min-w-0">
-                <dt className="text-xs font-medium text-muted-foreground">
-                  ID
-                </dt>
-                <dd className="mt-1 flex min-w-0 items-center gap-2 text-xs text-text-secondary">
-                  <code className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
-                    {record.id}
-                  </code>
-                  <Button
-                    className="h-auto px-0 text-xs"
-                    onClick={() => copyFeedback.copy("record-id", record.id)}
-                    type="button"
-                    variant="link"
-                  >
-                    {copyButtonLabel(copyFeedback, "record-id")}
-                  </Button>
-                </dd>
-              </div>
-            </div>
-          </DetailSection>
-
-          <DetailSection title={t("records.metrics")}>
-            <dl className="grid grid-cols-3 @max-[720px]:grid-cols-2 [&>div]:border-l [&>div]:px-3 [&>div:nth-child(3n+1)]:border-l-0 [&>div:nth-child(3n+1)]:pl-0 @max-[720px]:[&>div:nth-child(3n+1)]:border-l @max-[720px]:[&>div:nth-child(3n+1)]:pl-3 @max-[720px]:[&>div:nth-child(odd)]:border-l-0 @max-[720px]:[&>div:nth-child(odd)]:pl-0">
-              <Metric label="HTTP" value={record.http_status ?? "—"} />
-              <Metric
-                label={t("records.latency")}
-                value={<RecordLatency record={record} />}
-                live={record.status === "pending"}
-              />
-              <Metric
-                label={t("records.inputTokens")}
-                value={record.usage?.input_tokens ?? "—"}
-              />
-              <Metric
-                label={t("records.outputTokens")}
-                value={record.usage?.output_tokens ?? "—"}
-              />
-              <Metric
-                label={t("records.totalTokens")}
-                value={record.usage?.total_tokens ?? "—"}
-              />
-              <Metric
-                label={t("records.cacheRead")}
-                value={record.usage?.cache_read_tokens ?? "—"}
-              />
-              <Metric
-                label={t("records.cacheWrite")}
-                value={record.usage?.cache_write_tokens ?? "—"}
-              />
-            </dl>
-          </DetailSection>
-
-          <DetailSection title={t("records.privacyRestore")}>
-            {record.privacy_restore ? (
-              <dl className="grid grid-cols-4 @max-[720px]:grid-cols-2 [&>div]:border-l [&>div]:px-3 [&>div:first-child]:border-l-0 [&>div:first-child]:pl-0">
-                <Metric
-                  label={t("records.status")}
-                  value={
-                    record.privacy_restore.enabled
-                      ? t("records.on")
-                      : t("records.off")
-                  }
-                />
-                <Metric
-                  label={t("records.mappings")}
-                  value={record.privacy_restore.mapping_count}
-                />
-                <Metric
-                  label={t("records.restored")}
-                  value={record.privacy_restore.restored_count}
-                />
-                <Metric
-                  label={t("records.safeFallback")}
-                  value={record.privacy_restore.fallback_count}
-                />
-              </dl>
-            ) : (
-              <p className="text-xs text-success-foreground">
-                {t("records.noPrivacyRestore")}
-              </p>
-            )}
-          </DetailSection>
-
-          {record.recovery || recoveryRecords.length > 1 ? (
-            <DetailSection title={t("failure.details")}>
-              <RecoveryChain
-                records={recoveryRecords}
-                serviceNames={serviceNames}
-              />
-              <RecoveryDetails
-                modelRedirect={record.model_redirect}
-                value={record.recovery}
-              />
-            </DetailSection>
-          ) : null}
-
-          {record.error ? (
-            <DetailSection tone="error" title={t("records.error")}>
-              <dl className="grid grid-cols-3 gap-3 @max-[720px]:grid-cols-2">
-                <DetailField
-                  label={t("records.category")}
-                  value={record.error.category}
-                  code
-                />
-                <DetailField
-                  label={t("records.code")}
-                  value={record.error.code}
-                  code
-                />
-                <DetailField
-                  label={t("records.retryable")}
-                  value={
-                    record.error.retryable ? t("common.yes") : t("common.no")
-                  }
-                />
-                <DetailField
-                  className="col-span-full"
-                  label={t("records.message")}
-                  value={record.error.message}
-                  wrap
-                />
-                {record.error.upstream ? (
-                  <DetailField
-                    className="col-span-full"
-                    label={`${t("records.upstreamError", {
-                      status: record.error.upstream.status,
-                    })}${
-                      record.error.upstream.content_type
-                        ? ` · ${record.error.upstream.content_type}`
-                        : ""
-                    }`}
-                    value={
-                      <>
-                        <pre
-                          className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-xs leading-relaxed [overflow-wrap:anywhere]"
-                          data-testid="record-upstream-error"
-                        >
-                          {record.error.upstream.body}
-                        </pre>
-                        {record.error.upstream.truncated ? (
-                          <span className="mt-1 block text-muted-foreground">
-                            {t("records.upstreamErrorTruncated")}
-                          </span>
-                        ) : null}
-                      </>
-                    }
-                    wrap
-                  />
-                ) : null}
-              </dl>
-            </DetailSection>
-          ) : null}
-
-          <DetailSection title={t("records.related")}>
-            <dl className="grid grid-cols-3 gap-3 @max-[720px]:grid-cols-2">
-              <DetailField
-                label={t("records.attempt")}
-                value={
-                  record.attempt_index === 0
-                    ? t("records.neverReachedUpstream")
-                    : String(record.attempt_index)
-                }
-              />
-              <DetailField
-                label={t("records.parent")}
-                value={record.parent_request_id ?? t("records.rootRecord")}
-                code
-              />
-              <DetailField
-                label={t("records.retryChildren")}
-                value={String(record.child_count)}
-              />
-              <DetailField
-                label={t("records.route")}
-                value={record.route_id ?? "—"}
-                code
-              />
-              <DetailField
-                label={t("records.service")}
-                value={serviceName ?? record.service_id ?? "—"}
-              />
-              <DetailField
-                label={t("records.token")}
-                value={record.local_access_token_id ?? "—"}
-                code
-              />
-            </dl>
-          </DetailSection>
-        </TabsContent>
-
-        <TabsContent
-          className="min-h-0 min-w-0 flex-1 space-y-3 overflow-auto overscroll-contain py-4 [scrollbar-gutter:stable]"
           value="content"
         >
           {auditError ? (
@@ -4396,9 +4645,7 @@ function RecordDetail({
                   tone="notice"
                 >
                   <span className="min-w-0">
-                    {t("rawSealing.unlockedHint", {
-                      minutes: unlockIdleMinutes(rawSealing),
-                    })}
+                    {unlockEndText(rawSealing, "unlocked")}
                   </span>
                   <Button
                     onClick={onLockRaw}
@@ -4407,6 +4654,28 @@ function RecordDetail({
                     variant="outline"
                   >
                     {t("rawSealing.lock")}
+                  </Button>
+                </FormMessage>
+              ) : null}
+              {rawPasswordMissing(rawSealing) &&
+              Object.values(auditContent.withheld).some(
+                (part) => part?.reason === "raw_not_kept",
+              ) ? (
+                // Capture is on without a raw password, so raw parts are
+                // still dropped; point at the setup without blocking.
+                <FormMessage
+                  className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5"
+                  data-slot="raw-not-kept"
+                  tone="notice"
+                >
+                  <span className="min-w-0">{t("rawSealing.notKeptHint")}</span>
+                  <Button
+                    onClick={onSetRawPassword}
+                    size="xs"
+                    type="button"
+                    variant="outline"
+                  >
+                    {t("rawSealing.setupAction")}
                   </Button>
                 </FormMessage>
               ) : null}
@@ -4493,88 +4762,6 @@ function RecordDetail({
   );
 }
 
-function DetailSection({
-  title,
-  tone,
-  children,
-}: {
-  title: string;
-  tone?: "error";
-  children: ReactNode;
-}) {
-  return (
-    <section
-      className={cn(
-        "rounded-md border bg-card p-3.5",
-        tone === "error" && "border-destructive/25 bg-danger-wash",
-      )}
-    >
-      <h3 className="mb-2.5 text-sm font-semibold">{title}</h3>
-      {children}
-    </section>
-  );
-}
-
-function DetailField({
-  label,
-  value,
-  code = false,
-  wrap = false,
-  className = "",
-}: {
-  label: string;
-  value: ReactNode;
-  code?: boolean;
-  /** Show the whole value on as many lines as it needs. */
-  wrap?: boolean;
-  className?: string;
-}) {
-  return (
-    <div className={cn("min-w-0", className)}>
-      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-      <dd
-        className={cn(
-          "mt-1 text-xs text-text-secondary",
-          wrap
-            ? "whitespace-pre-wrap [overflow-wrap:anywhere]"
-            : "overflow-hidden text-ellipsis whitespace-nowrap",
-        )}
-      >
-        {code && typeof value === "string" && value !== "—" ? (
-          <code className="text-xs">{value}</code>
-        ) : (
-          value
-        )}
-      </dd>
-    </div>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  live = false,
-}: {
-  label: string;
-  value: ReactNode;
-  live?: boolean;
-}) {
-  const t = i18n.t.bind(i18n);
-  return (
-    <div className="min-w-0">
-      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-      <dd className="mt-1 text-base font-semibold tabular-nums">
-        {value}
-        {live ? (
-          <small className="ml-1 text-micro font-medium text-warning-foreground">
-            {t("records.liveBadge")}
-          </small>
-        ) : null}
-      </dd>
-    </div>
-  );
-}
-
 function RecordSkeleton() {
   const t = i18n.t.bind(i18n);
   return (
@@ -4646,9 +4833,15 @@ function confirmMessage(pending: PendingConfirm): string {
     return i18n.t("records.deleteBody");
   }
   if (pending.kind === "delete-sessions") {
-    return i18n.t("records.deleteSessionsBody", {
-      calls: i18n.t("records.callCount", { count: pending.calls }),
-    });
+    const calls = i18n.t("records.callCount", { count: pending.calls });
+    return pending.subagents > 0
+      ? i18n.t("records.deleteSessionsWithSubagentsBody", {
+          calls,
+          subagents: i18n.t("records.subagentCount", {
+            count: pending.subagents,
+          }),
+        })
+      : i18n.t("records.deleteSessionsBody", { calls });
   }
   if (pending.kind === "purge-all") {
     return i18n.t("records.purgeAllBody");
@@ -4694,6 +4887,16 @@ function isControlTransportError(error: unknown): boolean {
   return /error sending request|timed out|timeout|connection reset|connection refused|connection closed/i.test(
     message,
   );
+}
+
+// Each purge request finishes whole or changes nothing, so a missing answer
+// never leaves part of one deleted.
+function unansweredPurgeMessage(error: unknown): string | null {
+  if (error instanceof Error && error.message === PURGE_STILL_RUNNING) {
+    return i18n.t("records.purgeStillRunning");
+  }
+  if (isControlTransportError(error)) return i18n.t("records.purgeNoAnswer");
+  return null;
 }
 
 function listErrorMessage(error: unknown): string {

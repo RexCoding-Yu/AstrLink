@@ -85,7 +85,9 @@ type Dependencies struct {
 	// MaxConcurrentInspections limits how many requests may parse and
 	// classify at once. Zero selects DefaultMaxConcurrentInspections.
 	MaxConcurrentInspections int
-	// MaxRequestBodyMiB limits incoming request bodies; zero means unlimited.
+	// MaxRequestBodyMiB limits incoming request bodies, a compressed one after
+	// decoding; zero means unlimited, though a compressed body still decodes
+	// to at most maxDecodedRequestBodyBytes.
 	MaxRequestBodyMiB uint32
 	// SubscriptionRisk is optional. It receives classified upstream ban and
 	// quota signals from Claude and Codex subscription accounts.
@@ -103,6 +105,9 @@ type Dependencies struct {
 	// image and Responses requests for the models they claim, their
 	// native routes and /v1/tasks; nil serves none.
 	Tasks *taskplugin.Engine
+	// ClaudeOfficial is optional. It serves official Claude accounts through
+	// their claude CLI; nil leaves those accounts unavailable.
+	ClaudeOfficial ClaudeOfficial
 }
 
 // MetadataResolver resolves a request's metadata; *metadata.Registry
@@ -180,10 +185,12 @@ type Handler struct {
 	classifier               Classifier
 	classifierSettings       ClassifierSettingsProvider
 	// clock is the time routing rules read; nil reads the system clock.
-	clock               func() time.Time
-	subscriptionRisk    SubscriptionRiskReporter
-	identities          *accountauth.IdentityRegistry
-	sessionFingerprints sessionFingerprints
+	clock                   func() time.Time
+	subscriptionRisk        SubscriptionRiskReporter
+	identities              *accountauth.IdentityRegistry
+	sessionFingerprints     sessionFingerprints
+	claudeOfficial          ClaudeOfficial
+	claudeOfficialForwarder Forwarder
 }
 
 const (
@@ -338,13 +345,18 @@ func NewWithDependencies(dependencies Dependencies) *Handler {
 	if !ok {
 		providerTransport = transport.New(nil)
 	}
+	var claudeOfficialForwarder Forwarder
+	if dependencies.ClaudeOfficial != nil {
+		claudeOfficialForwarder = transport.New(dependencies.ClaudeOfficial)
+	}
 	return &Handler{
 		providerTransport: providerTransport,
 		requestMetadata:   dependencies.Metadata,
 		plugins:           dependencies.Plugins,
 		tasks:             dependencies.Tasks,
-		proxyCredentials:  dependencies.ProxyCredentials,
-		resolver:          dependencies.Resolver, authorizer: dependencies.Authorizer, forwarder: dependencies.Forwarder,
+		claudeOfficial:    dependencies.ClaudeOfficial, claudeOfficialForwarder: claudeOfficialForwarder,
+		proxyCredentials: dependencies.ProxyCredentials,
+		resolver:         dependencies.Resolver, authorizer: dependencies.Authorizer, forwarder: dependencies.Forwarder,
 		accessTokenAuthenticator: dependencies.AccessTokenAuthenticator, privacyFilter: dependencies.PrivacyFilter,
 		policyWarningReporter: dependencies.PolicyWarningReporter,
 		requestRecords:        dependencies.RequestRecords,
@@ -371,6 +383,13 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	// comes before the cross-origin headers every other route sends.
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && strings.HasPrefix(request.URL.Path, pluginhost.LookupPath) {
 		handler.serveLookup(writer, request)
+		return
+	}
+	if builtinInternalFrom(request.Context()) == nil && hasClaudeProcessHeader(request) {
+		// A serving claude CLI's own model call.
+		if accepted, ok := handler.acceptClaudeLoopback(writer, request); ok {
+			handler.serveClaudeLoopback(writer, accepted)
+		}
 		return
 	}
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil {
@@ -428,8 +447,16 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		handler.writeRecordedInferenceError(writer, request, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the configured size limit", false, nil)
 		return
 	}
+	if errors.Is(err, errDecodedBodyTooLarge) {
+		handler.writeRecordedInferenceError(writer, request, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("decompressed request body exceeds %d MiB", maxDecodedRequestBodyBytes>>20), false, nil)
+		return
+	}
+	if errors.Is(err, errInvalidContentEncoding) {
+		handler.writeRecordedInferenceError(writer, request, http.StatusBadRequest, "invalid_content_encoding", "request body could not be decompressed with its Content-Encoding", false, nil)
+		return
+	}
 	if errors.Is(err, errUnsupportedContentEncoding) {
-		handler.writeRecordedInferenceError(writer, request, http.StatusUnsupportedMediaType, "unsupported_content_encoding", "encoded inference request bodies are not supported", false, nil)
+		handler.writeRecordedInferenceError(writer, request, http.StatusUnsupportedMediaType, "unsupported_content_encoding", "request Content-Encoding is not supported; send gzip, deflate, br, zstd or an uncompressed body", false, nil)
 		return
 	}
 	if err != nil {
@@ -1157,7 +1184,14 @@ func (handler *Handler) startRecordSession(request *http.Request, classified Req
 	session.privacyGated = handler.privacyFilter != nil
 	session.bindPersistence(handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 	if handler.requestRecords != nil {
-		session.fingerprinter = handler.sessionFingerprints.get(request.Context(), handler.auditBlobs, handler.recordLogger)
+		fingerprinter, linkFingerprinter, contextFingerprinter := handler.sessionFingerprints.get(request.Context(), handler.auditBlobs, handler.recordLogger)
+		session.fingerprinter, session.linkFingerprinter = fingerprinter, linkFingerprinter
+		session.observeContext(classified.context, contextFingerprinter)
+		if session.clientType == contract.ClientDeepSeekHarness && session.linkFingerprinter != nil {
+			// Its subagents carry no thread ids; the prompts this
+			// conversation gives them are how they find it.
+			session.scanner.watchSpawns()
+		}
 	}
 	session.resolveSession(request.Context(), handler.requestRecords, handler.recordLogger)
 	if handler.requestMetadata != nil {
@@ -1244,6 +1278,12 @@ func (handler *Handler) classify(request *http.Request) (Request, func(), error)
 	if err != nil {
 		return Request{}, func() {}, err
 	}
+	limit, tooLarge := handler.decodedBodyLimit()
+	sentBodyHeaders, err := decodeRequestBody(request, limit, tooLarge)
+	if err != nil {
+		release()
+		return Request{}, func() {}, err
+	}
 	classified, classifyErr := classify(request, handler.maxRequestBodyBytes)
 	if classifyErr != nil {
 		if replay, buffered := request.Body.(*replayReadCloser); buffered {
@@ -1252,6 +1292,7 @@ func (handler *Handler) classify(request *http.Request) (Request, func(), error)
 		release()
 		return Request{}, func() {}, classifyErr
 	}
+	classified.sentBodyHeaders = sentBodyHeaders
 	// Inspection is done. Holding the slot through resolve + upstream
 	// streaming caps the whole gateway at four in-flight AI requests.
 	release()

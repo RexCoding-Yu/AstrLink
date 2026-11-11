@@ -25,11 +25,14 @@ export const ACTIVE_GRACE_MS = 60_000;
  */
 export const TOOL_WAIT_MS = 30 * 60_000;
 
-/** The span the live board charts and counts recent failures over. */
+/** The span the live board charts; it hides once nothing went on in it. */
 export const ACTIVITY_WINDOW_MS = 5 * 60_000;
 
 /** The chart reads the count once per step across the window. */
 export const ACTIVITY_STEP_MS = 1000;
+
+/** The span the board averages the models' output over. */
+export const THROUGHPUT_WINDOW_MS = 60_000;
 
 export type ConversationActivity =
   | {
@@ -111,7 +114,7 @@ export function conversationActivity(
  * for, at most `TOOL_WAIT_MS`, or for the grace. `own` is the conversation's
  * calls, oldest first.
  */
-function busyUntil(
+export function busyUntil(
   call: RequestActivityCall,
   own: readonly RequestActivityCall[],
 ): number {
@@ -132,10 +135,11 @@ export interface ActivityClient {
 export interface ActivitySnapshot {
   /** Conversations running a call or waiting between calls. */
   conversations: number;
-  /** Calls in flight across those conversations. */
-  calls: number;
-  /** Conversations whose latest call failed within the window. */
-  failures: number;
+  /**
+   * Tokens the models generated per second over the last
+   * `THROUGHPUT_WINDOW_MS`, from the calls that reported them.
+   */
+  outputTokensPerSecond: number;
   /** The clients those conversations come from, busiest first. */
   clients: ActivityClient[];
 }
@@ -166,10 +170,30 @@ const byStart = (left: RequestActivityCall, right: RequestActivityCall) =>
   Date.parse(left.started_at) - Date.parse(right.started_at);
 
 /**
+ * The top-level conversation a conversation belongs to, following the
+ * subagent links `parentOf` knows; one it does not know, or one in a loop of
+ * links, is its own root.
+ */
+export function rootOf(
+  parentOf: ReadonlyMap<string, string>,
+  sessionId: string,
+): string {
+  let root = sessionId;
+  const seen = new Set([root]);
+  for (let parent = parentOf.get(root); parent; parent = parentOf.get(root)) {
+    if (seen.has(parent)) return sessionId;
+    seen.add(parent);
+    root = parent;
+  }
+  return root;
+}
+
+/**
  * The board's numbers and chart from the calls the gateway listed, on its
  * clock. A conversation is in progress while a call runs and after it ends,
  * as `busyUntil` says; it counts once under its latest call's client, however
- * many calls overlap.
+ * many calls overlap. Subagents count with the conversation that started
+ * them.
  */
 export function summarizeActivity(
   activity: RequestActivity,
@@ -178,15 +202,19 @@ export function summarizeActivity(
 ): { now: number; snapshot: ActivitySnapshot; points: ActivitySample[] } {
   const now = Date.parse(activity.now);
   const bySession = new Map<string, RequestActivityCall[]>();
+  const parentOf = new Map<string, string>();
   for (const call of activity.calls) {
     const own = bySession.get(call.session_id);
     if (own) own.push(call);
     else bySession.set(call.session_id, [call]);
+    if (call.parent_session_id) {
+      parentOf.set(call.session_id, call.parent_session_id);
+    }
   }
   for (const own of bySession.values()) own.sort(byStart);
   const spans = activity.calls
     .map((call) => ({
-      session: call.session_id,
+      session: rootOf(parentOf, call.session_id),
       client: call.client_type ?? "unknown",
       start: Date.parse(call.started_at),
       end: busyUntil(call, bySession.get(call.session_id) ?? []),
@@ -212,30 +240,61 @@ export function summarizeActivity(
   }
   const current = sampleAt(now);
   points.push(current);
-
-  // A conversation failed when its latest call did, within the window.
-  const latest = new Map<string, RequestActivity["calls"][number]>();
-  for (const call of activity.calls) {
-    const known = latest.get(call.session_id);
-    if (!known || Date.parse(call.started_at) > Date.parse(known.started_at)) {
-      latest.set(call.session_id, call);
-    }
-  }
-  let failures = 0;
-  for (const call of latest.values()) {
-    const ended = parseTime(call.completed_at);
-    if (call.status === "failed" && now - ended < windowMs) failures += 1;
-  }
   return {
     now,
     snapshot: {
       conversations: current.value,
-      calls: activity.calls.filter((call) => call.completed_at === null).length,
-      failures,
+      outputTokensPerSecond: outputThroughput(activity.calls, now),
       clients: [...current.clients],
     },
     points,
   };
+}
+
+/**
+ * Whether anything went on within the board's window: a conversation in
+ * progress at any sampled moment, or tokens still in the throughput average.
+ */
+export function hasRecentActivity({
+  snapshot,
+  points,
+}: {
+  snapshot: ActivitySnapshot;
+  points: readonly ActivitySample[];
+}): boolean {
+  return (
+    snapshot.conversations > 0 ||
+    snapshot.outputTokensPerSecond > 0 ||
+    points.some((point) => point.value > 0)
+  );
+}
+
+/**
+ * Tokens the models generated per second over the `windowMs` before `now`.
+ * Upstreams report a call's tokens once it ends, so a running call adds
+ * nothing yet. An ended call spreads its tokens evenly over its span, and the
+ * window takes the share it overlaps.
+ */
+export function outputThroughput(
+  calls: readonly RequestActivityCall[],
+  now: number,
+  windowMs: number = THROUGHPUT_WINDOW_MS,
+): number {
+  const from = now - windowMs;
+  let tokens = 0;
+  for (const call of calls) {
+    if (!call.output_tokens || call.completed_at === null) continue;
+    const start = Date.parse(call.started_at);
+    const end = Date.parse(call.completed_at);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    if (end <= start) {
+      if (from < end && end <= now) tokens += call.output_tokens;
+      continue;
+    }
+    const overlap = Math.min(end, now) - Math.max(start, from);
+    if (overlap > 0) tokens += (call.output_tokens * overlap) / (end - start);
+  }
+  return (tokens * 1000) / windowMs;
 }
 
 function rankClients(perClient: Map<ClientType, number>): ActivityClient[] {
@@ -264,7 +323,9 @@ export type LaneAction =
   /** Between calls, from a call that recorded no output. */
   | { kind: "idle" };
 
-export function laneAction(session: RequestSession): LaneAction {
+export function laneAction(
+  session: Pick<RequestSession, "status" | "active_request_starts" | "output">,
+): LaneAction {
   const output = session.output;
   if (sessionRunning(session)) {
     if (!output) return { kind: "waiting" };
@@ -347,18 +408,65 @@ export function laneTrail(
 }
 
 /**
+ * The conversations of a list page that stand on their own, and the
+ * subagents each of them started, oldest first. A subagent of a subagent
+ * goes under the top-level conversation too; one whose parent is not on the
+ * page stands on its own.
+ */
+export function nestSubagents(sessions: readonly RequestSession[]): {
+  roots: RequestSession[];
+  subagentsOf: Map<string, RequestSession[]>;
+} {
+  const listed = new Map(sessions.map((session) => [session.id, session]));
+  const parentOf = new Map<string, string>();
+  for (const session of sessions) {
+    const parent = session.parent_session_id;
+    if (parent && parent !== session.id && listed.has(parent)) {
+      parentOf.set(session.id, parent);
+    }
+  }
+  const roots: RequestSession[] = [];
+  const subagentsOf = new Map<string, RequestSession[]>();
+  for (const session of sessions) {
+    const root = rootOf(parentOf, session.id);
+    if (root === session.id || !listed.has(root)) {
+      roots.push(session);
+      continue;
+    }
+    const own = subagentsOf.get(root);
+    if (own) own.push(session);
+    else subagentsOf.set(root, [session]);
+  }
+  for (const own of subagentsOf.values()) {
+    own.sort(
+      (left, right) =>
+        Date.parse(left.started_at) - Date.parse(right.started_at) ||
+        left.id.localeCompare(right.id),
+    );
+  }
+  return { roots, subagentsOf };
+}
+
+/**
  * The conversations in progress and the rest in their list order. Active ones
  * keep their place while they alternate between calls and tools, so they are
- * ordered by when each conversation began, newest first.
+ * ordered by when each conversation began, newest first. A conversation stays
+ * in progress while a subagent it started works.
  */
 export function splitActiveSessions(
   sessions: readonly RequestSession[],
   nowMs: number,
+  subagentsOf?: ReadonlyMap<string, readonly RequestSession[]>,
 ): { active: RequestSession[]; rest: RequestSession[] } {
   const active: RequestSession[] = [];
   const rest: RequestSession[] = [];
   for (const session of sessions) {
-    if (conversationActivity(session, nowMs)) active.push(session);
+    const busy =
+      conversationActivity(session, nowMs) !== null ||
+      (subagentsOf?.get(session.id) ?? []).some(
+        (subagent) => conversationActivity(subagent, nowMs) !== null,
+      );
+    if (busy) active.push(session);
     else rest.push(session);
   }
   active.sort((left, right) => {

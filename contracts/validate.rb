@@ -186,9 +186,17 @@ end
 # A public key fingerprint identifies the key without being key material.
 leaked_key_fields = raw_sealing_fields.grep(/(?<!pass)key(?!_verified|_fingerprint)|secret|salt|nonce|envelope_/)
 raise "RawSealingStatus must not carry key material: #{leaked_key_fields.join(", ")}" unless leaked_key_fields.empty?
-# The raw password is the only proof that opens the raw key.
-unless openapi.dig("components", "schemas", "RawProof", "properties")&.keys&.sort == %w[kind password]
-  raise "RawProof must carry only the raw password"
+# The raw key opens with the raw password, or with the key the desktop keeps
+# behind Touch ID; a proof carries exactly one of them, never in a response.
+raw_proof_shapes = openapi.dig("components", "schemas", "RawProof", "oneOf")&.map do |shape|
+  shape.fetch("properties").keys.sort
+end
+unless raw_proof_shapes == [%w[kind password], %w[biometric kind]]
+  raise "RawProof must be either the raw password or the Touch ID key"
+end
+openapi.dig("components", "schemas", "RawProof", "oneOf").each do |shape|
+  secret = shape.fetch("properties").fetch(shape.fetch("required").first)
+  raise "RawProof secrets must be write-only" unless secret["writeOnly"] == true
 end
 # A wrong password on the desktop's own unlock names no grant or request.
 raw_event_required = openapi.dig("components", "schemas", "RawAccessEvent", "required")
@@ -282,7 +290,7 @@ raise "authorization sessions must identify their flow" unless authorization_ses
                                                           authorization_session.dig("properties", "flow", "$ref") == "#/components/schemas/AuthorizationFlow"
 raise "authorization sessions must support Device Code instructions" unless authorization_session.fetch("properties").key?("device_code")
 authorization_flow = openapi.dig("components", "schemas", "AuthorizationFlow")
-raise "authorization flow choices drifted" unless authorization_flow.fetch("enum") == %w[browser device_code authorization_code]
+raise "authorization flow choices drifted" unless authorization_flow.fetch("enum") == %w[browser device_code authorization_code claude_cli]
 authorization_start = openapi.dig("components", "schemas", "AuthorizationStartRequest")
 raise "authorization start must reject unknown fields" unless authorization_start.fetch("additionalProperties") == false &&
                                                                authorization_start.fetch("required") == ["flow"] &&
@@ -387,8 +395,8 @@ end
 end
 
 access_token = openapi.dig("components", "schemas", "AccessToken")
-raise "access-token metadata shape drifted" unless access_token.fetch("required") == %w[id name hint created_at]
-raise "access-token source remains on the public contract" if access_token.fetch("properties").key?("source")
+raise "access-token metadata shape drifted" unless access_token.fetch("required") == %w[id name hint source created_at]
+raise "access-token source must name the bootstrap token" unless access_token.dig("properties", "source", "enum") == %w[user system_default]
 
 access_token_list = openapi.dig("components", "schemas", "AccessTokenList")
 raise "access-token list must reserve a null cursor" unless access_token_list.fetch("required") == %w[items next_cursor] &&
@@ -410,7 +418,7 @@ routing_decision = openapi.dig("components", "schemas", "RequestRoutingDecision"
 raise "request records must explain the provider choice" unless request_record.dig("properties", "routing_decision", "$ref") == "#/components/schemas/RequestRoutingDecision" &&
                                                                routing_decision.fetch("required") == %w[skipped] &&
                                                                routing_decision.dig("properties", "skipped", "maxItems") == 64
-raise "RoutingSelection wire values drifted" unless openapi.dig("components", "schemas", "RoutingSelection", "enum") == %w[priority session_binding response_affinity websocket_connection failover client_pin]
+raise "RoutingSelection wire values drifted" unless openapi.dig("components", "schemas", "RoutingSelection", "enum") == %w[priority session_binding response_affinity websocket_connection failover client_pin claude_cli]
 raise "RoutingSkipReason wire values drifted" unless openapi.dig("components", "schemas", "RoutingSkipReason", "enum") == %w[
   disabled not_connected risk_paused model_not_listed protocol_unsupported streaming_unsupported
   conversion_unavailable circuit_open rate_limited websocket_disabled websocket_unsupported

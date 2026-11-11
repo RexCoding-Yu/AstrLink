@@ -34,6 +34,7 @@ const kindMarks: Record<ServiceKind, Mark> = {
   openai_compatible: "openai",
   anthropic: "anthropic",
   gemini: "gemini",
+  vertex: "vertex",
   deepseek: "deepseek",
   qwen: "qwen",
   doubao: "doubao",
@@ -41,6 +42,11 @@ const kindMarks: Record<ServiceKind, Mark> = {
   custom: "custom",
   plugin: "plugin",
 };
+
+/** The logo a kind draws; vendor-backed kinds name their vendor. */
+export function serviceKindMark(kind: ServiceKind): Mark {
+  return kindMarks[kind];
+}
 
 function renderMark(mark: Mark, size: number): ReactNode {
   switch (mark) {

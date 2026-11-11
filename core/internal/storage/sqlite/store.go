@@ -49,6 +49,7 @@ type Store struct {
 	serviceDocuments  serviceDocumentCache
 	usageSummaries    historyCache
 	requestSessions   historyCache
+	modelWindows      modelWindowCache
 	channelBindingsMu chan struct{}
 	db                *sql.DB
 	keys              *keyRing
@@ -353,7 +354,7 @@ func (store *Store) EnsureDefaultAccessToken(ctx context.Context, candidate stor
 	}
 
 	now := store.now().UTC()
-	if record, err = store.insertAccessTokenTx(ctx, transaction, candidate, now); err != nil {
+	if record, err = store.insertAccessTokenTx(ctx, transaction, candidate, storagecontract.AccessTokenSourceSystemDefault, now); err != nil {
 		return storagecontract.AccessTokenMetadata{}, false, err
 	}
 	if _, err = transaction.ExecContext(
@@ -384,7 +385,7 @@ func (store *Store) CreateAccessToken(ctx context.Context, candidate storagecont
 	if _, err = transaction.ExecContext(ctx, `UPDATE local_access_tokens SET id = id WHERE 0`); err != nil {
 		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("lock access tokens: %w", err)
 	}
-	record, err = store.insertAccessTokenTx(ctx, transaction, candidate, store.now().UTC())
+	record, err = store.insertAccessTokenTx(ctx, transaction, candidate, storagecontract.AccessTokenSourceUser, store.now().UTC())
 	if err != nil {
 		return storagecontract.AccessTokenMetadata{}, err
 	}
@@ -747,7 +748,7 @@ func localServiceID(ref secretstore.Ref) (contract.ServiceID, error) {
 	return id, nil
 }
 
-func (store *Store) insertAccessTokenTx(ctx context.Context, transaction *sql.Tx, candidate storagecontract.NewAccessToken, now time.Time) (storagecontract.AccessTokenMetadata, error) {
+func (store *Store) insertAccessTokenTx(ctx context.Context, transaction *sql.Tx, candidate storagecontract.NewAccessToken, source storagecontract.AccessTokenSource, now time.Time) (storagecontract.AccessTokenMetadata, error) {
 	var count int
 	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM local_access_tokens`).Scan(&count); err != nil {
 		return storagecontract.AccessTokenMetadata{}, fmt.Errorf("count access tokens: %w", err)
@@ -766,7 +767,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		candidate.NameKey,
 		candidate.Hash[:],
 		candidate.Hint,
-		storagecontract.AccessTokenSourceUser,
+		source,
 		createdAtText,
 	); err != nil {
 		var exists int
@@ -792,6 +793,7 @@ VALUES (?, ?, 1)`, candidate.ID, sealed); err != nil {
 		ID:        candidate.ID,
 		Name:      candidate.Name,
 		Hint:      candidate.Hint,
+		Source:    source,
 		CreatedAt: createdAt,
 	}, nil
 }
@@ -879,6 +881,7 @@ func decodeAccessTokenMetadata(id, name, nameKey, hint, source, createdAt string
 		ID:        tokenID,
 		Name:      canonicalName,
 		Hint:      hint,
+		Source:    tokenSource,
 		CreatedAt: parsedCreatedAt,
 	}, nil
 }

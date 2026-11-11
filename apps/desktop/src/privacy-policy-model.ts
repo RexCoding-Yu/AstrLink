@@ -203,7 +203,8 @@ export type PrivacySuppressionReason =
   | "allowlisted"
   | "placeholder"
   | "unrepresentable"
-  | "astrlink_identifier";
+  | "astrlink_identifier"
+  | "example_value";
 
 export interface PrivacyDryRunFinding {
   kind: CanonicalPrivacyKind;
@@ -325,10 +326,11 @@ export type PrivacyModelPreparationState = "preparing" | "ready" | "failed";
 export type PrivacyModelPreparationFallback = "local_model" | "regex";
 
 /**
- * Core prepares the policy's Core ML model as soon as it is selected: the
- * worker starts and compiles the model for this Mac. `fallback` is the
- * previous detector, which inspects requests until the model is ready and
- * after it failed; without one, requests wait, then fail once it failed.
+ * Core prepares the policy's Core ML or DirectML model as soon as it is
+ * selected: the worker starts and compiles the model for this Mac, or loads
+ * it onto the GPU. `fallback` is the previous detector, which inspects
+ * requests until the model is ready and after it failed; without one,
+ * requests wait, then fail once it failed.
  */
 export interface PrivacyModelPreparation {
   state: PrivacyModelPreparationState;
@@ -366,6 +368,7 @@ const suppressionReasons = new Set<PrivacySuppressionReason>([
   "placeholder",
   "unrepresentable",
   "astrlink_identifier",
+  "example_value",
 ]);
 const actions = new Set<PrivacyAction>(["allow", "warn", "block", "redact"]);
 const adapters = new Set<PrivacyModelAdapter>([
@@ -855,13 +858,13 @@ export function parsePrivacyPolicy(value: unknown, path = "$"): PrivacyPolicy {
 
 /**
  * Mirrors core/contract.DefaultPrivacyKindRules for responses that predate the
- * field. url, ip_address, and private_date are off because they were the
- * dominant false-positive sources for coding agents.
+ * field. Only credentials are on: the other kinds fill a coding agent's
+ * prompts as test data, docs, and logs, so each is one switch away.
  */
 export function defaultPrivacyKindRules(): PrivacyKindRule[] {
   return PRIVACY_KINDS.map((kind) => ({
     kind,
-    enabled: kind !== "url" && kind !== "ip_address" && kind !== "private_date",
+    enabled: kind === "common_secret",
     style: PLACEHOLDER_STYLE_LOCKED_KINDS.has(kind) ? "token" : "natural",
     notify: true,
   }));
@@ -904,6 +907,13 @@ export function defaultPrivacyAllowlistRules(): PrivacyAllowlistRule[] {
     { type: "domain_suffix", value: "localhost" },
     { type: "domain_suffix", value: "github.com" },
     { type: "domain_suffix", value: "githubusercontent.com" },
+    // Reserved for examples and tests (RFC 2606, RFC 6761).
+    { type: "domain_suffix", value: "example.com" },
+    { type: "domain_suffix", value: "example.net" },
+    { type: "domain_suffix", value: "example.org" },
+    { type: "domain_suffix", value: "example" },
+    { type: "domain_suffix", value: "test" },
+    { type: "domain_suffix", value: "invalid" },
     { type: "cidr", value: "127.0.0.0/8" },
     { type: "cidr", value: "::1/128" },
     { type: "cidr", value: "10.0.0.0/8" },
@@ -1809,6 +1819,20 @@ export function validatePrivacyModelInstallationID(
  */
 export function isCoreMLVariantID(variantID: string): boolean {
   return variantID.startsWith("coreml_");
+}
+
+/**
+ * On Windows x64 Core offers a local FP16 model as the DirectML variant
+ * `directml_fp16_gpu`. The worker loads it onto the GPU before it is ready;
+ * there is no compile step.
+ */
+export function isDirectMLVariantID(variantID: string): boolean {
+  return variantID.startsWith("directml_");
+}
+
+/** Core prepares these variants as soon as the policy selects them. */
+export function isAcceleratedVariantID(variantID: string): boolean {
+  return isCoreMLVariantID(variantID) || isDirectMLVariantID(variantID);
 }
 
 export function isResourceHeavyVariant(

@@ -17,6 +17,8 @@ export function ServiceTestResultView({
   result,
   error,
   running = false,
+  cancelling = false,
+  cancelled = false,
   blocked,
   stream = true,
   generates = false,
@@ -25,6 +27,8 @@ export function ServiceTestResultView({
   result?: ServiceTestResult | null;
   error?: string | null;
   running?: boolean;
+  cancelling?: boolean;
+  cancelled?: boolean;
   blocked?: string | null;
   stream?: boolean;
   /** The provider is a task plugin's: the test waits for what it generates. */
@@ -40,12 +44,14 @@ export function ServiceTestResultView({
       : null;
   const failure = error ?? result?.message;
   const status = running
-    ? t("serviceTest.testing")
-    : result?.ok
-      ? t("serviceTest.success")
-      : result || error
-        ? t("serviceTest.failed")
-        : t("serviceTest.ready");
+    ? t(cancelling ? "serviceTest.cancelling" : "serviceTest.testing")
+    : cancelled
+      ? t("serviceTest.cancelled")
+      : result?.ok
+        ? t("serviceTest.success")
+        : result || error
+          ? t("serviceTest.failed")
+          : t("serviceTest.ready");
   return (
     <>
       <div className="flex shrink-0 items-center justify-between gap-2">
@@ -72,11 +78,13 @@ export function ServiceTestResultView({
               tone={
                 running
                   ? "pending"
-                  : result?.ok
-                    ? "positive"
-                    : result || error
-                      ? "negative"
-                      : "neutral"
+                  : cancelled
+                    ? "neutral"
+                    : result?.ok
+                      ? "positive"
+                      : result || error
+                        ? "negative"
+                        : "neutral"
               }
             >
               {status}
@@ -141,7 +149,9 @@ export function ServiceTestResultView({
                 ? t("serviceTest.unavailable")
                 : running
                   ? t("serviceTest.waiting")
-                  : t("serviceTest.emptyTitle")
+                  : cancelled
+                    ? t("serviceTest.cancelled")
+                    : t("serviceTest.emptyTitle")
             }
             description={
               blocked ??
@@ -151,7 +161,9 @@ export function ServiceTestResultView({
                       ? "serviceTest.generating"
                       : "serviceTest.running",
                   )
-                : undefined)
+                : cancelled
+                  ? t("serviceTest.cancelledDescription")
+                  : undefined)
             }
             illustration={
               running ? (

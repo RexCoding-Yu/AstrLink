@@ -7,7 +7,6 @@ import {
   Connect as Cable,
   Copy,
   Key,
-  LockKeyhole,
   RefreshCw,
   Server,
 } from "@/components/icons";
@@ -33,20 +32,25 @@ import {
   previewClientConfigSnippet,
   type ClientConfigTarget,
 } from "./bridge";
-import { ClientSetupDialog, clientLabel } from "./ClientSetupDialog";
-import type { DirectClient } from "./client-config-model";
+import { ClientSetupDialog } from "./ClientSetupDialog";
+import {
+  clientConfigClients,
+  type BuiltinClient,
+  type ClientConfigSnippetFile,
+} from "./client-config-model";
+import {
+  builtinClientProtocols,
+  modelCandidates,
+  requiredEntry,
+} from "./client-delivery-model";
+import { clientLabel } from "./client-setup-clients";
 import type { AppSnapshot } from "./core-model";
 import type { AccessTokenCatalog } from "./AccessTokenManager";
 import type { ServiceCatalog } from "./Overview";
 import { PageHeader } from "./PageHeader";
-import type { RawSealingState } from "./raw-sealing-model";
-import {
-  RawSealingDialogs,
-  useRawSetupNeeded,
-  type RawDialog,
-} from "./RawSealingControls";
 import { useT } from "./i18n";
 import { notify } from "./notify";
+import { protocolLabel } from "./service-presets";
 import type { useOnboarding } from "./use-onboarding";
 import type { UsageState } from "./usage-range";
 
@@ -65,8 +69,6 @@ export function GettingStarted({
   onOpenRecords,
   onRefresh,
   onRestart,
-  onRawSealingStatus,
-  rawSealing,
 }: {
   conversionEngine?: ConversionEngineCapability | null;
   onboarding: ReturnType<typeof useOnboarding>;
@@ -82,22 +84,19 @@ export function GettingStarted({
   onOpenRecords: () => void;
   onRefresh: () => void;
   onRestart: () => void;
-  onRawSealingStatus: (next: RawSealingState) => void;
-  rawSealing: { status: RawSealingState | null; error: string | null };
 }) {
   const t = useT();
   const [selectedStep, setSelectedStep] = useState(onboarding.step);
-  const [rawDialog, setRawDialog] = useState<RawDialog | null>(null);
-  const passwordMissing = useRawSetupNeeded(rawSealing.status);
   const [protocol, setProtocol] = useState<"openai" | "anthropic">("openai");
-  const [manualClient, setManualClient] = useState<DirectClient | "other">(
+  const [manualClient, setManualClient] = useState<BuiltinClient | "other">(
     "claude",
   );
   const [snippet, setSnippet] = useState<{
     key: string;
-    text: string | null;
+    files: ClientConfigSnippetFile[] | null;
   } | null>(null);
-  const [copyingSnippet, setCopyingSnippet] = useState(false);
+  // The block being copied, by its index.
+  const [copyingSnippet, setCopyingSnippet] = useState<number | null>(null);
   const [tokenId, setTokenId] = useState("");
   const [copying, setCopying] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -123,11 +122,6 @@ export function GettingStarted({
     onboarding.tokenReady &&
     onboarding.requestReady;
   const steps = [
-    {
-      title: t("onboarding.passwordTitle"),
-      description: t("onboarding.passwordShort"),
-      complete: onboarding.passwordReady,
-    },
     {
       title: t("onboarding.serviceTitle"),
       description: t("onboarding.serviceShort"),
@@ -165,16 +159,26 @@ export function GettingStarted({
       ? candidate.startsWith("openai.")
       : candidate === "anthropic.messages",
   );
-  // The snippet shows the first model a client can reach, as the other
-  // tools view does; Codex cannot start without one.
+  // The snippet shows the first model a client reaches through an entry its
+  // provider already has, as the other tools view does. Every client but
+  // Claude Code needs one to start.
+  const snippetCatalog = { services: catalog.items, redirects: [] };
   const snippetModel =
     manualClient === "other"
       ? undefined
-      : modelsFor((candidate) =>
-          manualClient === "codex"
-            ? candidate === "openai.responses"
-            : candidate === "anthropic.messages",
-        )[0];
+      : modelCandidates(
+          snippetCatalog,
+          [builtinClientProtocols[manualClient]],
+          conversionEngine,
+        ).find(
+          (model) =>
+            !requiredEntry(
+              snippetCatalog,
+              model,
+              builtinClientProtocols[manualClient],
+              conversionEngine,
+            ),
+        );
   const snippetTarget: ClientConfigTarget | null =
     manualClient !== "other" &&
     token &&
@@ -205,8 +209,8 @@ export function GettingStarted({
     let cancelled = false;
     const target = JSON.parse(snippetKey) as ClientConfigTarget;
     previewClientConfigSnippet(target).then(
-      (text) => !cancelled && setSnippet({ key: snippetKey, text }),
-      () => !cancelled && setSnippet({ key: snippetKey, text: null }),
+      (files) => !cancelled && setSnippet({ key: snippetKey, files }),
+      () => !cancelled && setSnippet({ key: snippetKey, files: null }),
     );
     return () => {
       cancelled = true;
@@ -235,13 +239,13 @@ export function GettingStarted({
     }
   };
 
-  const copySnippet = async () => {
+  const copySnippet = async (file: number) => {
     if (!snippetTarget || snippetCopyPending.current) return;
     snippetCopyPending.current = true;
-    setCopyingSnippet(true);
+    setCopyingSnippet(file);
     try {
-      // The host fills in the real token and copies the config itself.
-      const copied = await copyClientConfigSnippet(snippetTarget);
+      // The host fills in the real token and copies the file itself.
+      const copied = await copyClientConfigSnippet({ ...snippetTarget, file });
       if (!mounted.current) return;
       if (copied) notify.success(t("onboarding.configCopied"));
       else notify.error(t("common.copyFailed"));
@@ -252,7 +256,7 @@ export function GettingStarted({
         );
     } finally {
       snippetCopyPending.current = false;
-      if (mounted.current) setCopyingSnippet(false);
+      if (mounted.current) setCopyingSnippet(null);
     }
   };
 
@@ -349,7 +353,6 @@ export function GettingStarted({
                 <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
                   {t(
                     [
-                      "onboarding.passwordBody",
                       "onboarding.serviceBody",
                       "onboarding.tokenBody",
                       "onboarding.clientBody",
@@ -359,62 +362,9 @@ export function GettingStarted({
               </div>
               {selectedStep === 0 ? (
                 <>
-                  {onboarding.passwordReady ? (
-                    <FormMessage
-                      data-slot="onboarding-password-done"
-                      tone="success"
-                    >
-                      {t("onboarding.passwordDone")}
-                    </FormMessage>
-                  ) : rawSealing.status === null ? (
-                    rawSealing.error ? (
-                      <FormMessage tone="error">
-                        {t("onboarding.passwordLoadFailed", {
-                          message: rawSealing.error,
-                        })}
-                      </FormMessage>
-                    ) : isReady ? (
-                      <p
-                        role="status"
-                        className="text-sm text-muted-foreground"
-                      >
-                        {t("onboarding.passwordLoading")}
-                      </p>
-                    ) : null
-                  ) : null}
-                  <div className="flex flex-wrap gap-2">
-                    {passwordMissing ? (
-                      <Button onClick={() => setRawDialog({ kind: "set" })}>
-                        <LockKeyhole aria-hidden="true" />
-                        {t("onboarding.passwordAction")}
-                      </Button>
-                    ) : null}
-                    {onboarding.passwordReady ? (
-                      <Button
-                        variant="outline"
-                        onClick={() => setSelectedStep(1)}
-                      >
-                        {t("onboarding.next")}
-                        <ArrowRight aria-hidden="true" />
-                      </Button>
-                    ) : null}
-                  </div>
-                  {rawSealing.status?.password_required ? (
-                    <p className="text-sm leading-relaxed">
-                      {t("rawSealing.hint.unset")}
-                    </p>
-                  ) : null}
-                </>
-              ) : selectedStep === 1 ? (
-                <>
-                  {passwordMissing ? (
-                    <FormMessage tone="notice">
-                      {t("onboarding.finishPassword")}
-                    </FormMessage>
-                  ) : null}
                   <div className="flex flex-wrap gap-2">
                     <Button
-                      disabled={!onboarding.catalogsReady || passwordMissing}
+                      disabled={!onboarding.catalogsReady}
                       onClick={
                         catalog.items.length ? onManageServices : onAddService
                       }
@@ -429,7 +379,7 @@ export function GettingStarted({
                     {onboarding.serviceReady ? (
                       <Button
                         variant="outline"
-                        onClick={() => setSelectedStep(2)}
+                        onClick={() => setSelectedStep(1)}
                       >
                         {t("onboarding.next")}
                         <ArrowRight aria-hidden="true" />
@@ -448,7 +398,7 @@ export function GettingStarted({
                     </HelpDisclosure>
                   </div>
                 </>
-              ) : selectedStep === 2 ? (
+              ) : selectedStep === 1 ? (
                 <>
                   {!onboarding.serviceReady ? (
                     <FormMessage tone="notice">
@@ -472,7 +422,7 @@ export function GettingStarted({
                     {onboarding.tokenReady && onboarding.serviceReady ? (
                       <Button
                         variant="outline"
-                        onClick={() => setSelectedStep(3)}
+                        onClick={() => setSelectedStep(2)}
                       >
                         {t("onboarding.next")}
                         <ArrowRight aria-hidden="true" />
@@ -521,8 +471,10 @@ export function GettingStarted({
                         value={manualClient}
                         onValueChange={setManualClient}
                         options={[
-                          { value: "claude", label: clientLabel("claude") },
-                          { value: "codex", label: clientLabel("codex") },
+                          ...clientConfigClients.map((client) => ({
+                            value: client,
+                            label: clientLabel(client),
+                          })),
                           { value: "other", label: t("onboarding.otherTools") },
                         ]}
                       />
@@ -580,43 +532,62 @@ export function GettingStarted({
                           )}
                         </>
                       ) : !snippetTarget ? (
-                        <p>{t("onboarding.snippetNeedsModel")}</p>
+                        <p>
+                          {t("onboarding.snippetNeedsModel", {
+                            client: clientLabel(manualClient),
+                            protocol: protocolLabel(
+                              builtinClientProtocols[manualClient],
+                            ),
+                          })}
+                        </p>
                       ) : (
                         <>
-                          <p>
-                            {t("onboarding.snippetHint", {
-                              path:
-                                manualClient === "codex"
-                                  ? "~/.codex/config.toml"
-                                  : "~/.claude/settings.json",
-                            })}
-                          </p>
-                          {shownSnippet && shownSnippet.text === null ? (
+                          <p>{t("onboarding.snippetHint")}</p>
+                          {!shownSnippet ? (
+                            <pre
+                              aria-busy="true"
+                              className="rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed"
+                            >
+                              {t("common.loading")}
+                            </pre>
+                          ) : !shownSnippet.files ? (
                             <FormMessage tone="error">
                               {t("onboarding.snippetFailed")}
                             </FormMessage>
                           ) : (
-                            <pre
-                              aria-busy={!shownSnippet}
-                              className="max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed whitespace-pre"
-                            >
-                              {shownSnippet?.text ?? t("common.loading")}
-                            </pre>
+                            shownSnippet.files.map((file, index) => (
+                              <div
+                                key={file.path}
+                                className="grid gap-1.5"
+                                data-slot="config-snippet"
+                              >
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+                                    {file.path}
+                                  </code>
+                                  <Button
+                                    aria-label={t("onboarding.copyFile", {
+                                      file: file.path,
+                                    })}
+                                    disabled={copyingSnippet !== null}
+                                    onClick={() => void copySnippet(index)}
+                                    size="xs"
+                                    variant="outline"
+                                  >
+                                    <Copy aria-hidden="true" />
+                                    {t(
+                                      copyingSnippet === index
+                                        ? "common.copying"
+                                        : "onboarding.copyConfig",
+                                    )}
+                                  </Button>
+                                </div>
+                                <pre className="max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed whitespace-pre">
+                                  {file.contents}
+                                </pre>
+                              </div>
+                            ))
                           )}
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="w-fit"
-                            disabled={copyingSnippet || !shownSnippet?.text}
-                            onClick={() => void copySnippet()}
-                          >
-                            <Copy aria-hidden="true" />
-                            {t(
-                              copyingSnippet
-                                ? "common.copying"
-                                : "onboarding.copyConfig",
-                            )}
-                          </Button>
                         </>
                       )}
                     </HelpDisclosure>
@@ -671,12 +642,6 @@ export function GettingStarted({
           onClose={() => setImportOpen(false)}
         />
       ) : null}
-      <RawSealingDialogs
-        dialog={rawDialog}
-        onClose={() => setRawDialog(null)}
-        onStatus={onRawSealingStatus}
-        status={rawSealing.status}
-      />
     </section>
   );
 }

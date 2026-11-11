@@ -1,5 +1,10 @@
 import { expect, it } from "vitest";
-import { parseServiceTestResult } from "./service-test-model";
+import {
+  parseServiceTestResult,
+  testableCapabilities,
+  vertexTestProtocol,
+} from "./service-test-model";
+import type { Service } from "./service-model";
 
 const result = {
   service_id: "service_test",
@@ -11,6 +16,31 @@ const result = {
   duration_ms: 300,
   output: "OK",
 };
+
+it("only tests Gemini models on Vertex Express", () => {
+  const service: Service = {
+    id: "service_vertex",
+    name: "Vertex",
+    kind: "vertex",
+    enabled: true,
+    http: {
+      base_url: "https://aiplatform.googleapis.com",
+      auth: { scheme: "google_api_key" },
+    },
+    models: ["gemini-test", "claude-test"],
+    capabilities: [],
+    created_at: "2026-10-25T00:00:00Z",
+    updated_at: "2026-10-25T00:00:00Z",
+  };
+  expect(testableCapabilities(service).map((row) => row.protocol)).toEqual([
+    "google.generate_content",
+  ]);
+  expect(vertexTestProtocol(service, "gemini-test")).toBe(
+    "google.generate_content",
+  );
+  expect(vertexTestProtocol(service, "claude-test")).toBeUndefined();
+  expect(vertexTestProtocol(service, "meta/llama-test-maas")).toBeUndefined();
+});
 
 it("accepts measured zero, nullable timings and older Core responses", () => {
   expect(parseServiceTestResult(result).first_token_ms).toBeUndefined();

@@ -21,6 +21,7 @@ export const payAsYouGoPresetIDs: HTTPServicePresetID[] = [
   "openai",
   "anthropic",
   "gemini",
+  "vertex",
   "deepseek",
   "qwen",
   "moonshot",
@@ -432,6 +433,22 @@ const profileDefinitions: Readonly<
     capabilityIDs: ["anthropic.messages", "openai.models"],
     advancedOnStart: false,
   },
+  vertex: {
+    id: "vertex",
+    kind: "vertex",
+    baseURL: "https://aiplatform.googleapis.com",
+    baseURLPlaceholder: "https://aiplatform.googleapis.com",
+    authScheme: "google_service_account",
+    headerName: "",
+    capabilityIDs: [
+      "anthropic.messages",
+      "google.generate_content",
+      "openai.chat",
+      "openai.models",
+      "google.models",
+    ],
+    advancedOnStart: false,
+  },
   gemini: {
     id: "gemini",
     kind: "gemini",
@@ -608,6 +625,37 @@ export function protocolLabel(protocolID: string): string {
   return protocolLabels[protocolID] ?? protocolID;
 }
 
+export function vertexExpressCapabilities(
+  engine?: ConversionEngineSnapshot | null,
+): ServiceCapability[] {
+  const capabilities: ServiceCapability[] = [
+    { protocol: "google.generate_content", mode: "native", streaming: true },
+  ];
+  if (engine?.available) {
+    for (const protocol of [
+      "openai.responses",
+      "anthropic.messages",
+      "openai.chat",
+    ] as const) {
+      if (
+        engine.edges.some(
+          (edge) =>
+            edge.from === protocol &&
+            edge.to === "google.generate_content" &&
+            edge.streaming,
+        )
+      )
+        capabilities.push({
+          protocol,
+          mode: "native",
+          streaming: true,
+          convert_to: "google.generate_content",
+        });
+    }
+  }
+  return capabilities;
+}
+
 export function httpServicePreset(
   profileID: HTTPServicePresetID,
   discovered: readonly ProtocolDescriptor[] = [],
@@ -626,7 +674,26 @@ export function httpServicePreset(
       : {}),
   }));
   if (
-    !["opencode_go", "opencode_zen", "custom", "plugin"].includes(profileID)
+    profileID === "vertex" &&
+    engine?.available &&
+    engine.edges.some(
+      (edge) =>
+        edge.from === "openai.responses" &&
+        edge.to === "google.generate_content" &&
+        edge.streaming,
+    )
+  ) {
+    capabilities.unshift({
+      protocol: "openai.responses",
+      mode: "native",
+      streaming: true,
+      convert_to: "google.generate_content",
+    });
+  }
+  if (
+    !["opencode_go", "opencode_zen", "vertex", "custom", "plugin"].includes(
+      profileID,
+    )
   ) {
     // Existing conversion entries (e.g. Gemini's Chat entry) are not upstreams.
     const upstream = definition.capabilityIDs.filter(
@@ -745,6 +812,9 @@ export const serviceAuthLabels: Record<ServiceAuthScheme, string> = {
   get anthropic_api_key() {
     return i18n.t("services.authAnthropic");
   },
+  get google_service_account() {
+    return i18n.t("services.vertexCredential");
+  },
   get google_api_key() {
     return i18n.t("services.authGoogle");
   },
@@ -765,6 +835,7 @@ export function httpServiceKindLabel(kind: HTTPServiceKind): string {
       openai: "OpenAI",
       anthropic: "Anthropic",
       gemini: "Gemini",
+      vertex: "Vertex AI",
       deepseek: i18n.t("kind.deepseek"),
       qwen: i18n.t("kind.qwen"),
       moonshot: i18n.t("kind.moonshot"),

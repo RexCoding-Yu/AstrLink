@@ -32,6 +32,7 @@ import { Button } from "@/components/ui/button";
 import { formatAgo } from "@/lib/format-ago";
 import { cn } from "@/lib/utils";
 
+import { useDisplayCurrency } from "./currency-display";
 import { ActiveRawGrants } from "./ActiveRawGrants";
 import {
   getTrayState,
@@ -400,6 +401,7 @@ export function TrayPopoverPanel({
 }) {
   const t = useT();
   const quotaMode = useQuotaDisplayMode();
+  useDisplayCurrency();
   const [subscriptionsExpanded, setSubscriptionsExpanded] = useState(false);
   const view = state?.view ?? null;
   const phase: CorePhase = view?.phase ?? "unavailable";
@@ -745,8 +747,8 @@ export function TrayPopoverPanel({
                     <Metric
                       label={t("tray.cost")}
                       size="sm"
-                      title={`$${formatUsd(digest.cost_today.amount_usd)}`}
-                      value={`$${formatUsd(digest.cost_today.amount_usd)}`}
+                      title={formatUsd(digest.cost_today.amount_usd)}
+                      value={formatUsd(digest.cost_today.amount_usd)}
                     />
                   ) : null}
                 </MetricGroup>

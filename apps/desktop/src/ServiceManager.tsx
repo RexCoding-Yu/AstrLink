@@ -1,3 +1,4 @@
+import { KeyFileInput } from "./components/KeyFileInput";
 import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { ServiceProxyFields } from "./components/ServiceProxyFields";
 import {
@@ -9,18 +10,30 @@ import {
 import { isWebEdition } from "./edition";
 import { ServiceTerminalDialog } from "./ServiceTerminalDialog";
 import { ServiceTestDialog } from "./ServiceTestDialog";
-import { PricingWorkspace, ServiceBillingMeter } from "./PricingWorkspace";
+import { PricingWorkspace } from "./PricingWorkspace";
 import { useServiceOrder } from "./use-service-order";
-import { useServiceListColumns } from "./service-list-columns";
 import { useServicePerformance } from "./use-service-performance";
-import { ServicePerformanceMeter } from "./components/ServicePerformanceMeter";
 import { UsageRangeSelect } from "./components/UsageRangeSelect";
-import type { UsageRangePreset } from "./usage-range";
+import { resolveUsageWindow, type UsageRangePreset } from "./usage-range";
 import { ServiceOrderHelp } from "./ServiceOrderHelp";
+import { ClaudeCLINotice } from "./ClaudeCLINotice";
+import {
+  ServicePackageGrid,
+  type CardBilling,
+  type ServiceCardActions,
+} from "./ServicePackageGrid";
+import { useQuotaEstimates } from "./use-quota-estimates";
+import { useServicePackages } from "./use-service-packages";
+import {
+  cardEnabled,
+  packageCards,
+  type ServiceFilter,
+} from "./service-package-model";
+import { useBillingSummary } from "./BillingOverview";
 import { ServiceRiskBadge } from "./ServiceRiskBadge";
 import { ProtocolModeHelp } from "./ProtocolModeHelp";
 import { ServiceEditorTour } from "./ServiceEditorTour";
-import { OrderedList } from "./components/OrderedList";
+import { HelpPopover } from "./components/HelpPopover";
 import { ClientTypeIcons } from "./components/ClientTypeIcon";
 import { useGatewayResponseTimeout } from "./use-gateway-response-timeout";
 import { useRoutingDefaults } from "./use-routing-defaults";
@@ -38,15 +51,11 @@ import {
   BadgeAlert,
   Boxes,
   ChevronRight,
-  Flask,
   Connect as Cable,
-  Ellipsis,
   Key as KeyRound,
-  SquarePen as Pencil,
   Plus,
   RefreshCw,
   Route,
-  ShieldCheck,
   SlidersHorizontal,
 } from "@/components/icons";
 
@@ -63,39 +72,22 @@ import { EmptyState } from "@/components/EmptyState";
 import { ModelBrandIcon } from "@/components/ModelBrandIcon";
 import { FormMessage } from "@/components/FormMessage";
 import { Field } from "@/components/Field";
-import { ListToolbar } from "@/components/ListToolbar";
 import { IconButton } from "@/components/IconButton";
 import { SegmentedControl } from "@/components/SegmentedControl";
-import { CapabilityIndicator } from "@/components/CapabilityIndicator";
 import { CapabilityToggle } from "@/components/CapabilityToggle";
-import {
-  SERVICE_LIST_COLUMNS,
-  ServiceListHeader,
-  ServiceListRow,
-  type ServiceListLabels,
-} from "@/components/ServiceListRow";
 import { Panel, PanelHeader } from "@/components/Panel";
 import { DataRow } from "@/components/DataRow";
-import {
-  kindMarkIsShared,
-  ServiceKindIcon,
-} from "@/components/ServiceKindIcon";
+import { ServiceKindIcon } from "@/components/ServiceKindIcon";
 import { ServiceKindLabel } from "@/components/ServiceKindLabel";
 import { StatusBadge } from "@/components/StatusBadge";
 import { StatusDot } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ModelSelect } from "@/components/ModelSelect";
 import { SearchInput } from "@/components/SearchInput";
 import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import { PluginIcon, pluginAvatar } from "@/components/PluginIcon";
@@ -160,12 +152,17 @@ import {
   serviceAuthLabels,
   serviceSiteForBaseURL,
   supportsLocalConversion,
+  vertexExpressCapabilities,
   type HTTPServicePresetID,
   type ProtocolDescriptor,
   type ServiceSiteID,
 } from "./service-presets";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
+import {
+  localImportPickerGroup,
+  localImportPickerValue,
+} from "./LocalImportDialog";
 import { decodeModelEditorValue, encodeModelEditorValue } from "./model-editor";
 import { filterModels } from "./model-groups";
 import { PluginSlot } from "./plugin-ui";
@@ -175,6 +172,10 @@ import {
 } from "./ServiceModelsEditor";
 import {
   activeServiceRisk,
+  validVertexConnection,
+  vertexBaseURL,
+  vertexLocation,
+  serviceAccountSummary,
   responsesWebSocketEnabled,
   serviceBuiltinRedirects,
   withClaudeCodeRedirects,
@@ -190,7 +191,6 @@ import {
   bestConversionTarget,
   isModelFormat,
   isSubscriptionKind,
-  serviceStatusLabel,
   subscriptionConversionTargets,
   subscriptionKinds,
   subscriptionKindProviders,
@@ -209,20 +209,17 @@ import {
   type SubscriptionServiceKind,
 } from "./service-model";
 import type { PluginList, PluginProvider, PluginTask } from "./plugin-model";
+import type { SubscriptionUsageStatus } from "./SubscriptionUsageMeter";
 import {
-  SubscriptionResetButton,
-  SubscriptionUsageMeter,
-  type SubscriptionUsageStatus,
-} from "./SubscriptionUsageMeter";
-import {
-  providerAuthorizationFlows,
+  accountAuthorizationFlows,
   type AuthorizationFlow,
   type AuthorizationSession,
+  type SubscriptionMode,
   type SubscriptionProvider,
 } from "./subscription-model";
 import {
   formatSubscriptionUsageError,
-  planTypeLabel,
+  usageFailureReason,
   resetOutcomeMessage,
   type SubscriptionUsage,
 } from "./subscription-usage-model";
@@ -294,6 +291,8 @@ export interface ServiceManagerProps {
   onDirtyChange: (dirty: boolean) => void;
   /** The gateway address a terminal opened for a provider connects to. */
   inferenceURL?: string;
+  /** Opens the import from agent tool configs; omitted where none is readable. */
+  onLocalImport?: () => void;
 }
 
 type Draft = {
@@ -321,6 +320,9 @@ type Draft = {
   plugin?: ServicePlugin;
   /** What the task plugin of a new provider declares. */
   pluginTask?: PluginTask;
+  vertexProjectID: string;
+  vertexLocation: string;
+  vertexImplicitProject: boolean;
 };
 
 type ConfirmAction =
@@ -337,7 +339,6 @@ type AuthorizationDialog = {
 };
 
 type EditorTab = ServiceEditorTab;
-type ServiceFilter = "all" | "enabled" | "disabled";
 
 function serviceTypeOptionLabel(kind: ServiceKind): string {
   if (kind === "codex_subscription") return i18n.t("services.codexKind");
@@ -375,14 +376,6 @@ const subscriptionPlanKinds: ServiceKind[] = [
 /** Gateways that front other providers' accounts behind one address. */
 const gatewayKinds: ServiceKind[] = ["newapi", "magpie"];
 
-/**
- * Subscriptions whose logo is shared with a pay-as-you-go kind (GLM Coding
- * Plan and GLM API, for example) need a tag to tell them apart.
- */
-function needsSubscriptionTag(kind: ServiceKind): boolean {
-  return subscriptionPlanKinds.includes(kind) && kindMarkIsShared(kind);
-}
-
 function serviceKindPickerGroups(): DialogPickerGroup<ServiceKind>[] {
   return [
     {
@@ -418,10 +411,13 @@ function pluginChoiceValue(choice: PluginProviderChoice): string {
 
 /** Asks for the provider type before the add-provider editor opens. */
 export function ServiceKindPickerDialog({
+  onLocalImport,
   onOpenChange,
   onSelect,
   open,
 }: {
+  /** Lists importing from agent tool configs first when given. */
+  onLocalImport?: () => void;
   onOpenChange: (open: boolean) => void;
   /** plugin is set for a provider a plugin adapts. */
   onSelect: (kind: ServiceKind, plugin?: PluginProviderChoice) => void;
@@ -472,11 +468,19 @@ export function ServiceKindPickerDialog({
       })),
     });
   return (
-    <PickerDialog
+    <PickerDialog<string>
       description={t("services.kindPickerDescription")}
-      groups={groups}
+      groups={
+        onLocalImport
+          ? [localImportPickerGroup(t) as DialogPickerGroup<string>, ...groups]
+          : groups
+      }
       onOpenChange={onOpenChange}
       onValueChange={(value) => {
+        if (value === localImportPickerValue) {
+          onLocalImport?.();
+          return;
+        }
         const choice = choices.find(
           (candidate) => pluginChoiceValue(candidate) === value,
         );
@@ -546,14 +550,33 @@ function pluginProviderDraft(
     capabilities,
     authorizationFlow: null,
     modelListPath: "",
+    vertexProjectID: "",
+    vertexLocation: "",
+    vertexImplicitProject: false,
   };
 }
 
-/** The only login transport a single-flow provider offers; null when the user must pick. */
-function defaultAuthorizationFlow(kind: ServiceKind): AuthorizationFlow | null {
+/**
+ * The only login transport an account offers; null when the user must pick.
+ * Pass "official" for a new account: new Claude accounts start official.
+ */
+function defaultAuthorizationFlow(
+  kind: ServiceKind,
+  mode: SubscriptionMode | undefined,
+): AuthorizationFlow | null {
   if (!isSubscriptionKind(kind)) return null;
-  const flows = providerAuthorizationFlows[subscriptionKindProviders[kind]];
+  const flows = accountAuthorizationFlows(
+    subscriptionKindProviders[kind],
+    mode,
+  );
   return flows.length === 1 ? flows[0] : null;
+}
+
+function officialClaude(service: Service | null | undefined): boolean {
+  return (
+    service?.kind === "claude_subscription" &&
+    service.subscription?.mode === "official"
+  );
 }
 
 function subscriptionDefaultName(kind: SubscriptionServiceKind): string {
@@ -568,7 +591,7 @@ function subscriptionDefaultName(kind: SubscriptionServiceKind): string {
 function subscriptionKindHint(kind: SubscriptionServiceKind): string {
   if (kind === "antigravity_subscription")
     return i18n.t("services.antigravityHint");
-  if (kind === "claude_subscription") return i18n.t("services.claudeOauthHint");
+  if (kind === "claude_subscription") return i18n.t("services.claudeKindHint");
   if (kind === "grok_subscription") return i18n.t("services.grokHint");
   if (kind === "copilot_subscription") return i18n.t("services.copilotHint");
   if (kind === "droid_subscription") return i18n.t("services.droidHint");
@@ -584,12 +607,8 @@ function subscriptionOauthLabel(kind: ServiceKind): string {
   return i18n.t("services.openaiCodexOauth");
 }
 
-/**
- * The line under a provider's name in the list. A coding plan on one of its
- * vendor's own sites gets none: that address says nothing beyond the kind, so
- * only a custom one is worth the space.
- */
-function serviceListDetail(service: Service): string | null {
+/** The line under a card's name: the account, or the host of the address. */
+function serviceCardDetail(service: Service): string {
   if (!service.http) {
     const hint = service.subscription?.account_hint;
     return hint
@@ -597,13 +616,11 @@ function serviceListDetail(service: Service): string | null {
       : subscriptionOauthLabel(service.kind);
   }
   const baseURL = service.http.base_url;
-  const kind = service.kind as HTTPServicePresetID;
-  if (
-    codingPlanPresetIDs.includes(kind) &&
-    serviceSiteForBaseURL(httpServicePreset(kind), baseURL) !== null
-  )
-    return null;
-  return baseURL || null;
+  try {
+    return new URL(baseURL).host || baseURL;
+  } catch {
+    return baseURL;
+  }
 }
 
 function subscriptionAccountLabel(kind: ServiceKind, hint: string): string {
@@ -721,6 +738,8 @@ type ModelPreview = {
 };
 
 function modelDiscoveryProtocols(draft: Draft): ModelDiscoveryProtocol[] {
+  if (draft.kind === "vertex")
+    return draft.authScheme === "google_api_key" ? [] : ["openai.models"];
   // A plugin lists its provider's models; Core ignores the protocol.
   if (isSubscriptionKind(draft.kind) || draft.kind === "plugin")
     return ["openai.models"];
@@ -736,6 +755,10 @@ function modelDiscoveryKey(draft: Draft): string {
     draft.baseURL.trim(),
     authForDraft(draft),
     draft.secret,
+    draft.removeCredential,
+    draft.proxy,
+    draft.modelListPath,
+    vertexForDraft(draft),
     modelDiscoveryProtocols(draft),
   ]);
 }
@@ -764,8 +787,11 @@ function draftForKind(
       capabilities: subscriptionNativeCapabilities[kind].map((capability) => ({
         ...capability,
       })),
-      authorizationFlow: defaultAuthorizationFlow(kind),
+      authorizationFlow: defaultAuthorizationFlow(kind, "official"),
       modelListPath: "",
+      vertexProjectID: "",
+      vertexLocation: "global",
+      vertexImplicitProject: false,
     };
   }
   const preset = httpServicePreset(
@@ -791,6 +817,9 @@ function draftForKind(
     capabilities: preset.capabilities.map((capability) => ({ ...capability })),
     authorizationFlow: null,
     modelListPath: "",
+    vertexProjectID: "",
+    vertexLocation: "global",
+    vertexImplicitProject: false,
   };
 }
 
@@ -844,6 +873,13 @@ function draftFromRecord(record: ServiceRecord): Draft {
     ),
     modelListPath: service.http.model_list_path ?? "",
     ...(service.plugin ? { plugin: { ...service.plugin } } : {}),
+    vertexProjectID: service.http.vertex?.project_id ?? "",
+    vertexLocation:
+      service.http.vertex?.location ?? vertexLocation(service.http.base_url),
+    vertexImplicitProject:
+      service.kind === "vertex" &&
+      service.http.auth.scheme === "google_service_account" &&
+      !service.http.vertex,
   };
 }
 
@@ -910,10 +946,57 @@ function authForDraft(draft: Draft) {
     : { scheme: draft.authScheme };
 }
 
+function vertexForDraft(draft: Draft) {
+  return draft.kind === "vertex" &&
+    draft.authScheme === "google_service_account" &&
+    !draft.vertexImplicitProject
+    ? {
+        vertex: {
+          project_id: draft.vertexProjectID.trim(),
+          location: draft.vertexLocation.trim(),
+        },
+      }
+    : {};
+}
+
+function vertexDraftIssue(draft: Draft): string | null {
+  if (draft.kind !== "vertex") return null;
+  if (draft.authScheme === "google_api_key") {
+    return draft.secret.trim().startsWith("{")
+      ? i18n.t("services.vertexUseServiceAccount")
+      : null;
+  }
+  if (
+    !draft.vertexImplicitProject &&
+    !validVertexConnection(vertexForDraft(draft).vertex!)
+  )
+    return i18n.t("services.vertexInvalidConfig");
+  if (draft.secret.trim()) {
+    try {
+      const json = JSON.parse(draft.secret);
+      if (
+        json?.type !== "service_account" ||
+        typeof json.project_id !== "string" ||
+        !json.project_id ||
+        typeof json.client_email !== "string" ||
+        !json.client_email ||
+        typeof json.private_key !== "string" ||
+        !json.private_key
+      )
+        return i18n.t("services.vertexInvalidCredential");
+    } catch {
+      return i18n.t("services.vertexInvalidCredential");
+    }
+  }
+  return null;
+}
+
 function validateDraft(
   draft: Draft,
   editing: ServiceRecord | null,
 ): string | null {
+  const vertexIssue = vertexDraftIssue(draft);
+  if (vertexIssue) return vertexIssue;
   if (!validProxyDraft(draft.proxy)) return i18n.t("serviceProxy.invalid");
   if (draft.name.trim().length === 0 || [...draft.name.trim()].length > 128) {
     return i18n.t("services.nameInvalid");
@@ -956,13 +1039,20 @@ function validateDraft(
   if (draft.authScheme === "custom_header" && draft.headerName.trim() === "") {
     return i18n.t("services.headerRequired");
   }
-  const hasStoredCredential = Boolean(editing?.service.http?.credential_ref);
+  const hasStoredCredential = Boolean(
+    editing?.service.http?.credential_ref &&
+      editing.service.http.auth.scheme === draft.authScheme,
+  );
   if (
     draft.authScheme !== "none" &&
     draft.secret.trim() === "" &&
     !hasStoredCredential
   ) {
-    return i18n.t("services.keyRequired");
+    return i18n.t(
+      draft.kind === "vertex"
+        ? "services.vertexInvalidCredential"
+        : "services.keyRequired",
+    );
   }
   if (draft.capabilities.length === 0) {
     return i18n.t("services.capabilityRequired");
@@ -972,21 +1062,6 @@ function validateDraft(
 
 /** Subscriptions refresh while the list is visible so risk state stays current. */
 const SERVICE_RISK_POLL_INTERVAL_MS = 30_000;
-
-function serviceDot(
-  service: Service,
-  now: Date,
-): "positive" | "pending" | "negative" | "neutral" {
-  if (!service.enabled) return "neutral";
-  const risk = activeServiceRisk(service, now);
-  if (risk?.state === "suspended") return "negative";
-  const status = service.subscription?.status;
-  if (status === "needs_reauth" || status === "error") return "negative";
-  if (risk) return "pending";
-  if (!status || status === "connected") return "positive";
-  if (status === "authorizing" || status === "disconnected") return "pending";
-  return "negative";
-}
 
 function ModelPreviewDialog({
   preview,
@@ -1201,6 +1276,7 @@ export function ServiceManager({
   onServiceRemoved,
   onDirtyChange,
   inferenceURL = "",
+  onLocalImport,
 }: ServiceManagerProps) {
   const routingDefaults = useRoutingDefaults(isReady);
   const gatewayTimeout = useGatewayResponseTimeout();
@@ -1209,30 +1285,12 @@ export function ServiceManager({
     isReady && view.kind === "list" && catalogStatus === "ready",
     onRefresh,
   );
-  const listColumns = useServiceListColumns();
   const t = useT();
-  const columnLabels: ServiceListLabels = {
-    service: t("services.columnService"),
-    models: t("services.columnModels"),
-    usage: t("services.columnUsage"),
-    billing: t("services.columnBilling"),
-    performance: t("services.columnPerformance"),
-    status: t("services.columnStatus"),
-    actions: t("services.columnActions"),
-  };
   const descriptors = useMemo(
     () => protocolDescriptors(protocols),
     [protocols],
   );
   const [query, setQuery] = useState("");
-  const [modelQuery, setModelQuery] = useState("");
-  const modelSuggestions = useMemo(
-    () =>
-      [...new Set(services.flatMap((service) => service.models))].sort(
-        (left, right) => left.localeCompare(right),
-      ),
-    [services],
-  );
   const [serviceFilter, setServiceFilter] = useState<ServiceFilter>("all");
   const [kindPickerOpen, setKindPickerOpen] = useState(false);
   const [draft, setDraft] = useState<Draft>(() =>
@@ -1268,6 +1326,8 @@ export function ServiceManager({
   const [probingModels, setProbingModels] = useState(false);
   const [modelPreview, setModelPreview] = useState<ModelPreview | null>(null);
   const [modelPreviewQuery, setModelPreviewQuery] = useState("");
+  const currentDiscoveryKey = useRef("");
+  currentDiscoveryKey.current = modelDiscoveryKey(draft);
   const [upstreamModels, setUpstreamModels] = useState<{
     key: string;
     snapshot: UpstreamModelSnapshot;
@@ -1292,6 +1352,39 @@ export function ServiceManager({
     isReady && view.kind === "list",
     performancePreset,
     usageEpoch,
+  );
+  const servicePackages = useServicePackages(
+    isReady && view.kind === "list" && catalogStatus === "ready",
+    services,
+    usageByService,
+  );
+  const quotaEstimates = useQuotaEstimates(
+    isReady && view.kind === "list",
+    usageByService,
+  );
+  // A refresh moves the window's end to now, like the other list reads.
+  const billingWindow = useMemo(
+    () => resolveUsageWindow(performancePreset, new Date()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [performancePreset, usageEpoch],
+  );
+  const billingSummary = useBillingSummary({
+    from: billingWindow.from,
+    to: billingWindow.to,
+    ready: isReady && view.kind === "list",
+    revision: usageEpoch,
+  });
+  const cardBilling = useMemo<CardBilling>(
+    () => ({
+      status: billingSummary.status,
+      byService: new Map(
+        (billingSummary.summary?.by_service ?? []).map((group) => [
+          group.service_id,
+          group,
+        ]),
+      ),
+    }),
+    [billingSummary.status, billingSummary.summary],
   );
   const [refreshingUsageIDs, setRefreshingUsageIDs] = useState<Set<string>>(
     () => new Set(),
@@ -1342,6 +1435,7 @@ export function ServiceManager({
         }));
       } catch (cause) {
         const message = formatSubscriptionUsageError(cause);
+        const reason = usageFailureReason(cause);
         console.error("AstrLink failed to load subscription usage", id, cause);
         if (usageGeneration.current !== generation) return;
         setUsageByService((current) => ({
@@ -1350,6 +1444,7 @@ export function ServiceManager({
             status: "error",
             usage: current[id]?.usage,
             error: message,
+            reason,
           },
         }));
       } finally {
@@ -1765,6 +1860,24 @@ export function ServiceManager({
   };
 
   const discoverModels = async () => {
+    const key = currentDiscoveryKey.current;
+    const generation = loadGeneration.current;
+    const isCurrent = () =>
+      currentDiscoveryKey.current === key &&
+      loadGeneration.current === generation;
+    const vertexIssue = vertexDraftIssue(draft);
+    if (vertexIssue) {
+      setError(vertexIssue);
+      return;
+    }
+    if (
+      draft.kind === "vertex" &&
+      draft.removeCredential &&
+      !draft.secret.trim()
+    ) {
+      setError(t("services.vertexInvalidCredential"));
+      return;
+    }
     if (isSubscriptionKind(draft.kind) && !editing) {
       setError(t("services.saveBeforeFetch"));
       return;
@@ -1783,6 +1896,7 @@ export function ServiceManager({
           kind: draft.kind,
           http: {
             base_url: draft.baseURL.trim(),
+            ...vertexForDraft(draft),
             auth: authForDraft(draft),
             ...(draft.secret.trim()
               ? { credential: { secret: draft.secret } }
@@ -1790,6 +1904,7 @@ export function ServiceManager({
             model_list_path: draft.modelListPath.trim(),
           },
         });
+        if (!isCurrent()) return;
         const models = [
           ...new Set([...draft.models, ...result.model_ids]),
         ].sort();
@@ -1805,6 +1920,7 @@ export function ServiceManager({
           warnings: result.warnings ?? [],
         });
       } catch (cause) {
+        if (!isCurrent()) return;
         setError(
           t("services.fetchFailedDetail", {
             warnings: errorMessage(cause, t("services.fetchFailed")),
@@ -1837,6 +1953,7 @@ export function ServiceManager({
             kind: draft.kind as HTTPServiceKind,
             http: {
               base_url: draft.baseURL.trim(),
+              ...vertexForDraft(draft),
               auth: authForDraft(draft),
               ...(draft.secret.trim()
                 ? { credential: { secret: draft.secret } }
@@ -1846,6 +1963,7 @@ export function ServiceManager({
           });
         }),
       );
+      if (!isCurrent()) return;
       const discovered: string[] = [];
       const discoveredProtocols: ModelProtocol[] = [];
       const warnings: string[] = [];
@@ -1906,7 +2024,10 @@ export function ServiceManager({
     requestedFlow: AuthorizationFlow,
     session: AuthorizationSession,
   ) => {
-    if (session.flow === "authorization_code") {
+    if (
+      session.flow === "authorization_code" ||
+      session.flow === "claude_cli"
+    ) {
       setAuthorizationDialog({ service, requestedFlow, session });
       return;
     }
@@ -1967,6 +2088,10 @@ export function ServiceManager({
         if (!isSubscriptionKind(draft.kind)) {
           patch.http = {
             base_url: draft.baseURL.trim(),
+            ...vertexForDraft(draft),
+            ...(draft.kind === "vertex" && draft.authScheme === "google_api_key"
+              ? { vertex: null }
+              : {}),
             auth: authForDraft(draft),
             ...(draft.secret.trim()
               ? { credential: { secret: draft.secret } }
@@ -1992,6 +2117,14 @@ export function ServiceManager({
               : {}),
             name: draft.name.trim(),
             kind: draft.kind,
+            ...(draft.kind === "claude_subscription"
+              ? {
+                  subscription_mode:
+                    draft.authorizationFlow === "claude_cli"
+                      ? "official"
+                      : "legacy",
+                }
+              : {}),
             enabled: draft.enabled,
             responses_websocket_enabled: draft.responsesWebSocket,
             ...(draft.privacyTrusted ? { privacy_trusted: true } : {}),
@@ -2028,6 +2161,7 @@ export function ServiceManager({
               : {}),
             http: {
               base_url: draft.baseURL.trim(),
+              ...vertexForDraft(draft),
               auth: authForDraft(draft),
               ...(draft.secret.trim()
                 ? { credential: { secret: draft.secret } }
@@ -2126,7 +2260,8 @@ export function ServiceManager({
       const session = await getServiceAuthorization(service.id);
       if (
         session.flow === "device_code" ||
-        session.flow === "authorization_code"
+        session.flow === "authorization_code" ||
+        session.flow === "claude_cli"
       ) {
         setAuthorizationDialog({
           service,
@@ -2271,29 +2406,6 @@ export function ServiceManager({
   );
 
   if (view.kind === "list") {
-    const search = query.trim().toLocaleLowerCase();
-    const modelSearch = modelQuery.trim().toLocaleLowerCase();
-    const filtered = !!search || !!modelSearch || serviceFilter !== "all";
-    const enabledCount = services.filter((service) => service.enabled).length;
-    const visibleServices = serviceOrder.ordered.filter(
-      (service) =>
-        (serviceFilter === "all" ||
-          service.enabled === (serviceFilter === "enabled")) &&
-        (!modelSearch ||
-          service.models.some((model) =>
-            model.toLocaleLowerCase().includes(modelSearch),
-          )) &&
-        [
-          service.name,
-          serviceKindLabel(service.kind),
-          service.http?.base_url,
-          service.subscription?.account_hint,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLocaleLowerCase()
-          .includes(search),
-    );
     const busy = catalogStatus === "loading";
     const now = new Date();
     const suspendedCount = services.filter(
@@ -2301,6 +2413,118 @@ export function ServiceManager({
         service.enabled &&
         activeServiceRisk(service, now)?.state === "suspended",
     ).length;
+    const cards = packageCards(serviceOrder.ordered, servicePackages.packages);
+    const enabledCards = cards.filter(cardEnabled).length;
+    const filtered = !!query.trim() || serviceFilter !== "all";
+    const startLogin = (service: Service) => {
+      setLoginChoice(service);
+      setLoginChoiceFlow(
+        defaultAuthorizationFlow(service.kind, service.subscription?.mode),
+      );
+      setError(null);
+    };
+    const serviceMenu = (service: Service) => {
+      const subscription = service.subscription;
+      const acting = actionID === service.id;
+      return (
+        <>
+          <DropdownMenuItem
+            disabled={acting}
+            onSelect={() =>
+              onViewChange({ kind: "edit", serviceId: service.id })
+            }
+          >
+            {t("services.editAction")}
+          </DropdownMenuItem>
+          {subscription?.status === "authorizing" ? (
+            <>
+              <DropdownMenuItem
+                disabled={acting}
+                onSelect={() => void showAuthorization(service)}
+              >
+                {acting ? t("common.processing") : t("services.viewLogin")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={acting}
+                onSelect={() => void cancelAuthorization(service)}
+              >
+                {t("services.cancelLogin")}
+              </DropdownMenuItem>
+            </>
+          ) : subscription ? (
+            <DropdownMenuItem
+              disabled={acting}
+              onSelect={() => startLogin(service)}
+            >
+              {acting
+                ? t("common.processing")
+                : subscription.status === "connected"
+                  ? t("services.resignIn")
+                  : t("services.signIn")}
+            </DropdownMenuItem>
+          ) : null}
+          {subscription?.status === "connected" ? (
+            <DropdownMenuItem
+              disabled={acting}
+              onSelect={() => setConfirmAction({ kind: "logout", service })}
+            >
+              {t("services.signOut")}
+            </DropdownMenuItem>
+          ) : null}
+          {isWebEdition ? null : (
+            <DropdownMenuItem
+              disabled={acting || !isReady || !inferenceURL}
+              onSelect={() => setTerminalService(service)}
+            >
+              {t("services.openInTerminal")}
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            disabled={acting}
+            onSelect={() => setConfirmAction({ kind: "delete", service })}
+            variant="destructive"
+          >
+            {acting ? t("common.processing") : t("common.delete")}
+          </DropdownMenuItem>
+        </>
+      );
+    };
+    const cardActions: ServiceCardActions = {
+      menu: serviceMenu,
+      risk: (service) => {
+        const risk = activeServiceRisk(service, now);
+        return risk ? (
+          <ServiceRiskBadge
+            disabled={!isReady || actionID === service.id}
+            now={now}
+            onRestore={() => setConfirmAction({ kind: "clear-risk", service })}
+            risk={risk}
+            serviceId={service.id}
+            serviceName={service.name}
+          />
+        ) : null;
+      },
+      detail: serviceCardDetail,
+      edit: (service) => onViewChange({ kind: "edit", serviceId: service.id }),
+      reset: (service) => setConfirmAction({ kind: "reset-usage", service }),
+      test: setTestingService,
+      toggle: (service) => void toggleEnabled(service),
+      login: startLogin,
+      billing: (service) => setBillingService(service.id),
+      retryUsage: (members) => {
+        for (const service of members)
+          if (hasPlanUsage(service)) void loadServiceUsage(service.id, true);
+      },
+      addAccount: (service) =>
+        onViewChange({ kind: "create", serviceKind: service.kind }),
+      addSubscription: () => setKindPickerOpen(true),
+      addRelay: () => setKindPickerOpen(true),
+      clearFilters: () => {
+        setQuery("");
+        setServiceFilter("all");
+      },
+    };
     return (
       <section
         className="@container gutter-frame flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
@@ -2314,6 +2538,7 @@ export function ServiceManager({
           />
         ) : null}
         <ServiceKindPickerDialog
+          onLocalImport={onLocalImport}
           onOpenChange={setKindPickerOpen}
           onSelect={(serviceKind, plugin) =>
             onViewChange({
@@ -2326,46 +2551,51 @@ export function ServiceManager({
         />
         <PageHeader
           variant="compact"
-          className="@max-[360px]:gap-2"
+          className="flex-wrap gap-y-2 @max-[360px]:gap-2"
+          title={t("services.title")}
+          titleId="service-heading"
+          titleSuffix={
+            <SegmentedControl<ServiceFilter>
+              label={t("services.filterStatus")}
+              onValueChange={setServiceFilter}
+              options={[
+                {
+                  value: "all",
+                  label: t("services.filterAll"),
+                  count: cards.length,
+                },
+                {
+                  value: "enabled",
+                  label: t("services.filterEnabled"),
+                  count: enabledCards,
+                },
+                {
+                  value: "disabled",
+                  label: t("services.filterDisabled"),
+                  count: cards.length - enabledCards,
+                },
+              ]}
+              value={serviceFilter}
+            />
+          }
+          actionsClassName="ml-auto min-w-0 shrink flex-wrap justify-end gap-1.5"
           actions={
             <>
+              <SearchInput
+                className="w-56 @max-[720px]:w-44"
+                clearLabel={t("common.clearSearch")}
+                label={t("services.searchServices")}
+                onValueChange={setQuery}
+                placeholder={t("services.searchServicesPlaceholder")}
+                value={query}
+              />
+              <UsageRangeSelect
+                label={t("services.performanceRange")}
+                preset={performancePreset}
+                onChange={setPerformancePreset}
+                size="default"
+              />
               <ServiceOrderHelp ready={isReady && catalogStatus === "ready"} />
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <IconButton
-                    label={t("services.customizeColumns")}
-                    size="icon"
-                    type="button"
-                  >
-                    <SlidersHorizontal aria-hidden="true" />
-                  </IconButton>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    {t("services.visibleColumns")}
-                  </DropdownMenuLabel>
-                  {SERVICE_LIST_COLUMNS.map((id) => (
-                    <DropdownMenuCheckboxItem
-                      checked={!listColumns.hidden.includes(id)}
-                      key={id}
-                      onCheckedChange={(visible) =>
-                        listColumns.setVisible(id, visible)
-                      }
-                      // Keep the menu open to toggle several columns.
-                      onSelect={(event) => event.preventDefault()}
-                    >
-                      {columnLabels[id]}
-                    </DropdownMenuCheckboxItem>
-                  ))}
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    disabled={listColumns.isDefault}
-                    onSelect={listColumns.reset}
-                  >
-                    {t("services.resetColumns")}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
               <IconButton
                 label={
                   busy ? t("common.refreshing") : t("services.refreshList")
@@ -2382,8 +2612,8 @@ export function ServiceManager({
                   aria-hidden="true"
                   className={cn(
                     "motion-reduce:animate-none",
-                    // Rows keep their settled quota while it reloads, so the
-                    // toolbar is where a refresh in flight shows.
+                    // Cards keep their settled quota while it reloads, so the
+                    // header is where a refresh in flight shows.
                     (busy || refreshingUsageIDs.size > 0) &&
                       "animate-spin motion-reduce:animate-none",
                   )}
@@ -2393,19 +2623,13 @@ export function ServiceManager({
                 aria-label={t("services.add")}
                 disabled={!isReady || busy}
                 onClick={() => setKindPickerOpen(true)}
-                size="sm"
                 type="button"
               >
                 <Plus aria-hidden="true" />
-                <span className="@max-[480px]:hidden">{t("services.add")}</span>
-                <span className="hidden @max-[480px]:inline">
-                  {t("overview.add")}
-                </span>
+                {t("overview.add")}
               </Button>
             </>
           }
-          title={t("services.title")}
-          titleId="service-heading"
         />
         {!isReady || catalogStatus === "blocked" ? (
           <FormMessage className="mb-3" tone="notice">
@@ -2431,64 +2655,6 @@ export function ServiceManager({
             {t("services.riskSuspendedSummary", { count: suspendedCount })}
           </FormMessage>
         ) : null}
-
-        <div className="mb-3 shrink-0">
-          <ListToolbar
-            title={t("services.listLabel")}
-            count={
-              filtered
-                ? `${visibleServices.length} / ${services.length}`
-                : services.length
-            }
-            query={query}
-            onQueryChange={setQuery}
-            searchLabel={t("services.searchServices")}
-            placeholder={t("services.searchServicesPlaceholder")}
-            clearLabel={t("common.clearSearch")}
-            secondaryFilters={
-              <ModelSelect
-                aria-label={t("services.filterModel")}
-                clearLabel={t("common.clearSearch")}
-                emptyMessage={t("services.noModelSuggestions")}
-                onValueChange={setModelQuery}
-                options={modelSuggestions}
-                placeholder={t("services.filterModelPlaceholder")}
-                value={modelQuery}
-              />
-            }
-            filters={
-              <>
-                <SegmentedControl<ServiceFilter>
-                  label={t("services.filterStatus")}
-                  onValueChange={setServiceFilter}
-                  options={[
-                    {
-                      value: "all",
-                      label: t("services.filterAll"),
-                      count: services.length,
-                    },
-                    {
-                      value: "enabled",
-                      label: t("services.filterEnabled"),
-                      count: enabledCount,
-                    },
-                    {
-                      value: "disabled",
-                      label: t("services.filterDisabled"),
-                      count: services.length - enabledCount,
-                    },
-                  ]}
-                  value={serviceFilter}
-                />
-                <UsageRangeSelect
-                  label={t("services.performanceRange")}
-                  preset={performancePreset}
-                  onChange={setPerformancePreset}
-                />
-              </>
-            }
-          />
-        </div>
         <p className="sr-only" aria-live="polite">
           {serviceOrder.saving
             ? t("services.orderSaving")
@@ -2500,6 +2666,22 @@ export function ServiceManager({
           <FormMessage className="mb-3" tone="error">
             {serviceOrder.error}
             <Button type="button" variant="ghost" onClick={serviceOrder.reload}>
+              {t("common.retry")}
+            </Button>
+          </FormMessage>
+        ) : null}
+        {servicePackages.error && services.length > 0 ? (
+          <FormMessage
+            className="mb-3"
+            data-testid="service-packages-error"
+            tone="warning"
+          >
+            {t("packages.loadFailed", { message: servicePackages.error })}
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={servicePackages.reload}
+            >
               {t("common.retry")}
             </Button>
           </FormMessage>
@@ -2529,421 +2711,36 @@ export function ServiceManager({
           ) : !serviceOrder.hasOrder && !serviceOrder.error ? (
             <EmptyState title={t("services.loading")} />
           ) : !serviceOrder.hasOrder ? null : (
-            <>
-              <div
-                className="@container/service-list group/service-list gutter-scroller min-h-0 min-w-0 flex-1 overflow-y-auto"
-                data-testid="service-list-scroller"
-                ref={serviceListScrollerRef}
-              >
-                <ServiceListHeader
-                  hidden={listColumns.hidden}
-                  labels={columnLabels}
-                />
-                {visibleServices.length === 0 ? (
-                  <EmptyState
-                    className="col-span-full"
-                    title={t("common.noSearchResults")}
-                    description={t("services.noSearchResults")}
-                    action={
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          setQuery("");
-                          setModelQuery("");
-                          setServiceFilter("all");
-                        }}
-                        type="button"
-                      >
-                        {t("services.clearFilters")}
-                      </Button>
-                    }
-                  />
-                ) : null}
-                <OrderedList
-                  items={visibleServices}
-                  label={t("services.orderLabel")}
-                  compact
-                  showPosition={false}
-                  disabled={
-                    !isReady ||
-                    busy ||
-                    serviceOrder.saving ||
-                    !serviceOrder.complete
-                  }
-                  positionOf={(service) =>
-                    serviceOrder.ordered.findIndex(
-                      (item) => item.id === service.id,
-                    ) + 1
-                  }
-                  onChange={(items) => void serviceOrder.save(items)}
-                >
-                  {(service, _index, controls, sorting) => {
-                    const subscription = service.subscription;
-                    const acting = actionID === service.id;
-                    const plan = planTypeLabel(
-                      usageByService[service.id]?.usage?.plan_type,
-                      subscription?.provider,
-                    );
-                    const tone = serviceDot(service, now);
-                    const risk = activeServiceRisk(service, now);
-                    const statusLabel = serviceStatusLabel(service, now);
-                    const detail = serviceListDetail(service);
-                    return (
-                      <ServiceListRow
-                        key={service.id}
-                        hidden={listColumns.hidden}
-                        name={service.name}
-                        order={controls}
-                        sorting={sorting}
-                        sortIcon={
-                          <ServiceKindIcon kind={service.kind} size={20} />
-                        }
-                        sortStatus={
-                          <StatusDot label={statusLabel} tone={tone} />
-                        }
-                        identity={
-                          <div className="flex min-w-0 items-center gap-3">
-                            <span
-                              className="relative flex size-9 shrink-0 items-center justify-center rounded-md border bg-background"
-                              title={serviceKindLabel(service.kind)}
-                            >
-                              <ServiceKindIcon kind={service.kind} size={24} />
-                              {needsSubscriptionTag(service.kind) ? (
-                                <Badge
-                                  aria-hidden="true"
-                                  className="absolute -bottom-2.5 left-1/2 z-10 h-4 w-max -translate-x-1/2 bg-background px-1 py-0 leading-none text-text-secondary"
-                                  data-testid="subscription-kind-tag"
-                                  variant="outline"
-                                >
-                                  {t("subscription.tag")}
-                                </Badge>
-                              ) : null}
-                            </span>
-                            <div className="grid min-w-0 gap-0.5">
-                              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                                <Button
-                                  className="block h-auto min-w-0 max-w-full shrink truncate rounded-sm p-0 text-left text-sm font-semibold"
-                                  disabled={acting}
-                                  onClick={() =>
-                                    onViewChange({
-                                      kind: "edit",
-                                      serviceId: service.id,
-                                    })
-                                  }
-                                  title={service.name}
-                                  type="button"
-                                  variant="link"
-                                >
-                                  {service.name}
-                                </Button>
-                                {plan ? (
-                                  <Badge
-                                    className="font-semibold tabular-nums"
-                                    data-testid="subscription-plan"
-                                    title={t("subscription.plan", { plan })}
-                                    variant="accent"
-                                  >
-                                    {plan}
-                                  </Badge>
-                                ) : null}
-                                {risk ? (
-                                  <ServiceRiskBadge
-                                    disabled={!isReady || acting}
-                                    now={now}
-                                    onRestore={() =>
-                                      setConfirmAction({
-                                        kind: "clear-risk",
-                                        service,
-                                      })
-                                    }
-                                    risk={risk}
-                                    serviceId={service.id}
-                                    serviceName={service.name}
-                                  />
-                                ) : null}
-                              </div>
-                              {service.privacy_trusted || detail ? (
-                                <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                                  {service.privacy_trusted ? (
-                                    <Badge
-                                      className="min-w-0 shrink [&>svg]:shrink-0"
-                                      data-testid="privacy-trusted-badge"
-                                      title={t(
-                                        "services.privacyTrustedBadgeHint",
-                                      )}
-                                      variant="outline"
-                                    >
-                                      <ShieldCheck aria-hidden="true" />
-                                      <span className="truncate">
-                                        {t("services.privacyTrustedBadge")}
-                                      </span>
-                                    </Badge>
-                                  ) : null}
-                                  {detail ? (
-                                    <span
-                                      className="block min-w-0 grow basis-10 truncate text-xs text-text-secondary"
-                                      title={detail}
-                                    >
-                                      {detail}
-                                    </span>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                            </div>
-                          </div>
-                        }
-                        inventory={
-                          <>
-                            <Button
-                              aria-label={t("services.openModels", {
-                                name: service.name,
-                              })}
-                              className="block h-auto w-fit rounded-sm p-0 text-left text-xs font-medium tabular-nums"
-                              disabled={acting}
-                              onClick={() =>
-                                onViewChange({
-                                  kind: "edit",
-                                  serviceId: service.id,
-                                  tab: "models",
-                                })
-                              }
-                              type="button"
-                              variant="link"
-                            >
-                              {t("services.modelCount", {
-                                count: service.models.length,
-                              })}
-                            </Button>
-                            <span className="inline-flex items-center gap-1.5 text-micro text-muted-foreground tabular-nums">
-                              {t("services.apiCount", {
-                                count: service.capabilities.length,
-                              })}
-                              {supportsResponsesWebSocket(service) &&
-                              responsesWebSocketEnabled(service) ? (
-                                <CapabilityIndicator
-                                  label={t("services.webSocketOn")}
-                                >
-                                  <Cable
-                                    aria-hidden="true"
-                                    animateOnHover={false}
-                                    className="size-3"
-                                  />
-                                </CapabilityIndicator>
-                              ) : null}
-                            </span>
-                          </>
-                        }
-                        usage={
-                          hasPlanUsage(service) ? (
-                            <SubscriptionUsageMeter
-                              error={usageByService[service.id]?.error}
-                              now={new Date()}
-                              onRefresh={
-                                isReady
-                                  ? () =>
-                                      void loadServiceUsage(service.id, true)
-                                  : undefined
-                              }
-                              refreshing={refreshingUsageIDs.has(service.id)}
-                              status={
-                                usageByService[service.id]?.status ?? "loading"
-                              }
-                              usage={usageByService[service.id]?.usage}
-                            />
-                          ) : undefined
-                        }
-                        billing={
-                          <div className="grid justify-items-start gap-1.5">
-                            <ServiceBillingMeter
-                              serviceId={service.id}
-                              ready={isReady}
-                              epoch={usageEpoch}
-                              observedAt={
-                                usageByService[service.id]?.usage?.fetched_at
-                              }
-                              onOpen={() => setBillingService(service.id)}
-                            />
-                            {hasPlanUsage(service) ? (
-                              <SubscriptionResetButton
-                                onReset={() =>
-                                  setConfirmAction({
-                                    kind: "reset-usage",
-                                    service,
-                                  })
-                                }
-                                resetting={actionID === service.id}
-                                usage={usageByService[service.id]?.usage}
-                              />
-                            ) : null}
-                          </div>
-                        }
-                        performance={
-                          <ServicePerformanceMeter
-                            serviceId={service.id}
-                            serviceName={service.name}
-                            ready={isReady}
-                            performance={performance.byService[service.id]}
-                            status={performance.status}
-                            preset={performancePreset}
-                          />
-                        }
-                        status={
-                          // The switch already shows on/off; mark only states
-                          // that need attention, without moving the switch.
-                          <span className="relative inline-flex">
-                            <Switch
-                              aria-label={t("services.enableNamed", {
-                                name: service.name,
-                              })}
-                              checked={service.enabled}
-                              disabled={!isReady || acting}
-                              onCheckedChange={() =>
-                                void toggleEnabled(service)
-                              }
-                              size="sm"
-                            />
-                            {tone === "negative" || tone === "pending" ? (
-                              <span className="absolute -top-1.5 -right-1.5 flex">
-                                <StatusDot label={statusLabel} tone={tone} />
-                              </span>
-                            ) : null}
-                          </span>
-                        }
-                        actions={
-                          <>
-                            <IconButton
-                              label={t("serviceTest.testNamed", {
-                                name: service.name,
-                              })}
-                              disabled={!isReady || acting}
-                              onClick={() => setTestingService(service)}
-                              type="button"
-                            >
-                              <Flask aria-hidden="true" />
-                            </IconButton>
-                            <IconButton
-                              label={t("services.editNamed", {
-                                name: service.name,
-                              })}
-                              disabled={acting}
-                              onClick={() =>
-                                onViewChange({
-                                  kind: "edit",
-                                  serviceId: service.id,
-                                })
-                              }
-                              type="button"
-                            >
-                              <Pencil aria-hidden="true" />
-                            </IconButton>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <IconButton
-                                  label={t("services.moreNamed", {
-                                    name: service.name,
-                                  })}
-                                  disabled={acting}
-                                  size="icon-sm"
-                                  type="button"
-                                >
-                                  <Ellipsis aria-hidden="true" />
-                                </IconButton>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                {subscription ? (
-                                  subscription.status === "authorizing" ? (
-                                    <>
-                                      <DropdownMenuItem
-                                        disabled={acting}
-                                        onSelect={() =>
-                                          void showAuthorization(service)
-                                        }
-                                      >
-                                        {acting
-                                          ? t("common.processing")
-                                          : t("services.viewLogin")}
-                                      </DropdownMenuItem>
-                                      <DropdownMenuItem
-                                        disabled={acting}
-                                        onSelect={() =>
-                                          void cancelAuthorization(service)
-                                        }
-                                      >
-                                        {t("services.cancelLogin")}
-                                      </DropdownMenuItem>
-                                    </>
-                                  ) : (
-                                    <DropdownMenuItem
-                                      disabled={acting}
-                                      onSelect={() => {
-                                        setLoginChoice(service);
-                                        setLoginChoiceFlow(
-                                          defaultAuthorizationFlow(
-                                            service.kind,
-                                          ),
-                                        );
-                                        setError(null);
-                                      }}
-                                    >
-                                      {acting
-                                        ? t("common.processing")
-                                        : subscription.status === "connected"
-                                          ? t("services.resignIn")
-                                          : t("services.signIn")}
-                                    </DropdownMenuItem>
-                                  )
-                                ) : null}
-                                {subscription?.status === "connected" ? (
-                                  <DropdownMenuItem
-                                    disabled={acting}
-                                    onSelect={() =>
-                                      setConfirmAction({
-                                        kind: "logout",
-                                        service,
-                                      })
-                                    }
-                                  >
-                                    {t("services.signOut")}
-                                  </DropdownMenuItem>
-                                ) : null}
-                                {isWebEdition ? null : (
-                                  <DropdownMenuItem
-                                    disabled={
-                                      acting || !isReady || !inferenceURL
-                                    }
-                                    onSelect={() => setTerminalService(service)}
-                                  >
-                                    {t("services.openInTerminal")}
-                                  </DropdownMenuItem>
-                                )}
-                                {subscription || !isWebEdition ? (
-                                  <DropdownMenuSeparator />
-                                ) : null}
-                                <DropdownMenuItem
-                                  disabled={acting}
-                                  onSelect={() =>
-                                    setConfirmAction({
-                                      kind: "delete",
-                                      service,
-                                    })
-                                  }
-                                  variant="destructive"
-                                >
-                                  {acting
-                                    ? t("common.processing")
-                                    : t("common.delete")}
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </>
-                        }
-                      />
-                    );
-                  }}
-                </OrderedList>
-              </div>
-            </>
+            <ServicePackageGrid
+              actingID={actionID}
+              actions={cardActions}
+              billing={cardBilling}
+              estimates={quotaEstimates}
+              filter={serviceFilter}
+              now={now}
+              onReorder={(next) => void serviceOrder.save(next)}
+              packages={servicePackages.packages}
+              performance={performance}
+              preset={performancePreset}
+              query={query}
+              ready={isReady}
+              refreshing={refreshingUsageIDs}
+              reorderDisabled={
+                !isReady ||
+                busy ||
+                serviceOrder.saving ||
+                !serviceOrder.complete
+              }
+              scrollerRef={serviceListScrollerRef}
+              services={serviceOrder.ordered}
+              strategy={{
+                savingID: servicePackages.savingID,
+                error: servicePackages.strategyError,
+                onChange: (id, strategy) =>
+                  void servicePackages.setStrategy(id, strategy),
+              }}
+              usage={usageByService}
+            />
           )}
         </div>
         {testingService ? (
@@ -3023,11 +2820,13 @@ export function ServiceManager({
               <DialogDescription>
                 {deviceCodeOnlyKind(shownLoginChoice?.kind)
                   ? deviceCodeKindHint(shownLoginChoice?.kind)
-                  : shownLoginChoice?.kind === "claude_subscription"
-                    ? t("services.claudeOauthHint")
-                    : shownLoginChoice?.kind === "antigravity_subscription"
-                      ? t("services.antigravityHint")
-                      : t("services.chooseOauthHint")}
+                  : officialClaude(shownLoginChoice)
+                    ? t("services.claudeOfficialHint")
+                    : shownLoginChoice?.kind === "claude_subscription"
+                      ? t("services.claudeOauthHint")
+                      : shownLoginChoice?.kind === "antigravity_subscription"
+                        ? t("services.antigravityHint")
+                        : t("services.chooseOauthHint")}
               </DialogDescription>
             </DialogHeader>
             <RadioGroup
@@ -3038,7 +2837,14 @@ export function ServiceManager({
               }
               value={shownLoginChoiceFlow ?? ""}
             >
-              {shownLoginChoice?.kind === "claude_subscription" ? (
+              {officialClaude(shownLoginChoice) ? (
+                <ChoiceCard
+                  label={t("services.claudeOfficial")}
+                  description={t("services.claudeOfficialHint")}
+                  selected={shownLoginChoiceFlow === "claude_cli"}
+                  value="claude_cli"
+                />
+              ) : shownLoginChoice?.kind === "claude_subscription" ? (
                 <ChoiceCard
                   label={t("services.claudeOauth")}
                   description={t("services.claudeOauthHint")}
@@ -3076,6 +2882,7 @@ export function ServiceManager({
                 </>
               )}
             </RadioGroup>
+            {officialClaude(shownLoginChoice) ? <ClaudeCLINotice /> : null}
             <DialogFooter>
               <Button
                 variant="outline"
@@ -3109,16 +2916,22 @@ export function ServiceManager({
             <DialogContent className="max-w-[460px] sm:max-w-[460px]">
               <DialogHeader>
                 <DialogTitle>
-                  {authorizationDialog.session.flow === "authorization_code"
-                    ? t("services.claudeOauth")
-                    : t("services.deviceCodeTitle")}
+                  {authorizationDialog.session.flow === "claude_cli"
+                    ? t("services.claudeCLI.loginTitle")
+                    : authorizationDialog.session.flow === "authorization_code"
+                      ? t("services.claudeOauth")
+                      : t("services.deviceCodeTitle")}
                 </DialogTitle>
                 <DialogDescription>
-                  {authorizationDialog.session.flow === "authorization_code"
-                    ? t("services.claudeOauthHint")
-                    : deviceCodeDescription(
-                        authorizationDialog.session.provider,
-                      )}
+                  {authorizationDialog.session.flow === "claude_cli"
+                    ? isWebEdition
+                      ? t("services.claudeCLI.loginHintServer")
+                      : t("services.claudeCLI.loginHintDesktop")
+                    : authorizationDialog.session.flow === "authorization_code"
+                      ? t("services.claudeOauthHint")
+                      : deviceCodeDescription(
+                          authorizationDialog.session.provider,
+                        )}
                 </DialogDescription>
               </DialogHeader>
               {authorizationDialog.requestedFlow === "browser" ? (
@@ -3127,7 +2940,8 @@ export function ServiceManager({
                 </FormMessage>
               ) : null}
               {authorizationDialog.session.status === "pending" &&
-              authorizationDialog.session.flow === "authorization_code" ? (
+              (authorizationDialog.session.flow === "authorization_code" ||
+                authorizationDialog.session.flow === "claude_cli") ? (
                 <form
                   className="grid gap-4"
                   onSubmit={async (event) => {
@@ -3167,7 +2981,11 @@ export function ServiceManager({
                       aria-label={t("services.authorizationCode")}
                       type="password"
                       autoComplete="off"
-                      placeholder="code#state"
+                      placeholder={
+                        authorizationDialog.session.flow === "claude_cli"
+                          ? undefined
+                          : "code#state"
+                      }
                       value={authorizationCode}
                       maxLength={8192}
                       onChange={(event) =>
@@ -3312,7 +3130,16 @@ export function ServiceManager({
   // A task plugin's provider serves the protocols its plugin claims, which
   // the gateway sets; it has no protocols to choose.
   const taskProvider = draft.plugin?.provider === "task";
-  const canKeepCredential = Boolean(editing?.service.http?.credential_ref);
+  const canKeepCredential = Boolean(
+    editing?.service.http?.credential_ref &&
+      editing.service.http.auth.scheme === draft.authScheme,
+  );
+  const vertexExpress =
+    draft.kind === "vertex" && draft.authScheme === "google_api_key";
+  const loadedVertexKey =
+    draft.kind === "vertex" && !vertexExpress
+      ? serviceAccountSummary(draft.secret)
+      : null;
   const savedKeyHint = editing?.service.http?.credential_hint;
   const selectedPreset = isSubscriptionKind(draft.kind)
     ? null
@@ -3345,52 +3172,55 @@ export function ServiceManager({
     />
   );
   const modelsEditor = (
-    <ServiceModelsEditor
-      key={editingServiceID ?? "create"}
-      builtinProtocol={(model) =>
-        serviceBuiltinModelProtocol(draft.kind, model)
-      }
-      formats={serviceModelFormats(draft.kind)}
-      modelEditor={modelEditor}
-      modelProtocols={draft.modelProtocols}
-      models={draft.models}
-      probingModels={probingModels}
-      onAddModels={addModels}
-      onClearModels={() =>
-        setDraft((current) => ({
-          ...current,
-          models: [],
-          modelProtocols: [],
-        }))
-      }
-      onDiscoverModels={
-        // A plugin's provider lists its models once it is saved; a task
-        // plugin's models are the ones it declares.
-        draft.plugin?.provider !== "task" &&
-        (draft.kind === "plugin" ? editing !== null : true) &&
-        (modelDiscoveryProtocols(draft).length > 0 ||
-          (draft.kind === "custom" && draft.modelListPath.trim() !== ""))
-          ? () => void discoverModels()
-          : undefined
-      }
-      onModelEditorChange={setModelEditor}
-      onModelProtocolsChange={(models, protocol) =>
-        setDraft((current) => ({
-          ...current,
-          modelProtocols: withModelProtocols(
-            current.modelProtocols,
-            models,
-            protocol,
-          ),
-        }))
-      }
-      onRemoveModels={removeDraftModels}
-      upstream={
-        upstreamModels?.key === modelDiscoveryKey(draft)
-          ? upstreamModels.snapshot
-          : null
-      }
-    />
+    <>
+      <ServiceModelsEditor
+        key={editingServiceID ?? "create"}
+        compact={draft.kind === "vertex"}
+        builtinProtocol={(model) =>
+          serviceBuiltinModelProtocol(draft.kind, model)
+        }
+        formats={serviceModelFormats(draft.kind, draft.authScheme)}
+        modelEditor={modelEditor}
+        modelProtocols={draft.modelProtocols}
+        models={draft.models}
+        probingModels={probingModels}
+        onAddModels={addModels}
+        onClearModels={() =>
+          setDraft((current) => ({
+            ...current,
+            models: [],
+            modelProtocols: [],
+          }))
+        }
+        onDiscoverModels={
+          // A plugin's provider lists its models once it is saved; a task
+          // plugin's models are the ones it declares.
+          draft.plugin?.provider !== "task" &&
+          (draft.kind === "plugin" ? editing !== null : true) &&
+          (modelDiscoveryProtocols(draft).length > 0 ||
+            (draft.kind === "custom" && draft.modelListPath.trim() !== ""))
+            ? () => void discoverModels()
+            : undefined
+        }
+        onModelEditorChange={setModelEditor}
+        onModelProtocolsChange={(models, protocol) =>
+          setDraft((current) => ({
+            ...current,
+            modelProtocols: withModelProtocols(
+              current.modelProtocols,
+              models,
+              protocol,
+            ),
+          }))
+        }
+        onRemoveModels={removeDraftModels}
+        upstream={
+          upstreamModels?.key === modelDiscoveryKey(draft)
+            ? upstreamModels.snapshot
+            : null
+        }
+      />
+    </>
   );
   // Subscriptions keep their native protocols fixed; any other entry protocol
   // must convert into one of the provider's egress formats.
@@ -3400,13 +3230,17 @@ export function ServiceManager({
       ? subscriptionNativeCapabilities[subscriptionKind].map(
           ({ protocol }) => protocol,
         )
-      : [],
+      : vertexExpress
+        ? ["google.generate_content"]
+        : [],
   );
   const egressTargets = subscriptionKind
     ? subscriptionConversionTargets[subscriptionKind]
-    : null;
+    : vertexExpress
+      ? ["google.generate_content"]
+      : null;
   // Every OpenCode model has an upstream format. Its chat entry rows decide
-  // which clients get in, and the model's format decides what OpenCode gets.
+  // which clients get in, and the model decides the upstream format.
   const formatRoutedKind =
     draft.kind === "opencode_go" || draft.kind === "opencode_zen";
   // Re-enabling a protocol the preset's upstream serves natively passes it through.
@@ -3419,7 +3253,14 @@ export function ServiceManager({
     ? descriptors.filter(
         ({ id }) => nativeProtocols.has(id) || supportsLocalConversion(id),
       )
-    : descriptors;
+    : draft.kind === "vertex"
+      ? descriptors.filter(
+          ({ id }) =>
+            supportsLocalConversion(id) ||
+            id === "openai.models" ||
+            id === "google.models",
+        )
+      : descriptors;
   const protocolEditor = (
     <Panel asChild>
       <section aria-labelledby="service-capabilities-heading">
@@ -3464,14 +3305,30 @@ export function ServiceManager({
             const targets = convertible
               ? localConversionTargets(descriptor.id, conversionEngine).filter(
                   (target) =>
-                    egressTargets === null || egressTargets.includes(target.id),
+                    (egressTargets === null ||
+                      egressTargets.includes(target.id)) &&
+                    (draft.kind !== "vertex" ||
+                      serviceModelFormats("vertex", draft.authScheme).some(
+                        (format) => format === target.id,
+                      )),
                 )
               : [];
             const selected = targets.find(
               (target) => target.id === capability?.convert_to,
             );
-            const defaultTarget = egressTargets
-              ? targets.find((target) => target.enabled)?.id
+            const passthroughAllowed =
+              egressTargets === null &&
+              !(
+                draft.kind === "vertex" && descriptor.id === "openai.responses"
+              );
+            const defaultTarget = !passthroughAllowed
+              ? ((draft.kind === "vertex"
+                  ? targets.find(
+                      (target) =>
+                        target.id === "google.generate_content" &&
+                        target.enabled,
+                    )?.id
+                  : undefined) ?? targets.find((target) => target.enabled)?.id)
               : followsModelFormat || presetUpstreamProtocols.has(descriptor.id)
                 ? undefined
                 : bestConversionTarget(
@@ -3482,8 +3339,7 @@ export function ServiceManager({
                     conversionEngine,
                   );
             const locked =
-              native ||
-              (egressTargets !== null && !capability && !defaultTarget);
+              native || (!passthroughAllowed && !capability && !defaultTarget);
             return (
               <DataRow
                 className="grid grid-cols-1 gap-3 py-3 @[640px]:grid-cols-[minmax(0,1fr)_232px]"
@@ -3554,11 +3410,11 @@ export function ServiceManager({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {egressTargets ? null : (
+                      {passthroughAllowed ? (
                         <SelectItem value={localConversionPassthrough}>
                           {t("services.passthrough")}
                         </SelectItem>
-                      )}
+                      ) : null}
                       {targets.map((target) => (
                         <SelectItem
                           disabled={!target.enabled}
@@ -3760,12 +3616,22 @@ export function ServiceManager({
                     value={draft.authorizationFlow ?? ""}
                   >
                     {draft.kind === "claude_subscription" ? (
-                      <ChoiceCard
-                        label={t("services.claudeOauth")}
-                        description={t("services.claudeOauthHint")}
-                        selected
-                        value="authorization_code"
-                      />
+                      <>
+                        <ChoiceCard
+                          label={t("services.claudeOfficial")}
+                          description={t("services.claudeOfficialHint")}
+                          selected={draft.authorizationFlow === "claude_cli"}
+                          value="claude_cli"
+                        />
+                        <ChoiceCard
+                          label={t("services.claudeLegacy")}
+                          description={t("services.claudeOauthHint")}
+                          selected={
+                            draft.authorizationFlow === "authorization_code"
+                          }
+                          value="authorization_code"
+                        />
+                      </>
                     ) : deviceCodeOnlyKind(draft.kind) ? (
                       <ChoiceCard
                         label="Device Code"
@@ -3802,6 +3668,11 @@ export function ServiceManager({
                       {t("services.chooseLoginContinue")}
                     </small>
                   ) : null}
+                  {draft.authorizationFlow === "claude_cli" ? (
+                    <div className="mt-2">
+                      <ClaudeCLINotice />
+                    </div>
+                  ) : null}
                 </fieldset>
               ) : null}
               <div className="flex items-start gap-2 rounded-md border border-success/20 bg-success-wash px-3 py-2.5 text-text-secondary">
@@ -3820,7 +3691,104 @@ export function ServiceManager({
             </>
           ) : (
             <>
-              {presetSites.length > 0 ? (
+              {draft.kind === "vertex" ? (
+                <>
+                  <Field
+                    group
+                    label={t("services.authScheme")}
+                    hint={
+                      vertexExpress
+                        ? t("services.vertexExpressHint")
+                        : undefined
+                    }
+                  >
+                    <SegmentedControl<ServiceAuthScheme>
+                      label={t("services.authScheme")}
+                      value={draft.authScheme}
+                      options={[
+                        {
+                          value: "google_service_account",
+                          label: t("services.vertexServiceAccount"),
+                        },
+                        { value: "google_api_key", label: "Express API Key" },
+                      ]}
+                      onValueChange={(authScheme) =>
+                        setDraft((current) => ({
+                          ...current,
+                          authScheme,
+                          vertexImplicitProject: false,
+                          secret: "",
+                          removeCredential: false,
+                          baseURL: vertexBaseURL(
+                            authScheme === "google_api_key"
+                              ? "global"
+                              : current.vertexLocation,
+                          ),
+                          capabilities:
+                            authScheme === "google_api_key"
+                              ? vertexExpressCapabilities(conversionEngine)
+                              : httpServicePreset(
+                                  "vertex",
+                                  protocols,
+                                  conversionEngine,
+                                ).capabilities,
+                          modelProtocols:
+                            authScheme === "google_api_key"
+                              ? current.modelProtocols.filter(
+                                  (entry) =>
+                                    entry.protocol ===
+                                    "google.generate_content",
+                                )
+                              : current.modelProtocols,
+                        }))
+                      }
+                    />
+                  </Field>
+                  {!vertexExpress ? (
+                    draft.vertexImplicitProject ? (
+                      <Field label={t("services.apiAddress")}>
+                        {baseURLInput}
+                      </Field>
+                    ) : (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <Field label={t("services.vertexProject")}>
+                          <Input
+                            aria-label={t("services.vertexProject")}
+                            maxLength={254}
+                            value={draft.vertexProjectID}
+                            onChange={(event) =>
+                              setDraft((current) => ({
+                                ...current,
+                                vertexProjectID: event.target.value,
+                              }))
+                            }
+                          />
+                        </Field>
+                        <Field
+                          label={t("services.vertexLocation")}
+                          hint={t("services.vertexLocationHint")}
+                        >
+                          <Input
+                            aria-label={t("services.vertexLocation")}
+                            maxLength={64}
+                            value={draft.vertexLocation}
+                            placeholder="global"
+                            onChange={(event) =>
+                              setDraft((current) => ({
+                                ...current,
+                                vertexLocation: event.target.value,
+                                baseURL: vertexBaseURL(
+                                  event.target.value.trim(),
+                                ),
+                              }))
+                            }
+                          />
+                        </Field>
+                      </div>
+                    )
+                  ) : null}
+                </>
+              ) : presetSites.length > 0 ? (
                 <Field
                   group
                   label={t("services.apiAddress")}
@@ -3872,13 +3840,15 @@ export function ServiceManager({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {Object.entries(serviceAuthLabels).map(
-                          ([scheme, label]) => (
+                        {Object.entries(serviceAuthLabels)
+                          .filter(
+                            ([scheme]) => scheme !== "google_service_account",
+                          )
+                          .map(([scheme, label]) => (
                             <SelectItem key={scheme} value={scheme}>
                               {label}
                             </SelectItem>
-                          ),
-                        )}
+                          ))}
                       </SelectContent>
                     </Select>
                   </Field>
@@ -3928,7 +3898,65 @@ export function ServiceManager({
                   />
                 </Field>
               ) : null}
-              {draft.authScheme !== "none" ? (
+              {draft.kind === "vertex" && !vertexExpress ? (
+                <Field
+                  group
+                  label={t("services.vertexCredential")}
+                  hint={
+                    canKeepCredential
+                      ? t("services.vertexCredentialKeep")
+                      : t("services.vertexCredentialHint")
+                  }
+                >
+                  <KeyFileInput
+                    label={t("services.vertexCredential")}
+                    accept=".json,application/json"
+                    chooseLabel={t("services.keyFileChoose")}
+                    replaceLabel={t("services.keyFileReplace")}
+                    loaded={
+                      loadedVertexKey ? (
+                        <div className="grid min-w-0 gap-0.5">
+                          <span className="truncate">
+                            {loadedVertexKey.email}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {t("services.vertexKeyProject", {
+                              project: loadedVertexKey.project,
+                            })}
+                          </span>
+                        </div>
+                      ) : null
+                    }
+                    saved={
+                      canKeepCredential && !draft.removeCredential
+                        ? t("services.vertexCredentialSaved")
+                        : null
+                    }
+                    maxLength={16_384}
+                    value={draft.secret}
+                    placeholder={
+                      canKeepCredential
+                        ? t("services.vertexCredentialKeep")
+                        : t("services.vertexCredential")
+                    }
+                    onChange={(secret) => {
+                      let project = "";
+                      try {
+                        const account = JSON.parse(secret);
+                        if (typeof account?.project_id === "string")
+                          project = account.project_id;
+                      } catch {
+                        /* Incomplete pasted JSON is validated on save. */
+                      }
+                      setDraft((current) => ({
+                        ...current,
+                        secret,
+                        vertexProjectID: current.vertexProjectID || project,
+                      }));
+                    }}
+                  />
+                </Field>
+              ) : draft.authScheme !== "none" ? (
                 <Field
                   label={
                     editingKind
@@ -3988,7 +4016,14 @@ export function ServiceManager({
                       }))
                     }
                   />
-                  <span>{t("services.removeStoredKey")}</span>
+                  <span>
+                    {t(
+                      editing?.service.http?.auth.scheme ===
+                        "google_service_account"
+                        ? "services.vertexRemoveCredential"
+                        : "services.removeStoredKey",
+                    )}
+                  </span>
                 </Label>
               ) : null}
             </>
@@ -4061,6 +4096,7 @@ export function ServiceManager({
         title={view.kind === "edit" ? t("services.edit") : t("services.add")}
         titleId="service-editor-heading"
         variant="compact"
+        className="[@media(max-height:680px)]:mb-1"
       />
       {riskConfirm}
       {!isReady ? (
@@ -4184,6 +4220,19 @@ export function ServiceManager({
                     {t("failure.title")}
                   </TabsTrigger>
                 </TabsList>
+                {draft.kind === "vertex" && editorTab === "models" ? (
+                  <HelpPopover label={t("services.vertexModelsHelp")}>
+                    <p>{t("models.hint")}</p>
+                    <p className="mt-2">
+                      {t(
+                        vertexExpress
+                          ? "services.vertexExpressHint"
+                          : "services.vertexCatalogHint",
+                      )}
+                    </p>
+                    <p className="mt-2">{t("models.formatHint")}</p>
+                  </HelpPopover>
+                ) : null}
                 <ServiceEditorTour
                   modelCount={draft.models.length}
                   protocols={draft.capabilities.map(
@@ -4297,7 +4346,7 @@ export function ServiceManager({
               </TabsContent>
             </Tabs>
           </fieldset>
-          <div className="mt-3 flex shrink-0 items-center justify-between gap-3 border-t pt-3 pb-1">
+          <div className="mt-3 flex shrink-0 items-center justify-between gap-3 border-t pt-3 pb-1 [@media(max-height:680px)]:mt-2 [@media(max-height:680px)]:pt-2">
             <span className="text-xs text-muted-foreground">
               {dirty ? t("services.unsavedChanges") : t("services.saveHint")}
             </span>

@@ -22,6 +22,9 @@ type RequestRecordListOptions struct {
 	// Query matches root records whose input preview contains it as a
 	// literal, ASCII case-insensitive substring. Empty means no text filter.
 	Query string
+	// ClientType keeps roots recognized as this client. Nil means any;
+	// historical roots recorded before recognition never match.
+	ClientType *contract.ClientType
 }
 
 type RequestRecordPage struct {
@@ -83,6 +86,16 @@ type SessionCursorScope struct {
 	LocalAccessTokenID *contract.AccessTokenID
 	// NotBefore, when non-zero, excludes roots that started earlier.
 	NotBefore time.Time
+	// Continues, when not empty, admits only roots whose stored turn state
+	// is one of these points (convo.Scope.Continues).
+	Continues []SessionTurnPoint
+}
+
+// SessionTurnPoint is a turn state a root may have stored: its
+// turn_user_messages and turn_user_fingerprint.
+type SessionTurnPoint struct {
+	UserMessages int
+	Fingerprint  string
 }
 
 // SessionLinkMatch is the root record FindSessionLink selected.
@@ -98,6 +111,25 @@ type SessionLinkMatch struct {
 	Status contract.RequestStatus
 	// Value is the queried cursor value that matched.
 	Value string
+	// ParentSessionID is the matched record's link to the conversation that
+	// started its session, nil for a top-level conversation.
+	ParentSessionID *contract.SessionID
+}
+
+// ProjectMemoryOptions picks the project and client a memory view covers.
+type ProjectMemoryOptions struct {
+	// Project is the project shown. Without it, and without NoProject, the
+	// project of the most recent call is shown.
+	Project *string
+	// NoProject shows the calls that named no project.
+	NoProject bool
+	// ClientType is the client shown; nil shows the one that called in the
+	// project last.
+	ClientType *contract.ClientType
+	// DayStart is when the newest day the reads count began, in the
+	// reader's time zone; Now is when the view is read.
+	DayStart time.Time
+	Now      time.Time
 }
 
 type RequestRecordStore interface {
@@ -126,4 +158,11 @@ type RequestRecordStore interface {
 	// conversation made no later call before since. Model discovery is left
 	// out.
 	ListRequestActivity(ctx context.Context, since time.Time) ([]contract.RequestActivityCall, error)
+	// GetProjectMemory reads what one client's agents keep in one project;
+	// see contract.ProjectMemory.
+	GetProjectMemory(context.Context, ProjectMemoryOptions) (contract.ProjectMemory, error)
+	// GetProjectMemoryEntry reads one memory of that view, by the file its
+	// index line links, and what happened to it. ErrNotFound when the view
+	// has no such memory.
+	GetProjectMemoryEntry(context.Context, ProjectMemoryOptions, string) (contract.MemoryEntryDetail, error)
 }

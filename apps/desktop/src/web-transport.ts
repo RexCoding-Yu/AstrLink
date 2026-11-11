@@ -1,4 +1,8 @@
 import { i18n } from "./i18n";
+import {
+  SERVICE_TEST_ALREADY_RUNNING_ERROR,
+  SERVICE_TEST_INVALID_ID_ERROR,
+} from "./service-test-cancellation";
 
 export const CONSOLE_SIGNED_OUT = "astrlink:console-signed-out";
 export const RAW_CHANGED = "astrlink:web-raw-changed";
@@ -10,6 +14,8 @@ export class ConsoleError extends Error {
     public status: number,
     public code: string,
     public retryAfter: number,
+    /** The first detail's reason, such as why a quota read failed. */
+    public reason?: string,
     /** The error's body, such as what a change that needs confirming grants. */
     public body?: unknown,
   ) {
@@ -27,6 +33,7 @@ export async function consoleRequest(
   method: Method = "GET",
   body?: unknown,
   etag?: string,
+  signal?: AbortSignal,
   approved = false,
 ) {
   if (!/^\/(?:control|console)\/v1\//.test(path))
@@ -51,6 +58,7 @@ export async function consoleRequest(
   };
   if (method !== "GET" && body !== undefined)
     options.body = JSON.stringify(body);
+  if (signal) options.signal = signal;
   const response = await fetch(path, options);
   if (response.status === 401)
     window.dispatchEvent(new Event(CONSOLE_SIGNED_OUT));
@@ -66,6 +74,7 @@ export async function consoleRequest(
       response.status,
       error?.code ?? `HTTP ${response.status}`,
       Number(retry),
+      error?.details?.find((v: Args) => typeof v.reason === "string")?.reason,
       value,
     );
   }
@@ -102,6 +111,17 @@ function segment(value: unknown, pattern: RegExp): string {
   return value;
 }
 const service = (a: Args) => `/services/${id(a, "serviceId")}`;
+// Package IDs carry `:` and provider-reported plan keys, so they are escaped
+// as one path segment instead of matched against the resource ID shape.
+function packageID(args: Args): string {
+  const value = args.packageId;
+  if (
+    typeof value !== "string" ||
+    !/^(service|subscription):\P{Cc}{1,400}$/u.test(value)
+  )
+    throw new Error("Invalid package ID");
+  return encodeURIComponent(value);
+}
 const request = (a: Args) => `/requests/${id(a, "requestId")}`;
 const session = (a: Args) => `/request-sessions/${id(a, "sessionId")}`;
 const model = (a: Args) => `/privacy-models/${id(a, "installationId")}`;
@@ -167,6 +187,17 @@ export function openWebURL(value: unknown) {
   window.open(url.href, "_blank", "noopener,noreferrer");
 }
 
+/** Abort handles for provider tests started through the web console. */
+const serviceTestAborts = new Map<string, AbortController>();
+
+function serviceTestKey(serviceId: string, testId: string): string {
+  return JSON.stringify([serviceId, testId]);
+}
+
+function validServiceTestId(testId: string): boolean {
+  return testId.length > 0 && testId.length <= 128;
+}
+
 /** Mirrors sidecar.rs, raw_access.rs and the host's response envelopes. */
 const commands: Record<string, Command> = {
   core_status: async () => {
@@ -223,6 +254,12 @@ const commands: Record<string, Command> = {
     (a) => ({ service_ids: a.serviceIds }),
     "order",
   ),
+  get_service_packages: route("/service-packages"),
+  update_service_package: route(
+    (a) => `/service-packages/${packageID(a)}`,
+    "PATCH",
+    (a) => ({ strategy: a.strategy }),
+  ),
   get_service: route(service, "GET", undefined, "service"),
   create_service: route("/services", "POST", input, "service"),
   update_service: route(service, "PATCH", patch, "service"),
@@ -232,7 +269,41 @@ const commands: Record<string, Command> = {
   ),
   get_service_reset_credits: route((a) => `${service(a)}/usage/reset-credits`),
   reset_service_usage: route((a) => `${service(a)}/usage/reset`, "POST"),
-  test_service: route((a) => `${service(a)}/test`, "POST", input),
+  test_service: async (a) => {
+    const serviceId = id(a, "serviceId");
+    const testId = typeof a.testId === "string" ? a.testId : "";
+    if (testId && !validServiceTestId(testId))
+      throw new Error(SERVICE_TEST_INVALID_ID_ERROR);
+    const key = testId ? serviceTestKey(serviceId, testId) : "";
+    if (key && serviceTestAborts.has(key))
+      throw new Error(SERVICE_TEST_ALREADY_RUNNING_ERROR);
+    const controller = key ? new AbortController() : null;
+    if (controller) serviceTestAborts.set(key, controller);
+    try {
+      const { value } = await consoleRequest(
+        `/control/v1/services/${serviceId}/test`,
+        "POST",
+        input(a),
+        undefined,
+        controller?.signal,
+      );
+      return value;
+    } finally {
+      if (controller && serviceTestAborts.get(key) === controller)
+        serviceTestAborts.delete(key);
+    }
+  },
+  cancel_service_test: async (a) => {
+    const serviceId = id(a, "serviceId");
+    const testId = typeof a.testId === "string" ? a.testId : "";
+    if (!validServiceTestId(testId)) return false;
+    const key = serviceTestKey(serviceId, testId);
+    const controller = serviceTestAborts.get(key);
+    if (!controller) return false;
+    serviceTestAborts.delete(key);
+    controller.abort();
+    return true;
+  },
   probe_service_models: route(
     (a) => `${service(a)}/probe-models`,
     "POST",
@@ -253,6 +324,8 @@ const commands: Record<string, Command> = {
     return { kind: "session", session: value };
   },
   get_service_authorization: route((a) => `${service(a)}/authorization`),
+  get_claude_cli: route("/claude-cli"),
+  install_claude_cli: route("/claude-cli/install", "POST"),
   complete_service_authorization: route(
     (a) => `${service(a)}/authorization`,
     "PUT",
@@ -284,6 +357,10 @@ const commands: Record<string, Command> = {
   get_request_activity: route(
     (a) => `/request-activity${query({ since: a.since })}`,
   ),
+  get_project_memory: route((a) => `/request-memory${query(a.query as Args)}`),
+  get_project_memory_entry: route(
+    (a) => `/request-memory/entry${query(a.query as Args)}`,
+  ),
   get_request_session: route(session),
   get_session_channel_bindings: route(
     (a) => `${session(a)}/channel-bindings${query({ before: a.before })}`,
@@ -312,6 +389,7 @@ const commands: Record<string, Command> = {
   delete_request_record: route(request, "DELETE"),
   purge_request_records: route("/requests/purge", "POST", input),
   get_request_audit_content: route((a) => `${request(a)}/audit`),
+  get_request_context_texts: route((a) => `${request(a)}/audit/context`),
   list_raw_access: route("/audit/raw-access"),
   decide_raw_access: (a) =>
     raw(
@@ -407,6 +485,7 @@ const commands: Record<string, Command> = {
     switch (a.operation) {
       case "status":
       case "catalog":
+      case "estimates":
         return route(`${base}/${a.operation}`)(a);
       case "sync":
         return route(`${base}/sync`, "POST")(a);
@@ -435,6 +514,7 @@ const commands: Record<string, Command> = {
         "PATCH",
         a.input,
         undefined,
+        undefined,
         a.approved === true,
       ).then((result) => result.value);
     if (a.action === "source_preview")
@@ -446,6 +526,7 @@ const commands: Record<string, Command> = {
         "/control/v1/plugins/sources/install",
         "POST",
         a.input,
+        undefined,
         undefined,
         a.approved === true,
       ).then((result) => result.value);
@@ -461,6 +542,7 @@ const commands: Record<string, Command> = {
           "POST",
           a.input,
           undefined,
+          undefined,
           a.approved === true,
         ).then((result) => result.value);
       case "source_uninstall":
@@ -472,6 +554,7 @@ const commands: Record<string, Command> = {
           `/control/v1${plugin}`,
           "PATCH",
           a.input,
+          undefined,
           undefined,
           a.approved === true,
         ).then((result) => result.value);

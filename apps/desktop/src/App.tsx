@@ -71,7 +71,7 @@ import { RouteManager } from "./RouteManager";
 import { SafetyPolicy } from "./SafetyPolicy";
 import { AgentDebugSettings } from "./AgentDebugSettings";
 import type { AgentSkillId } from "./agent-install-model";
-import { RawPasswordGate, useRawSetupNeeded } from "./RawSealingControls";
+import { RawKeyReplacedGate } from "./RawSealingControls";
 import { useRawSealingStatus } from "./use-raw-sealing-status";
 import { LocalDataNotice } from "./LocalDataNotice";
 import { SettingsCenter } from "./SettingsCenter";
@@ -93,6 +93,7 @@ import {
   usePluginSlot,
   type PluginNavigation,
 } from "./plugin-ui";
+import { LocalImportDialog } from "./LocalImportDialog";
 import { useProviderImport } from "./use-provider-import";
 import { notify } from "./notify";
 import type { Service } from "./service-model";
@@ -389,6 +390,11 @@ export default function App() {
   const [pendingPage, setPendingPage] = useState<WorkspacePage | null>(null);
   // Overview and the guide add providers through the same type picker as the list.
   const [serviceKindPickerOpen, setServiceKindPickerOpen] = useState(false);
+  const [localImportOpen, setLocalImportOpen] = useState(false);
+  // Local agent tool configs exist only beside the desktop app.
+  const startLocalImport = isWebEdition
+    ? undefined
+    : () => setLocalImportOpen(true);
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const editorDirtyRef = useRef(false);
   const requestGateRef = useRef<RequestGate | null>(null);
@@ -475,14 +481,7 @@ export default function App() {
       : null;
   const rawSealing = useRawSealingStatus(coreSessionKey, isReady);
   usePluginLanguageSync(coreSessionKey);
-  const rawSetupNeeded = useRawSetupNeeded(rawSealing.status);
-  const onboarding = useOnboarding({
-    isReady,
-    catalog,
-    tokenCatalog,
-    usage,
-    passwordReady: rawSealing.status !== null && !rawSetupNeeded,
-  });
+  const onboarding = useOnboarding({ isReady, catalog, tokenCatalog, usage });
 
   // Silent refreshes read the rendered state to stay out of a visible load.
   const catalogRef = useRef(catalog);
@@ -920,10 +919,7 @@ export default function App() {
         .map((entry) => entry.id),
     [protocols],
   );
-  const providerImport = useProviderImport({
-    enabled: isReady && rawSealing.status !== null && !rawSetupNeeded,
-    protocols,
-  });
+  const providerImport = useProviderImport({ enabled: isReady, protocols });
 
   const handleProviderImported = (service: Service) => {
     providerImport.close();
@@ -1166,7 +1162,6 @@ export default function App() {
                   {t("onboarding.inProgress")} ·{" "}
                   {t(
                     [
-                      "onboarding.passwordTitle",
                       "onboarding.serviceTitle",
                       "onboarding.tokenTitle",
                       "onboarding.clientTitle",
@@ -1202,13 +1197,12 @@ export default function App() {
                   void refreshUsage();
                 }}
                 onRestart={() => void handleRestart()}
-                onRawSealingStatus={rawSealing.setStatus}
-                rawSealing={rawSealing}
               />
             ) : page.kind === "overview" ? (
               <Overview
                 catalog={catalog}
                 copyState={copyState}
+                coreSessionKey={coreSessionKey}
                 isNativeApp={isNativeApp}
                 isReady={isReady}
                 isRestarting={isRestarting}
@@ -1366,6 +1360,7 @@ export default function App() {
                 onServiceRemoved={handleServiceRemoved}
                 onServiceSaved={handleServiceSaved}
                 onViewChange={(next) => navigate(next)}
+                onLocalImport={startLocalImport}
                 protocols={protocols}
                 services={catalog.items}
                 view={page}
@@ -1380,6 +1375,7 @@ export default function App() {
         sessionKey={coreSessionKey}
       />
       <ServiceKindPickerDialog
+        onLocalImport={startLocalImport}
         onOpenChange={setServiceKindPickerOpen}
         onSelect={(serviceKind, plugin) =>
           navigate({
@@ -1399,13 +1395,9 @@ export default function App() {
         open={pendingPage !== null}
         title={t("common.discardUnsaved")}
       />
-      <RawPasswordGate
+      <RawKeyReplacedGate
         onStatus={rawSealing.setStatus}
         status={rawSealing.status}
-        // The guide asks for the password in its own first step.
-        suspended={
-          !onboarding.settled || (onboarding.active && page.kind === "overview")
-        }
       />
       {providerImport.active && (
         <ProviderImportDialog
@@ -1414,6 +1406,14 @@ export default function App() {
           plan={providerImport.active.plan}
           onAdded={handleProviderImported}
           onClose={providerImport.close}
+        />
+      )}
+      {localImportOpen && (
+        <LocalImportDialog
+          onClose={() => setLocalImportOpen(false)}
+          onImported={rememberService}
+          protocols={protocols}
+          services={catalog.items}
         />
       )}
     </AppShell>

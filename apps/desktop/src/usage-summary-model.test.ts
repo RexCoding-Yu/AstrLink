@@ -21,6 +21,10 @@ const response = {
   status_counts: statusCounts,
   by_day: [{ date, ...totals }],
   by_hour: [{ date, hour: 9, ...totals }],
+  by_hour_model: [
+    { date, hour: 9, model: "model_a", requests: 5000, total_tokens: 10000 },
+    { date, hour: 9, model: null, requests: 1, total_tokens: 2 },
+  ],
   by_service: [{ id: null, ...totals }],
   by_model: [{ id: "model_a", ...totals }],
   by_token: [{ id: "token_a", ...totals }],
@@ -31,6 +35,25 @@ const response = {
       failed_requests: 2,
       tasks: 0,
       failed_tasks: 0,
+    },
+  ],
+  by_client: [{ id: null, ...totals }],
+  by_route: [
+    {
+      client_type: "codex",
+      service_id: "service_b",
+      failed_service_id: "service_a",
+      failed: false,
+      rewrites: ["model_redirect", "client_identity"],
+      requests: 5000,
+    },
+    {
+      client_type: null,
+      service_id: null,
+      failed_service_id: null,
+      failed: true,
+      rewrites: [],
+      requests: 1,
     },
   ],
   scanned_records: 5001,
@@ -99,6 +122,33 @@ describe("usage summary contract", () => {
     expect(summary.by_day).toEqual(response.by_day);
   });
 
+  it("keeps hour-by-model buckets and client groups", () => {
+    const summary = parseUsageSummary(response, window);
+    expect(summary.by_hour_model).toEqual(response.by_hour_model);
+    expect(summary.by_client).toEqual(response.by_client);
+  });
+
+  it("keeps routes and drops kinds it does not know", () => {
+    expect(parseUsageSummary(response, window).by_route).toEqual(
+      response.by_route,
+    );
+    const newer = parseUsageSummary(
+      {
+        ...response,
+        by_route: [
+          {
+            ...response.by_route[0],
+            client_type: "future_client",
+            rewrites: ["future_rewrite", "client_identity", "privacy"],
+          },
+        ],
+      },
+      window,
+    ).by_route[0];
+    expect(newer.client_type).toBeNull();
+    expect(newer.rewrites).toEqual(["privacy", "client_identity"]);
+  });
+
   it.each([
     { ...response, totals: { ...totals, total_tokens: -1 } },
     {
@@ -124,6 +174,37 @@ describe("usage summary contract", () => {
     {
       ...response,
       by_plugin: [{ ...response.by_plugin[0], requests: undefined }],
+    },
+    { ...response, by_client: [...response.by_client, ...response.by_client] },
+    { ...response, by_client: undefined },
+    { ...response, by_hour_model: undefined },
+    { ...response, by_route: undefined },
+    { ...response, by_route: [response.by_route[0], response.by_route[0]] },
+    { ...response, by_route: [{ ...response.by_route[0], requests: 0 }] },
+    { ...response, by_route: [{ ...response.by_route[0], failed: 1 }] },
+    {
+      ...response,
+      by_route: [{ ...response.by_route[0], rewrites: ["privacy", "privacy"] }],
+    },
+    {
+      ...response,
+      by_hour_model: [{ ...response.by_hour_model[0], date: "2026-09-17" }],
+    },
+    {
+      ...response,
+      by_hour_model: [{ ...response.by_hour_model[0], hour: 24 }],
+    },
+    {
+      ...response,
+      by_hour_model: [{ ...response.by_hour_model[0], model: "" }],
+    },
+    {
+      ...response,
+      by_hour_model: [{ ...response.by_hour_model[0], requests: -1 }],
+    },
+    {
+      ...response,
+      by_hour_model: [response.by_hour_model[0], response.by_hour_model[0]],
     },
     { ...response, extra: true },
   ])("rejects malformed or inconsistent statistics", (value) => {

@@ -34,7 +34,14 @@ import {
   parseProviderImportNotice,
   type ProviderImportNotice,
 } from "./provider-import-model";
+import {
+  parseLocalImportOpened,
+  parseLocalImportRead,
+  type LocalImportOpened,
+  type LocalImportRead,
+} from "./local-import-model";
 import { parseUsageSummary } from "./usage-summary-model";
+import { parseDisplayCurrency, type DisplayCurrency } from "./currency-display";
 import {
   parsePrivacySummary,
   type PrivacySummary,
@@ -114,14 +121,21 @@ import {
 } from "./privacy-policy-model";
 import {
   parseAuditContent,
+  parseMemoryEntryDetail,
+  parseProjectMemory,
   parsePurgeResult,
+  parseRequestContextTexts,
   parseRequestRecord,
   parseRequestActivity,
   parseRequestRecordPage,
   parseRequestSessionDetail,
   parseRequestSessionPage,
   type AuditContent,
+  type ClientType,
+  type MemoryEntryDetail,
+  type ProjectMemory,
   type RequestActivity,
+  type RequestContextTexts,
   type RequestRecord,
   type RequestRecordListQuery,
   type RequestRecordPage,
@@ -157,9 +171,11 @@ import { parseLocalDataStatus, type LocalDataStatus } from "./local-data-model";
 import {
   parseAuthorizationSession,
   parseBeginCodexAuthorizationResult,
+  parseClaudeCLIStatus,
   type AuthorizationFlow,
   type AuthorizationSession,
   type BeginCodexAuthorizationResult,
+  type ClaudeCLIStatus,
 } from "./subscription-model";
 import {
   parseSubscriptionUsage,
@@ -231,17 +247,23 @@ import {
   type SessionPlugin,
 } from "./plugin-model";
 import {
+  parseClientCatalog,
   parseClientConfigApplyOutcome,
   parseClientConfigCopied,
+  parseClientConfigPreview,
   parseClientConfigSnippet,
   parseClientConfigOverview,
   parseClientProxyCheck,
+  type ClientCatalog,
+  type ClientConfigAction,
   type ClientConfigApplyOutcome,
   type ClientConfigClient,
+  type ClientConfigItem,
   type ClientConfigModels,
   type ClientConfigOverview,
+  type ClientConfigPreview,
+  type ClientConfigSnippetFile,
   type ClientProxyCheck,
-  type DirectClient,
 } from "./client-config-model";
 import {
   parseAgentInstallReceipt,
@@ -361,6 +383,12 @@ export async function getPreferences(): Promise<SettingsSnapshot> {
   return parseSettingsSnapshot(await invokeDesktopRead("get_preferences"));
 }
 
+/** The currency amounts show in, with today's rate; see `currency.rs`. */
+export async function getDisplayCurrency(): Promise<DisplayCurrency> {
+  requireNativeBridge();
+  return parseDisplayCurrency(await invoke<unknown>("display_currency"));
+}
+
 export async function updatePreferences(
   input: Preferences,
 ): Promise<SettingsSnapshot> {
@@ -460,6 +488,89 @@ export async function updateServiceOrder(
   );
 }
 
+export const PACKAGE_STRATEGIES = [
+  "auto",
+  "soonest_reset",
+  "most_remaining",
+] as const;
+export type PackageStrategy = (typeof PACKAGE_STRATEGIES)[number];
+/**
+ * Accounts of one provider and plan, or a single service. The core derives
+ * membership; `service_ids` keep their routing order.
+ */
+export interface ServicePackage {
+  id: string;
+  kind: "subscription" | "service";
+  provider?: string;
+  plan_type?: string;
+  service_ids: string[];
+  strategy: PackageStrategy;
+}
+// Plan keys are whatever the provider reports, lowercased, so only the prefix
+// and the absence of control characters are checked here.
+const packageIDPattern = /^(service|subscription):\P{Cc}{1,400}$/u;
+export function isPackageStrategy(value: unknown): value is PackageStrategy {
+  return PACKAGE_STRATEGIES.includes(value as PackageStrategy);
+}
+export function parseServicePackage(value: unknown): ServicePackage {
+  if (!value || typeof value !== "object")
+    throw new Error("Invalid service package");
+  const { id, kind, provider, plan_type, service_ids, strategy } =
+    value as ServicePackage;
+  if (
+    typeof id !== "string" ||
+    !packageIDPattern.test(id) ||
+    (kind !== "subscription" && kind !== "service") ||
+    (provider !== undefined && typeof provider !== "string") ||
+    (plan_type !== undefined && typeof plan_type !== "string") ||
+    !Array.isArray(service_ids) ||
+    service_ids.length === 0 ||
+    service_ids.some(
+      (serviceID) =>
+        typeof serviceID !== "string" ||
+        !/^[a-z][a-z0-9_-]{2,95}$/.test(serviceID),
+    ) ||
+    new Set(service_ids).size !== service_ids.length ||
+    !isPackageStrategy(strategy)
+  )
+    throw new Error("Invalid service package");
+  return {
+    id,
+    kind,
+    ...(provider ? { provider } : {}),
+    ...(plan_type ? { plan_type } : {}),
+    service_ids,
+    strategy,
+  };
+}
+export function parseServicePackages(value: unknown): ServicePackage[] {
+  const packages = (value as { packages?: unknown } | null)?.packages;
+  if (!Array.isArray(packages)) throw new Error("Invalid service packages");
+  const parsed = packages.map(parseServicePackage);
+  const members = parsed.flatMap((item) => item.service_ids);
+  if (
+    new Set(parsed.map((item) => item.id)).size !== parsed.length ||
+    new Set(members).size !== members.length
+  )
+    throw new Error("Invalid service packages");
+  return parsed;
+}
+export async function getServicePackages(): Promise<ServicePackage[]> {
+  requireNativeBridge();
+  return parseServicePackages(await invoke("get_service_packages"));
+}
+export async function updateServicePackageStrategy(
+  packageId: string,
+  strategy: PackageStrategy,
+): Promise<ServicePackage> {
+  requireNativeBridge();
+  if (!packageIDPattern.test(packageId) || !isPackageStrategy(strategy))
+    throw new Error("Invalid service package");
+  return parseServicePackage(
+    await invoke("update_service_package", { packageId, strategy }),
+  );
+}
+
 export async function getService(serviceId: string): Promise<ServiceRecord> {
   requireNativeBridge();
   return parseServiceRecord(
@@ -528,14 +639,33 @@ export async function resetServiceUsage(
   );
 }
 
+export {
+  SERVICE_TEST_CANCELLED_ERROR,
+  SERVICE_TEST_ALREADY_RUNNING_ERROR,
+  SERVICE_TEST_INVALID_ID_ERROR,
+} from "./service-test-cancellation";
+
 export async function testService(
   serviceId: string,
   input: ServiceTestInput,
+  testId?: string,
 ): Promise<ServiceTestResult> {
   requireNativeBridge();
   return parseServiceTestResult(
-    await invoke<unknown>("test_service", { serviceId, input }),
+    await invoke<unknown>("test_service", {
+      serviceId,
+      input,
+      ...(testId ? { testId } : {}),
+    }),
   );
+}
+
+export async function cancelServiceTest(
+  serviceId: string,
+  testId: string,
+): Promise<boolean> {
+  requireNativeBridge();
+  return invoke<boolean>("cancel_service_test", { serviceId, testId });
 }
 
 export async function probeServiceModels(
@@ -644,6 +774,18 @@ export async function getServiceAuthorization(
   );
 }
 
+/** The claude CLI official Claude accounts run. */
+export async function getClaudeCLI(): Promise<ClaudeCLIStatus> {
+  requireNativeBridge();
+  return parseClaudeCLIStatus(await invoke<unknown>("get_claude_cli"));
+}
+
+/** Starts the official installer; only the server edition offers it. */
+export async function installClaudeCLI(): Promise<ClaudeCLIStatus> {
+  requireNativeBridge();
+  return parseClaudeCLIStatus(await invoke<unknown>("install_claude_cli"));
+}
+
 export async function cancelServiceAuthorization(
   serviceId: string,
 ): Promise<AuthorizationSession> {
@@ -708,6 +850,9 @@ function compactQuery(
     compact.models = query.models;
   }
   if (query.status !== undefined) compact.status = query.status;
+  if (query.client_type !== undefined) {
+    compact.client_type = query.client_type;
+  }
   return compact;
 }
 
@@ -824,15 +969,59 @@ export async function getRequestAuditContent(
   );
 }
 
+/** What the texts of a call's captured body read: rules, memory, summary. */
+export async function getRequestContextTexts(
+  requestId: string,
+): Promise<RequestContextTexts> {
+  requireNativeBridge();
+  return parseRequestContextTexts(
+    await invoke<unknown>("get_request_context_texts", { requestId }),
+  );
+}
+
+/**
+ * Which project's memory to read: a project, or the calls that named none;
+ * without either, the project of the most recent call. Without a client, the
+ * one that called there last. `day_start` is when today began here, so the
+ * daily reads follow the local day.
+ */
+export type ProjectMemoryQuery = {
+  client_type?: ClientType;
+  day_start?: string;
+} & (
+  | { project?: string; no_project?: never }
+  | { no_project: true; project?: never }
+);
+
+export async function getProjectMemory(
+  query: ProjectMemoryQuery,
+): Promise<ProjectMemory> {
+  requireNativeBridge();
+  return parseProjectMemory(
+    await invoke<unknown>("get_project_memory", { query }),
+  );
+}
+
+/** One memory of a project's view and each turn that noted or read it. */
+export async function getProjectMemoryEntry(
+  query: ProjectMemoryQuery & { file: string },
+): Promise<MemoryEntryDetail> {
+  requireNativeBridge();
+  return parseMemoryEntryDetail(
+    await invoke<unknown>("get_project_memory_entry", { query }),
+  );
+}
+
 export async function listRawAccess(): Promise<RawAccessList> {
   requireNativeBridge();
   return parseRawAccessList(await invoke<unknown>("list_raw_access"));
 }
 
 /**
- * Decides one agent raw access request. While Core is unlocked an approval
- * needs no proof; otherwise it carries the raw password, which the host
- * forwards once and keeps no copy of. Denying carries none.
+ * Decides one agent raw access request. An approval always carries a proof:
+ * the raw password, which the host forwards once and keeps no copy of, or a
+ * request for Touch ID, which the host prompts for itself. Denying carries
+ * none.
  */
 export async function decideRawAccess(
   grantId: string,
@@ -849,7 +1038,7 @@ export async function decideRawAccess(
   );
 }
 
-/** Ends a running timed grant before it expires. */
+/** Ends a running lasting grant before it ends on its own. */
 export async function revokeRawGrant(grantId: string): Promise<RawAccessGrant> {
   requireNativeBridge();
   return parseRawAccessGrant(
@@ -862,10 +1051,33 @@ export async function getRawSealingStatus(): Promise<RawSealingState> {
   return parseRawSealingState(await invoke<unknown>("raw_sealing_status"));
 }
 
-/** Opens the operator's raw unlock session; Core ends it after idling. */
+/**
+ * Opens the operator's raw unlock session. On the desktop it lasts until the
+ * screen locks, the computer sleeps, or the operator locks; Core ends an idle
+ * one where it keeps that timeout.
+ */
 export async function unlockRaw(proof: RawProof): Promise<RawSealingOutcome> {
   requireNativeBridge();
   return parseRawSealingOutcome(await invoke<unknown>("unlock_raw", { proof }));
+}
+
+/**
+ * Lets Touch ID open raw content beside the raw password, which this takes
+ * once. The host keeps the key it generates in the keychain.
+ */
+export async function enrollRawBiometric(
+  password: string,
+): Promise<RawSealingOutcome> {
+  requireNativeBridge();
+  return parseRawSealingOutcome(
+    await invoke<unknown>("enroll_raw_biometric", { password }),
+  );
+}
+
+/** Stops Touch ID from opening raw content; the raw password keeps working. */
+export async function removeRawBiometric(): Promise<RawSealingStatus> {
+  requireNativeBridge();
+  return parseRawSealingStatus(await invoke<unknown>("remove_raw_biometric"));
 }
 
 /**
@@ -1019,27 +1231,38 @@ export async function deleteAccessToken(tokenId: string): Promise<void> {
 
 export interface ClientConfigTarget {
   tokenId: string;
-  client: DirectClient;
+  client: ClientConfigClient;
   models: ClientConfigModels;
   inferenceUrl: string;
 }
 
 /**
- * What AstrLink wrote to Claude Code, Codex, and Pi, on this computer and in
+ * Every client the setup dialog lists and how AstrLink reaches each. Outside
+ * the desktop there are no local clients.
+ */
+export async function getClientCatalog(): Promise<ClientCatalog> {
+  if (!hasNativeBridge()) return { clients: [] };
+  return parseClientCatalog(await invoke<unknown>("client_catalog"));
+}
+
+/**
+ * What AstrLink wrote to each client of `catalog`, on this computer and in
  * running WSL distributions. Outside the desktop there are no local clients.
  */
 export async function getClientConfigStatus(
   inferenceUrl: string | null,
+  catalog: ClientCatalog,
 ): Promise<ClientConfigOverview> {
   if (!hasNativeBridge())
     return {
       clients: [],
       wsl_unchecked: [],
       wsl_localhost: false,
-      cc_switch_wsl: { claude: null, codex: null },
+      installed: [],
     };
   return parseClientConfigOverview(
     await invoke<unknown>("client_config_status", { inferenceUrl }),
+    catalog,
   );
 }
 
@@ -1057,30 +1280,72 @@ export async function checkClientProxy(
 }
 
 /**
- * Writes the connection, or names the keys that need `replace` first. `wsl`
- * names the WSL distribution to write in; `null` is this computer.
+ * What writing or removing one client's config would change, file by file.
+ * The token stays in the host; the diff shows its hint.
  */
-export async function applyClientConfig(
-  input: ClientConfigTarget & { replace: boolean; wsl: string | null },
-): Promise<ClientConfigApplyOutcome> {
+export async function previewClientConfigChanges(input: {
+  tokenId: string;
+  client: ClientConfigClient;
+  /** The WSL distribution to write in; `null` is this computer. */
+  wsl: string | null;
+  /** The write target of a client with several; `null` otherwise. */
+  target: string | null;
+  action: ClientConfigAction;
+  models: ClientConfigModels;
+  inferenceUrl: string;
+}): Promise<ClientConfigPreview> {
   requireNativeBridge();
-  return parseClientConfigApplyOutcome(
-    await invoke<unknown>("apply_client_config", { ...input }),
+  return parseClientConfigPreview(
+    await invoke<unknown>("preview_client_config_changes", { ...input }),
   );
 }
 
-export async function removeClientConfig(
-  client: DirectClient,
-  wsl: string | null,
-): Promise<void> {
+/**
+ * Writes or removes several clients' configs. Unless `confirmed`, nothing is
+ * written while any item replaces settings AstrLink did not write, switches
+ * tokens or gateways, or removes a config; those come back to confirm.
+ */
+export async function applyClientConfigs(input: {
+  tokenId: string | null;
+  inferenceUrl: string;
+  items: ClientConfigItem[];
+  confirmed: boolean;
+}): Promise<ClientConfigApplyOutcome> {
   requireNativeBridge();
-  await invoke("remove_client_config", { client, wsl });
+  return parseClientConfigApplyOutcome(
+    await invoke<unknown>("apply_client_configs", { ...input }),
+    input.items,
+  );
 }
 
-/** The config for a fresh setup, with the token shown as its hint. */
+/**
+ * Opens a client's import link for a token. The host builds the link, so
+ * the token never reaches the webview.
+ */
+export async function openClientImportLink(input: {
+  tokenId: string;
+  client: ClientConfigClient;
+  protocol: string;
+  inferenceUrl: string;
+}): Promise<void> {
+  requireNativeBridge();
+  await invoke("open_client_import_link", { ...input });
+}
+
+/** Removes AstrLink's config and restores the values it replaced. */
+export async function removeClientConfig(
+  client: ClientConfigClient,
+  wsl: string | null,
+  target: string | null,
+): Promise<void> {
+  requireNativeBridge();
+  await invoke("remove_client_config", { client, wsl, target });
+}
+
+/** The config for a fresh setup, file by file, with the token's hint. */
 export async function previewClientConfigSnippet(
   input: ClientConfigTarget,
-): Promise<string> {
+): Promise<ClientConfigSnippetFile[]> {
   requireNativeBridge();
   return parseClientConfigSnippet(
     await invoke<unknown>("preview_client_config_snippet", { ...input }),
@@ -1088,11 +1353,12 @@ export async function previewClientConfigSnippet(
 }
 
 /**
- * Has the host copy the config with the real token to the clipboard. False
- * when the clipboard refused it.
+ * Has the host copy one file of the config, `file` indexing the preview's
+ * files, with the real token to the clipboard. False when the clipboard
+ * refused it.
  */
 export async function copyClientConfigSnippet(
-  input: ClientConfigTarget,
+  input: ClientConfigTarget & { file: number },
 ): Promise<boolean> {
   requireNativeBridge();
   return parseClientConfigCopied(
@@ -1123,21 +1389,10 @@ export async function openServiceTerminal(
   await invoke("open_service_terminal", { request });
 }
 
-/** Whether the OS has an app registered for CC Switch's import links. */
+/** Whether the OS has an app registered for CC Switch's links. */
 export async function isCCSwitchInstalled(): Promise<boolean> {
   if (!hasNativeBridge()) return false;
   return (await invoke<unknown>("cc_switch_installed")) === true;
-}
-
-/** CC Switch names the provider after the token. */
-export async function openCCSwitchImport(input: {
-  tokenId: string;
-  client: ClientConfigClient;
-  models: ClientConfigModels;
-  inferenceUrl: string;
-}): Promise<void> {
-  requireNativeBridge();
-  await invoke("open_cc_switch_import", input);
 }
 
 /** The provider link waiting for confirmation, e.g. the one that launched the app. */
@@ -1170,6 +1425,65 @@ export async function confirmProviderImport(
 export async function dismissProviderImport(id: string): Promise<void> {
   if (!hasNativeBridge()) return;
   await invoke("dismiss_provider_import", { id });
+}
+
+function requireLocalFiles(): void {
+  if (!hasNativeBridge()) throw new Error(i18n.t("bridge.desktopOnly"));
+}
+
+/** Finds the agent tools' config files and starts an import; reads none. */
+export async function openLocalImport(): Promise<LocalImportOpened> {
+  requireLocalFiles();
+  return parseLocalImportOpened(await invoke<unknown>("local_import_sources"));
+}
+
+/** Reads the checked sources; keys come back only as hints. */
+export async function readLocalImport(
+  session: string,
+  sources: string[],
+): Promise<LocalImportRead> {
+  requireLocalFiles();
+  return parseLocalImportRead(
+    await invoke<unknown>("read_local_import", { session, sources }),
+  );
+}
+
+/** The one model-list request a found provider gets; the host adds its key. */
+export async function probeLocalImportModels(
+  session: string,
+  candidate: string,
+  input: DraftServiceModelProbeInput,
+): Promise<ServiceModelProbe> {
+  requireLocalFiles();
+  return parseServiceModelProbe(
+    await invoke<unknown>("probe_local_import_models", {
+      session,
+      candidate,
+      input,
+    }),
+  );
+}
+
+/** Creates a found provider; the host attaches the key it read. */
+export async function confirmLocalImport(
+  session: string,
+  candidate: string,
+  input: HTTPServiceCreateInput,
+): Promise<ServiceRecord> {
+  requireLocalFiles();
+  return parseServiceRecord(
+    await invoke<unknown>("confirm_local_import", {
+      session,
+      candidate,
+      input,
+    }),
+  );
+}
+
+/** Ends the import; the host drops every key it read. */
+export async function dismissLocalImport(session: string): Promise<void> {
+  if (!hasNativeBridge()) return;
+  await invoke("dismiss_local_import", { session });
 }
 
 export async function listPrivacyPolicies(): Promise<PrivacyPolicyPage> {

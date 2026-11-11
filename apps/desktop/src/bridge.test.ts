@@ -41,6 +41,8 @@ import {
   getService,
   getServiceOrder,
   updateServiceOrder,
+  getServicePackages,
+  updateServicePackageStrategy,
   getServiceAuthorization,
   getServiceUsage,
   resetServiceUsage,
@@ -59,6 +61,7 @@ import {
   probeServiceModels,
   probeServiceProxy,
   testService,
+  cancelServiceTest,
   probePrivacyModel,
   restartCore,
   updateService,
@@ -70,10 +73,11 @@ import {
   logoutService,
   openAuthorizationURL,
   isCCSwitchInstalled,
-  openCCSwitchImport,
+  getClientCatalog,
   getClientConfigStatus,
   checkClientProxy,
-  applyClientConfig,
+  applyClientConfigs,
+  previewClientConfigChanges,
   removeClientConfig,
   previewClientConfigSnippet,
   copyClientConfigSnippet,
@@ -146,12 +150,10 @@ describe("desktop bridge contract", () => {
     invokeMock.mockResolvedValueOnce({
       items: [grant],
       active: [running],
-      unlocked: true,
     });
     await expect(listRawAccess()).resolves.toEqual({
       pending: [{ ...grant, decision: null, scope: null }],
       active: [running],
-      unlocked: true,
     });
     expect(invokeMock).toHaveBeenLastCalledWith("list_raw_access");
 
@@ -193,7 +195,7 @@ describe("desktop bridge contract", () => {
       retry_after_seconds: 8,
     });
     await expect(
-      decideRawAccess(grant.grant_id, "window_5m", {
+      decideRawAccess(grant.grant_id, "until_lock", {
         kind: "password",
         password: "wrong",
       }),
@@ -222,10 +224,9 @@ describe("desktop bridge contract", () => {
     invokeMock.mockResolvedValueOnce({
       items: [{ ...grant, grant_id: "x" }],
       active: [],
-      unlocked: false,
     });
     await expect(listRawAccess()).rejects.toThrow("$.items[0].grant_id");
-    invokeMock.mockResolvedValueOnce({ items: [], unlocked: false });
+    invokeMock.mockResolvedValueOnce({ items: [] });
     await expect(listRawAccess()).rejects.toThrow("$.active");
     invokeMock.mockResolvedValueOnce({ outcome: "approved" });
     await expect(decideRawAccess(grant.grant_id, "deny")).rejects.toThrow(
@@ -248,6 +249,7 @@ describe("desktop bridge contract", () => {
       password_min_length: 8,
       password_max_length: 128,
       key_replaced: false,
+      biometric_available: false,
     };
     invokeMock.mockResolvedValueOnce(status);
     await expect(getRawSealingStatus()).resolves.toEqual(status);
@@ -290,7 +292,11 @@ describe("desktop bridge contract", () => {
     await expect(getRawSealingStatus()).resolves.toMatchObject({
       key_replaced: false,
     });
-    const { key_replaced: _verdict, ...withoutVerdict } = status;
+    const {
+      key_replaced: _verdict,
+      biometric_available: _touchID,
+      ...withoutVerdict
+    } = status;
     invokeMock.mockResolvedValueOnce(withoutVerdict);
     await expect(lockRaw()).resolves.toEqual(status);
     invokeMock.mockResolvedValueOnce({ ...status, key_replaced: "yes" });
@@ -381,9 +387,12 @@ describe("desktop bridge contract", () => {
       status_counts: emptyUsageStatusCounts(),
       by_day: [],
       by_hour: [],
+      by_hour_model: [],
       by_service: [],
       by_model: [],
       by_token: [],
+      by_client: [],
+      by_route: [],
       by_plugin: [],
       scanned_records: 0,
     });
@@ -405,9 +414,12 @@ describe("desktop bridge contract", () => {
       status_counts: emptyUsageStatusCounts(),
       by_day: [],
       by_hour: [],
+      by_hour_model: [],
       by_service: [],
       by_model: [],
       by_token: [],
+      by_client: [],
+      by_route: [],
       by_plugin: [],
       scanned_records: 0,
     };
@@ -474,6 +486,66 @@ describe("desktop bridge contract", () => {
     await expect(updateServiceOrder(["bad/path"], record.etag)).rejects.toThrow(
       "Invalid service order",
     );
+  });
+  it("reads packages in routing order and saves one package's strategy", async () => {
+    const plus = {
+      id: "subscription:codex:plus",
+      kind: "subscription",
+      provider: "openai_codex",
+      plan_type: "plus",
+      service_ids: ["service_b", "service_a"],
+      strategy: "most_remaining",
+    };
+    // Core leaves plan_type out for a plan it has not read and for services.
+    const unread = {
+      id: "subscription:claude:unknown",
+      kind: "subscription",
+      provider: "claude_code",
+      service_ids: ["service_c"],
+      strategy: "auto",
+    };
+    const relay = {
+      id: "service:service_relay",
+      kind: "service",
+      service_ids: ["service_relay"],
+      strategy: "auto",
+    };
+    invokeMock.mockResolvedValueOnce({ packages: [plus, unread, relay] });
+    await expect(getServicePackages()).resolves.toEqual([plus, unread, relay]);
+    expect(invokeMock).toHaveBeenLastCalledWith("get_service_packages");
+
+    invokeMock.mockResolvedValueOnce({ ...plus, strategy: "soonest_reset" });
+    await expect(
+      updateServicePackageStrategy(plus.id, "soonest_reset"),
+    ).resolves.toEqual({ ...plus, strategy: "soonest_reset" });
+    expect(invokeMock).toHaveBeenLastCalledWith("update_service_package", {
+      packageId: plus.id,
+      strategy: "soonest_reset",
+    });
+
+    for (const packages of [
+      [plus, { ...relay, service_ids: ["service_a"] }],
+      [plus, { ...plus, service_ids: ["service_z"] }],
+      [{ ...plus, strategy: "fastest" }],
+      [{ ...plus, id: "plan:codex:plus" }],
+      [{ ...plus, service_ids: [] }],
+    ]) {
+      invokeMock.mockResolvedValueOnce({ packages });
+      await expect(getServicePackages()).rejects.toThrow(
+        /Invalid service package/,
+      );
+    }
+    invokeMock.mockClear();
+    await expect(
+      updateServicePackageStrategy(
+        plus.id,
+        "fastest" as Parameters<typeof updateServicePackageStrategy>[1],
+      ),
+    ).rejects.toThrow("Invalid service package");
+    await expect(
+      updateServicePackageStrategy("subscription:\ncodex", "auto"),
+    ).rejects.toThrow("Invalid service package");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
   beforeEach(() => {
     invokeMock.mockReset();
@@ -592,6 +664,10 @@ describe("desktop bridge contract", () => {
     await listRequestSessions({ ...query, kind: "inference" });
     expect(invokeMock).toHaveBeenLastCalledWith("list_request_sessions", {
       query: { ...query, kind: "inference" },
+    });
+    await listRequestRecords({ limit: 1, client_type: "zed" });
+    expect(invokeMock).toHaveBeenLastCalledWith("list_request_records", {
+      query: { limit: 1, client_type: "zed" },
     });
   });
 
@@ -816,6 +892,7 @@ describe("desktop bridge contract", () => {
       id: "token_01",
       name: "VS Code",
       hint: "astr_…K8Q2",
+      source: "user",
       created_at: "2026-07-24T10:30:00Z",
     };
 
@@ -870,77 +947,83 @@ describe("desktop bridge contract", () => {
     invokeMock.mockResolvedValueOnce("yes");
     await expect(isCCSwitchInstalled()).resolves.toBe(false);
 
-    const ccSwitchInput = {
-      tokenId: "token_01",
-      client: "gemini" as const,
-      models: { model: "gemini-2.5-pro" },
-      inferenceUrl: "http://127.0.0.1:8317",
+    const clientDirs = {
+      claude: [".claude", ["settings.json"]],
+      codex: [".codex", ["config.toml"]],
+      gemini: [".gemini", [".env", "settings.json"]],
+      opencode: [".config/opencode", ["opencode.jsonc"]],
+      openclaw: [".openclaw", ["openclaw.json"]],
+      pi: [".pi/agent", ["models.json", "settings.json"]],
+    } as const;
+    const catalog = {
+      clients: Object.keys(clientDirs).map((id) => ({
+        id,
+        name: id,
+        kind: "file" as const,
+        targets: [],
+        protocols: ["openai.chat"],
+        list: false,
+      })),
     };
-    invokeMock.mockResolvedValueOnce(undefined);
-    await openCCSwitchImport(ccSwitchInput);
-    expect(invokeMock).toHaveBeenLastCalledWith(
-      "open_cc_switch_import",
-      ccSwitchInput,
+    invokeMock.mockResolvedValueOnce(catalog);
+    await expect(getClientCatalog()).resolves.toEqual(catalog);
+    expect(invokeMock).toHaveBeenLastCalledWith("client_catalog");
+    invokeMock.mockResolvedValueOnce({
+      clients: [{ ...catalog.clients[0], kind: "plugin" }],
+    });
+    await expect(getClientCatalog()).rejects.toThrow(
+      "Invalid client-config IPC response",
     );
 
-    const statuses = [
-      {
-        client: "claude",
+    const statuses = Object.entries(clientDirs).map(
+      ([client, [dir, names]]) => ({
+        client,
         wsl: null,
-        detected: true,
-        paths: ["/Users/me/.claude/settings.json"],
-        state: "configured",
-        token_id: "token_01",
-        models: { model: "claude-route", opusModel: "opus-route" },
-      },
-      {
-        client: "codex",
-        wsl: null,
-        detected: false,
-        paths: ["/Users/me/.codex/config.toml"],
-        state: "not_configured",
-        token_id: null,
-        models: {},
-      },
-      {
-        client: "pi",
-        wsl: null,
-        detected: true,
-        paths: [
-          "/Users/me/.pi/agent/models.json",
-          "/Users/me/.pi/agent/settings.json",
-        ],
-        state: "not_configured",
-        token_id: null,
-        models: {},
-      },
-    ];
+        target: null,
+        detected: client !== "codex",
+        home: "/Users/me",
+        dir: `/Users/me/${dir}`,
+        paths: names.map((name) => `/Users/me/${dir}/${name}`),
+        exists: names.map(() => client === "claude"),
+        state: client === "claude" ? "configured" : "not_configured",
+        token_id: client === "claude" ? "token_01" : null,
+        models:
+          client === "claude"
+            ? { model: "claude-route", opusModel: "opus-route" }
+            : {},
+        notes: [],
+        paste_since_unix: null,
+        paste_into: [],
+      }),
+    );
     const inUbuntu = statuses.map((status) => ({
       ...status,
       wsl: "Ubuntu",
+      home: "//wsl$/Ubuntu/home/me",
+      dir: `//wsl$/Ubuntu${status.dir}`,
       paths: status.paths.map((path) => `//wsl$/Ubuntu${path}`),
     }));
     const overview = {
       clients: [...statuses, ...inUbuntu],
       wsl_unchecked: ["Debian"],
       wsl_localhost: true,
-      cc_switch_wsl: { claude: null, codex: "Ubuntu" },
+      installed: [],
     };
     invokeMock.mockResolvedValueOnce(overview);
     await expect(
-      getClientConfigStatus("http://127.0.0.1:8317"),
+      getClientConfigStatus("http://127.0.0.1:8317", catalog),
     ).resolves.toEqual(overview);
     expect(invokeMock).toHaveBeenLastCalledWith("client_config_status", {
       inferenceUrl: "http://127.0.0.1:8317",
     });
     for (const clients of [
-      [statuses[1], statuses[0], statuses[2]],
+      [statuses[1], statuses[0], ...statuses.slice(2)],
       [...inUbuntu, ...statuses],
       [...statuses, inUbuntu[0], inUbuntu[1]],
       [...statuses, ...statuses],
     ]) {
       invokeMock.mockResolvedValueOnce({ ...overview, clients });
-      await expect(getClientConfigStatus(null)).rejects.toThrow(
+      await expect(getClientConfigStatus(null, catalog)).rejects.toThrow(
         "Invalid client-config IPC response",
       );
     }
@@ -961,70 +1044,181 @@ describe("desktop bridge contract", () => {
       "Invalid client-config IPC response",
     );
 
-    const target = {
+    const change = {
       tokenId: "token_01",
-      client: "codex" as const,
-      models: { model: "gpt-5" },
+      client: "gemini" as const,
+      wsl: null,
+      target: null,
+      action: "write" as const,
+      models: { model: "gemini-3-pro" },
       inferenceUrl: "http://127.0.0.1:8317",
     };
+    const preview = {
+      files: [
+        {
+          path: "/Users/me/.gemini/.env",
+          created: true,
+          deleted: false,
+          changes: 2,
+          unit: "line",
+          lines: [{ kind: "add", text: "GEMINI_API_KEY=astr_…abcd" }],
+        },
+      ],
+      replaced: 0,
+      restored: 0,
+    };
+    invokeMock.mockResolvedValueOnce(preview);
+    await expect(previewClientConfigChanges(change)).resolves.toEqual(preview);
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      "preview_client_config_changes",
+      change,
+    );
     invokeMock.mockResolvedValueOnce({
-      status: "needs_confirmation",
-      keys: ["model_provider"],
-      gateway: "http://localhost:8317/v1",
+      ...preview,
+      files: [
+        {
+          ...preview.files[0],
+          lines: [{ kind: "add", text: `GEMINI_API_KEY=${secret}` }],
+        },
+      ],
     });
+    await expect(previewClientConfigChanges(change)).rejects.toThrow(
+      "must show the token hint",
+    );
+
+    const items = [
+      {
+        client: "codex" as const,
+        wsl: null,
+        target: null,
+        action: "write" as const,
+        models: { model: "gpt-5", reasoningEffort: "high" },
+      },
+      {
+        client: "claude" as const,
+        wsl: "Ubuntu",
+        target: null,
+        action: "remove" as const,
+      },
+    ];
+    const batch = {
+      tokenId: "token_01",
+      inferenceUrl: "http://127.0.0.1:8317",
+      items,
+      confirmed: false,
+    };
+    const confirmationNeeded = {
+      status: "needs_confirmation",
+      items: [
+        {
+          client: "codex",
+          wsl: null,
+          target: null,
+          dir: "/Users/me/.codex",
+          remove: false,
+          keys: [
+            {
+              path: "/Users/me/.codex/config.toml",
+              key: "model_provider",
+              current: "openai",
+            },
+          ],
+          gateway: "http://localhost:8317/v1",
+          token_id: null,
+        },
+        {
+          client: "claude",
+          wsl: "Ubuntu",
+          target: null,
+          dir: "//wsl$/Ubuntu/Users/me/.claude",
+          remove: true,
+          keys: [],
+          gateway: null,
+          token_id: null,
+        },
+      ],
+    };
+    invokeMock.mockResolvedValueOnce(confirmationNeeded);
+    await expect(applyClientConfigs(batch)).resolves.toEqual(
+      confirmationNeeded,
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("apply_client_configs", batch);
+    const results = {
+      status: "done",
+      results: [
+        {
+          client: "codex",
+          wsl: null,
+          target: null,
+          action: "write",
+          ok: true,
+          error: null,
+        },
+        {
+          client: "claude",
+          wsl: "Ubuntu",
+          target: null,
+          action: "remove",
+          ok: false,
+          error: { message: "locked", path: null, line: null },
+        },
+      ],
+    };
+    invokeMock.mockResolvedValueOnce(results);
     await expect(
-      applyClientConfig({ ...target, replace: false, wsl: null }),
-    ).resolves.toEqual({
-      status: "needs_confirmation",
-      keys: ["model_provider"],
-      gateway: "http://localhost:8317/v1",
+      applyClientConfigs({ ...batch, confirmed: true }),
+    ).resolves.toEqual(results);
+    // Results answer the items asked, in order.
+    invokeMock.mockResolvedValueOnce({
+      ...results,
+      results: [...results.results].reverse(),
     });
-    expect(invokeMock).toHaveBeenLastCalledWith("apply_client_config", {
-      ...target,
-      replace: false,
-      wsl: null,
-    });
+    await expect(applyClientConfigs(batch)).rejects.toThrow(
+      "Invalid client-config IPC response",
+    );
     invokeMock.mockResolvedValueOnce({ status: "applied" });
-    await expect(
-      applyClientConfig({ ...target, replace: true, wsl: "Ubuntu" }),
-    ).resolves.toEqual({ status: "applied" });
-    expect(invokeMock).toHaveBeenLastCalledWith("apply_client_config", {
-      ...target,
-      replace: true,
-      wsl: "Ubuntu",
-    });
-    invokeMock.mockResolvedValueOnce({ status: "applied", keys: [] });
-    await expect(
-      applyClientConfig({ ...target, replace: true, wsl: null }),
-    ).rejects.toThrow("unexpected field");
+    await expect(applyClientConfigs(batch)).rejects.toThrow(
+      "Invalid client-config IPC response",
+    );
 
     invokeMock.mockResolvedValueOnce(undefined);
-    await removeClientConfig("claude", "Ubuntu");
+    await removeClientConfig("workbuddy", "Ubuntu", "intl");
     expect(invokeMock).toHaveBeenLastCalledWith("remove_client_config", {
-      client: "claude",
+      client: "workbuddy",
       wsl: "Ubuntu",
+      target: "intl",
     });
 
-    invokeMock.mockResolvedValueOnce(
-      'experimental_bearer_token = "astr_…abcd"',
-    );
-    await expect(previewClientConfigSnippet(target)).resolves.toContain(
-      "astr_…abcd",
-    );
+    const target = {
+      tokenId: "token_01",
+      client: "gemini" as const,
+      models: { model: "gemini-3-pro" },
+      inferenceUrl: "http://127.0.0.1:8317",
+    };
+    const snippet = [
+      { path: "~/.gemini/.env", contents: "GEMINI_API_KEY=astr_…abcd\n" },
+      { path: "~/.gemini/settings.json", contents: "{}\n" },
+    ];
+    invokeMock.mockResolvedValueOnce(snippet);
+    await expect(previewClientConfigSnippet(target)).resolves.toEqual(snippet);
     expect(invokeMock).toHaveBeenLastCalledWith(
       "preview_client_config_snippet",
       target,
     );
-    invokeMock.mockResolvedValueOnce(`token = "${secret}"`);
+    invokeMock.mockResolvedValueOnce([
+      { path: "~/.gemini/.env", contents: `GEMINI_API_KEY=${secret}` },
+    ]);
     await expect(previewClientConfigSnippet(target)).rejects.toThrow(
       "must show the token hint",
     );
     invokeMock.mockResolvedValueOnce(false);
-    await expect(copyClientConfigSnippet(target)).resolves.toBe(false);
-    expect(invokeMock).toHaveBeenLastCalledWith(
-      "copy_client_config_snippet",
-      target,
+    await expect(copyClientConfigSnippet({ ...target, file: 1 })).resolves.toBe(
+      false,
     );
+    expect(invokeMock).toHaveBeenLastCalledWith("copy_client_config_snippet", {
+      ...target,
+      file: 1,
+    });
 
     invokeMock.mockResolvedValueOnce(undefined);
     await deleteAccessToken("token_01");
@@ -1718,6 +1912,39 @@ describe("classifier credential bridge", () => {
 });
 
 describe("provider test bridge", () => {
+  it("uses the same cancellation ID for the test and cancel commands", async () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    const input = {
+      protocol: "openai.chat" as const,
+      model: "test",
+      stream: true,
+    };
+    let reject!: (reason: string) => void;
+    invokeMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, rejectTest) => {
+          reject = rejectTest;
+        }),
+    );
+    const pending = testService("service_test", input, "test_active");
+    expect(invokeMock).toHaveBeenLastCalledWith("test_service", {
+      serviceId: "service_test",
+      input,
+      testId: "test_active",
+    });
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(
+      cancelServiceTest("service_test", "test_active"),
+    ).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenLastCalledWith("cancel_service_test", {
+      serviceId: "service_test",
+      testId: "test_active",
+    });
+    reject("service_test_cancelled");
+    await expect(pending).rejects.toThrow("service_test_cancelled");
+    vi.unstubAllGlobals();
+  });
+
   it("passes the selected provider and validates its result", async () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     const input = {

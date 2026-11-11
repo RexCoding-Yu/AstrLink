@@ -37,6 +37,7 @@ const (
 	ServiceKindOpenAI                  ServiceKind = "openai"
 	ServiceKindAnthropic               ServiceKind = "anthropic"
 	ServiceKindGemini                  ServiceKind = "gemini"
+	ServiceKindVertex                  ServiceKind = "vertex"
 	ServiceKindOpenAICompatible        ServiceKind = "openai_compatible"
 	ServiceKindDeepSeek                ServiceKind = "deepseek"
 	ServiceKindQwen                    ServiceKind = "qwen"
@@ -54,7 +55,7 @@ const (
 func (kind ServiceKind) Valid() bool {
 	switch kind {
 	case ServiceKindCodexSubscription, ServiceKindNewAPI, ServiceKindMagpie, ServiceKindOpenAI,
-		ServiceKindAnthropic, ServiceKindGemini, ServiceKindOpenAICompatible,
+		ServiceKindAnthropic, ServiceKindGemini, ServiceKindVertex, ServiceKindOpenAICompatible,
 		ServiceKindCustom, ServiceKindClaudeSubscription, ServiceKindGrokSubscription, ServiceKindAntigravitySubscription,
 		ServiceKindCopilotSubscription, ServiceKindDroidSubscription, ServiceKindOpenCodeGo,
 		ServiceKindOpenCodeZen, ServiceKindKimiCoding, ServiceKindGLMCoding, ServiceKindMiniMaxCoding,
@@ -98,10 +99,11 @@ func (kind ServiceKind) IsHTTP() bool {
 // HTTPConnection contains non-secret transport configuration for an HTTP API
 // service. Credential bytes remain in the dedicated local credential table.
 type HTTPConnection struct {
-	BaseURL       string      `json:"base_url"`
-	Auth          ServiceAuth `json:"auth"`
-	CredentialRef string      `json:"credential_ref,omitempty"`
-	ModelListPath string      `json:"model_list_path,omitempty"`
+	BaseURL       string            `json:"base_url"`
+	Auth          ServiceAuth       `json:"auth"`
+	CredentialRef string            `json:"credential_ref,omitempty"`
+	ModelListPath string            `json:"model_list_path,omitempty"`
+	Vertex        *VertexConnection `json:"vertex,omitempty"`
 }
 
 // ValidateModelListPath accepts an absolute URL path appended to base_url for
@@ -124,6 +126,14 @@ func ValidateModelListPath(path string) error {
 }
 
 func (connection HTTPConnection) Validate(serviceID ServiceID) error {
+	if connection.Vertex != nil {
+		if err := connection.Vertex.Validate(); err != nil {
+			return err
+		}
+		if connection.BaseURL != connection.Vertex.BaseURL() || connection.Auth.Scheme != AuthSchemeGoogleServiceAccount {
+			return fmt.Errorf("vertex requires its official regional base_url and service account authentication")
+		}
+	}
 	if err := connection.Auth.Validate(); err != nil {
 		return fmt.Errorf("auth: %w", err)
 	}
@@ -163,16 +173,21 @@ func (connection HTTPConnection) Validate(serviceID ServiceID) error {
 // SubscriptionConnection is the non-secret lifecycle state for a
 // browser-authorized subscription. OAuth tokens never enter this document.
 type SubscriptionConnection struct {
-	Provider              SubscriptionProvider `json:"provider"`
-	Status                SubscriptionStatus   `json:"status"`
-	AccountHint           string               `json:"account_hint,omitempty"`
-	ProviderAccountID     string               `json:"provider_account_id,omitempty"`
-	CredentialRef         string               `json:"credential_ref,omitempty"`
-	AuthorizationBoundary string               `json:"authorization_boundary,omitempty"`
-	TokenExpiresAt        *time.Time           `json:"token_expires_at,omitempty"`
-	LastRefreshAt         *time.Time           `json:"last_refresh_at,omitempty"`
-	LastError             *SubscriptionError   `json:"last_error,omitempty"`
-	Risk                  *SubscriptionRisk    `json:"risk,omitempty"`
+	Provider          SubscriptionProvider `json:"provider"`
+	Status            SubscriptionStatus   `json:"status"`
+	AccountHint       string               `json:"account_hint,omitempty"`
+	ProviderAccountID string               `json:"provider_account_id,omitempty"`
+	// PlanType is the plan the last usage read reported, kept so the account
+	// stays in its plan's package after a restart. It never leaves the device.
+	PlanType string `json:"plan_type,omitempty"`
+	// Mode is empty on documents written before modes existed; they are legacy.
+	Mode                  SubscriptionMode   `json:"mode,omitempty"`
+	CredentialRef         string             `json:"credential_ref,omitempty"`
+	AuthorizationBoundary string             `json:"authorization_boundary,omitempty"`
+	TokenExpiresAt        *time.Time         `json:"token_expires_at,omitempty"`
+	LastRefreshAt         *time.Time         `json:"last_refresh_at,omitempty"`
+	LastError             *SubscriptionError `json:"last_error,omitempty"`
+	Risk                  *SubscriptionRisk  `json:"risk,omitempty"`
 }
 
 func (connection SubscriptionConnection) Validate(serviceID ServiceID) error {
@@ -183,6 +198,8 @@ func (connection SubscriptionConnection) Validate(serviceID ServiceID) error {
 		DisplayName:           "service",
 		AccountHint:           connection.AccountHint,
 		ProviderAccountID:     connection.ProviderAccountID,
+		PlanType:              connection.PlanType,
+		Mode:                  connection.Mode,
 		CredentialRef:         connection.CredentialRef,
 		Capabilities:          connection.Provider.Capabilities(),
 		AuthorizationBoundary: connection.AuthorizationBoundary,
@@ -299,10 +316,10 @@ func (service Service) ModelProtocol(model string) ProtocolID {
 }
 
 // ResponsesWebSocket reports the effective per-channel transport setting.
-// The Copilot API and Factory's gateway serve Responses over HTTP only, and
+// Copilot, Droid and Vertex do not expose native Responses WebSockets, and
 // a task plugin's provider answers Responses through its tasks over HTTP.
 func (service Service) ResponsesWebSocket() bool {
-	if service.Kind == ServiceKindCopilotSubscription || service.Kind == ServiceKindDroidSubscription {
+	if service.Kind == ServiceKindCopilotSubscription || service.Kind == ServiceKindDroidSubscription || service.Kind == ServiceKindVertex {
 		return false
 	}
 	if service.Plugin != nil && service.Plugin.Provider == PluginProviderTask {
@@ -340,6 +357,13 @@ func (service Service) Validate() error {
 		if err := service.HTTP.Validate(service.ID); err != nil {
 			return fmt.Errorf("http: %w", err)
 		}
+		if service.Kind == ServiceKindVertex {
+			if service.HTTP.Auth.Scheme != AuthSchemeGoogleServiceAccount && service.HTTP.Auth.Scheme != AuthSchemeGoogleAPIKey {
+				return fmt.Errorf("vertex requires a service account or Express API key")
+			}
+		} else if service.HTTP.Vertex != nil || service.HTTP.Auth.Scheme == AuthSchemeGoogleServiceAccount {
+			return fmt.Errorf("vertex configuration and service accounts require a vertex service")
+		}
 		if service.HTTP.ModelListPath != "" && service.Kind != ServiceKindCustom {
 			return fmt.Errorf("http: model_list_path is only supported for custom services")
 		}
@@ -369,6 +393,13 @@ func (service Service) Validate() error {
 	if err := ValidateModelProtocols(service.Kind, service.ModelProtocols); err != nil {
 		return err
 	}
+	if service.VertexExpress() {
+		for _, model := range service.ModelProtocols {
+			if model.Protocol != ProtocolGoogleGenerateContent {
+				return fmt.Errorf("Vertex Express only supports Gemini upstream models")
+			}
+		}
+	}
 	if service.Kind.IsSubscription() {
 		if err := service.Kind.SubscriptionProvider().ValidateCapabilities(service.Capabilities); err != nil {
 			return err
@@ -376,6 +407,26 @@ func (service Service) Validate() error {
 	}
 	seen := make(map[string]struct{}, len(service.Capabilities))
 	for index, capability := range service.Capabilities {
+		if service.Kind == ServiceKindVertex {
+			if service.VertexExpress() && capability.Protocol.IsModelFormat() {
+				upstream := capability.Protocol
+				if capability.ConvertTo != "" {
+					upstream = capability.ConvertTo
+				}
+				if upstream != ProtocolGoogleGenerateContent {
+					return fmt.Errorf("Vertex Express entries must use or convert to Gemini")
+				}
+			}
+			if capability.Protocol == ProtocolOpenAIResponses && capability.ConvertTo == "" {
+				return fmt.Errorf("Vertex Responses entry requires a conversion target")
+			}
+			if !capability.Protocol.IsModelFormat() && !capability.Protocol.IsModelDiscovery() {
+				return fmt.Errorf("vertex only supports chat and model discovery protocols")
+			}
+			if capability.ConvertTo != "" && !slices.Contains(service.Kind.ModelFormats(), capability.ConvertTo) {
+				return fmt.Errorf("unsupported Vertex upstream protocol")
+			}
+		}
 		if err := capability.Validate(); err != nil {
 			return fmt.Errorf("capabilities[%d]: %w", index, err)
 		}
@@ -480,7 +531,8 @@ func ServiceFromSubscriptionAccount(account SubscriptionAccount) Service {
 		Capabilities: append([]Capability(nil), account.Capabilities...),
 		Subscription: &SubscriptionConnection{
 			Provider: account.Provider, Status: account.Status, AccountHint: account.AccountHint,
-			ProviderAccountID: account.ProviderAccountID, CredentialRef: account.CredentialRef,
+			ProviderAccountID: account.ProviderAccountID, PlanType: account.PlanType, Mode: account.Mode,
+			CredentialRef:         account.CredentialRef,
 			AuthorizationBoundary: account.AuthorizationBoundary, TokenExpiresAt: account.TokenExpiresAt,
 			LastRefreshAt: account.LastRefreshAt, LastError: account.LastError, Risk: account.Risk,
 		},
@@ -496,6 +548,8 @@ func (service Service) SubscriptionAccountView() (SubscriptionAccount, error) {
 		ID: service.ID, Provider: service.Subscription.Provider, Status: service.Subscription.Status,
 		DisplayName: service.Name, AccountHint: service.Subscription.AccountHint,
 		ProviderAccountID:     service.Subscription.ProviderAccountID,
+		PlanType:              service.Subscription.PlanType,
+		Mode:                  service.Subscription.Mode,
 		CredentialRef:         service.Subscription.CredentialRef,
 		Capabilities:          append([]Capability(nil), service.Capabilities...),
 		AuthorizationBoundary: service.Subscription.AuthorizationBoundary,

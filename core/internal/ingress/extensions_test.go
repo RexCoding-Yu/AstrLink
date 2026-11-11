@@ -141,9 +141,9 @@ func hookRecord(t *testing.T, record contract.RequestRecord, key, hook string) c
 	return contract.RequestPluginRecord{}
 }
 
-const chatBody = `{"model":"gpt-test","messages":[{"role":"system","content":"Be nice."},{"role":"user","content":"%s"}],"tools":[{"type":"function","function":{"name":"old","parameters":{"type":"object"}}}]}`
+const extensionChatBody = `{"model":"gpt-test","messages":[{"role":"system","content":"Be nice."},{"role":"user","content":"%s"}],"tools":[{"type":"function","function":{"name":"old","parameters":{"type":"object"}}}]}`
 
-func chat(text string) string { return strings.Replace(chatBody, "%s", text, 1) }
+func chat(text string) string { return strings.Replace(extensionChatBody, "%s", text, 1) }
 
 func TestEntryHooksTagAndRefuseRequests(t *testing.T) {
 	gate := extensionPlugin("gate", []string{plugin.CapabilityRequestGate, plugin.CapabilityRequest}, "", `

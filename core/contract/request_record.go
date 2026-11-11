@@ -152,20 +152,21 @@ func SessionStatusFromRequest(status RequestStatus) SessionStatus {
 // multimodal input such as images). cache_read_tokens / cache_write_tokens
 // are subsets of that input when the upstream reports them.
 type Usage struct {
-	CacheWrite1hTokens *int  `json:"cache_write_1h_tokens,omitempty"`
-	InputAudioTokens   *int  `json:"input_audio_tokens,omitempty"`
-	OutputAudioTokens  *int  `json:"output_audio_tokens,omitempty"`
-	ThinkingEnabled    *bool `json:"thinking_enabled,omitempty"`
-	BillingIncomplete  bool  `json:"billing_incomplete,omitempty"`
-	InputTokens        int   `json:"input_tokens"`
-	OutputTokens       int   `json:"output_tokens"`
-	TotalTokens        int   `json:"total_tokens"`
-	CacheReadTokens    *int  `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens   *int  `json:"cache_write_tokens,omitempty"`
+	CacheWrite1hTokens  *int  `json:"cache_write_1h_tokens,omitempty"`
+	CacheWrite12hTokens *int  `json:"cache_write_12h_tokens,omitempty"`
+	InputAudioTokens    *int  `json:"input_audio_tokens,omitempty"`
+	OutputAudioTokens   *int  `json:"output_audio_tokens,omitempty"`
+	ThinkingEnabled     *bool `json:"thinking_enabled,omitempty"`
+	BillingIncomplete   bool  `json:"billing_incomplete,omitempty"`
+	InputTokens         int   `json:"input_tokens"`
+	OutputTokens        int   `json:"output_tokens"`
+	TotalTokens         int   `json:"total_tokens"`
+	CacheReadTokens     *int  `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens    *int  `json:"cache_write_tokens,omitempty"`
 }
 
 func (usage Usage) Validate() error {
-	for _, count := range []*int{usage.CacheWrite1hTokens, usage.InputAudioTokens, usage.OutputAudioTokens} {
+	for _, count := range []*int{usage.CacheWrite1hTokens, usage.CacheWrite12hTokens, usage.InputAudioTokens, usage.OutputAudioTokens} {
 		if count != nil && *count < 0 {
 			return fmt.Errorf("billing token counts must be non-negative")
 		}
@@ -424,12 +425,15 @@ const (
 	// itself, such as a local access token id or a request id. It names a
 	// record without granting access to anything.
 	PrivacyIgnoreAstrLinkIdentifier PrivacyIgnoreReason = "astrlink_identifier"
+	// PrivacyIgnoreExampleValue is a value only documentation and tests use:
+	// a card number payment providers publish for test payments.
+	PrivacyIgnoreExampleValue PrivacyIgnoreReason = "example_value"
 )
 
 func (reason PrivacyIgnoreReason) Valid() bool {
 	switch reason {
 	case PrivacyIgnoreKindDisabled, PrivacyIgnoreLowConfidence, PrivacyIgnoreAllowlisted,
-		PrivacyIgnoreAstrLinkIdentifier:
+		PrivacyIgnoreAstrLinkIdentifier, PrivacyIgnoreExampleValue:
 		return true
 	default:
 		return false
@@ -637,6 +641,9 @@ type RequestRecord struct {
 	// SessionLink tells how this record joined its session; null when it
 	// started the session.
 	SessionLink *SessionLink `json:"session_link"`
+	// ParentSessionID names the conversation that started this record's
+	// session as a subagent; absent for a top-level conversation.
+	ParentSessionID *SessionID `json:"parent_session_id,omitempty"`
 	// Cursors are the typed values stored for this record: explicit cursors
 	// the request named plus everything the response produced.
 	Cursors    []SessionCursor `json:"cursors"`
@@ -648,6 +655,14 @@ type RequestRecord struct {
 	// PluginRecords are the plugins' parts in the request, in the order
 	// they ran. Empty when no plugin ran.
 	PluginRecords []RequestPluginRecord `json:"plugin_records,omitempty"`
+	// Context is what the call carried to the model, read from its body;
+	// absent on retries, on calls whose body was not read, and on records
+	// from before it was kept.
+	Context *RequestContext `json:"context,omitempty"`
+	// Project is the working directory the agent named, with the home
+	// directory written as ~; absent when the request does not say. Only a
+	// record with a context names one.
+	Project *string `json:"project,omitempty"`
 }
 
 func (record RequestRecord) Validate() error {
@@ -794,6 +809,9 @@ func (record RequestRecord) Validate() error {
 			return fmt.Errorf("session_id: %w", err)
 		}
 	}
+	if err := validateParentSession(record.ParentSessionID, record.SessionID); err != nil {
+		return err
+	}
 	if record.PreviousResponseID != nil {
 		if err := validateProtocolCursor("previous_response_id", *record.PreviousResponseID); err != nil {
 			return err
@@ -851,6 +869,19 @@ func (record RequestRecord) Validate() error {
 			return fmt.Errorf("output: %w", err)
 		}
 	}
+	if record.Context != nil {
+		if err := record.Context.Validate(); err != nil {
+			return fmt.Errorf("context: %w", err)
+		}
+	}
+	if record.Project != nil {
+		if record.Context == nil {
+			return fmt.Errorf("project needs a context")
+		}
+		if err := validateBoundedText("project", *record.Project, MaxContextPathRunes, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -874,7 +905,13 @@ type RequestSession struct {
 	StartedAt     time.Time  `json:"started_at"`
 	LastStartedAt time.Time  `json:"last_started_at"`
 	CompletedAt   *time.Time `json:"completed_at"`
-	DurationMs    int64      `json:"duration_ms"`
+	// DurationMs is the union of finished call runtimes: overlapping calls
+	// count once, and gaps between calls never count.
+	DurationMs int64 `json:"duration_ms"`
+	// RunningSince starts the one merged runtime block that contains every call
+	// still running, so a client adds the elapsed time once instead of once per
+	// call. Nil when nothing runs.
+	RunningSince *time.Time `json:"running_since"`
 	// ToolDurationMs estimates gaps between calls in the same user turn;
 	// retry backoff and gaps between user turns are excluded. Nil if unknown.
 	ToolDurationMs        *int64        `json:"tool_duration_ms"`
@@ -897,6 +934,36 @@ type RequestSession struct {
 	// PrivacyWarned is set when the warn action let at least one call of the
 	// session through, so the list can mark it without loading every call.
 	PrivacyWarned bool `json:"privacy_warned,omitempty"`
+	// ParentSessionID names the conversation that started this one as a
+	// subagent; absent for a top-level conversation.
+	ParentSessionID *SessionID `json:"parent_session_id,omitempty"`
+	// SubagentCount is how many conversations this one started as
+	// subagents, theirs included.
+	SubagentCount int `json:"subagent_count,omitempty"`
+	// ContextTokens is the context the newest main call sent: its input
+	// tokens, cache reads and writes included. Nil while no call reported
+	// usage.
+	ContextTokens *int `json:"context_tokens,omitempty"`
+	// CompactionPointTokens is where the client compacts this conversation:
+	// the larger context of its last two compactions, each just before it
+	// happened. Nil until the context was compacted.
+	CompactionPointTokens *int `json:"compaction_point_tokens,omitempty"`
+	// ContextWindowTokens is the model's context window from LLM Metadata,
+	// for the official model the newest priced call reached. Nil when the
+	// catalog gives none.
+	ContextWindowTokens *int `json:"context_window_tokens,omitempty"`
+	// CompactionCount counts the compactions the client marked or a drop in
+	// context showed.
+	CompactionCount int `json:"compaction_count,omitempty"`
+	// Usage sums the tokens of every call, retries included. Nil while no
+	// call reported usage.
+	Usage *SessionUsage `json:"usage,omitempty"`
+	// Cost values the calls at official API prices. Only a session's detail
+	// carries it; lists leave it out.
+	Cost *SessionCost `json:"cost,omitempty"`
+	// FailedRepeats is set while the newest main call's history ends with
+	// one tool call repeated with the same arguments, failing each time.
+	FailedRepeats *FailedRepeats `json:"failed_repeats,omitempty"`
 }
 
 func (session RequestSession) Validate() error {
@@ -905,6 +972,12 @@ func (session RequestSession) Validate() error {
 	}
 	if err := session.ID.Validate(); err != nil {
 		return err
+	}
+	if err := validateParentSession(session.ParentSessionID, &session.ID); err != nil {
+		return err
+	}
+	if session.SubagentCount < 0 {
+		return fmt.Errorf("subagent_count must be non-negative")
 	}
 	if err := validateBoundedText("title", session.Title, MaxSessionTitleRunes, true); err != nil {
 		return err
@@ -917,6 +990,9 @@ func (session RequestSession) Validate() error {
 	}
 	if session.DurationMs < 0 {
 		return fmt.Errorf("duration_ms must be non-negative")
+	}
+	if session.RunningSince != nil && session.RunningSince.IsZero() {
+		return fmt.Errorf("running_since must be a valid timestamp")
 	}
 	if session.ToolDurationMs != nil && *session.ToolDurationMs < 0 {
 		return fmt.Errorf("tool_duration_ms must be non-negative")
@@ -972,6 +1048,29 @@ func (session RequestSession) Validate() error {
 			return fmt.Errorf("local_access_token_id: %w", err)
 		}
 	}
+	for _, tokens := range []*int{session.ContextTokens, session.CompactionPointTokens, session.ContextWindowTokens} {
+		if tokens != nil && *tokens < 0 {
+			return fmt.Errorf("context token counts must be non-negative")
+		}
+	}
+	if session.CompactionCount < 0 {
+		return fmt.Errorf("compaction_count must be non-negative")
+	}
+	if session.Usage != nil {
+		if err := session.Usage.Validate(); err != nil {
+			return err
+		}
+	}
+	if session.Cost != nil {
+		if err := session.Cost.Validate(); err != nil {
+			return err
+		}
+	}
+	if session.FailedRepeats != nil {
+		if err := session.FailedRepeats.Validate(); err != nil {
+			return fmt.Errorf("failed_repeats: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -983,6 +1082,33 @@ type RequestSessionPage struct {
 type RequestSessionDetail struct {
 	RequestSession
 	Turns []RequestRecord `json:"turns"`
+	// Subagents are the conversations this one started, theirs included:
+	// each comes right after the one that started it, siblings oldest first.
+	Subagents []RequestSession `json:"subagents,omitempty"`
+	// Context follows the context the conversation sent call by call; nil
+	// for model listings.
+	Context *SessionContext `json:"context,omitempty"`
+	// WithSubagents sums this conversation together with every subagent
+	// under it; absent when it started none.
+	WithSubagents *SessionTotals `json:"with_subagents,omitempty"`
+}
+
+// SessionTotals sums the calls of a group of conversations and the tokens
+// they reported, retries included.
+type SessionTotals struct {
+	CallCount    int   `json:"call_count"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+}
+
+func (totals SessionTotals) Validate() error {
+	if totals.CallCount < 1 {
+		return fmt.Errorf("call_count must be at least 1")
+	}
+	if totals.InputTokens < 0 || totals.OutputTokens < 0 {
+		return fmt.Errorf("token counts must be non-negative")
+	}
+	return nil
 }
 
 func (detail RequestSessionDetail) Validate() error {
@@ -996,6 +1122,36 @@ func (detail RequestSessionDetail) Validate() error {
 		if err := turn.Validate(); err != nil {
 			return fmt.Errorf("turns[%d]: %w", index, err)
 		}
+	}
+	for index, subagent := range detail.Subagents {
+		if err := subagent.Validate(); err != nil {
+			return fmt.Errorf("subagents[%d]: %w", index, err)
+		}
+	}
+	if detail.Context != nil {
+		if err := detail.Context.Validate(); err != nil {
+			return fmt.Errorf("context: %w", err)
+		}
+	}
+	if detail.WithSubagents != nil {
+		if err := detail.WithSubagents.Validate(); err != nil {
+			return fmt.Errorf("with_subagents: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateParentSession checks a subagent's link to the conversation that
+// started it; a conversation cannot be its own parent.
+func validateParentSession(parent, own *SessionID) error {
+	if parent == nil {
+		return nil
+	}
+	if err := parent.Validate(); err != nil {
+		return fmt.Errorf("parent_session_id: %w", err)
+	}
+	if own != nil && *parent == *own {
+		return fmt.Errorf("parent_session_id must not equal the session id")
 	}
 	return nil
 }

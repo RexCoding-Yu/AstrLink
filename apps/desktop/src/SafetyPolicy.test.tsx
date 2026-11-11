@@ -63,6 +63,7 @@ function rawSealing(overrides: Partial<RawSealingState> = {}): RawSealingState {
     password_min_length: 8,
     password_max_length: 128,
     key_replaced: false,
+    biometric_available: false,
     ...overrides,
   };
 }
@@ -641,6 +642,132 @@ describe("SafetyPolicy", () => {
   });
 
   it.each([
+    {
+      system: "macOS 26",
+      accelerated: [
+        ["coreml_fp16_gpu", "Core ML FP16 · GPU"],
+        ["coreml_fp16_ane", "Core ML FP16 · Neural Engine"],
+      ],
+      reason: null,
+      shown: ["Core ML FP16 · GPU", "Core ML FP16 · 神经网络引擎（较慢）"],
+      choose: "Core ML FP16 · GPU",
+      hint: "开始使用 Core ML 版本时",
+    },
+    {
+      system: "macOS 15",
+      accelerated: [
+        ["coreml_fp16_gpu", "Core ML FP16 · GPU"],
+        ["coreml_fp16_ane", "Core ML FP16 · Neural Engine"],
+      ],
+      reason: "requires_macos_26" as const,
+      shown: [
+        "Core ML FP16 · GPU · 需要 macOS 26 或更高版本",
+        "Core ML FP16 · 神经网络引擎（较慢） · 需要 macOS 26 或更高版本",
+      ],
+      choose: null,
+      hint: null,
+    },
+    {
+      system: "Windows",
+      accelerated: [["directml_fp16_gpu", "DirectML FP16 · GPU"]],
+      reason: null,
+      shown: ["DirectML FP16 · GPU"],
+      choose: "DirectML FP16 · GPU",
+      hint: "开始使用 DirectML 版本时",
+    },
+  ])(
+    "offers AstrLink Guard's FP16 variants from the catalog on $system",
+    async ({ accelerated, reason, shown, choose, hint }) => {
+      const guard: PrivacyCatalogModel = {
+        ...catalogModel,
+        id: "catalog_astrlink_guard",
+        name: "AstrLink Guard",
+        source: "official",
+        repo_id: "QuantumNous/astrlink-guard",
+        version: "0.1.3",
+        recommended: true,
+        variants: [
+          catalogModel.variants[0],
+          ...accelerated.map(([id, name]) => ({
+            ...catalogModel.variants[0],
+            id,
+            name,
+            quantization: "f16",
+            bytes_total: 75_462_203,
+            recommended: false,
+            supported: reason === null,
+            unsupported_reason: reason,
+          })),
+        ],
+      };
+      bridgeMocks.getPrivacyModelCatalog.mockResolvedValueOnce({
+        items: [guard],
+      });
+      await renderPolicy();
+      await openModels();
+
+      const selector = '[aria-label="AstrLink Guard 模型版本"]';
+      const trigger = container.querySelector<HTMLButtonElement>(selector);
+      expect(trigger?.textContent).toBe("CPU INT8 · 推荐");
+      expect(container.textContent).not.toContain("开始使用");
+      await act(async () => {
+        trigger?.dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            pointerType: "mouse",
+          }),
+        );
+        await Promise.resolve();
+      });
+      const options = [
+        ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+      ];
+      // INT8 stays the one recommended variant; the Core ML GPU name does
+      // not claim it too.
+      expect(options.map((option) => option.textContent?.trim())).toEqual([
+        "CPU INT8 · 推荐",
+        ...shown,
+      ]);
+      expect(
+        options.slice(1).map((option) => option.dataset.disabled !== undefined),
+      ).toEqual(accelerated.map(() => reason !== null));
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }),
+        );
+        await Promise.resolve();
+      });
+      if (choose === null || hint === null) return;
+
+      await chooseOption(selector, choose);
+      expect(trigger?.textContent).toBe(choose);
+      expect(container.textContent).toContain(hint);
+      expect(container.textContent).toContain("下载 72 MB");
+
+      bridgeMocks.probePrivacyModel.mockResolvedValueOnce(
+        probe({
+          repo_id: guard.repo_id,
+          requested_revision: revision,
+          name: guard.name,
+          variants: guard.variants,
+          labels: [{ label: "email", suggested_kind: "email" }],
+          requires_label_mapping: false,
+        }),
+      );
+      bridgeMocks.installPrivacyModel.mockResolvedValueOnce(installation());
+      await act(async () => button("检查并安装").click());
+      expect(bridgeMocks.installPrivacyModel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repo_id: guard.repo_id,
+          revision,
+          variant_id: accelerated[0][0],
+        }),
+      );
+    },
+  );
+
+  it.each([
     new Error("privacy model probe label has missing or unexpected fields"),
     "privacy model probe label has missing or unexpected fields",
   ])(
@@ -836,7 +963,7 @@ describe("SafetyPolicy", () => {
       expect(container.textContent).toContain("AstrLink Guard推荐");
       expect(container.textContent).toContain("官方 · apache-2.0 · v0.1.0");
       expect(container.textContent).not.toContain("有新版本");
-      expect(button("查看已就绪")).toBeTruthy();
+      expect(button("用于策略")).toBeTruthy();
       await act(async () => button("已安装 1").click());
       expect(container.textContent).toContain("CPU INT8 · int8 · v0.1.0");
       expect(container.textContent).not.toContain("更新到");
@@ -874,65 +1001,87 @@ describe("SafetyPolicy", () => {
       expect(choice(unknown.id)).toContain("CPU INT8 · 版本 22222222");
     });
 
-    it("offers a newer tag and installs it by commit", async () => {
-      bridgeMocks.getPrivacyModelReleases.mockResolvedValueOnce({
-        items: [release],
-      });
-      bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
-        items: [installedGuard()],
-      });
-      await renderPolicy();
-      await openModels();
+    it.each(["catalog", "installed"])(
+      "updates from %s without leaving the model card",
+      async (view) => {
+        bridgeMocks.getPrivacyModelReleases.mockResolvedValueOnce({
+          items: [release],
+        });
+        bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+          items: [installedGuard()],
+        });
+        await renderPolicy();
+        await openModels();
 
-      expect(container.textContent).toContain("官方 · apache-2.0 · v0.2.0");
-      expect(container.textContent).toContain("有新版本 v0.2.0");
-      expect(container.textContent).toContain("下载 38 MB");
-      await act(async () => button("已安装 1").click());
-      expect(container.textContent).toContain("CPU INT8 · int8 · v0.1.0");
-      expect(container.textContent).toContain("有新版本 v0.2.0");
+        expect(container.textContent).toContain("官方 · apache-2.0 · v0.2.0");
+        expect(container.textContent).toContain("有新版本 v0.2.0");
+        expect(container.textContent).toContain("下载 38 MB");
+        if (view === "installed") {
+          await act(async () => button("已安装 1").click());
+          expect(container.textContent).toContain("CPU INT8 · int8 · v0.1.0");
+          expect(container.textContent).toContain("有新版本 v0.2.0");
+        }
 
-      bridgeMocks.probePrivacyModel.mockResolvedValueOnce(
-        probe({
+        bridgeMocks.probePrivacyModel.mockResolvedValueOnce(
+          probe({
+            repo_id: guard.repo_id,
+            requested_revision: releaseRevision,
+            revision: releaseRevision,
+            name: guard.name,
+            variants: release.variants,
+            labels: [{ label: "email", suggested_kind: "email" }],
+            requires_label_mapping: false,
+          }),
+        );
+        bridgeMocks.installPrivacyModel.mockResolvedValueOnce(
+          installation({
+            id: "model_cccccccccccccccccccccccccccccccc",
+            catalog_id: guard.id,
+            name: guard.name,
+            repo_id: guard.repo_id,
+            revision: releaseRevision,
+          }),
+        );
+        await act(async () => {
+          actionButton("更新到 v0.2.0").click();
+          await Promise.resolve();
+        });
+        expect(bridgeMocks.probePrivacyModel).toHaveBeenCalledWith({
           repo_id: guard.repo_id,
-          requested_revision: releaseRevision,
           revision: releaseRevision,
-          name: guard.name,
-          variants: release.variants,
-          labels: [{ label: "email", suggested_kind: "email" }],
-          requires_label_mapping: false,
-        }),
-      );
-      bridgeMocks.installPrivacyModel.mockResolvedValueOnce(
-        installation({
-          id: "model_cccccccccccccccccccccccccccccccc",
-          catalog_id: guard.id,
-          name: guard.name,
+        });
+        expect(bridgeMocks.installPrivacyModel).toHaveBeenCalledWith({
           repo_id: guard.repo_id,
           revision: releaseRevision,
-        }),
-      );
-      await act(async () => {
-        actionButton("更新到 v0.2.0").click();
-        await Promise.resolve();
-      });
-      expect(bridgeMocks.probePrivacyModel).toHaveBeenCalledWith({
-        repo_id: guard.repo_id,
-        revision: releaseRevision,
-      });
-      expect(bridgeMocks.installPrivacyModel).toHaveBeenCalledWith({
-        repo_id: guard.repo_id,
-        revision: releaseRevision,
-        variant_id: "cpu_int8",
-        label_mapping: { email: "email" },
-      });
-      expect(notifyMocks.success).toHaveBeenCalledWith(
-        "新版本已开始下载，完成后请在“已安装”中改用新版本。",
-      );
-      // The policy keeps the installed version until the user switches.
-      expect(container.textContent).toContain("CPU INT8 · int8 · v0.2.0");
-      expect(container.textContent).not.toContain("有新版本");
-      expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
-    });
+          variant_id: "cpu_int8",
+          label_mapping: { email: "email" },
+        });
+        expect(notifyMocks.success).toHaveBeenCalledWith(
+          "新版本已开始下载，完成后可在模型卡片中切换。",
+        );
+        // The policy keeps the installed version until the user switches.
+        expect(
+          button(view === "catalog" ? "内置" : "已安装 1").getAttribute(
+            "aria-selected",
+          ),
+        ).toBe("true");
+        const card = container.querySelector(
+          'article[aria-label="AstrLink Guard"]',
+        )!;
+        expect(
+          card
+            .querySelector('[role="progressbar"]')
+            ?.getAttribute("aria-valuenow"),
+        ).toBe("25");
+        expect(container.querySelectorAll("article")).toHaveLength(1);
+        expect(button("已安装 1")).toBeTruthy();
+        if (view === "installed") {
+          expect(card.textContent).toContain("CPU INT8 · v0.2.0");
+        }
+        expect(container.textContent).not.toContain("有新版本");
+        expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
+      },
+    );
 
     it("forces a fresh release check when the operator refreshes", async () => {
       await renderPolicy();
@@ -973,7 +1122,6 @@ describe("SafetyPolicy", () => {
 
       expect(container.textContent).toContain("新版本 v0.2.0 已下载");
       expect(container.textContent).not.toContain("有新版本");
-      expect(button("查看已就绪")).toBeTruthy();
       expect(switchButtons()).toHaveLength(1);
       // Only the row of the policy's model offers the switch.
       await act(async () => button("已安装 2").click());
@@ -1029,6 +1177,7 @@ describe("SafetyPolicy", () => {
     );
     expect(button("确认安装").disabled).toBe(true);
     await chooseOption('[aria-label="MISC 标签映射"]', "忽略此标签");
+    await Promise.all([settleClosedLayer(), vi.advanceTimersByTimeAsync(0)]);
     expect(button("确认安装").disabled).toBe(false);
 
     await act(async () => {
@@ -1043,6 +1192,18 @@ describe("SafetyPolicy", () => {
     });
     expect(container.textContent).toContain("25%");
     expect(button("取消")).toBeTruthy();
+    expect(button("内置").getAttribute("aria-selected")).toBe("true");
+    expect(button("已安装 0")).toBeTruthy();
+    expect(
+      container.querySelector(
+        `article[aria-label="${catalogModel.name}"] [role="progressbar"]`,
+      ),
+    ).not.toBeNull();
+    await Promise.all([settleClosedLayer(), vi.advanceTimersByTimeAsync(0)]);
+    await act(async () => button("已安装 0").click());
+    expect(container.textContent).toContain("尚未安装本地模型");
+    expect(container.querySelector('[role="progressbar"]')).toBeNull();
+    await act(async () => button("内置").click());
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(900);
@@ -1052,9 +1213,77 @@ describe("SafetyPolicy", () => {
       catalogInstallationID,
     );
     expect(container.textContent).toContain("已就绪");
-    expect(container.textContent).toContain("社区目录");
+    expect(container.textContent).toContain("社区");
     expect(container.textContent).toContain(catalogModel.license);
     expect(button("用于策略")).toBeTruthy();
+    expect(button("内置").getAttribute("aria-selected")).toBe("true");
+    expect(button("已安装 1")).toBeTruthy();
+  });
+
+  it("keeps downloads for other variants and revisions on their model card", async () => {
+    const int4 = {
+      ...catalogModel.variants[0],
+      id: "cpu_int4",
+      name: "CPU INT4",
+      recommended: false,
+    };
+    const other = installation({
+      id: customInstallationID,
+      revision: "2".repeat(40),
+      variant_id: int4.id,
+      variant_name: int4.name,
+      status: "paused",
+      bytes_downloaded: 90_000_000,
+    });
+    bridgeMocks.getPrivacyModelCatalog.mockResolvedValueOnce({
+      items: [{ ...catalogModel, variants: [...catalogModel.variants, int4] }],
+    });
+    bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+      items: [installation(), other],
+    });
+    bridgeMocks.resumePrivacyModelInstallation.mockResolvedValueOnce({
+      ...other,
+      status: "downloading",
+    });
+    await renderPolicy();
+    await openModels();
+
+    expect(button("已安装 0")).toBeTruthy();
+    expect(container.querySelectorAll("article")).toHaveLength(1);
+    expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
+    expect(container.textContent).toContain("CPU INT4 · 版本 22222222");
+    await chooseOption(
+      `[aria-label="${catalogModel.name} 模型版本"]`,
+      "CPU INT4",
+    );
+    await settleClosedLayer();
+    expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
+    expect(button("检查并安装")).toBeTruthy();
+    await act(async () => button("继续下载").click());
+    expect(bridgeMocks.resumePrivacyModelInstallation).toHaveBeenCalledWith(
+      other.id,
+    );
+    expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
+  });
+
+  it("keeps an unfinished model accessible if it leaves the catalog", async () => {
+    bridgeMocks.getPrivacyModelCatalog.mockResolvedValueOnce({ items: [] });
+    bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+      items: [installation({ status: "error", error: "download_failed" })],
+    });
+    bridgeMocks.resumePrivacyModelInstallation.mockResolvedValueOnce(
+      installation(),
+    );
+    await renderPolicy();
+    await openModels();
+
+    expect(button("已安装 0")).toBeTruthy();
+    expect(container.textContent).toContain("下载失败");
+    await act(async () => button("重试").click());
+    expect(bridgeMocks.resumePrivacyModelInstallation).toHaveBeenCalledWith(
+      catalogInstallationID,
+    );
+    expect(button("暂停下载")).toBeTruthy();
   });
 
   it("pauses without losing progress, ignores a stale poll, and resumes polling", async () => {
@@ -1074,7 +1303,6 @@ describe("SafetyPolicy", () => {
     );
     await renderPolicy();
     await openModels();
-    await act(async () => button("已安装 1").click());
     await act(async () => {
       await vi.advanceTimersByTimeAsync(900);
     });
@@ -1125,7 +1353,6 @@ describe("SafetyPolicy", () => {
     );
     await renderPolicy();
     await openModels();
-    await act(async () => button("已安装 1").click());
     await act(async () => button("继续下载").click());
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       "继续下载失败",
@@ -1147,7 +1374,6 @@ describe("SafetyPolicy", () => {
     await renderPolicy();
     await openModels();
 
-    await act(async () => button("已安装 1").click());
     await act(async () => {
       await vi.advanceTimersByTimeAsync(900);
       await Promise.resolve();
@@ -1171,7 +1397,7 @@ describe("SafetyPolicy", () => {
     expect(bridgeMocks.cancelPrivacyModelInstallation).toHaveBeenCalledWith(
       catalogInstallationID,
     );
-    expect(container.textContent).toContain("尚未安装本地模型");
+    expect(button("检查并安装")).toBeTruthy();
 
     await act(async () => {
       stalePoll.resolve(
@@ -1181,7 +1407,7 @@ describe("SafetyPolicy", () => {
       );
       await Promise.resolve();
     });
-    expect(container.textContent).toContain("尚未安装本地模型");
+    expect(button("检查并安装")).toBeTruthy();
     expect(
       container.querySelector(`[aria-label="${catalogModel.name} 下载进度"]`),
     ).toBeNull();
@@ -1197,7 +1423,6 @@ describe("SafetyPolicy", () => {
       .mockResolvedValueOnce(readyInstallation());
     await renderPolicy();
     await openModels();
-    await act(async () => button("已安装 1").click());
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(900);
@@ -1318,6 +1543,9 @@ describe("SafetyPolicy", () => {
     });
     expect(container.textContent).toContain("自定义公开仓库");
     expect(container.textContent).toContain(heavyProbe.license);
+    expect(button("自定义").getAttribute("aria-selected")).toBe("true");
+    expect(button("已安装 0")).toBeTruthy();
+    expect(button("暂停下载")).toBeTruthy();
   });
 
   it("probes an already-mounted ONNX file and reuses the install flow", async () => {
@@ -1401,6 +1629,11 @@ describe("SafetyPolicy", () => {
     });
     expect(container.textContent).toContain("本地导入");
     expect(container.textContent).toContain("导入中");
+    expect(button("本地导入").getAttribute("aria-selected")).toBe("true");
+    expect(button("已安装 0")).toBeTruthy();
+    expect(
+      container.querySelector('article [role="progressbar"]'),
+    ).not.toBeNull();
     expect(window.confirm).not.toHaveBeenCalled();
   });
 
@@ -1426,7 +1659,7 @@ describe("SafetyPolicy", () => {
       await renderPolicy();
       await openModels();
 
-      await act(async () => button("已安装 1").click());
+      await act(async () => button("本地导入").click());
       expect(container.textContent).toContain("本地导入");
       expect(container.textContent).toContain(message);
       expect(
@@ -2115,6 +2348,249 @@ describe("SafetyPolicy", () => {
     );
   });
 
+  it("names the DirectML variant and notes the GPU load on local import", async () => {
+    const directMLVariant = {
+      id: "directml_fp16_gpu",
+      name: "DirectML FP16 · GPU",
+      quantization: "f16",
+      bytes_total: 74_000_000,
+      estimated_ram_bytes: 370_000_000,
+      recommended: false,
+      supported: true,
+      unsupported_reason: null,
+    } as const;
+    const localProbe = probe({
+      repo_id: "local/model-aaaaaaaaaaaa",
+      requested_revision: revision,
+      name: "Guard FP16",
+      variants: [directMLVariant, catalogModel.variants[0]],
+    });
+    bridgeMocks.probeLocalPrivacyModel.mockResolvedValueOnce(localProbe);
+    await renderPolicy();
+    await openModels();
+    await act(async () => button("本地导入").click());
+    await setInput(
+      '[aria-label="本地模型路径"]',
+      "C:\\models\\guard\\model_fp16_static512.onnx",
+    );
+    await act(async () => {
+      button("检查本地模型").click();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain(
+      "开始使用 DirectML 版本时，AstrLink 会立即把模型加载到显卡上并显示进度，一般几秒钟就能完成。",
+    );
+    expect(container.textContent).not.toContain("Core ML");
+    const trigger = document.querySelector<HTMLButtonElement>(
+      '[aria-label="本地模型版本"]',
+    )!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          pointerType: "mouse",
+        }),
+      );
+      await Promise.resolve();
+    });
+    const options = [
+      ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].map((option) => option.textContent);
+    expect(options).toContain("DirectML FP16 · GPU");
+  });
+
+  function directMLInstallation(
+    overrides: Partial<PrivacyModelInstallation> = {},
+  ): PrivacyModelInstallation {
+    return {
+      ...readyInstallation(),
+      id: customInstallationID,
+      name: "Guard FP16",
+      variant_id: "directml_fp16_gpu",
+      variant_name: "DirectML FP16 · GPU",
+      quantization: "f16",
+      ...overrides,
+    };
+  }
+
+  it("notes the GPU load when a DirectML model is chosen for the policy", async () => {
+    const cpu = readyInstallation();
+    const directML = directMLInstallation();
+    const hint = "开始使用 DirectML 版本时，AstrLink 会立即把模型加载到显卡上";
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({
+        enabled: true,
+        detector: "local_model",
+        local_model_id: cpu.id,
+      }),
+    );
+    bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+      items: [cpu, directML],
+    });
+    await renderPolicy();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>("#privacy-detector-local-model")!
+        .click(),
+    );
+    const picker = () =>
+      document.querySelector('[role="dialog"]')?.textContent ?? "";
+    expect(picker()).not.toContain(hint);
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>(
+          `#privacy-model-choice-${directML.id}`,
+        )!
+        .click(),
+    );
+    expect(picker()).toContain(hint);
+    expect(picker()).not.toContain("Core ML");
+    await act(async () => button("取消").click());
+    await settleClosedLayer();
+
+    await openModels();
+    await act(async () => button("已安装 2").click());
+    const useButton = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent?.trim() === "用于策略",
+    )!;
+    await act(async () => {
+      useButton.click();
+      await Promise.resolve();
+    });
+    const dialog = document.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain(hint);
+  });
+
+  it("shows a spinner while the policy's DirectML model loads onto the GPU, then that it is ready", async () => {
+    vi.useFakeTimers();
+    const directML = directMLInstallation({
+      preparation: { state: "preparing", fallback: "regex" },
+    });
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({
+        enabled: true,
+        detector: "local_model",
+        local_model_id: directML.id,
+      }),
+    );
+    bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+      items: [directML],
+    });
+    bridgeMocks.getPrivacyModelInstallation.mockResolvedValueOnce({
+      ...directML,
+      preparation: { state: "ready", fallback: null },
+    });
+    await renderPolicy();
+
+    const notice = () =>
+      container.querySelector('[data-testid="model-preparation"]');
+    expect(
+      notice()?.querySelector('[role="status"][aria-busy="true"]'),
+    ).not.toBeNull();
+    expect(notice()?.textContent).toContain("正在显卡上加载模型…");
+    expect(notice()?.textContent).toContain(
+      "就绪之前，正则规则会继续检查请求。",
+    );
+    expect(notice()?.textContent).not.toContain("Mac");
+    expect(container.textContent).toContain("正在准备本地模型…");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(900);
+      await Promise.resolve();
+    });
+    expect(notice()?.textContent).toBe("已加载到显卡上，可以使用。");
+    expect(container.textContent).not.toContain("正在准备本地模型…");
+  });
+
+  it("explains a failed DirectML preparation without mentioning the Mac", async () => {
+    const directML = directMLInstallation({
+      preparation: { state: "failed", fallback: "local_model" },
+    });
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({
+        enabled: true,
+        detector: "local_model",
+        local_model_id: directML.id,
+      }),
+    );
+    bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+      items: [directML],
+    });
+    await renderPolicy();
+
+    const notice = container.querySelector('[data-testid="model-preparation"]');
+    expect(notice?.getAttribute("role")).toBe("alert");
+    expect(notice?.textContent).toBe(
+      "这个模型没能加载到显卡上。之前的本地模型会继续检查请求。重试",
+    );
+  });
+
+  it("keeps the previous model while a newly chosen DirectML model loads", async () => {
+    const cpu = { ...readyInstallation(), preparation: null };
+    const directML = directMLInstallation();
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({
+        enabled: true,
+        detector: "local_model",
+        local_model_id: cpu.id,
+      }),
+    );
+    bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
+      items: [cpu, directML],
+    });
+    const pending = deferred<PrivacyPolicyRecord>();
+    bridgeMocks.updatePrivacyPolicy.mockReturnValueOnce(pending.promise);
+    bridgeMocks.getPrivacyModelInstallation.mockResolvedValueOnce({
+      ...directML,
+      preparation: { state: "preparing", fallback: "local_model" },
+    });
+    await renderPolicy();
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>("#privacy-detector-local-model")!
+        .click(),
+    );
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>(
+          `#privacy-model-choice-${directML.id}`,
+        )!
+        .click(),
+    );
+    await act(async () => {
+      button("使用所选模型").click();
+      await Promise.resolve();
+    });
+    expect(bridgeMocks.updatePrivacyPolicy).toHaveBeenCalledWith(etag, {
+      detector: "local_model",
+      local_model_id: directML.id,
+    });
+    // Core keeps the previous model, so nothing is being closed.
+    expect(
+      container.querySelector('[data-testid="privacy-model-unloading"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      pending.resolve(
+        policyRecord({
+          enabled: true,
+          detector: "local_model",
+          local_model_id: directML.id,
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    const notice = container.querySelector('[data-testid="model-preparation"]');
+    expect(notice?.textContent).toContain("正在显卡上加载模型…");
+    expect(notice?.textContent).toContain(
+      "就绪之前，之前的本地模型会继续检查请求。",
+    );
+  });
+
   it("shows an in-app confirmation and feedback when deleting a model", async () => {
     const ready = readyInstallation();
     bridgeMocks.listPrivacyModelInstallations.mockResolvedValueOnce({
@@ -2228,18 +2704,22 @@ describe("SafetyPolicy", () => {
   });
 
   it("chooses per kind which warnings notify under warn and continue", async () => {
+    // Emails are off by default; this user turned them on.
+    const withEmail = defaultPrivacyKindRules().map((rule) =>
+      rule.kind === "email" ? { ...rule, enabled: true } : rule,
+    );
     bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
-      policyRecord({ request_action: "warn" }),
+      policyRecord({ request_action: "warn", kind_rules: withEmail }),
     );
     bridgeMocks.updatePrivacyPolicy.mockResolvedValueOnce(
-      policyRecord({ request_action: "warn" }),
+      policyRecord({ request_action: "warn", kind_rules: withEmail }),
     );
     await renderPolicy();
     expect(container.textContent).toContain("把不需要通知的类型设为「仅记录」");
     await openPolicySection("脱敏规则");
 
     expect(sectionButton("逐类型检测与通知", "重置此组设置").disabled).toBe(
-      true,
+      false,
     );
     expect(
       container.querySelector('[aria-label="邮箱 占位符形态"]'),
@@ -2261,7 +2741,7 @@ describe("SafetyPolicy", () => {
     await settleClosedLayer();
 
     expect(bridgeMocks.updatePrivacyPolicy).toHaveBeenCalledWith(etag, {
-      kind_rules: defaultPrivacyKindRules().map((rule) =>
+      kind_rules: withEmail.map((rule) =>
         rule.kind === "email" ? { ...rule, notify: false } : rule,
       ),
     });
@@ -2295,7 +2775,7 @@ describe("SafetyPolicy", () => {
     await act(async () => sectionButton("逐类型脱敏", "重置此组设置").click());
     const dialog = document.querySelector('[role="alertdialog"]');
     expect(dialog?.textContent).toContain("将逐类型脱敏恢复默认？");
-    expect(dialog?.textContent).toContain("URL、IP 地址、私人日期关闭");
+    expect(dialog?.textContent).toContain("默认只开启常见密钥，其他类型关闭");
     expect(bridgeMocks.updatePrivacyPolicy).not.toHaveBeenCalled();
 
     await act(async () => button("恢复默认").click());
@@ -2368,10 +2848,19 @@ describe("SafetyPolicy", () => {
 
     await act(async () => sectionButton("免脱敏名单", "补回默认条目").click());
     const dialog = document.querySelector('[role="alertdialog"]');
-    expect(dialog?.textContent).toContain("将补回以下 7 条默认条目");
-    const added = [
+    expect(dialog?.textContent).toContain("将补回以下 13 条默认条目");
+    const domains = [
       "localhost",
       "githubusercontent.com",
+      // Reserved for examples and tests.
+      "example.com",
+      "example.net",
+      "example.org",
+      "example",
+      "test",
+      "invalid",
+    ];
+    const ranges = [
       "127.0.0.0/8",
       "::1/128",
       "172.16.0.0/12",
@@ -2380,7 +2869,7 @@ describe("SafetyPolicy", () => {
     ];
     expect(
       [...(dialog?.querySelectorAll("li") ?? [])].map((row) => row.textContent),
-    ).toEqual(added);
+    ).toEqual([...domains, ...ranges]);
 
     await act(async () => button("补回").click());
     await flush();
@@ -2391,13 +2880,12 @@ describe("SafetyPolicy", () => {
         { type: "literal", value: "build-01" },
         { type: "domain_suffix", value: "GitHub.com" },
         { type: "cidr", value: "10.0.0.0/8" },
-        { type: "domain_suffix", value: "localhost" },
-        { type: "domain_suffix", value: "githubusercontent.com" },
-        ...added.slice(2).map((value) => ({ type: "cidr", value })),
+        ...domains.map((value) => ({ type: "domain_suffix", value })),
+        ...ranges.map((value) => ({ type: "cidr", value })),
       ],
     });
     expect(notifyMocks.success).toHaveBeenLastCalledWith(
-      "已补回 7 条默认条目，新请求立即生效。",
+      "已补回 13 条默认条目，新请求立即生效。",
     );
     expect(
       container.querySelector<HTMLInputElement>('input[type="search"]')?.value,
@@ -2406,7 +2894,13 @@ describe("SafetyPolicy", () => {
   });
 
   it("locks the placeholder style of kinds where the shape is a safety property", async () => {
-    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(policyRecord());
+    bridgeMocks.getPrivacyPolicy.mockResolvedValueOnce(
+      policyRecord({
+        kind_rules: defaultPrivacyKindRules().map((rule) =>
+          rule.kind === "email" ? { ...rule, enabled: true } : rule,
+        ),
+      }),
+    );
     await renderPolicy();
     await openPolicySection("脱敏规则");
 
