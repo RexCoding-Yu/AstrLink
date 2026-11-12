@@ -1076,14 +1076,15 @@ function parseSubscriptionConnection(
   return result;
 }
 
+const pluginKeyPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const pluginNamePattern = /^[a-z][a-z0-9-]{0,31}$/;
 
 function parseServicePlugin(value: unknown, path: string): ServicePlugin {
   const plugin = objectAt(value, path);
   keysAt(plugin, ["key", "provider"], ["upstream", "settings"], path);
-  const key = stringAt(plugin.key, `${path}.key`, 1, 32);
+  const key = stringAt(plugin.key, `${path}.key`, 1, 64);
   const provider = stringAt(plugin.provider, `${path}.provider`, 1, 32);
-  if (!pluginNamePattern.test(key) || !pluginNamePattern.test(provider))
+  if (!pluginKeyPattern.test(key) || !pluginNamePattern.test(provider))
     invalid(path, "invalid plugin provider");
   const parsed: ServicePlugin = { key, provider };
   if (plugin.upstream !== undefined) {

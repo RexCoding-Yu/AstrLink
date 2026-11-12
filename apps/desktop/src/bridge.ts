@@ -205,6 +205,7 @@ import {
   parsePluginHostSettings,
   parsePluginList,
   parsePluginMarket,
+  parsePluginMarketDoc,
   parsePluginTaskPage,
   parsePluginStats,
   parsePluginStatus,
@@ -238,6 +239,7 @@ import {
   type PluginHostSettingsUpdate,
   type PluginList,
   type PluginMarket,
+  type PluginMarketDoc,
   type PluginTaskPage,
   type PluginSettingsUpdate,
   type PluginStats,
@@ -2073,6 +2075,33 @@ export async function getPluginMarket(index?: string): Promise<PluginMarket> {
     await invoke<unknown>("plugin_action", {
       action: "market",
       input: index ? { index } : {},
+    }),
+  );
+}
+
+/** The plugin of an 8-digit New API code, as a listing of that one plugin. */
+export async function findPluginByCode(code: string): Promise<PluginMarket> {
+  requireNativeBridge();
+  return parsePluginMarket(
+    await invoke<unknown>("plugin_action", {
+      action: "market",
+      input: { code },
+    }),
+  );
+}
+
+/** A marketplace version's usage guide or release notes. */
+export async function getPluginMarketDoc(input: {
+  index: string;
+  key: string;
+  version?: string;
+  doc: "readme" | "changelog";
+}): Promise<PluginMarketDoc> {
+  requireNativeBridge();
+  return parsePluginMarketDoc(
+    await invoke<unknown>("plugin_action", {
+      action: "market_doc",
+      input,
     }),
   );
 }

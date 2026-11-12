@@ -40,7 +40,7 @@ var taskCapabilities = []string{"json-clone@1", "submit-sse-delta@1", "json-orde
 type TaskMeta struct {
 	APIVersion           int                 `json:"apiVersion"`
 	Key                  string              `json:"key"`
-	Name                 string              `json:"name"`
+	Name                 LocalizedText       `json:"name"`
 	Icon                 string              `json:"icon,omitempty"`
 	Description          LocalizedText       `json:"description,omitempty"`
 	Version              string              `json:"version"`
@@ -242,14 +242,14 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 	switch {
 	case meta.APIVersion != 1:
 		return invalid("meta.apiVersion %d is not supported; task plugins use 1", meta.APIVersion)
-	case !ValidPluginKey(meta.Key) || len(meta.Key) > 30:
-		return invalid("meta.key %q must be a lowercase letter followed by up to 29 lowercase letters, digits or hyphens", meta.Key)
+	case !ValidPluginKey(meta.Key):
+		return invalid("meta.key %q must be a lowercase letter or digit followed by up to 63 lowercase letters, digits, hyphens or underscores", meta.Key)
 	case key != "" && meta.Key != key:
 		return invalid("meta.key %q does not match the plugin directory %q", meta.Key, key)
 	case slices.Contains(reservedTaskKeys, meta.Key):
 		return invalid("meta.key %q is a path of the gateway; its routes could not be served under /%s", meta.Key, meta.Key)
-	case strings.TrimSpace(meta.Name) == "" || utf8.RuneCountInString(meta.Name) > 128:
-		return invalid("meta.name must be 1 to 128 characters")
+	case strings.TrimSpace(meta.Name.In("en")) == "":
+		return invalid("meta.name is required, in English when it is given by language")
 	case utf8.RuneCountInString(meta.Icon) > 128 || strings.HasPrefix(meta.Icon, "data:") || strings.Contains(meta.Icon, "://"):
 		return invalid("meta.icon is a LobeHub icon name or text, at most 128 characters")
 	case !taskVersionPattern.MatchString(meta.Version):
@@ -264,6 +264,9 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 		return invalid("meta.fetchMode must be per_task or batch")
 	case len(meta.Models) == 0:
 		return invalid("meta.models must list at least one model")
+	}
+	if err := validateLocalized(meta.Name, 128, "meta.name"); err != nil {
+		return invalid("%s", err.Error())
 	}
 	if err := validateLocalized(meta.Description, 512, "meta.description"); err != nil {
 		return invalid("%v", err)

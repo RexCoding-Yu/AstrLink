@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -43,6 +44,9 @@ const (
 	iconRetry = 2 * time.Minute
 )
 
+// marketCodePattern is a plugin's code on the New API site.
+var marketCodePattern = regexp.MustCompile(`^[0-9]{8}$`)
+
 // The waits of reading a marketplace, variables so that tests can shorten
 // them.
 var (
@@ -60,11 +64,19 @@ type marketIndex struct {
 	IndexVersion int            `json:"indexVersion"`
 	Name         string         `json:"name"`
 	Plugins      []marketPlugin `json:"plugins"`
+	// Revoked are the files the marketplace took down, by sha256.
+	Revoked []marketRevoked `json:"revoked"`
+}
+
+type marketRevoked struct {
+	SHA256 string               `json:"sha256"`
+	Key    string               `json:"key"`
+	Reason plugin.LocalizedText `json:"reason"`
 }
 
 type marketPlugin struct {
 	Key          string                     `json:"key"`
-	Name         string                     `json:"name"`
+	Name         plugin.LocalizedText       `json:"name"`
 	Icon         string                     `json:"icon"`
 	IconFile     *marketFile                `json:"iconFile"`
 	Description  plugin.LocalizedText       `json:"description"`
@@ -80,11 +92,41 @@ type marketPlugin struct {
 	// the task part.
 	Provider  bool `json:"provider"`
 	Transform bool `json:"transform"`
+	// Code, Recommended, Author, Repo and Installs30d are what the New API
+	// site adds: the plugin's 8-digit code, whether it recommends the
+	// plugin, who published a community plugin and from where, and how many
+	// gateways installed it in 30 days.
+	Code        string        `json:"code"`
+	Recommended bool          `json:"recommended"`
+	Author      *marketAuthor `json:"author"`
+	Repo        string        `json:"repo"`
+	Installs30d *int          `json:"installs30d"`
+}
+
+type marketAuthor struct {
+	Login string `json:"login"`
+	URL   string `json:"url"`
 }
 
 type marketFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
+}
+
+// marketDoc is a version's usage guide or release notes: a file, its
+// sha256 when the index lists one, a page to read it on, and its
+// translations by language.
+type marketDoc struct {
+	Path         string                   `json:"path"`
+	SHA256       string                   `json:"sha256"`
+	SourceURL    string                   `json:"sourceUrl"`
+	Translations map[string]marketDocFile `json:"translations"`
+}
+
+type marketDocFile struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	SourceURL string `json:"sourceUrl"`
 }
 
 type marketVersion struct {
@@ -96,6 +138,8 @@ type marketVersion struct {
 	AllowedHosts  []string        `json:"allowedHosts"`
 	BaseURL       string          `json:"baseUrl"`
 	Auth          plugin.TaskAuth `json:"auth"`
+	Readme        *marketDoc      `json:"readme"`
+	Changelog     *marketDoc      `json:"changelog"`
 }
 
 func parseIndex(data []byte) (*marketIndex, error) {
@@ -147,10 +191,16 @@ type marketRef struct {
 }
 
 // parseMarketLink reads a marketplace link: an http or https address of
-// an index.json, and the plugin's key and version after #.
+// an index.json, or of a marketplace's lookup of a plugin by its code,
+// which answers in the index's shape, and the plugin's key and version
+// after #.
 func parseMarketLink(text string) (marketRef, bool) {
 	parsed, err := url.Parse(strings.TrimSpace(text))
-	if err != nil || parsed.Host == "" || parsed.User != nil || !strings.HasSuffix(parsed.Path, ".json") {
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return marketRef{}, false
+	}
+	lookup := path.Base(parsed.Path) == "resolve" && marketCodePattern.MatchString(parsed.Query().Get("code"))
+	if !strings.HasSuffix(parsed.Path, ".json") && !lookup {
 		return marketRef{}, false
 	}
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopbackHost(parsed.Hostname())) {
@@ -199,15 +249,12 @@ func (installer *Installer) marketGet(ctx context.Context, address string, limit
 	return data, nil
 }
 
-// fetchIndex reads a marketplace's index, the official one from jsDelivr
-// when GitHub cannot be reached, and returns the address it came from,
-// which the files it lists are relative to. The address that answered
-// last goes first, so a network without GitHub waits for it once.
+// fetchIndex reads a marketplace's index, from a mirror when its address
+// cannot be reached, and returns the address it came from, which the files
+// it lists are relative to. The address that answered last goes first, so
+// a network that cannot reach the first waits for it once.
 func (installer *Installer) fetchIndex(ctx context.Context, address string) (*marketIndex, string, error) {
-	addresses := []string{address}
-	if address == contract.OfficialPluginMarket {
-		addresses = append(addresses, contract.OfficialPluginMarketFallback)
-	}
+	addresses := append([]string{address}, contract.PluginMarketMirrors(address)...)
 	installer.market.mutex.Lock()
 	answered := installer.market.answered[address]
 	installer.market.mutex.Unlock()
@@ -304,7 +351,7 @@ func (installer *Installer) previewMarket(ctx context.Context, ref marketRef, li
 			}
 		}
 	}
-	installer.marketChangelogs(ctx, base, version.Path, files.changelogs)
+	installer.marketChangelogs(ctx, base, version, files.changelogs)
 	staged, err := installer.stageTask(ctx, string(text), files, filepath.Join(work, "out"))
 	if err != nil {
 		return contract.PluginInstallReview{}, contract.PluginInstallRecord{}, err
@@ -330,10 +377,26 @@ func (installer *Installer) previewMarket(ctx context.Context, ref marketRef, li
 	return review, record, nil
 }
 
-// marketChangelogs fetches the changelog beside a version's file, and the
-// translations its front matter names.
-func (installer *Installer) marketChangelogs(ctx context.Context, base, file string, into map[string][]byte) {
-	dir := path.Dir(file)
+// marketChangelogs fetches a version's release notes and their
+// translations: the files the index lists, checked against their sha256,
+// else the CHANGELOG.md beside the version's file and the translations its
+// front matter names.
+func (installer *Installer) marketChangelogs(ctx context.Context, base string, version *marketVersion, into map[string][]byte) {
+	if listed := version.Changelog; listed != nil && listed.Path != "" {
+		if data, err := installer.docFile(ctx, base, marketDocFile{Path: listed.Path, SHA256: listed.SHA256}); err == nil {
+			into["CHANGELOG.md"] = data
+		}
+		for language, file := range listed.Translations {
+			if !changelogPattern.MatchString("CHANGELOG." + language + ".md") {
+				continue
+			}
+			if data, err := installer.docFile(ctx, base, file); err == nil {
+				into["CHANGELOG."+language+".md"] = data
+			}
+		}
+		return
+	}
+	dir := path.Dir(version.Path)
 	canonical, err := installer.relativeGet(ctx, base, path.Join(dir, "CHANGELOG.md"))
 	if err != nil {
 		return
@@ -344,6 +407,19 @@ func (installer *Installer) marketChangelogs(ctx context.Context, base, file str
 			into[translation] = data
 		}
 	}
+}
+
+// docFile fetches a usage guide or release notes the index lists, checked
+// against its sha256 when the index gives one.
+func (installer *Installer) docFile(ctx context.Context, base string, file marketDocFile) ([]byte, error) {
+	if file.SHA256 != "" {
+		return installer.verified(ctx, base, file.Path, file.SHA256, maxDocBytes)
+	}
+	address, err := relative(base, file.Path)
+	if err != nil {
+		return nil, fail(contract.PluginInstallInvalidLink, file.Path)
+	}
+	return installer.marketGet(ctx, address, maxDocBytes)
 }
 
 func (installer *Installer) relativeGet(ctx context.Context, base, name string) ([]byte, error) {
@@ -405,7 +481,7 @@ func (installer *Installer) checkMarketUpdate(ctx context.Context, record contra
 	check.Commit = strings.ToLower(latest.SHA256)
 	check.URL = MarketLink(source.Index, source.Key, latest.Version)
 	changelogs := map[string][]byte{}
-	installer.marketChangelogs(ctx, base, latest.Path, changelogs)
+	installer.marketChangelogs(ctx, base, latest, changelogs)
 	check.Notes = changelogIn(changelogs, installer.language())
 	return check, nil
 }
@@ -418,6 +494,9 @@ type marketListing struct {
 	market  contract.PluginMarket
 	entries map[string]marketPlugin
 	base    string
+	// revoked are the reasons of the files the marketplace took down, by
+	// sha256.
+	revoked map[string]string
 }
 
 type marketCache struct {
@@ -435,10 +514,18 @@ type marketIcon struct {
 	failed time.Time
 }
 
+// Installed is what a marketplace listing needs of a plugin installed
+// now: its version and, when it came from a marketplace, the sha256 of its
+// file.
+type Installed struct {
+	Version string
+	SHA256  string
+}
+
 // Market lists what a marketplace offers, the official one for "":
 // newest version, models, protocols, and an icon to show. installed tells
-// the version of a key installed now.
-func (installer *Installer) Market(ctx context.Context, index string, installed func(key string) string) (contract.PluginMarket, error) {
+// what of a key is installed now.
+func (installer *Installer) Market(ctx context.Context, index string, installed func(key string) Installed) (contract.PluginMarket, error) {
 	if index == "" {
 		index = contract.OfficialPluginMarket
 	}
@@ -447,31 +534,168 @@ func (installer *Installer) Market(ctx context.Context, index string, installed 
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	installer.market.mutex.Lock()
-	cached, ok := installer.market.listings[index]
-	installer.market.mutex.Unlock()
-	if !ok || installer.options.Now().Sub(cached.at) > marketCacheFor {
-		listing, err := installer.readMarket(ctx, index)
-		if err != nil {
-			return contract.PluginMarket{}, installer.failure(ctx, err)
-		}
-		cached = listing
-		installer.market.mutex.Lock()
-		if installer.market.listings == nil {
-			installer.market.listings = map[string]marketListing{}
-		}
-		installer.market.listings[index] = cached
-		installer.market.mutex.Unlock()
+	cached, err := installer.listing(ctx, index)
+	if err != nil {
+		return contract.PluginMarket{}, installer.failure(ctx, err)
 	}
+	return installer.present(ctx, cached, installed), nil
+}
+
+// listing is a marketplace's listing in the plugin page's language, read
+// again when the one kept is older than marketCacheFor.
+func (installer *Installer) listing(ctx context.Context, index string) (marketListing, error) {
+	kept := index + "\x00" + installer.language()
+	installer.market.mutex.Lock()
+	cached, ok := installer.market.listings[kept]
+	installer.market.mutex.Unlock()
+	if ok && installer.options.Now().Sub(cached.at) <= marketCacheFor {
+		return cached, nil
+	}
+	listing, err := installer.readMarket(ctx, index)
+	if err != nil {
+		return marketListing{}, err
+	}
+	installer.market.mutex.Lock()
+	if installer.market.listings == nil {
+		installer.market.listings = map[string]marketListing{}
+	}
+	installer.market.listings[kept] = listing
+	installer.market.mutex.Unlock()
+	return listing, nil
+}
+
+// present is a listing as the plugin page shows it: with icons, what is
+// installed now, and whether the marketplace took that version down.
+func (installer *Installer) present(ctx context.Context, cached marketListing, installed func(key string) Installed) contract.PluginMarket {
 	market := cached.market
 	market.Plugins = slices.Clone(market.Plugins)
 	installer.fillIcons(ctx, cached, market.Plugins)
 	for at := range market.Plugins {
-		if installed != nil {
-			market.Plugins[at].Installed = installed(market.Plugins[at].Key)
+		if installed == nil {
+			continue
+		}
+		now := installed(market.Plugins[at].Key)
+		market.Plugins[at].Installed = now.Version
+		if reason, ok := cached.revoked[strings.ToLower(now.SHA256)]; ok && now.SHA256 != "" {
+			market.Plugins[at].Revoked = &contract.PluginMarketRevoked{Reason: reason}
 		}
 	}
+	return market
+}
+
+// FindByCode finds a plugin by its 8-digit code: in the official
+// marketplace first, then through the community marketplace's lookup, which
+// also finds a plugin its listing leaves out. The answer lists the one
+// plugin, its Index the address its links install from.
+func (installer *Installer) FindByCode(ctx context.Context, code string, installed func(key string) Installed) (contract.PluginMarket, error) {
+	code = strings.TrimSpace(code)
+	if !marketCodePattern.MatchString(code) {
+		return contract.PluginMarket{}, fail(contract.PluginInstallInvalidLink, code)
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if official, err := installer.listing(ctx, contract.OfficialPluginMarket); err == nil {
+		market := installer.present(ctx, official, installed)
+		for _, entry := range market.Plugins {
+			if entry.Code == code {
+				market.Plugins = []contract.PluginMarketEntry{entry}
+				return market, nil
+			}
+		}
+	}
+	lookup := contract.CommunityPluginResolve + "?code=" + code
+	listing, err := installer.readMarket(ctx, lookup)
+	if err != nil {
+		return contract.PluginMarket{}, installer.failure(ctx, err)
+	}
+	market := installer.present(ctx, listing, installed)
+	if len(market.Plugins) == 0 {
+		return contract.PluginMarket{}, fail(contract.PluginInstallNoPlugin, code)
+	}
+	market.Plugins = market.Plugins[:1]
 	return market, nil
+}
+
+// MarketDoc is a version's usage guide or release notes from a
+// marketplace, in the user's language when it has a translation, else in
+// English. Release notes the index does not list are read from the
+// CHANGELOG.md beside the version's file.
+func (installer *Installer) MarketDoc(ctx context.Context, index, key, version, doc string) (contract.PluginMarketDoc, error) {
+	if index == "" {
+		index = contract.OfficialPluginMarket
+	}
+	if _, ok := parseMarketLink(MarketLink(index, "probe", "")); !ok {
+		return contract.PluginMarketDoc{}, fail(contract.PluginInstallInvalidLink, index)
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	listing, err := installer.listing(ctx, index)
+	if err != nil {
+		return contract.PluginMarketDoc{}, installer.failure(ctx, err)
+	}
+	entry, ok := listing.entries[key]
+	if !ok {
+		return contract.PluginMarketDoc{}, fail(contract.PluginInstallNoPlugin, key)
+	}
+	if version == "" {
+		version = entry.Latest
+	}
+	var found *marketVersion
+	for at := range entry.Versions {
+		if entry.Versions[at].Version == version {
+			found = &entry.Versions[at]
+		}
+	}
+	if found == nil {
+		return contract.PluginMarketDoc{}, fail(contract.PluginInstallRefNotFound, key+"@"+version)
+	}
+	described := found.Readme
+	if doc == contract.PluginMarketChangelog {
+		described = found.Changelog
+	} else if doc != contract.PluginMarketReadme {
+		return contract.PluginMarketDoc{}, fail(contract.PluginInstallInvalidLink, doc)
+	}
+	if described == nil || described.Path == "" {
+		if doc == contract.PluginMarketChangelog {
+			changelogs := map[string][]byte{}
+			installer.marketChangelogs(ctx, listing.base, found, changelogs)
+			if notes := changelogIn(changelogs, installer.language()); notes != "" {
+				return contract.PluginMarketDoc{Markdown: notes}, nil
+			}
+		}
+		return contract.PluginMarketDoc{}, fail(contract.PluginInstallNoPlugin, key+"@"+version+" "+doc)
+	}
+	language, file := docIn(described, installer.language())
+	data, err := installer.docFile(ctx, listing.base, file)
+	if err != nil {
+		return contract.PluginMarketDoc{}, installer.failure(ctx, err)
+	}
+	result := contract.PluginMarketDoc{Markdown: stripFrontMatter(string(data)), Language: language}
+	if httpsURL(file.SourceURL) {
+		result.SourceURL = file.SourceURL
+	}
+	return result, nil
+}
+
+// maxDocBytes bounds a usage guide.
+const maxDocBytes = 256 << 10
+
+// docIn picks a document's file in language, its primary language, or the
+// English file.
+func docIn(doc *marketDoc, language string) (string, marketDocFile) {
+	candidates := []string{language}
+	if primary, _, found := strings.Cut(language, "-"); found {
+		candidates = append(candidates, primary)
+	}
+	if strings.HasPrefix(language, "zh") {
+		candidates = append(candidates, "zh-CN")
+	}
+	for _, candidate := range candidates {
+		if file, ok := doc.Translations[candidate]; ok && file.Path != "" {
+			return candidate, file
+		}
+	}
+	return "en", marketDocFile{Path: doc.Path, SHA256: doc.SHA256, SourceURL: doc.SourceURL}
 }
 
 // fillIcons gives the plugins of a listing their icons: those fetched
@@ -512,10 +736,25 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 			continue
 		}
 		listed := contract.PluginMarketEntry{
-			Key: entry.Key, Name: entry.Name, Description: entry.Description.In(language), Icon: entry.Icon, Website: entry.Website,
+			Key: entry.Key, Name: entry.Name.In(language), Description: entry.Description.In(language), Icon: entry.Icon, Website: entry.Website,
 			SortPriority: entry.SortPriority, Latest: entry.Latest, Models: slices.Clone(entry.Models),
 			Protocols: []contract.PluginTaskProtocol{}, Routes: []contract.PluginTaskRoute{}, Versions: []contract.PluginMarketVersion{},
-			Link: MarketLink(address, entry.Key, entry.Latest),
+			Link: MarketLink(address, entry.Key, entry.Latest), Recommended: entry.Recommended, Installs30d: entry.Installs30d,
+		}
+		if listed.Name == "" {
+			listed.Name = entry.Key
+		}
+		if marketCodePattern.MatchString(entry.Code) {
+			listed.Code = entry.Code
+		}
+		if author := entry.Author; author != nil && author.Login != "" && len(author.Login) <= 64 {
+			listed.Author = &contract.PluginMarketAuthor{Login: author.Login}
+			if httpsURL(author.URL) {
+				listed.Author.URL = author.URL
+			}
+		}
+		if httpsURL(entry.Repo) {
+			listed.Repository = entry.Repo
 		}
 		if listed.Models == nil {
 			listed.Models = []string{}
@@ -533,12 +772,24 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 			listed.Routes = append(listed.Routes, contract.PluginTaskRoute{Method: route.Method, Path: route.Path, Type: route.Type, Models: route.Models})
 		}
 		for _, version := range entry.Versions {
-			if version.Kind != "" && version.Kind != "task" {
-				continue
+			// A version of only a part this gateway does not run is listed
+			// so, and cannot be installed.
+			if version.Version == entry.Latest && version.Kind != "" && version.Kind != "task" {
+				part := version.Kind
+				switch part {
+				case "provider":
+					part = contract.PluginPartProvider
+				case "transform":
+					part = contract.PluginPartTransform
+				}
+				if !slices.Contains(listed.Unsupported, part) {
+					listed.Unsupported = append(listed.Unsupported, part)
+				}
 			}
 			listed.Versions = append(listed.Versions, contract.PluginMarketVersion{
 				Version: version.Version, MinAPIVersion: version.MinAPIVersion, BaseURL: version.BaseURL,
 				Auth: string(version.Auth.Kind()), AllowedHosts: version.AllowedHosts, Link: MarketLink(address, entry.Key, version.Version),
+				Readme: version.Readme != nil && version.Readme.Path != "", Changelog: version.Changelog != nil && version.Changelog.Path != "",
 			})
 		}
 		if len(listed.Versions) == 0 {
@@ -554,7 +805,20 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 		}
 		return market.Plugins[i].Key < market.Plugins[j].Key
 	})
-	return marketListing{at: installer.options.Now(), market: market, entries: entries, base: base}, nil
+	revoked := map[string]string{}
+	for _, entry := range index.Revoked {
+		if sum := strings.ToLower(strings.TrimSpace(entry.SHA256)); len(sum) == 64 {
+			revoked[sum] = entry.Reason.In(language)
+		}
+	}
+	return marketListing{at: installer.options.Now(), market: market, entries: entries, base: base, revoked: revoked}, nil
+}
+
+// httpsURL reports whether raw is an absolute https address, as the links a
+// marketplace shows must be.
+func httpsURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
 // marketIcon is a marketplace plugin's icon as a data URL: the file the

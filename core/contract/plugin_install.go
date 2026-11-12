@@ -1,5 +1,7 @@
 package contract
 
+import "net/url"
+
 // Plugins installed from source (plugin platform v2, §7): a GitHub link is
 // resolved to a commit, its source built in Core with the dependencies its
 // lock file pins, reviewed, and installed only once the user confirms.
@@ -249,12 +251,41 @@ type PluginInstalledVersion struct {
 	ReplacedAt string `json:"replaced_at"`
 }
 
-// The official plugin marketplace of new-api, through GitHub and, when
-// GitHub cannot be reached, jsDelivr.
+// The plugin marketplaces of new-api, on the New API site: the official
+// one, which is also built from the new-api-plugins repository on GitHub,
+// and the community one, where authors publish their own plugins.
 const (
-	OfficialPluginMarket         = "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json"
-	OfficialPluginMarketFallback = "https://cdn.jsdelivr.net/gh/QuantumNous/new-api-plugins@main/index.json"
+	OfficialPluginMarket  = "https://www.newapi.ai/api/v1/plugins/index.json"
+	CommunityPluginMarket = "https://www.newapi.ai/api/v1/community/index.json"
+	// GitHubPluginMarket is the official marketplace's repository, which
+	// installs made before the New API site served it name.
+	GitHubPluginMarket = "https://raw.githubusercontent.com/QuantumNous/new-api-plugins/main/index.json"
+	// CommunityPluginResolve finds a community plugin by its code.
+	CommunityPluginResolve = "https://www.newapi.ai/api/v1/community/resolve"
+
+	newAPISite        = "www.newapi.ai"
+	newAPIBackupSite  = "www.newapi.pro"
+	gitHubMarketCache = "https://cdn.jsdelivr.net/gh/QuantumNous/new-api-plugins@main/index.json"
 )
+
+// PluginMarketMirrors are the addresses that serve the same index as
+// index, to try in order when it does not answer: the New API site's
+// backup site for its addresses, and for the official marketplace its
+// repository on GitHub and jsDelivr's copy of it.
+func PluginMarketMirrors(index string) []string {
+	var mirrors []string
+	if parsed, err := url.Parse(index); err == nil && parsed.Host == newAPISite {
+		parsed.Host = newAPIBackupSite
+		mirrors = append(mirrors, parsed.String())
+	}
+	switch index {
+	case OfficialPluginMarket:
+		mirrors = append(mirrors, GitHubPluginMarket, gitHubMarketCache)
+	case GitHubPluginMarket:
+		mirrors = append(mirrors, gitHubMarketCache)
+	}
+	return mirrors
+}
 
 // PluginMarket is what a plugin marketplace offers.
 type PluginMarket struct {
@@ -263,6 +294,34 @@ type PluginMarket struct {
 	Name    string              `json:"name"`
 	Plugins []PluginMarketEntry `json:"plugins"`
 }
+
+// PluginMarketAuthor is who published a community plugin.
+type PluginMarketAuthor struct {
+	Login string `json:"login"`
+	URL   string `json:"url,omitempty"`
+}
+
+// PluginMarketRevoked says the marketplace took down the version installed
+// now, and why.
+type PluginMarketRevoked struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// PluginMarketDoc is a version's usage guide or release notes, in the
+// user's language when the marketplace has it.
+type PluginMarketDoc struct {
+	Markdown string `json:"markdown"`
+	// Language is the language of Markdown; SourceURL a page where the
+	// file can be read.
+	Language  string `json:"language,omitempty"`
+	SourceURL string `json:"source_url,omitempty"`
+}
+
+// The documents a marketplace version may have.
+const (
+	PluginMarketReadme    = "readme"
+	PluginMarketChangelog = "changelog"
+)
 
 // PluginMarketEntry is a plugin a marketplace offers, as its index
 // describes the newest version.
@@ -288,6 +347,19 @@ type PluginMarketEntry struct {
 	// Unsupported are the parts of the newest version this gateway does
 	// not run yet; such a plugin is listed but cannot be installed.
 	Unsupported []string `json:"unsupported,omitempty"`
+	// Code is the plugin's 8-digit code on the New API site.
+	Code string `json:"code,omitempty"`
+	// Recommended marks a plugin the marketplace recommends.
+	Recommended bool `json:"recommended,omitempty"`
+	// Author published a community plugin from Repository.
+	Author     *PluginMarketAuthor `json:"author,omitempty"`
+	Repository string              `json:"repository,omitempty"`
+	// Installs30d is how many gateways installed it in 30 days, when the
+	// marketplace counts.
+	Installs30d *int `json:"installs_30d,omitempty"`
+	// Revoked is set when the marketplace took down the version installed
+	// now.
+	Revoked *PluginMarketRevoked `json:"revoked,omitempty"`
 }
 
 // The parts of a new-api plugin besides its task part.
@@ -305,4 +377,8 @@ type PluginMarketVersion struct {
 	AllowedHosts  []string `json:"allowed_hosts,omitempty"`
 	// Link installs this version.
 	Link string `json:"link"`
+	// Readme and Changelog say the version has a usage guide and release
+	// notes to read.
+	Readme    bool `json:"readme,omitempty"`
+	Changelog bool `json:"changelog,omitempty"`
 }

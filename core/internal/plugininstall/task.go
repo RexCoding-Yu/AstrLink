@@ -233,7 +233,7 @@ func repositoryIndex(resolved Resolved) string {
 		ref = resolved.Commit
 	}
 	if strings.EqualFold(resolved.Owner+"/"+resolved.Repo, "QuantumNous/new-api-plugins") && ref == "main" {
-		return contract.OfficialPluginMarket
+		return contract.GitHubPluginMarket
 	}
 	return "https://raw.githubusercontent.com/" + resolved.Owner + "/" + resolved.Repo + "/" + ref + "/index.json"
 }

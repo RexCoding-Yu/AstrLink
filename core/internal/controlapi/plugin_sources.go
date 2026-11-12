@@ -23,7 +23,9 @@ type PluginInstaller interface {
 	Rollback(key, id string) error
 	Uninstall(key string) error
 	CheckUpdate(ctx context.Context, record contract.PluginInstallRecord) (contract.PluginUpdateCheck, error)
-	Market(ctx context.Context, index string, installed func(key string) string) (contract.PluginMarket, error)
+	Market(ctx context.Context, index string, installed func(key string) plugininstall.Installed) (contract.PluginMarket, error)
+	FindByCode(ctx context.Context, code string, installed func(key string) plugininstall.Installed) (contract.PluginMarket, error)
+	MarketDoc(ctx context.Context, index, key, version, doc string) (contract.PluginMarketDoc, error)
 }
 
 // installFailureEnvelope is the error of an install that cannot go on,
@@ -249,23 +251,55 @@ func (handler *Handler) pluginSource(writer http.ResponseWriter, request *http.R
 }
 
 // pluginMarket lists what a plugin marketplace offers, the official one
-// unless index names another.
+// unless index names another; with code, the one plugin of that code.
 func (handler *Handler) pluginMarket(writer http.ResponseWriter, request *http.Request) {
 	if handler.pluginInstaller == nil {
 		writeError(writer, http.StatusServiceUnavailable, "unavailable", "installing plugins is unavailable")
 		return
 	}
-	installed := func(key string) string {
+	installed := func(key string) plugininstall.Installed {
 		target := handler.plugins.Current().Plugin(key)
 		if target == nil || target.Task() == nil {
-			return ""
+			return plugininstall.Installed{}
 		}
-		return target.Task().Version
+		now := plugininstall.Installed{Version: target.Task().Version}
+		if record := target.Installed; record != nil && record.Source.Kind == contract.PluginSourceMarket {
+			now.SHA256 = record.Source.Commit
+		}
+		return now
 	}
-	market, err := handler.pluginInstaller.Market(request.Context(), request.URL.Query().Get("index"), installed)
+	query := request.URL.Query()
+	var market contract.PluginMarket
+	var err error
+	if code := query.Get("code"); code != "" {
+		market, err = handler.pluginInstaller.FindByCode(request.Context(), code, installed)
+	} else {
+		market, err = handler.pluginInstaller.Market(request.Context(), query.Get("index"), installed)
+	}
 	if err != nil {
 		writeInstallFailure(writer, err)
 		return
 	}
 	writeJSON(writer, http.StatusOK, market)
+}
+
+// pluginMarketDoc answers a marketplace version's usage guide or release
+// notes.
+func (handler *Handler) pluginMarketDoc(writer http.ResponseWriter, request *http.Request) {
+	if handler.pluginInstaller == nil {
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", "installing plugins is unavailable")
+		return
+	}
+	query := request.URL.Query()
+	key, doc := query.Get("key"), query.Get("doc")
+	if !contract.ValidPluginKey(key) || (doc != contract.PluginMarketReadme && doc != contract.PluginMarketChangelog) {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "key and doc (readme or changelog) are required")
+		return
+	}
+	found, err := handler.pluginInstaller.MarketDoc(request.Context(), query.Get("index"), key, query.Get("version"), doc)
+	if err != nil {
+		writeInstallFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, found)
 }

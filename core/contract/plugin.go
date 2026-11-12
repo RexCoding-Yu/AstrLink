@@ -10,14 +10,22 @@ import (
 )
 
 var (
-	pluginKeyPattern            = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	pluginKeyPattern            = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	nativePluginKeyPattern      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	pluginCredentialNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 )
 
-// ValidPluginKey reports whether key can name a plugin: a lowercase letter,
-// then up to 31 lowercase letters, digits and hyphens. It is also the name
-// of the plugin's directory.
+// ValidPluginKey reports whether key can name a plugin: a lowercase letter
+// or digit, then up to 63 lowercase letters, digits, hyphens and
+// underscores, as new-api's keys are; a community plugin's key starts with
+// its author's GitHub name and an underscore, like alice_foo. It is also
+// the name of the plugin's directory.
 func ValidPluginKey(key string) bool { return pluginKeyPattern.MatchString(key) }
+
+// ValidNativePluginKey reports whether key can name a plugin written for
+// AstrLink's own plugin API: a lowercase letter, then up to 31 lowercase
+// letters, digits and hyphens.
+func ValidNativePluginKey(key string) bool { return nativePluginKeyPattern.MatchString(key) }
 
 // ValidPluginCredentialName reports whether name can name a credential slot
 // of a plugin: a lowercase letter, then up to 31 lowercase letters, digits

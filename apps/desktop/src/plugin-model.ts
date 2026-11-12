@@ -313,6 +313,10 @@ export interface PluginMarketVersion {
   allowed_hosts?: string[];
   /** The link that installs this version. */
   link: string;
+  /** The version has a usage guide to read. */
+  readme?: boolean;
+  /** The version has release notes to read. */
+  changelog?: boolean;
 }
 
 /** A plugin a marketplace offers, as its index describes the newest version. */
@@ -341,6 +345,25 @@ export interface PluginMarketEntry {
    * installed.
    */
   unsupported?: string[];
+  /** The plugin's 8-digit code on the New API site. */
+  code?: string;
+  /** The marketplace recommends the plugin. */
+  recommended?: boolean;
+  /** Who published a community plugin, and the repository it came from. */
+  author?: { login: string; url?: string };
+  repository?: string;
+  /** How many gateways installed it in 30 days, when the marketplace counts. */
+  installs_30d?: number;
+  /** Set when the marketplace took down the version installed now. */
+  revoked?: { reason?: string };
+}
+
+/** A marketplace version's usage guide or release notes. */
+export interface PluginMarketDoc {
+  markdown: string;
+  language?: string;
+  /** A page where the file can be read. */
+  source_url?: string;
 }
 
 /** What a plugin marketplace offers. */
@@ -1272,6 +1295,11 @@ export function parsePluginMarket(value: unknown): PluginMarket {
                 `${where}.allowed_hosts`,
               ),
               link: plugin.string(listed.link, `${where}.link`),
+              readme: plugin.optionalBoolean(listed.readme, `${where}.readme`),
+              changelog: plugin.optionalBoolean(
+                listed.changelog,
+                `${where}.changelog`,
+              ),
             });
           }),
         models: plugin.strings(entry.models, `${at}.models`),
@@ -1280,9 +1308,52 @@ export function parsePluginMarket(value: unknown): PluginMarket {
         link: plugin.string(entry.link, `${at}.link`),
         installed: plugin.optionalString(entry.installed, `${at}.installed`),
         unsupported: optionalStrings(entry.unsupported, `${at}.unsupported`),
+        code: plugin.optionalString(entry.code, `${at}.code`),
+        recommended: plugin.optionalBoolean(
+          entry.recommended,
+          `${at}.recommended`,
+        ),
+        author:
+          entry.author === undefined
+            ? undefined
+            : parseMarketAuthor(entry.author, `${at}.author`),
+        repository: plugin.optionalString(entry.repository, `${at}.repository`),
+        installs_30d: plugin.optionalInteger(
+          entry.installs_30d,
+          `${at}.installs_30d`,
+        ),
+        revoked:
+          entry.revoked === undefined
+            ? undefined
+            : defined({
+                reason: plugin.optionalString(
+                  plugin.object(entry.revoked, `${at}.revoked`).reason,
+                  `${at}.revoked.reason`,
+                ),
+              }),
       });
     }),
   };
+}
+
+function parseMarketAuthor(
+  value: unknown,
+  path: string,
+): { login: string; url?: string } {
+  const author = plugin.object(value, path);
+  return defined({
+    login: plugin.string(author.login, `${path}.login`),
+    url: plugin.optionalString(author.url, `${path}.url`),
+  });
+}
+
+export function parsePluginMarketDoc(value: unknown): PluginMarketDoc {
+  const doc = plugin.object(value, "$");
+  return defined({
+    markdown: plugin.string(doc.markdown, "$.markdown"),
+    language: plugin.optionalString(doc.language, "$.language"),
+    source_url: plugin.optionalString(doc.source_url, "$.source_url"),
+  });
 }
 
 function parseProvider(value: unknown, path: string): PluginProvider {

@@ -34,7 +34,7 @@ func TestOfficialTaskPluginsLoad(t *testing.T) {
 				t.Fatalf("Check: %v", err)
 			}
 			task := checked.Task
-			if task == nil || task.Key != source.Key || checked.Meta.Key != source.Key || checked.Meta.Name != task.Name {
+			if task == nil || task.Key != source.Key || checked.Meta.Key != source.Key || checked.Meta.Name != task.Name.In("en") {
 				t.Fatalf("Check = %+v, want the task plugin %s", checked, source.Key)
 			}
 			for _, hook := range []string{"buildSubmitRequest", "parseSubmitResponse", "parseTaskResult"} {

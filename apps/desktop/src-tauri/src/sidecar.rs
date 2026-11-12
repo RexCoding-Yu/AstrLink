@@ -2563,7 +2563,7 @@ impl CoreManager {
         input: serde_json::Value,
         approved: bool,
     ) -> Result<PluginUpdate, String> {
-        if !valid_plugin_name(key, '-') {
+        if !valid_plugin_key(key) {
             return Err("invalid plugin".into());
         }
         let path = format!("/control/v1/plugins/{key}");
@@ -2640,7 +2640,7 @@ impl CoreManager {
         key: &str,
         file: &str,
     ) -> Result<Vec<u8>, reqwest::StatusCode> {
-        if !valid_plugin_name(key, '-') || !matches!(file, "client.js" | "client.js.map") {
+        if !valid_plugin_key(key) || !matches!(file, "client.js" | "client.js.map") {
             return Err(reqwest::StatusCode::NOT_FOUND);
         }
         let path = format!("/control/v1/plugins/{key}/{file}");
@@ -3893,6 +3893,16 @@ fn is_builtin_tool_test(method: &Method, path: &str) -> bool {
 }
 
 /// A lowercase letter, then up to 31 lowercase letters, digits or `extra`.
+/// Whether `value` can name a plugin, as Core's ValidPluginKey: a
+/// lowercase letter or digit, then up to 63 lowercase letters, digits,
+/// hyphens and underscores, as New API's community keys need.
+fn valid_plugin_key(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('a'..='z' | '0'..='9'))
+        && value.len() <= 64
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
 fn valid_plugin_name(value: &str, extra: char) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some('a'..='z'))
@@ -3958,23 +3968,53 @@ fn plugin_request(
             ))
         }
         // What a plugin marketplace offers, the official one unless the
-        // input names another index.
+        // input names another index; with a code, the one plugin of that
+        // code.
         "market" => {
-            let index = input
-                .as_ref()
-                .and_then(|input| input.get("index"))
-                .and_then(serde_json::Value::as_str)
-                .filter(|index| !index.is_empty());
-            let path = match index {
+            let field = |name: &str| {
+                input
+                    .as_ref()
+                    .and_then(|input| input.get(name))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+            };
+            if let Some(code) = field("code") {
+                if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("invalid plugin code".into());
+                }
+                return Ok((Method::GET, format!("{base}/market?code={code}"), None));
+            }
+            let path = match field("index") {
                 Some(index) => format!("{base}/market?index={}", percent_encode_query(index)),
                 None => format!("{base}/market"),
             };
             return Ok((Method::GET, path, None));
         }
+        // A marketplace version's usage guide or release notes.
+        "market_doc" => {
+            let input = input.ok_or("the plugin is required")?;
+            let field = |name: &str| {
+                input
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+            };
+            let (key, doc) = (field("key"), field("doc"));
+            if !valid_plugin_key(key) || !matches!(doc, "readme" | "changelog") {
+                return Err("invalid plugin document".into());
+            }
+            let mut path = format!("{base}/market/doc?key={key}&doc={doc}");
+            for name in ["index", "version"] {
+                if !field(name).is_empty() {
+                    path.push_str(&format!("&{name}={}", percent_encode_query(field(name))));
+                }
+            }
+            return Ok((Method::GET, path, None));
+        }
         _ => {}
     }
     let key = key
-        .filter(|key| valid_plugin_name(key, '-'))
+        .filter(|key| valid_plugin_key(key))
         .ok_or("invalid plugin")?;
     let plugin = format!("{base}/{key}");
     Ok(match action {
@@ -4140,7 +4180,7 @@ fn session_plugins_request(
     let Some(key) = key else {
         return Ok((Method::GET, base, None));
     };
-    if !valid_plugin_name(key, '-') {
+    if !valid_plugin_key(key) {
         return Err("invalid plugin".into());
     }
     if refresh {
@@ -7859,6 +7899,56 @@ mod tests {
                 None
             )
         );
+        assert_eq!(
+            plugin_request(
+                "market",
+                None,
+                None,
+                Some(serde_json::json!({ "code": "46324580" }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/market?code=46324580".into(),
+                None
+            )
+        );
+        assert!(plugin_request(
+            "market",
+            None,
+            None,
+            Some(serde_json::json!({ "code": "4632&x=1" }))
+        )
+        .is_err());
+        assert_eq!(
+            plugin_request(
+                "market_doc",
+                None,
+                None,
+                Some(serde_json::json!({
+                    "index": "https://www.newapi.ai/api/v1/community/index.json",
+                    "key": "rexcoding-yu_artdance",
+                    "version": "1.0.2",
+                    "doc": "readme"
+                }))
+            )
+            .unwrap(),
+            (
+                Method::GET,
+                "/control/v1/plugins/market/doc?key=rexcoding-yu_artdance&doc=readme&index=https%3A%2F%2Fwww.newapi.ai%2Fapi%2Fv1%2Fcommunity%2Findex.json&version=1.0.2".into(),
+                None
+            )
+        );
+        for input in [
+            serde_json::json!({ "key": "Bad Key", "doc": "readme" }),
+            serde_json::json!({ "key": "sora", "doc": "license" }),
+        ] {
+            assert!(plugin_request("market_doc", None, None, Some(input)).is_err());
+        }
+        assert!(valid_plugin_key("rexcoding-yu_artdance"));
+        assert!(valid_plugin_key("1password"));
+        assert!(!valid_plugin_key("_sora"));
+        assert!(!valid_plugin_key(&"a".repeat(65)));
         assert_eq!(
             plugin_request(
                 "tasks",

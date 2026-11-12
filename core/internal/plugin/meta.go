@@ -108,8 +108,9 @@ var (
 	headerNamePattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
 )
 
-// ValidPluginKey reports whether key can name a plugin: a lowercase letter,
-// then up to 31 lowercase letters, digits and hyphens.
+// ValidPluginKey reports whether key can name a plugin: a lowercase letter
+// or digit, then up to 63 lowercase letters, digits, hyphens and
+// underscores, as New API's community keys need.
 func ValidPluginKey(key string) bool { return contract.ValidPluginKey(key) }
 
 // credentialHeaderAllowed reports whether the host may write a credential
@@ -155,7 +156,7 @@ func validateMeta(meta Meta, key string) error {
 	if meta.APIVersion < 1 || meta.APIVersion > APIVersion {
 		return invalid("meta.apiVersion %d is not supported; this host implements 1 to %d", meta.APIVersion, APIVersion)
 	}
-	if !ValidPluginKey(meta.Key) {
+	if !contract.ValidNativePluginKey(meta.Key) {
 		return invalid("meta.key %q must be a lowercase letter followed by up to 31 lowercase letters, digits or hyphens", meta.Key)
 	}
 	if meta.Key != key {

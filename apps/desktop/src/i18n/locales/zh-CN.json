@@ -6118,7 +6118,7 @@
       "custom": "其他市场",
       "indexLabel": "市场的 index.json 地址",
       "open": "打开",
-      "search": "搜索插件或模型",
+      "search": "搜索插件、模型或编码",
       "count_one": "{{name}} · {{count}} 个插件",
       "count_other": "{{name}} · {{count}} 个插件",
       "loading": "正在读取插件市场…",
@@ -6145,7 +6145,27 @@
         "transform": "请求处理插件",
         "other": "{{part}}"
       },
-      "partSeparator": "、"
+      "partSeparator": "、",
+      "community": "社区市场",
+      "recommended": "推荐",
+      "by": "作者 {{author}}",
+      "author": "作者",
+      "repository": "源码仓库",
+      "code": "插件编码",
+      "installs": "近 30 天",
+      "installsCount_one": "{{count}} 次安装",
+      "installsCount_other": "{{count}} 次安装",
+      "guide": "使用说明",
+      "guideSource": "在 GitHub 上查看",
+      "guideLoading": "正在读取使用说明…",
+      "guideFailed": "使用说明读取失败，可以稍后再打开。",
+      "notes": "更新说明",
+      "revoked": "已下架",
+      "revokedReason": "市场已经下架了你装的这个版本：{{reason}}。建议更新到其他版本，或者卸载。",
+      "revokedNoReason": "市场已经下架了你装的这个版本。建议更新到其他版本，或者卸载。",
+      "finding": "正在查找编码 {{code}} 的插件…",
+      "foundByCode": "编码 {{code}} 的插件",
+      "noCode": "没有找到编码为 {{code}} 的插件"
     },
     "task": {
       "protocols": {

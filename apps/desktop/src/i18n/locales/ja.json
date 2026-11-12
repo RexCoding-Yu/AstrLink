@@ -6118,7 +6118,7 @@
       "custom": "ほかのマーケットプレイス",
       "indexLabel": "マーケットプレイスの index.json のアドレス",
       "open": "開く",
-      "search": "プラグインやモデルを検索",
+      "search": "プラグイン、モデル、コードで検索",
       "count_one": "{{name}} · {{count}} 個のプラグイン",
       "count_other": "{{name}} · {{count}} 個のプラグイン",
       "loading": "マーケットプレイスを読み込んでいます…",
@@ -6145,7 +6145,27 @@
         "transform": "リクエスト処理部分",
         "other": "{{part}}"
       },
-      "partSeparator": "、"
+      "partSeparator": "、",
+      "community": "コミュニティ",
+      "recommended": "おすすめ",
+      "by": "作者 {{author}}",
+      "author": "作者",
+      "repository": "ソース",
+      "code": "プラグインコード",
+      "installs": "過去 30 日",
+      "installsCount_one": "{{count}} 件のインストール",
+      "installsCount_other": "{{count}} 件のインストール",
+      "guide": "使い方",
+      "guideSource": "GitHub で見る",
+      "guideLoading": "使い方を読み込んでいます…",
+      "guideFailed": "使い方を読み込めませんでした。しばらくしてからもう一度開いてください。",
+      "notes": "更新内容",
+      "revoked": "公開停止",
+      "revokedReason": "インストール中のこのバージョンはマーケットで公開停止になりました：{{reason}}。別のバージョンに更新するか、アンインストールしてください。",
+      "revokedNoReason": "インストール中のこのバージョンはマーケットで公開停止になりました。別のバージョンに更新するか、アンインストールしてください。",
+      "finding": "コード {{code}} のプラグインを探しています…",
+      "foundByCode": "コード {{code}} のプラグイン",
+      "noCode": "コード {{code}} のプラグインは見つかりません"
     },
     "task": {
       "protocols": {

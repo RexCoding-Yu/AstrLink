@@ -7,6 +7,7 @@ import { HelpDisclosure } from "@/components/HelpDisclosure";
 import { IconButton } from "@/components/IconButton";
 import { Boxes, RefreshCw } from "@/components/icons";
 import { LoadingState } from "@/components/LoadingState";
+import { MarkdownContent } from "@/components/MarkdownContent";
 import { Panel } from "@/components/Panel";
 import { PluginIcon, pluginAvatar } from "@/components/PluginIcon";
 import { SearchInput } from "@/components/SearchInput";
@@ -31,16 +32,39 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
-import { getPluginMarket, pluginInstallFailureOf } from "./bridge";
+import {
+  findPluginByCode,
+  getPluginMarket,
+  getPluginMarketDoc,
+  pluginInstallFailureOf,
+} from "./bridge";
 import { controlErrorMessage } from "./control-error";
 import { useT } from "./i18n";
 import { installFailureText } from "./PluginInstallReview";
 import { ModelChips, TaskEndpoints } from "./PluginTaskParts";
 import { taskAuthLabel, taskSurfaceLabels } from "./plugin-task-labels";
-import type { PluginMarket, PluginMarketEntry } from "./plugin-model";
+import type {
+  PluginMarket,
+  PluginMarketDoc,
+  PluginMarketEntry,
+} from "./plugin-model";
 
 /** The marketplace the page last opened, kept for this computer. */
 const MARKET_INDEX_KEY = "astrlink.plugins.marketIndex";
+
+/** New API's community marketplace. */
+export const COMMUNITY_MARKET_INDEX =
+  "https://www.newapi.ai/api/v1/community/index.json";
+
+/** A plugin's code on the New API site, which finds it in any marketplace. */
+const PLUGIN_CODE = /^\d{8}$/;
+
+type MarketSource = "official" | "community" | "custom";
+
+function sourceOf(index: string): MarketSource {
+  if (!index) return "official";
+  return index === COMMUNITY_MARKET_INDEX ? "community" : "custom";
+}
 
 function rememberedIndex(): string {
   try {
@@ -79,10 +103,21 @@ function newer(candidate: string, current: string): boolean {
 /** What the card's button does for an entry: install, update, or nothing. */
 function entryState(
   entry: PluginMarketEntry,
-): "install" | "update" | "installed" | "incompatible" {
+): "install" | "update" | "installed" | "revoked" | "incompatible" {
   if (entry.unsupported?.length) return "incompatible";
   if (!entry.installed) return "install";
-  return newer(entry.latest, entry.installed) ? "update" : "installed";
+  if (newer(entry.latest, entry.installed)) return "update";
+  return entry.revoked ? "revoked" : "installed";
+}
+
+/** Why the marketplace took down the version installed now. */
+function revokedReason(
+  entry: PluginMarketEntry,
+  t: ReturnType<typeof useT>,
+): string {
+  return entry.revoked?.reason
+    ? t("plugins.market.revokedReason", { reason: entry.revoked.reason })
+    : t("plugins.market.revokedNoReason");
 }
 
 /** Why AstrLink cannot install an entry: the new-api parts it needs. */
@@ -108,9 +143,11 @@ function incompatibleReason(
 
 /**
  * A plugin marketplace in new-api's index format: its plugins as cards, a
- * card opening what the plugin serves and its versions. Installing hands
- * the link of a version to the install dialog, which reviews it first.
- * `compact` lists the plugins as rows, inside the install dialog.
+ * card opening what the plugin serves, its usage guide and its versions.
+ * Installing hands the link of a version to the install dialog, which
+ * reviews it first. An 8-digit code in the search finds the plugin of that
+ * code in any New API marketplace. `compact` lists the plugins as rows,
+ * inside the install dialog.
  */
 export function PluginMarketView({
   isReady,
@@ -124,13 +161,20 @@ export function PluginMarketView({
 }) {
   const t = useT();
   const [index, setIndex] = useState(rememberedIndex);
-  const [customOpen, setCustomOpen] = useState(index !== "");
-  const [draft, setDraft] = useState(index);
+  const [source, setSource] = useState<MarketSource>(() => sourceOf(index));
+  const [draft, setDraft] = useState(source === "custom" ? index : "");
   const [market, setMarket] = useState<PluginMarket | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [open, setOpen] = useState<PluginMarketEntry | null>(null);
+  const [open, setOpen] = useState<{
+    entry: PluginMarketEntry;
+    index: string;
+  } | null>(null);
+  // The plugin an 8-digit code found outside the listing shown.
+  const [found, setFound] = useState<PluginMarket | null>(null);
+  const [finding, setFinding] = useState(false);
+  const [findError, setFindError] = useState<string | null>(null);
 
   const load = useCallback(
     async (target: string) => {
@@ -157,16 +201,56 @@ export function PluginMarketView({
     if (isReady) void load(index);
   }, [index, isReady, load]);
 
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
+  const needle = query.trim().toLowerCase();
+  const listed = useMemo(() => {
     const plugins = market?.plugins ?? [];
     if (!needle) return plugins;
     return plugins.filter((entry) =>
-      [entry.name, entry.key, entry.description ?? "", ...entry.models].some(
-        (text) => text.toLowerCase().includes(needle),
-      ),
+      [
+        entry.name,
+        entry.key,
+        entry.description ?? "",
+        entry.code ?? "",
+        entry.author?.login ?? "",
+        ...entry.models,
+      ].some((text) => text.toLowerCase().includes(needle)),
     );
-  }, [market, query]);
+  }, [market, needle]);
+  // A code the listing does not have is looked up on the New API site.
+  const code =
+    PLUGIN_CODE.test(needle) && listed.length === 0 && market ? needle : "";
+
+  useEffect(() => {
+    setFound(null);
+    setFindError(null);
+    setFinding(false);
+    if (!code || !isReady) return;
+    let current = true;
+    setFinding(true);
+    findPluginByCode(code)
+      .then((result) => {
+        if (current) setFound(result);
+      })
+      .catch((cause: unknown) => {
+        if (!current) return;
+        const failure = pluginInstallFailureOf(cause);
+        if (failure?.reason === "no_plugin") return;
+        setFindError(
+          failure
+            ? installFailureText(failure, t)
+            : controlErrorMessage(cause, t("plugins.market.failed")),
+        );
+      })
+      .finally(() => {
+        if (current) setFinding(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [code, isReady, t]);
+
+  const shown = found && code ? found.plugins : listed;
+  const shownIndex = found && code ? found.index : (market?.index ?? index);
 
   const choose = (next: string) => {
     rememberIndex(next);
@@ -182,12 +266,12 @@ export function PluginMarketView({
         <Select
           disabled={!isReady}
           onValueChange={(value) => {
-            if (value === "official") {
-              setCustomOpen(false);
-              choose("");
-            } else setCustomOpen(true);
+            const next = value as MarketSource;
+            setSource(next);
+            if (next === "official") choose("");
+            else if (next === "community") choose(COMMUNITY_MARKET_INDEX);
           }}
-          value={customOpen ? "custom" : "official"}
+          value={source}
         >
           <SelectTrigger
             aria-label={t("plugins.market.source")}
@@ -200,10 +284,13 @@ export function PluginMarketView({
             <SelectItem value="official">
               {t("plugins.market.official")}
             </SelectItem>
+            <SelectItem value="community">
+              {t("plugins.market.community")}
+            </SelectItem>
             <SelectItem value="custom">{t("plugins.market.custom")}</SelectItem>
           </SelectContent>
         </Select>
-        {customOpen ? (
+        {source === "custom" ? (
           <form
             className="flex min-w-0 flex-[1_1_18rem] items-center gap-2"
             onSubmit={(event) => {
@@ -230,7 +317,10 @@ export function PluginMarketView({
           </form>
         ) : null}
         <SearchInput
-          className={cn("min-w-40 flex-[1_1_12rem]", customOpen && "max-w-64")}
+          className={cn(
+            "min-w-40 flex-[1_1_12rem]",
+            source === "custom" && "max-w-64",
+          )}
           clearLabel={t("common.clearSearch")}
           label={t("plugins.market.search")}
           onValueChange={setQuery}
@@ -253,23 +343,35 @@ export function PluginMarketView({
       </div>
       {market && !compact ? (
         <p className="-mt-1 text-micro text-muted-foreground">
-          {t("plugins.market.count", {
-            name: market.name || t("plugins.market.official"),
-            count: market.plugins.length,
-          })}
+          {found && code
+            ? t("plugins.market.foundByCode", { code })
+            : t("plugins.market.count", {
+                name: market.name || t("plugins.market.official"),
+                count: market.plugins.length,
+              })}
         </p>
       ) : null}
       {error ? <FormMessage tone="error">{error}</FormMessage> : null}
-      {loading && !market ? (
-        <LoadingState className="flex-1" label={t("plugins.market.loading")} />
+      {findError ? <FormMessage tone="error">{findError}</FormMessage> : null}
+      {(loading && !market) || finding ? (
+        <LoadingState
+          className="flex-1"
+          label={
+            finding
+              ? t("plugins.market.finding", { code })
+              : t("plugins.market.loading")
+          }
+        />
       ) : market && shown.length === 0 ? (
         <EmptyState
           className="flex-1"
           illustration={<Boxes className="size-6 text-muted-foreground" />}
           title={
-            query.trim()
-              ? t("plugins.market.noMatch")
-              : t("plugins.market.empty")
+            code
+              ? t("plugins.market.noCode", { code })
+              : query.trim()
+                ? t("plugins.market.noMatch")
+                : t("plugins.market.empty")
           }
         />
       ) : compact ? (
@@ -282,7 +384,7 @@ export function PluginMarketView({
               <MarketRow
                 entry={entry}
                 onInstall={onInstall}
-                onOpen={() => setOpen(entry)}
+                onOpen={() => setOpen({ entry, index: shownIndex })}
               />
             </li>
           ))}
@@ -297,7 +399,7 @@ export function PluginMarketView({
               <MarketCard
                 entry={entry}
                 onInstall={onInstall}
-                onOpen={() => setOpen(entry)}
+                onOpen={() => setOpen({ entry, index: shownIndex })}
               />
             </li>
           ))}
@@ -305,7 +407,8 @@ export function PluginMarketView({
       )}
       {open ? (
         <MarketEntryDialog
-          entry={open}
+          entry={open.entry}
+          index={open.index}
           onClose={() => setOpen(null)}
           onInstall={(link) => {
             setOpen(null);
@@ -332,6 +435,16 @@ function EntryAction({
     return (
       <StatusBadge className="shrink-0" tone="positive">
         {t("plugins.market.installed")}
+      </StatusBadge>
+    );
+  if (state === "revoked")
+    return (
+      <StatusBadge
+        className="shrink-0"
+        title={revokedReason(entry, t)}
+        tone="negative"
+      >
+        {t("plugins.market.revoked")}
       </StatusBadge>
     );
   if (state === "incompatible")
@@ -422,7 +535,17 @@ function MarketCard({
             <span className="shrink-0 text-micro text-muted-foreground tabular-nums">
               {entry.latest}
             </span>
+            {entry.recommended ? (
+              <Badge className="shrink-0 px-1.5 py-0 font-normal">
+                {t("plugins.market.recommended")}
+              </Badge>
+            ) : null}
           </span>
+          {entry.author ? (
+            <span className="truncate text-micro text-muted-foreground">
+              {t("plugins.market.by", { author: entry.author.login })}
+            </span>
+          ) : null}
         </div>
         <EntryAction entry={entry} onInstall={onInstall} />
       </div>
@@ -480,13 +603,49 @@ function MarketRow({
   );
 }
 
-/** What a marketplace plugin serves, its models and its versions. */
+/**
+ * A marketplace version's usage guide or release notes, read when the
+ * dialog opens; null while it loads or when the version has none.
+ */
+function useMarketDoc(
+  index: string,
+  key: string,
+  version: string | undefined,
+  doc: "readme" | "changelog",
+  listed: boolean,
+): { doc: PluginMarketDoc | null; failed: boolean } {
+  const [state, setState] = useState<{
+    doc: PluginMarketDoc | null;
+    failed: boolean;
+  }>({ doc: null, failed: false });
+  useEffect(() => {
+    setState({ doc: null, failed: false });
+    if (!listed || !version) return;
+    let current = true;
+    getPluginMarketDoc({ index, key, version, doc })
+      .then((found) => {
+        if (current) setState({ doc: found, failed: false });
+      })
+      .catch(() => {
+        if (current) setState({ doc: null, failed: true });
+      });
+    return () => {
+      current = false;
+    };
+  }, [doc, index, key, listed, version]);
+  return state;
+}
+
+/** What a marketplace plugin serves, its usage guide, models and versions. */
 function MarketEntryDialog({
   entry,
+  index,
   onClose,
   onInstall,
 }: {
   entry: PluginMarketEntry;
+  /** The marketplace the entry came from, which its documents are read from. */
+  index: string;
   onClose: () => void;
   onInstall: (link: string) => void;
 }) {
@@ -495,6 +654,20 @@ function MarketEntryDialog({
     (version) => version.version === entry.latest,
   );
   const state = entryState(entry);
+  const guide = useMarketDoc(
+    index,
+    entry.key,
+    latest?.version,
+    "readme",
+    latest?.readme === true,
+  );
+  const notes = useMarketDoc(
+    index,
+    entry.key,
+    latest?.version,
+    "changelog",
+    latest?.changelog === true,
+  );
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="sm:max-w-xl" data-testid="plugin-market-entry">
@@ -522,6 +695,84 @@ function MarketEntryDialog({
           </div>
         </DialogHeader>
         <div className="grid max-h-[60vh] min-h-0 gap-4 overflow-y-auto overscroll-contain text-sm">
+          {entry.revoked && entry.installed ? (
+            <FormMessage tone="error">{revokedReason(entry, t)}</FormMessage>
+          ) : null}
+          {entry.author || entry.code || entry.installs_30d !== undefined ? (
+            <dl
+              className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs"
+              data-testid="plugin-market-facts"
+            >
+              {entry.author ? (
+                <>
+                  <dt className="text-muted-foreground">
+                    {t("plugins.market.author")}
+                  </dt>
+                  <dd className="flex min-w-0 flex-wrap gap-x-3">
+                    {entry.author.url ? (
+                      <ExternalLink href={entry.author.url}>
+                        {entry.author.login}
+                      </ExternalLink>
+                    ) : (
+                      <span>{entry.author.login}</span>
+                    )}
+                    {entry.repository ? (
+                      <ExternalLink href={entry.repository}>
+                        {t("plugins.market.repository")}
+                      </ExternalLink>
+                    ) : null}
+                  </dd>
+                </>
+              ) : null}
+              {entry.code ? (
+                <>
+                  <dt className="text-muted-foreground">
+                    {t("plugins.market.code")}
+                  </dt>
+                  <dd className="font-mono tabular-nums">{entry.code}</dd>
+                </>
+              ) : null}
+              {entry.installs_30d !== undefined ? (
+                <>
+                  <dt className="text-muted-foreground">
+                    {t("plugins.market.installs")}
+                  </dt>
+                  <dd className="tabular-nums">
+                    {t("plugins.market.installsCount", {
+                      count: entry.installs_30d,
+                    })}
+                  </dd>
+                </>
+              ) : null}
+            </dl>
+          ) : null}
+          {latest?.readme ? (
+            <section className="grid gap-1.5" data-testid="plugin-market-guide">
+              <h3 className="flex items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                {t("plugins.market.guide")}
+                {guide.doc?.source_url ? (
+                  <ExternalLink
+                    className="font-normal"
+                    href={guide.doc.source_url}
+                  >
+                    {t("plugins.market.guideSource")}
+                  </ExternalLink>
+                ) : null}
+              </h3>
+              {guide.doc ? (
+                <MarkdownContent
+                  className="rounded-md border bg-muted/20 px-3 py-2 text-xs"
+                  content={guide.doc.markdown}
+                />
+              ) : guide.failed ? (
+                <FormMessage>{t("plugins.market.guideFailed")}</FormMessage>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {t("plugins.market.guideLoading")}
+                </p>
+              )}
+            </section>
+          ) : null}
           <section className="grid gap-1.5">
             <h3 className="text-xs font-medium text-muted-foreground">
               {t("plugins.task.endpoints")}
@@ -569,6 +820,14 @@ function MarketEntryDialog({
             </h3>
             <ModelChips models={entry.models} />
           </section>
+          {notes.doc ? (
+            <HelpDisclosure title={t("plugins.market.notes")}>
+              <MarkdownContent
+                className="text-xs text-foreground"
+                content={notes.doc.markdown}
+              />
+            </HelpDisclosure>
+          ) : null}
           {entry.versions.length > 1 ? (
             <HelpDisclosure title={t("plugins.market.versions")}>
               <ul className="grid gap-0.5" data-testid="plugin-market-versions">
@@ -622,7 +881,7 @@ function MarketEntryDialog({
             >
               {t("plugins.market.incompatible")}
             </StatusBadge>
-          ) : state !== "installed" ? (
+          ) : state === "install" || state === "update" ? (
             <Button
               onClick={() => onInstall(entry.link)}
               size="sm"

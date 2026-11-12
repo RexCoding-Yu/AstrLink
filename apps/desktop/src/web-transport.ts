@@ -124,6 +124,8 @@ function packageID(args: Args): string {
 }
 const request = (a: Args) => `/requests/${id(a, "requestId")}`;
 const session = (a: Args) => `/request-sessions/${id(a, "sessionId")}`;
+/** A plugin key, as Core's ValidPluginKey. */
+const pluginKeyPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const model = (a: Args) => `/privacy-models/${id(a, "installationId")}`;
 const policy = "/policies/policy_privacy_default";
 type Command = (args: Args) => Promise<unknown>;
@@ -379,7 +381,7 @@ const commands: Record<string, Command> = {
   session_plugins: (a) => {
     if (a.key === undefined) return route((b) => `${session(b)}/plugins`)(a);
     const path = (b: Args) =>
-      `${session(b)}/plugins/${segment(b.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
+      `${session(b)}/plugins/${segment(b.key, pluginKeyPattern)}`;
     if (a.refresh === true)
       return route((b) => `${path(b)}/refresh`, "POST")(a);
     return route(path, "PUT", input)(a);
@@ -521,6 +523,8 @@ const commands: Record<string, Command> = {
       return route("/plugins/sources/preview", "POST", input)(a);
     if (a.action === "market")
       return route(`/plugins/market${query(a.input as Args)}`)(a);
+    if (a.action === "market_doc")
+      return route(`/plugins/market/doc${query(a.input as Args)}`)(a);
     if (a.action === "source_install")
       return consoleRequest(
         "/control/v1/plugins/sources/install",
@@ -530,7 +534,7 @@ const commands: Record<string, Command> = {
         undefined,
         a.approved === true,
       ).then((result) => result.value);
-    const plugin = `/plugins/${segment(a.key, /^[a-z][a-z0-9-]{0,31}$/)}`;
+    const plugin = `/plugins/${segment(a.key, pluginKeyPattern)}`;
     switch (a.action) {
       case "source_check":
         return route(`${plugin}/source/check`, "POST")(a);

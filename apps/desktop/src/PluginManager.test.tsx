@@ -30,6 +30,8 @@ const bridgeMocks = vi.hoisted(() => ({
   uninstallPlugin: vi.fn(),
   pluginInstallFailureOf: vi.fn(),
   getPluginMarket: vi.fn(),
+  findPluginByCode: vi.fn(),
+  getPluginMarketDoc: vi.fn(),
   listPluginTasks: vi.fn(),
   clearPluginTasks: vi.fn(),
   getUsageSummary: vi.fn(),
@@ -2263,7 +2265,7 @@ describe("PluginManager", () => {
       // The search reaches the models too.
       await type(
         document.querySelector<HTMLInputElement>(
-          'input[placeholder="搜索插件或模型"]',
+          'input[placeholder="搜索插件、模型或编码"]',
         )!,
         "wan2.5",
       );
@@ -2301,6 +2303,127 @@ describe("PluginManager", () => {
         "token-market",
         false,
       );
+    });
+
+    it("opens the community marketplace, finds a plugin by its code and shows its usage guide", async () => {
+      const communityIndex =
+        "https://www.newapi.ai/api/v1/community/index.json";
+      const lookup =
+        "https://www.newapi.ai/api/v1/community/resolve?code=30000003";
+      const echo = {
+        ...market.plugins[1],
+        key: "someone_echo",
+        name: "Echo",
+        description: "回声视频",
+        versions: [
+          {
+            version: "1.1.0",
+            readme: true,
+            link: `${communityIndex}#someone_echo@1.1.0`,
+          },
+        ],
+        link: `${communityIndex}#someone_echo@1.1.0`,
+        installed: "1.1.0",
+        revoked: { reason: "泄露密钥" },
+        author: { login: "someone", url: "https://github.com/someone" },
+        recommended: true,
+        code: "20000002",
+      };
+      const hidden = {
+        ...echo,
+        key: "other_hidden",
+        name: "Hidden",
+        code: "30000003",
+        installed: undefined,
+        revoked: undefined,
+        recommended: undefined,
+        author: undefined,
+        versions: [
+          {
+            version: "1.1.0",
+            readme: true,
+            link: `${lookup}#other_hidden@1.1.0`,
+          },
+        ],
+        link: `${lookup}#other_hidden@1.1.0`,
+      };
+      bridgeMocks.getPluginMarket.mockImplementation(async (index?: string) =>
+        index === communityIndex
+          ? {
+              index: communityIndex,
+              name: "New API Community",
+              plugins: [echo],
+            }
+          : market,
+      );
+      bridgeMocks.findPluginByCode.mockResolvedValue({
+        index: lookup,
+        name: "New API Community",
+        plugins: [hidden],
+      });
+      bridgeMocks.getPluginMarketDoc.mockResolvedValue({
+        markdown: "# Hidden\n\n先在官网申请密钥。",
+        language: "zh-CN",
+      });
+      try {
+        await renderTasks();
+        await openTab("插件市场");
+        await chooseOption('[aria-label="插件市场来源"]', "社区市场");
+        expect(bridgeMocks.getPluginMarket).toHaveBeenLastCalledWith(
+          communityIndex,
+        );
+        const cards = () => [
+          ...document.querySelectorAll<HTMLElement>(
+            '[data-testid="plugin-market-card"]',
+          ),
+        ];
+        expect(cards()).toHaveLength(1);
+        expect(cards()[0].textContent).toContain("作者 someone");
+        expect(cards()[0].textContent).toContain("推荐");
+        // The version installed now was taken down, and says why.
+        const badge = cards()[0].querySelector<HTMLElement>("[data-tone]")!;
+        expect(badge.textContent).toBe("已下架");
+        expect(badge.title).toContain("泄露密钥");
+        // A code the listing does not have is looked up on the site.
+        await type(
+          document.querySelector<HTMLInputElement>(
+            'input[placeholder="搜索插件、模型或编码"]',
+          )!,
+          "30000003",
+        );
+        await act(async () => {
+          await Promise.resolve();
+        });
+        expect(bridgeMocks.findPluginByCode).toHaveBeenCalledWith("30000003");
+        expect(cards().map((card) => card.textContent)).toEqual([
+          expect.stringContaining("Hidden"),
+        ]);
+        await click(cards()[0]);
+        await act(async () => {
+          await Promise.resolve();
+        });
+        expect(bridgeMocks.getPluginMarketDoc).toHaveBeenCalledWith({
+          index: lookup,
+          key: "other_hidden",
+          version: "1.1.0",
+          doc: "readme",
+        });
+        const entry = document.querySelector(
+          '[data-testid="plugin-market-entry"]',
+        ) as HTMLElement;
+        expect(
+          entry.querySelector('[data-testid="plugin-market-guide"]')
+            ?.textContent,
+        ).toContain("先在官网申请密钥。");
+        expect(entry.textContent).toContain("30000003");
+        await click(button("安装", entry));
+        await finishExitAnimations();
+        expect(bridgeMocks.previewPluginInstall).toHaveBeenCalledWith(
+          hidden.link,
+        );
+      } finally {
+        localStorage.removeItem("astrlink.plugins.marketIndex");
+      }
     });
   });
 });

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -28,9 +29,9 @@ func (transport hostTransport) RoundTrip(request *http.Request) (*http.Response,
 	return http.DefaultTransport.RoundTrip(routed)
 }
 
-// fakeMarket serves the official marketplace: GitHub's raw host, which
-// may hang, its mirror, whose icons may hang too, and two npm registries
-// without the icon package.
+// fakeMarket serves New API's marketplaces: the site, which may hang, its
+// backup site, whose icons may hang too, and two npm registries without
+// the icon package.
 type fakeMarket struct {
 	t         *testing.T
 	server    *httptest.Server
@@ -47,20 +48,18 @@ const marketIcon1 = `<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></sv
 func newFakeMarket(t *testing.T) *fakeMarket {
 	sum := sha256.Sum256([]byte(marketIcon1))
 	index := fmt.Sprintf(`{"indexVersion": 1, "name": "New API Official Plugins", "plugins": [
-		{"key": "incho", "name": "Incho", "icon": "text", "iconFile": {"path": "plugins/tasks/incho/icon.svg", "sha256": %q},
-		 "latest": "1.0.2", "versions": [{"version": "1.0.2", "path": "plugins/tasks/incho/1.0.2/plugin.js", "sha256": "00"}], "models": ["incho-1"]},
+		{"key": "incho", "name": "Incho", "icon": "text", "iconFile": {"path": "incho/1.0.2/icon.svg", "sha256": %q},
+		 "latest": "1.0.2", "versions": [{"version": "1.0.2", "path": "incho/1.0.2/plugin.js", "sha256": "00"}], "models": ["incho-1"]},
 		{"key": "kling", "name": "Kling", "icon": "Kling.Color", "task": true, "provider": true, "transform": false,
-		 "latest": "1.1.1", "versions": [{"version": "1.1.1", "path": "plugins/tasks/kling/1.1.1/plugin.js", "sha256": "00"}]},
-		{"key": "sora", "name": "Sora", "icon": "Sora.Color",
-		 "latest": "1.1.0", "versions": [{"version": "1.1.0", "path": "plugins/tasks/sora/1.1.0/plugin.js", "sha256": "00"}]},
+		 "latest": "1.1.1", "versions": [{"version": "1.1.1", "path": "kling/1.1.1/plugin.js", "sha256": "00"}]},
+		{"key": "sora", "name": "Sora", "icon": "Sora.Color", "code": "10000001",
+		 "latest": "1.1.0", "versions": [{"version": "1.1.0", "path": "sora/1.1.0/plugin.js", "sha256": "00"}]},
 		{"key": "typesafe", "name": "TypeSafe", "icon": "text:TS",
-		 "latest": "1.0.0", "versions": [{"version": "1.0.0", "path": "plugins/tasks/typesafe/1.0.0/plugin.js", "sha256": "00"}]}
+		 "latest": "1.0.0", "versions": [{"version": "1.0.0", "path": "typesafe/1.0.0/plugin.js", "sha256": "00"}]}
 	]}`, hex.EncodeToString(sum[:]))
 	market := &fakeMarket{t: t, served: map[string]int{}, stop: make(chan struct{}), files: map[string]string{
-		"/gh/QuantumNous/new-api-plugins@main/index.json":                   index,
-		"/gh/QuantumNous/new-api-plugins@main/plugins/tasks/incho/icon.svg": marketIcon1,
-		"/QuantumNous/new-api-plugins/main/index.json":                      index,
-		"/QuantumNous/new-api-plugins/main/plugins/tasks/incho/icon.svg":    marketIcon1,
+		"/api/v1/plugins/index.json":           index,
+		"/api/v1/plugins/incho/1.0.2/icon.svg": marketIcon1,
 	}}
 	market.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		market.mutex.Lock()
@@ -69,7 +68,7 @@ func newFakeMarket(t *testing.T) *fakeMarket {
 		body, found := market.files[request.URL.Path]
 		market.mutex.Unlock()
 		switch {
-		case request.Host == "raw.githubusercontent.com" && hangs,
+		case request.Host == "www.newapi.ai" && hangs,
 			iconsHang && strings.HasSuffix(request.URL.Path, ".svg"):
 			// A network that goes nowhere.
 			select {
@@ -122,17 +121,17 @@ func iconsOf(market contract.PluginMarket) map[string]bool {
 	return icons
 }
 
-func TestTheOfficialMarketGoesToItsMirrorWhenGitHubHangs(t *testing.T) {
+func TestTheOfficialMarketGoesToTheBackupSiteWhenTheSiteHangs(t *testing.T) {
 	shorten(t, 200*time.Millisecond, 5*time.Second)
 	market := newFakeMarket(t)
 	market.hangs = true
 	installer := market.installer(nil)
 	started := time.Now()
-	listed, err := installer.Market(context.Background(), "", func(key string) string {
+	listed, err := installer.Market(context.Background(), "", func(key string) Installed {
 		if key == "sora" {
-			return "1.0.3"
+			return Installed{Version: "1.0.3"}
 		}
-		return ""
+		return Installed{}
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +151,7 @@ func TestTheOfficialMarketGoesToItsMirrorWhenGitHubHangs(t *testing.T) {
 			t.Fatalf("sora installed = %q", entry.Installed)
 		}
 	}
-	// The icon the index lists comes from the mirror too; the icon package
+	// The icon the index lists comes from the backup site too; the icon package
 	// cannot be fetched, so the LobeHub ones are left out.
 	if icons := iconsOf(listed); !icons["incho"] || icons["kling"] || icons["sora"] || icons["typesafe"] {
 		t.Fatalf("icons = %v", icons)
@@ -163,12 +162,27 @@ func TestTheOfficialMarketGoesToItsMirrorWhenGitHubHangs(t *testing.T) {
 		t.Fatalf("registry requests = %d", npm)
 	}
 	// The next read, of another marketplace's listing or an install, goes
-	// to the mirror first.
-	if _, base, err := installer.fetchIndex(context.Background(), contract.OfficialPluginMarket); err != nil || base != contract.OfficialPluginMarketFallback {
+	// to the backup site first.
+	if _, base, err := installer.fetchIndex(context.Background(), contract.OfficialPluginMarket); err != nil || base != "https://www.newapi.pro/api/v1/plugins/index.json" {
 		t.Fatalf("fetchIndex = %q, %v", base, err)
 	}
-	if raw := market.count("raw.githubusercontent.com"); raw != 1 {
-		t.Fatalf("GitHub was asked %d times", raw)
+	if site := market.count("www.newapi.ai"); site != 1 {
+		t.Fatalf("the site was asked %d times", site)
+	}
+}
+
+func TestPluginMarketMirrors(t *testing.T) {
+	for index, want := range map[string][]string{
+		contract.OfficialPluginMarket: {"https://www.newapi.pro/api/v1/plugins/index.json", contract.GitHubPluginMarket,
+			"https://cdn.jsdelivr.net/gh/QuantumNous/new-api-plugins@main/index.json"},
+		contract.CommunityPluginMarket:                 {"https://www.newapi.pro/api/v1/community/index.json"},
+		contract.CommunityPluginResolve + "?code=1234": {"https://www.newapi.pro/api/v1/community/resolve?code=1234"},
+		contract.GitHubPluginMarket:                    {"https://cdn.jsdelivr.net/gh/QuantumNous/new-api-plugins@main/index.json"},
+		"https://plugins.example.com/index.json":       nil,
+	} {
+		if got := contract.PluginMarketMirrors(index); !slices.Equal(got, want) {
+			t.Errorf("mirrors of %s = %v, want %v", index, got, want)
+		}
 	}
 }
 
@@ -209,5 +223,121 @@ func TestAMarketListsItsPluginsBeforeIconsThatTakeTooLong(t *testing.T) {
 	*clock = clock.Add(iconRetry + time.Second)
 	if listed, _ = installer.Market(context.Background(), "", nil); !iconsOf(listed)["incho"] {
 		t.Fatal("the icon was not fetched again after a while")
+	}
+}
+
+// community adds New API's community marketplace to the fake: a plugin
+// with its code, author and usage guide, a version it took down, and the
+// lookup by code, which also finds a plugin its listing leaves out.
+func (market *fakeMarket) community(t *testing.T) (guideZh string) {
+	guide, guideZh := "---\ntitle: Echo\n---\n# Echo\nSay it twice.", "# 回声\n说两遍。"
+	notes := "## 1.1.0\n- Louder."
+	sum := func(text string) string {
+		digest := sha256.Sum256([]byte(text))
+		return hex.EncodeToString(digest[:])
+	}
+	revoked := strings.Repeat("ab", 32)
+	index := fmt.Sprintf(`{"indexVersion": 1, "name": "New API Community Plugins", "revoked": [{"sha256": %q, "key": "someone_echo", "reason": {"en": "Leaked keys", "zh-CN": "泄露密钥"}}],
+		"plugins": [{"key": "someone_echo", "name": {"en": "Echo", "zh-CN": "回声"}, "code": "20000002", "recommended": true, "installs30d": 7,
+		 "author": {"login": "someone", "url": "https://github.com/someone"}, "repo": "https://github.com/someone/echo",
+		 "latest": "1.1.0", "versions": [
+		  {"version": "1.1.0", "path": "files/one", "sha256": "00", "kind": "task",
+		   "readme": {"path": "docs/readme-en", "sha256": %q, "sourceUrl": "https://github.com/someone/echo/blob/main/README.md",
+		    "translations": {"zh-CN": {"path": "docs/readme-zh", "sha256": %q}}},
+		   "changelog": {"path": "docs/changelog-en", "sha256": %q}},
+		  {"version": "1.0.0", "path": "files/%s", "sha256": %q, "kind": "task"}]},
+		 {"key": "someone_relay", "name": "Relay", "code": "20000003", "author": {"login": "someone", "url": "javascript:alert(1)"},
+		  "latest": "1.0.0", "versions": [{"version": "1.0.0", "path": "files/two", "sha256": "00", "kind": "provider"}]}]}`,
+		revoked, sum(guide), sum(guideZh), sum(notes), revoked, revoked)
+	resolved := `{"indexVersion": 1, "name": "New API Community Plugins", "plugins": [{"key": "other_hidden", "name": "Hidden", "code": "30000003",
+		"latest": "0.1.0", "versions": [{"version": "0.1.0", "path": "files/three", "sha256": "00", "kind": "task"}]}]}`
+	market.mutex.Lock()
+	defer market.mutex.Unlock()
+	market.files["/api/v1/community/index.json"] = index
+	market.files["/api/v1/community/docs/readme-en"] = guide
+	market.files["/api/v1/community/docs/readme-zh"] = guideZh
+	market.files["/api/v1/community/docs/changelog-en"] = notes
+	market.files["/api/v1/community/resolve"] = resolved
+	return guideZh
+}
+
+func TestTheCommunityMarketListsAuthorsCodesAndTakenDownVersions(t *testing.T) {
+	market := newFakeMarket(t)
+	guideZh := market.community(t)
+	installer := market.installer(nil)
+	language := "zh-CN"
+	installer.options.Language = func() string { return language }
+	listed, err := installer.Market(context.Background(), contract.CommunityPluginMarket, func(key string) Installed {
+		if key == "someone_echo" {
+			return Installed{Version: "1.0.0", SHA256: strings.Repeat("AB", 32)}
+		}
+		return Installed{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A plugin of only a part this gateway does not run is listed so.
+	if len(listed.Plugins) != 2 || listed.Plugins[1].Key != "someone_relay" || !slices.Equal(listed.Plugins[1].Unsupported, []string{contract.PluginPartProvider}) ||
+		listed.Plugins[1].Author == nil || listed.Plugins[1].Author.URL != "" {
+		t.Fatalf("listed = %+v", listed.Plugins)
+	}
+	echo := listed.Plugins[0]
+	if echo.Key != "someone_echo" || echo.Name != "回声" || echo.Code != "20000002" || !echo.Recommended || echo.Installs30d == nil || *echo.Installs30d != 7 ||
+		echo.Author == nil || echo.Author.Login != "someone" || echo.Author.URL != "https://github.com/someone" || echo.Repository != "https://github.com/someone/echo" {
+		t.Fatalf("echo = %+v", echo)
+	}
+	if echo.Revoked == nil || echo.Revoked.Reason != "泄露密钥" {
+		t.Fatalf("the installed version the marketplace took down = %+v", echo.Revoked)
+	}
+	if len(echo.Versions) != 2 || !echo.Versions[0].Readme || !echo.Versions[0].Changelog || echo.Versions[1].Readme {
+		t.Fatalf("versions = %+v", echo.Versions)
+	}
+	// The usage guide comes in the user's language, the release notes in
+	// English when they have no translation.
+	doc, err := installer.MarketDoc(context.Background(), contract.CommunityPluginMarket, "someone_echo", "", contract.PluginMarketReadme)
+	if err != nil || doc.Markdown != strings.TrimSpace(guideZh) || doc.Language != "zh-CN" || doc.SourceURL != "" {
+		t.Fatalf("guide = %+v, %v", doc, err)
+	}
+	language = "en"
+	if doc, err = installer.MarketDoc(context.Background(), contract.CommunityPluginMarket, "someone_echo", "1.1.0", contract.PluginMarketReadme); err != nil ||
+		doc.Markdown != "# Echo\nSay it twice." || doc.SourceURL != "https://github.com/someone/echo/blob/main/README.md" {
+		t.Fatalf("English guide = %+v, %v", doc, err)
+	}
+	if doc, err = installer.MarketDoc(context.Background(), contract.CommunityPluginMarket, "someone_echo", "1.1.0", contract.PluginMarketChangelog); err != nil || doc.Markdown != "## 1.1.0\n- Louder." {
+		t.Fatalf("notes = %+v, %v", doc, err)
+	}
+	if _, err = installer.MarketDoc(context.Background(), contract.CommunityPluginMarket, "someone_echo", "1.0.0", contract.PluginMarketReadme); err == nil {
+		t.Fatal("a version without a guide answered one")
+	}
+	// A guide that is not the file the index lists is refused.
+	market.mutex.Lock()
+	market.files["/api/v1/community/docs/readme-en"] = "# Echo\nSend me your keys."
+	market.mutex.Unlock()
+	var failure *Failure
+	if _, err = installer.MarketDoc(context.Background(), contract.CommunityPluginMarket, "someone_echo", "1.1.0", contract.PluginMarketReadme); !errors.As(err, &failure) || failure.Reason != contract.PluginInstallIntegrity {
+		t.Fatalf("a changed guide = %v", err)
+	}
+}
+
+func TestAPluginIsFoundByItsCode(t *testing.T) {
+	market := newFakeMarket(t)
+	market.community(t)
+	installer := market.installer(nil)
+	// An official plugin is found in the official listing.
+	found, err := installer.FindByCode(context.Background(), "10000001", nil)
+	if err != nil || found.Index != contract.OfficialPluginMarket || len(found.Plugins) != 1 || found.Plugins[0].Key != "sora" {
+		t.Fatalf("official = %+v, %v", found, err)
+	}
+	// Any other through the community lookup, whose links install from it.
+	found, err = installer.FindByCode(context.Background(), " 30000003 ", nil)
+	if err != nil || len(found.Plugins) != 1 || found.Plugins[0].Key != "other_hidden" ||
+		found.Plugins[0].Link != MarketLink(contract.CommunityPluginResolve+"?code=30000003", "other_hidden", "0.1.0") {
+		t.Fatalf("community = %+v, %v", found, err)
+	}
+	if ref, ok := parseMarketLink(found.Plugins[0].Link); !ok || ref.key != "other_hidden" || ref.index != contract.CommunityPluginResolve+"?code=30000003" {
+		t.Fatalf("the link reads as %+v, %v", ref, ok)
+	}
+	if _, err = installer.FindByCode(context.Background(), "1234", nil); err == nil {
+		t.Fatal("a code that is not 8 digits was looked up")
 	}
 }

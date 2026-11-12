@@ -92,8 +92,19 @@ func (fake *fakeInstaller) CheckUpdate(_ context.Context, record contract.Plugin
 	return contract.PluginUpdateCheck{Available: true, Ref: "v1.2.0", RefKind: contract.PluginRefTag, URL: "https://github.com/" + record.Source.Repository + "/tree/v1.2.0"}, nil
 }
 
-func (fake *fakeInstaller) Market(_ context.Context, index string, installed func(string) string) (contract.PluginMarket, error) {
-	return contract.PluginMarket{Index: index, Name: "Test", Plugins: []contract.PluginMarketEntry{{Key: "sora", Name: "Sora", Latest: "1.1.0", Installed: installed("sora")}}}, nil
+func (fake *fakeInstaller) Market(_ context.Context, index string, installed func(string) plugininstall.Installed) (contract.PluginMarket, error) {
+	return contract.PluginMarket{Index: index, Name: "Test", Plugins: []contract.PluginMarketEntry{{Key: "sora", Name: "Sora", Latest: "1.1.0", Installed: installed("sora").Version}}}, nil
+}
+
+func (fake *fakeInstaller) FindByCode(_ context.Context, code string, installed func(string) plugininstall.Installed) (contract.PluginMarket, error) {
+	if code != "12345678" {
+		return contract.PluginMarket{}, &plugininstall.Failure{PluginInstallFailure: contract.PluginInstallFailure{Reason: contract.PluginInstallNoPlugin}}
+	}
+	return contract.PluginMarket{Index: contract.CommunityPluginResolve + "?code=" + code, Plugins: []contract.PluginMarketEntry{{Key: "someone_sora", Code: code, Installed: installed("someone_sora").Version}}}, nil
+}
+
+func (fake *fakeInstaller) MarketDoc(_ context.Context, index, key, version, doc string) (contract.PluginMarketDoc, error) {
+	return contract.PluginMarketDoc{Markdown: "# " + key + " " + version + " " + doc, Language: "en"}, nil
 }
 
 func TestInstallingFromSourceWaitsForConfirmation(t *testing.T) {
@@ -207,5 +218,28 @@ func TestAPluginNewHereStartsDisabledWhateverItsKeyLeftBehind(t *testing.T) {
 	}
 	if settings, err := store.GetPluginSettings(ctx, "hello"); err != nil || !settings.Enabled || !manager.Current().Plugin("hello").Enabled() {
 		t.Fatalf("settings after the update = %+v, %v", settings, err)
+	}
+}
+
+func TestPluginMarketFindsByCodeAndAnswersDocs(t *testing.T) {
+	_, handler, _, directory := newPluginHandler(t)
+	handler.pluginInstaller = &fakeInstaller{t: t, directory: directory}
+
+	response := controlRequest(t, handler, http.MethodGet, PluginsPath+"/market?code=12345678", "", "", "")
+	if market := decodeBody[contract.PluginMarket](t, response); response.Code != http.StatusOK || len(market.Plugins) != 1 || market.Plugins[0].Code != "12345678" {
+		t.Fatalf("a plugin by code = %d %s", response.Code, response.Body.String())
+	}
+	response = controlRequest(t, handler, http.MethodGet, PluginsPath+"/market?code=87654321", "", "", "")
+	if failure := decodeBody[installFailureEnvelope](t, response); response.Code != http.StatusUnprocessableEntity || failure.Failure.Reason != contract.PluginInstallNoPlugin {
+		t.Fatalf("an unknown code = %d %s", response.Code, response.Body.String())
+	}
+	response = controlRequest(t, handler, http.MethodGet, PluginsPath+"/market/doc?key=someone_sora&version=1.0.0&doc=readme", "", "", "")
+	if doc := decodeBody[contract.PluginMarketDoc](t, response); response.Code != http.StatusOK || doc.Markdown != "# someone_sora 1.0.0 readme" {
+		t.Fatalf("a usage guide = %d %s", response.Code, response.Body.String())
+	}
+	for _, query := range []string{"key=someone_sora&doc=license", "key=Bad%20Key&doc=readme"} {
+		if response := controlRequest(t, handler, http.MethodGet, PluginsPath+"/market/doc?"+query, "", "", ""); response.Code != http.StatusBadRequest {
+			t.Fatalf("doc?%s = %d %s", query, response.Code, response.Body.String())
+		}
 	}
 }

@@ -22,14 +22,15 @@ type PluginTasks interface {
 	RemoveResults(ctx context.Context, plugin string) error
 }
 
-// taskProvider is the provider a task plugin offers on the providers page.
-func taskProvider(meta *plugin.TaskMeta) contract.PluginProvider {
+// taskProvider is the provider a task plugin offers on the providers page,
+// named in language.
+func taskProvider(meta *plugin.TaskMeta, language string) contract.PluginProvider {
 	auth := contract.ServiceAuth{Scheme: contract.AuthSchemeBearer}
 	if meta.Auth.Kind() == plugin.TaskAuthNone {
 		auth = contract.ServiceAuth{Scheme: contract.AuthSchemeNone}
 	}
 	provider := contract.PluginProvider{
-		ID: contract.PluginProviderTask, Name: meta.Name, BaseURL: taskplugin.DefaultBaseURL(meta), Auth: auth,
+		ID: contract.PluginProviderTask, Name: meta.Name.In(language), BaseURL: taskplugin.DefaultBaseURL(meta), Auth: auth,
 		Models: slices.Clone(meta.Models), Protocols: []contract.PluginProviderProtocol{},
 	}
 	for _, capability := range taskCapabilities(meta) {

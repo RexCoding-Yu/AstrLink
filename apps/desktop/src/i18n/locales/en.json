@@ -6118,7 +6118,7 @@
       "custom": "Another marketplace",
       "indexLabel": "Address of the marketplace's index.json",
       "open": "Open",
-      "search": "Search plugins or models",
+      "search": "Search plugins, models or codes",
       "count_one": "{{name}} · {{count}} plugin",
       "count_other": "{{name}} · {{count}} plugins",
       "loading": "Reading the marketplace…",
@@ -6145,7 +6145,27 @@
         "transform": "request processing part",
         "other": "{{part}} part"
       },
-      "partSeparator": ", "
+      "partSeparator": ", ",
+      "community": "Community marketplace",
+      "recommended": "Recommended",
+      "by": "by {{author}}",
+      "author": "Author",
+      "repository": "Source",
+      "code": "Plugin code",
+      "installs": "Last 30 days",
+      "installsCount_one": "{{count}} install",
+      "installsCount_other": "{{count}} installs",
+      "guide": "Usage guide",
+      "guideSource": "View on GitHub",
+      "guideLoading": "Loading the usage guide…",
+      "guideFailed": "Could not load the usage guide. Try opening it again later.",
+      "notes": "Release notes",
+      "revoked": "Taken down",
+      "revokedReason": "The marketplace took down the version you installed: {{reason}}. Update to another version or uninstall it.",
+      "revokedNoReason": "The marketplace took down the version you installed. Update to another version or uninstall it.",
+      "finding": "Looking up plugin {{code}}…",
+      "foundByCode": "Plugin with code {{code}}",
+      "noCode": "No plugin has the code {{code}}"
     },
     "task": {
       "protocols": {

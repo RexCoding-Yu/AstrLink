@@ -6598,7 +6598,7 @@ components:
       properties:
         key:
           type: string
-          pattern: "^[a-z][a-z0-9-]{0,31}$"
+          pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"
           description: The plugin that adapts the service.
         provider:
           type: string

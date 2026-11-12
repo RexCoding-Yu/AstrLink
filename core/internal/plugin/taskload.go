@@ -130,7 +130,7 @@ func loadTask(source Source, module *moejs.Module, parsed *syntax.Module, limits
 		return nil, err
 	}
 	loaded.task = meta
-	loaded.meta = Meta{APIVersion: 1, Key: meta.Key, Name: meta.Name, Version: meta.Version}
+	loaded.meta = Meta{APIVersion: 1, Key: meta.Key, Name: meta.Name.In("en"), Version: meta.Version}
 	return loaded, nil
 }
 

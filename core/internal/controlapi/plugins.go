@@ -63,8 +63,13 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		handler.pluginSources(writer, request, action)
 		return
 	}
-	if key == "market" && action == "" {
-		if allowMethods(writer, request, http.MethodGet) {
+	if key == "market" && (action == "" || action == "doc") {
+		if !allowMethods(writer, request, http.MethodGet) {
+			return
+		}
+		if action == "doc" {
+			handler.pluginMarketDoc(writer, request)
+		} else {
 			handler.pluginMarket(writer, request)
 		}
 		return
@@ -207,7 +212,7 @@ func pluginSummary(target *plugin.Plugin, language string) contract.PluginSummar
 	if meta := target.Task(); meta != nil {
 		summary.Kind, summary.Task = contract.PluginKindTask, taskplugin.Summary(meta, language)
 		if target.Enabled() {
-			summary.Providers = append(summary.Providers, taskProvider(meta))
+			summary.Providers = append(summary.Providers, taskProvider(meta, language))
 		}
 	} else if target.Loaded() {
 		summary.Kind = contract.PluginKindExtension
