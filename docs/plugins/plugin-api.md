@@ -650,7 +650,7 @@ AstrLink 也能运行 [new-api](https://github.com/QuantumNous/new-api)
 - 插件页「插件市场」读官方市场的
   `index.json`，也可以换成其他市场的地址。读取走 raw 地址，不占 GitHub 接口次数。
 - 安装前按市场列出的 sha256 校验文件，再按 v1 的规则检查清单和导出。
-- 市场的索引写明了插件有哪几部分（`task`、`provider`、`transform`）。需要 new-api 的提供商部分或请求处理部分的插件照常列出，标为「不兼容」，不能安装。
+- 市场的索引写明了插件有哪几部分（`task`、`provider`、`transform`）。三部分都能安装；只有 AstrLink 还不运行的部分才标为「不兼容」，不能安装。
 - 「安装插件」里也可以粘贴 GitHub 上单个 `plugin.js`
   的链接；官方插件仓库里的链接认作市场安装，同样校验。
 - 插件的图标（`iconFile`、旁边的 `icon.svg` 或
