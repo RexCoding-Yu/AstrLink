@@ -520,7 +520,11 @@ func (handler *Handler) executeCandidatesWithTest(
 		// attempt sends; one that stops the request answers it here, and
 		// no other provider is tried.
 		if test == nil {
-			if refusal := records.outboundRequestPlugins(request.Context(), attemptRequest, candidate, plan.UpstreamProtocol, upstreamModel, candidateIndex); refusal != nil {
+			refusal := handler.requestStagePlugins(request.Context(), records, attemptRequest, classified, plan.UpstreamProtocol, upstreamModel, candidateIndex)
+			if refusal == nil {
+				refusal = records.outboundRequestPlugins(request.Context(), attemptRequest, candidate, plan.UpstreamProtocol, upstreamModel, candidateIndex)
+			}
+			if refusal != nil {
 				finishPrivacy()
 				_ = attemptRequest.Body.Close()
 				records.noteAttemptedService(candidate.Service.ID)

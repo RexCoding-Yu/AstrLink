@@ -1,8 +1,14 @@
 package ingress
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +40,12 @@ type requestPluginGateway struct {
 }
 
 func newRequestPluginGateway(t *testing.T, instances ...contract.RequestPluginInstance) *requestPluginGateway {
+	return newRequestPluginGatewayWith(t, nil, instances...)
+}
+
+// newRequestPluginGatewayWith runs new-api's plugins and the extra ones,
+// by key.
+func newRequestPluginGatewayWith(t *testing.T, extra map[string]string, instances ...contract.RequestPluginInstance) *requestPluginGateway {
 	t.Helper()
 	files := fstest.MapFS{}
 	settings := pluginSettings{}
@@ -43,6 +55,10 @@ func newRequestPluginGateway(t *testing.T, instances ...contract.RequestPluginIn
 			t.Fatal(err)
 		}
 		files[name+"/plugin.js"] = &fstest.MapFile{Data: text}
+		settings[name] = plugin.Settings{Enabled: true}
+	}
+	for name, text := range extra {
+		files[name+"/plugin.js"] = &fstest.MapFile{Data: []byte(text)}
 		settings[name] = plugin.Settings{Enabled: true}
 	}
 	manager := plugin.NewManager(plugin.ManagerOptions{Builtin: files, Settings: settings})
@@ -315,5 +331,59 @@ func TestRequestRedactionMasksAGeminiStream(t *testing.T) {
 	}
 	if response.Code != http.StatusOK || text.String() != "Write to *** soon." || !strings.Contains(response.Body.String(), `"finishReason":"STOP"`) {
 		t.Fatalf("gemini stream = %d %q\n%s", response.Code, text.String(), response.Body)
+	}
+}
+
+// shaperPlugin sets the reasoning effort at the request stage and shrinks
+// each image at outbound.
+const shaperPlugin = `export const meta = { apiVersion: 1, key: "shaper", name: "Shaper", version: "1.0.0", author: { name: "Test" } };
+export function request(ctx, req) {
+  if (req.summary.messageCount < 1) return { action: "continue" };
+  return { action: "continue", effects: [{ type: "reasoning.set", effort: "high" }] };
+}
+export function outbound(ctx, req) {
+  const effects = req.media.filter((item) => item.mimeType.startsWith("image/") && item.width > 64)
+    .map((item) => ({ type: "media.reencode", media: item.index, format: "auto", maxSide: 64 }));
+  return { action: "continue", effects };
+}
+`
+
+func TestARequestPluginSetsTheEffortAndShrinksImages(t *testing.T) {
+	gateway := newRequestPluginGatewayWith(t, map[string]string{"shaper": shaperPlugin},
+		contract.RequestPluginInstance{ID: "rpi_shaper001", Name: "Shaper", Plugin: "shaper", Enabled: true, Models: []string{}})
+	picture := image.NewRGBA(image.Rect(0, 0, 256, 192))
+	for x := range 256 {
+		for y := range 192 {
+			picture.Set(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: uint8(x ^ y), A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	_ = png.Encode(&encoded, picture)
+	url := "data:image/png;base64," + base64.StdEncoding.EncodeToString(encoded.Bytes())
+	body, _ := json.Marshal(map[string]any{"model": "o3", "messages": []any{map[string]any{"role": "user", "content": []any{
+		map[string]any{"type": "text", "text": "what is it?"},
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}},
+	}}}})
+	response := gateway.chat(string(body))
+	if response.Code != http.StatusOK || len(gateway.sent) != 1 {
+		t.Fatalf("status = %d %s", response.Code, response.Body)
+	}
+	sent := gateway.sent[0]
+	if gjson.Get(sent, "reasoning_effort").String() != "high" {
+		t.Fatalf("reasoning = %s", gjson.Get(sent, "reasoning_effort"))
+	}
+	shrunk := gjson.Get(sent, "messages.0.content.1.image_url.url").String()
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(shrunk, "data:image/jpeg;base64,"))
+	if err != nil || !strings.HasPrefix(shrunk, "data:image/jpeg;base64,") {
+		t.Fatalf("image = %.60s", shrunk)
+	}
+	if config, err := jpeg.DecodeConfig(bytes.NewReader(data)); err != nil || config.Width != 64 || config.Height != 48 {
+		t.Fatalf("shrunk to %+v %v", config, err)
+	}
+	// A client that set its effort keeps it.
+	body, _ = json.Marshal(map[string]any{"model": "o3", "reasoning_effort": "low", "messages": []any{map[string]any{"role": "user", "content": "hi"}}})
+	_ = gateway.chat(string(body))
+	if effort := gjson.Get(gateway.sent[1], "reasoning_effort").String(); effort != "low" {
+		t.Fatalf("the client's effort became %q", effort)
 	}
 }

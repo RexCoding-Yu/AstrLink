@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/imagecompress"
 	"github.com/QuantumNous/astrlink/core/internal/jsonpatch"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 )
@@ -114,6 +115,67 @@ type RequestAttempt struct {
 	Protocol      contract.ProtocolID
 	UpstreamModel string
 	Index         int
+	// Summary is what the request stage reads of the client's request:
+	// messageCount, toolCount, lastUserTextLength, totalTextLength,
+	// hasImages and reasoningEffort.
+	Summary map[string]any
+}
+
+// Reasoning is the effort the request stage's reasoning.set gave, and
+// whether it replaces one the client set.
+type Reasoning struct {
+	Effort   string
+	Override bool
+}
+
+// Request runs the request stage over the client's request, once per
+// attempt, before it is converted: it returns the reasoning effort the
+// instances set, or why the request stops.
+func (run *RequestRun) Request(ctx context.Context, protocol contract.ProtocolID, body []byte, attempt RequestAttempt, view RequestView) (Reasoning, *RequestRefusal) {
+	var reasoning Reasoning
+	if !run.Serves(contract.RequestStageRequest) || !json.Valid(body) {
+		return reasoning, nil
+	}
+	for _, current := range run.instances {
+		if !current.meta.HasStage(contract.RequestStageRequest) {
+			continue
+		}
+		started := time.Now()
+		seen := BodyView{Body: body}
+		if !current.plugin.Settings.Trusted && view != nil {
+			var err error
+			if seen, err = view(ctx, protocol, body); err != nil || seen.Blocked {
+				run.note(current, contract.RequestStageRequest, contract.PluginRecordSkipped, "privacy", nil, started, nil)
+				continue
+			}
+		}
+		edit, result, err := run.call(ctx, current, contract.RequestStageRequest, protocol, attempt, seen.Body, nil)
+		if err != nil {
+			run.note(current, contract.RequestStageRequest, contract.PluginRecordFailed, "", nil, started, nil)
+			run.host.logf("request plugin %s (%s) failed at request: %v", current.instance.ID, current.plugin.Key, err)
+			if current.meta.Optional {
+				continue
+			}
+			return reasoning, &RequestRefusal{Status: http.StatusInternalServerError, Code: contract.RequestPluginFailedCode, Message: "A request plugin failed"}
+		}
+		if result.Action == "reject" {
+			run.note(current, contract.RequestStageRequest, contract.PluginRecordOK, "", &result, started, []string{contract.PluginEffectDeny})
+			message := result.Message
+			if message == "" {
+				message = "Request rejected by policy"
+			}
+			return reasoning, &RequestRefusal{Status: http.StatusBadRequest, Code: contract.RequestRejectedCode, Message: message + " (code: " + result.Code + ")"}
+		}
+		var effects []string
+		for _, effect := range edit.effects {
+			if effect.Type == "reasoning.set" {
+				reasoning = Reasoning{Effort: effect.Effort, Override: effect.Override}
+				effects = []string{contract.PluginEffectParams}
+			}
+		}
+		run.note(current, contract.RequestStageRequest, contract.PluginRecordOK, "", &result, started, effects)
+	}
+	return reasoning, nil
 }
 
 // RequestPlugins starts the request processing of a request for model on
@@ -204,7 +266,13 @@ type stageEffect struct {
 	Text     *string               `json:"text"`
 	Effort   string                `json:"effort"`
 	Override bool                  `json:"override"`
+	Format   string                `json:"format"`
+	Quality  *int                  `json:"quality"`
+	MaxSide  *int                  `json:"maxSide"`
 }
+
+// requestEfforts are the efforts reasoning.set takes.
+var requestEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 // errInstanceFailed marks a result the host could not apply: a failure of
 // the instance.
@@ -316,6 +384,8 @@ type stageEdit struct {
 	// effects are the effects to apply, on the body the hook saw.
 	effects []stageEffect
 	media   []requestMedia
+	// reencoded counts the images media.reencode replaced.
+	reencoded int
 }
 
 // call runs one instance's hook for a stage over seen, the body as the
@@ -324,6 +394,9 @@ func (run *RequestRun) call(ctx context.Context, current *requestInstance, stage
 	shown, media, err := hideMedia(seen)
 	if err != nil {
 		return stageEdit{}, stageResult{}, err
+	}
+	if stage == contract.RequestStageOutbound {
+		measureImages(media)
 	}
 	view := map[string]any{
 		"stage": stage, "format": RequestFormat(protocol), "path": run.path, "model": run.model, "attempt": attempt.Index,
@@ -334,6 +407,9 @@ func (run *RequestRun) call(ctx context.Context, current *requestInstance, stage
 		view["upstreamModel"] = attempt.UpstreamModel
 	}
 	request := map[string]any{"body": json.RawMessage(shown), "media": mediaView(media)}
+	if stage == contract.RequestStageRequest && attempt.Summary != nil {
+		request["summary"] = attempt.Summary
+	}
 	if stage == contract.RequestStageOutbound || stage == contract.RequestStageEgress {
 		headers := map[string]string{}
 		for name, value := range setHeaders {
@@ -398,10 +474,21 @@ func (run *RequestRun) call(ctx context.Context, current *requestInstance, stage
 			if effect.Media == nil || *effect.Media < 0 || *effect.Media >= len(media) || effect.Text == nil || len(*effect.Text) > 1<<20 {
 				return stageEdit{}, stageResult{}, fmt.Errorf("effect %d names no file of the call, or its text is over 1 MiB", index)
 			}
-		case "media.reencode", "reasoning.set":
-			// The gateway does not re-encode images or set the effort for
-			// a plugin yet: the effect changes nothing.
-			continue
+		case "media.reencode":
+			switch {
+			case effect.Media == nil || *effect.Media < 0 || *effect.Media >= len(media):
+				return stageEdit{}, stageResult{}, fmt.Errorf("effect %d names no file of the call", index)
+			case !slices.Contains([]string{"auto", "jpeg", "png", "webp"}, effect.Format):
+				return stageEdit{}, stageResult{}, fmt.Errorf("effect %d: the format %q is not auto, jpeg, png or webp", index, effect.Format)
+			case effect.Quality != nil && (*effect.Quality < 1 || *effect.Quality > 100 || effect.Format == "webp"):
+				return stageEdit{}, stageResult{}, fmt.Errorf("effect %d: quality is 1 to 100, and webp takes none", index)
+			case effect.MaxSide != nil && (*effect.MaxSide < 16 || *effect.MaxSide > 16384):
+				return stageEdit{}, stageResult{}, fmt.Errorf("effect %d: maxSide is 16 to 16384", index)
+			}
+		case "reasoning.set":
+			if !slices.Contains(requestEfforts, effect.Effort) {
+				return stageEdit{}, stageResult{}, fmt.Errorf("effect %d: the effort %q is not one of %s", index, effect.Effort, strings.Join(requestEfforts, ", "))
+			}
 		}
 		edit.effects = append(edit.effects, effect)
 	}
@@ -448,6 +535,40 @@ func (run *RequestRun) applied(stage string, seen BodyView, body []byte, edit st
 			if err := document.Replace(item.path, encoded); err != nil {
 				return edit, err
 			}
+			changed = true
+		case "media.reencode":
+			item := &edit.media[*effect.Media]
+			if !strings.HasPrefix(item.mime, "image/") {
+				continue
+			}
+			data, err := base64.StdEncoding.DecodeString(item.data)
+			if err != nil {
+				continue
+			}
+			quality, maxSide := 0, 0
+			if effect.Quality != nil {
+				quality = *effect.Quality
+			}
+			if effect.MaxSide != nil {
+				maxSide = *effect.MaxSide
+			}
+			reencoded, mime, ok := imagecompress.Reencode(data, effect.Format, quality, maxSide)
+			if !ok {
+				continue
+			}
+			value := base64.StdEncoding.EncodeToString(reencoded)
+			if item.prefix != "" {
+				value = "data:" + mime + ";base64," + value
+			}
+			encoded, _ := json.Marshal(value)
+			if err := document.Replace(item.path, encoded); err != nil {
+				return edit, err
+			}
+			if item.mimePath != "" {
+				typed, _ := json.Marshal(mime)
+				_ = document.Replace(item.mimePath, typed)
+			}
+			edit.reencoded++
 			changed = true
 		}
 	}
@@ -647,6 +768,23 @@ type requestMedia struct {
 	bytes  int64
 	// rewritable is a text file whose text media.text may replace.
 	rewritable bool
+	// mimePath is the member that names its media type beside it, for
+	// a Claude or Gemini part.
+	mimePath      string
+	width, height int
+}
+
+// measureImages reads the size of each image of the call.
+func measureImages(media []requestMedia) {
+	for index := range media {
+		item := &media[index]
+		if !strings.HasPrefix(item.mime, "image/") {
+			continue
+		}
+		if data, err := base64.StdEncoding.DecodeString(item.data); err == nil {
+			item.width, item.height, _ = imagecompress.Size(data)
+		}
+	}
 }
 
 var mediaRefPattern = regexp.MustCompile(`\[media:\d+\]`)
@@ -663,21 +801,25 @@ func hideMedia(body []byte) ([]byte, []requestMedia, error) {
 	}
 	var media []requestMedia
 	document.Strings(func(pointer string, holder *jsonpatch.Object, value string) (string, bool) {
-		var mime, data, prefix string
+		var mime, data, prefix, mimePath string
 		switch {
 		case strings.HasPrefix(value, "data:") && strings.Contains(value[:min(len(value), 256)], ";base64,"):
 			header, payload, _ := strings.Cut(value, ",")
 			mime = strings.TrimSuffix(strings.TrimPrefix(header, "data:"), ";base64")
 			data, prefix = payload, header+","
 		case holder != nil && strings.HasSuffix(pointer, "/data") && memberText(holder, "type") == "base64":
-			mime, data = memberText(holder, "media_type"), value
+			mime, data, mimePath = memberText(holder, "media_type"), value, strings.TrimSuffix(pointer, "/data")+"/media_type"
 		case holder != nil && strings.HasSuffix(pointer, "/data") && (strings.Contains(pointer, "/inlineData/") || strings.Contains(pointer, "/inline_data/")):
 			mime, data = memberText(holder, "mimeType")+memberText(holder, "mime_type"), value
+			mimePath = strings.TrimSuffix(pointer, "/data") + "/mimeType"
+			if memberText(holder, "mime_type") != "" {
+				mimePath = strings.TrimSuffix(pointer, "/data") + "/mime_type"
+			}
 		default:
 			return "", false
 		}
 		item := requestMedia{
-			ref: "[media:" + strconv.Itoa(len(media)) + "]", path: pointer, mime: mime, data: data, prefix: prefix,
+			ref: "[media:" + strconv.Itoa(len(media)) + "]", path: pointer, mime: mime, data: data, prefix: prefix, mimePath: mimePath,
 			bytes: int64(base64.StdEncoding.DecodedLen(len(strings.TrimRight(data, "=")))),
 		}
 		item.rewritable = strings.HasPrefix(mime, "text/") || mime == "application/json"
@@ -700,7 +842,11 @@ func memberText(object *jsonpatch.Object, key string) string {
 func mediaView(media []requestMedia) []map[string]any {
 	view := []map[string]any{}
 	for index, item := range media {
-		view = append(view, map[string]any{"index": index, "path": item.path, "mimeType": item.mime, "bytes": item.bytes})
+		entry := map[string]any{"index": index, "path": item.path, "mimeType": item.mime, "bytes": item.bytes}
+		if item.width > 0 {
+			entry["width"], entry["height"] = item.width, item.height
+		}
+		view = append(view, entry)
 	}
 	return view
 }

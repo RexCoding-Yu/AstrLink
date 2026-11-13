@@ -111,3 +111,43 @@ func (session *recordSession) reportRequestPlugins() {
 	}
 	run.Report(record)
 }
+
+// requestStagePlugins runs the request stage over the client's request
+// for one attempt, and sets the reasoning effort the instances chose in
+// the body the attempt sends, in its provider's protocol: an effort the
+// client already set stays unless the instance overrides it.
+func (handler *Handler) requestStagePlugins(ctx context.Context, session *recordSession, attempt *http.Request, classified Request, protocol contract.ProtocolID, model string, index int) *pluginhost.RequestRefusal {
+	run := session.requestPluginRun()
+	if !run.Serves(contract.RequestStageRequest) || len(classified.body) == 0 {
+		return nil
+	}
+	signals := requestSignals(classified.Protocol, classified.body)
+	clientEffort := ""
+	if classified.ReasoningEffort != nil {
+		clientEffort = *classified.ReasoningEffort
+	}
+	summary := map[string]any{
+		"messageCount": signals.messages, "toolCount": signals.tools, "lastUserTextLength": signals.lastUserChars,
+		"totalTextLength": len(classified.body), "hasImages": bytes.Contains(classified.body, []byte("base64,")) || bytes.Contains(classified.body, []byte(`"image_url"`)),
+		"reasoningEffort": clientEffort,
+	}
+	reasoning, refusal := run.Request(ctx, classified.Protocol, classified.body, pluginhost.RequestAttempt{Protocol: classified.Protocol, UpstreamModel: model, Index: index, Summary: summary}, session.requestPluginView)
+	if refusal != nil || reasoning.Effort == "" || (clientEffort != "" && !reasoning.Override) {
+		return refusal
+	}
+	level := map[string]contract.ReasoningLevel{
+		"none": contract.ReasoningLevelOff, "minimal": contract.ReasoningLevelLow, "low": contract.ReasoningLevelLow,
+		"medium": contract.ReasoningLevelMedium, "high": contract.ReasoningLevelHigh, "xhigh": contract.ReasoningLevelMax, "max": contract.ReasoningLevelMax,
+	}[reasoning.Effort]
+	body, err := io.ReadAll(attempt.Body)
+	if err != nil {
+		return &pluginhost.RequestRefusal{Status: http.StatusInternalServerError, Code: contract.RequestPluginFailedCode, Message: "A request plugin failed"}
+	}
+	if target, ok := reasoningTargetFor(reasoningConfig{mode: contract.ReasoningModeFixed, level: level}, protocol, body); ok && rewritesProtocol(protocol) {
+		if edit := overrideReasoning(protocol, body, model, target, handler.codexModels.lookup(model)); edit.err == nil {
+			body = edit.body
+		}
+	}
+	replaceRecoveryRequestBody(attempt, body)
+	return nil
+}
