@@ -583,7 +583,10 @@ func (run *RequestRun) summary(result stageResult) string {
 		parts = append(parts, notice)
 	}
 	if result.Action == "reject" {
-		parts = append(parts, "rejected: "+result.Code)
+		parts = append(parts, map[string]string{"zh-CN": "已拦截：", "ja": "拒否："}[run.language]+result.Code)
+		if parts[len(parts)-1] == result.Code {
+			parts[len(parts)-1] = "rejected: " + result.Code
+		}
 	}
 	counts := map[string]int{}
 	var order []string

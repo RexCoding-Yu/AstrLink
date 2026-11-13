@@ -63,6 +63,16 @@ const knownSkipReasons = new Set([
 ]);
 
 /** The hooks of the extension points, whose records name the point. */
+/** The stages of new-api's request processing plugins. */
+const requestStages = new Set([
+  "ingress",
+  "request",
+  "outbound",
+  "egress",
+  "reply",
+  "report",
+]);
+
 const extensionHooks = new Set([
   "onRequest",
   "route",
@@ -403,7 +413,11 @@ function PluginRecordRow({
 }) {
   const t = useT();
   const { headline, points, details, quiet, usageOnly } = describe(entry, t);
-  const point = extensionHooks.has(entry.hook) ? hookLabel(entry.hook, t) : "";
+  const point = extensionHooks.has(entry.hook)
+    ? hookLabel(entry.hook, t)
+    : requestStages.has(entry.hook)
+      ? t(`plugins.requestPlugins.stages.${entry.hook}`)
+      : "";
   const view = entry.view && entry.view.length > 0 ? entry.view : null;
   const buttons = actions && actions.length > 0 ? actions : null;
   // As in request records, only a record that went wrong carries a pill.

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -61,6 +62,9 @@ type relayTarget struct {
 	meta   *plugin.TaskMeta
 	route  *plugin.RelayRoute
 	config json.RawMessage
+	// token is the exchangeKey token of the provider's key, nil without
+	// one.
+	token json.RawMessage
 }
 
 // relayFor finds the route of the service's plugin that serves the attempt.
@@ -249,6 +253,9 @@ func (relay *relayTarget) prepare(ctx context.Context, baseURL, clientPath, mode
 		visible[canonical] = values[0]
 	}
 	view := map[string]any{"baseUrl": baseURL, "path": clientPath, "config": relay.config}
+	if relay.token != nil {
+		view["token"] = relay.token
+	}
 	request := map[string]any{
 		"path": clientPath, "upstreamPath": address.Path, "model": model, "stream": stream,
 		"body": json.RawMessage(body), "headers": visible,
@@ -367,6 +374,9 @@ func (relay *relayTarget) sign(ctx context.Context, baseURL, key, method string,
 		}
 	}
 	view := map[string]any{"baseUrl": baseURL, "credential": nil, "apiKey": key, "config": relay.config}
+	if relay.token != nil {
+		view["token"] = relay.token
+	}
 	request := map[string]any{"method": method, "url": address.String(), "headers": headers, "bodySha256": hex.EncodeToString(sum[:])}
 	raw, err := relay.call(ctx, "signRequest", view, request)
 	if err != nil {
@@ -437,6 +447,12 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 	credentials, authHeader := relayAuth(relay.route, key, query)
 	header := request.Header.Clone()
 	ctx := request.Context()
+	if failed, err := host.exchange(ctx, target.Service, relay, base, key, false); failed != nil || err != nil {
+		if err != nil {
+			return transport.NewUpstreamError(err)
+		}
+		return answerRelay(writer, target, failed)
+	}
 	if relay.plugin.HasTaskHook("prepareRequest") && len(body) > 0 {
 		address.RawQuery = query.Encode()
 		prepared, moved, err := relay.prepare(ctx, baseURL, attempt.ClientPath, attempt.Model, attempt.Stream, address, root, body, header, authHeader)
@@ -458,44 +474,187 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 		}
 		body, address = prepared, moved
 	}
-	address.RawQuery = query.Encode()
-	if relay.plugin.HasTaskHook("signRequest") {
-		final := header.Clone()
-		for name, values := range credentials {
-			final[name] = values
+	header.Del("Authorization")
+	unsigned := query
+	for resend := false; ; resend = true {
+		query := url.Values{}
+		for name, values := range unsigned {
+			query[name] = slices.Clone(values)
 		}
-		headers, extra, err := relay.sign(ctx, baseURL, key, request.Method, address, final, body)
+		sentCredentials := credentials.Clone()
+		address.RawQuery = query.Encode()
+		if relay.plugin.HasTaskHook("signRequest") {
+			final := header.Clone()
+			for name, values := range sentCredentials {
+				final[name] = values
+			}
+			headers, extra, err := relay.sign(ctx, baseURL, key, request.Method, address, final, body)
+			if err != nil {
+				return transport.NewUpstreamError(err)
+			}
+			for name, value := range headers {
+				sentCredentials.Set(name, value)
+			}
+			for name, value := range extra {
+				query.Set(name, value)
+			}
+			address.RawQuery = query.Encode()
+		}
+		outbound, err := http.NewRequestWithContext(ctx, request.Method, (&url.URL{Path: address.Path, RawQuery: address.RawQuery}).String(), bytes.NewReader(body))
 		if err != nil {
 			return transport.NewUpstreamError(err)
 		}
-		for name, value := range headers {
-			credentials.Set(name, value)
+		outbound.Header = header.Clone()
+		outbound.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		outbound.ContentLength = int64(len(body))
+		sent := target
+		sent.BaseURL = &url.URL{Scheme: address.Scheme, Host: address.Host}
+		sent.RequestHeaders = sentCredentials
+		response, err := roundTrip(outbound, sent)
+		if err != nil {
+			return err
 		}
-		for name, value := range extra {
-			query.Set(name, value)
+		if !resend && relay.plugin.HasTaskHook("exchangeKey") {
+			rejected, kept := relay.rejected(ctx, baseURL, attempt.ClientPath, response)
+			response = kept
+			if rejected {
+				// The token is no longer good: the key is exchanged again
+				// and the same request sent once more.
+				_ = response.Body.Close()
+				if failed, err := host.exchange(ctx, target.Service, relay, base, key, true); failed != nil || err != nil {
+					if err != nil {
+						return transport.NewUpstreamError(err)
+					}
+					return answerRelay(writer, target, failed)
+				}
+				continue
+			}
 		}
-		address.RawQuery = query.Encode()
+		return answerRelay(writer, target, response)
 	}
-	origin := &url.URL{Scheme: address.Scheme, Host: address.Host}
-	outbound, err := http.NewRequestWithContext(ctx, request.Method, (&url.URL{Path: address.Path, RawQuery: address.RawQuery}).String(), bytes.NewReader(body))
-	if err != nil {
-		return transport.NewUpstreamError(err)
-	}
-	outbound.Header = header
-	outbound.Header.Del("Authorization")
-	outbound.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	outbound.ContentLength = int64(len(body))
-	sent := target
-	sent.BaseURL = origin
-	sent.RequestHeaders = credentials
-	response, err := roundTrip(outbound, sent)
-	if err != nil {
-		return err
-	}
+}
+
+// answerRelay hands an attempt's answer to the gateway.
+func answerRelay(writer http.ResponseWriter, target transport.Target, response *http.Response) error {
 	if target.HandleResponse != nil {
 		return target.HandleResponse(response)
 	}
 	return transport.WriteResponse(writer, response)
+}
+
+// rejected reports whether the upstream rejected the token: a 401, or
+// what credentialRejected says of another error. The response it returns
+// still has its whole body.
+func (relay *relayTarget) rejected(ctx context.Context, baseURL, clientPath string, response *http.Response) (bool, *http.Response) {
+	if response.StatusCode == http.StatusUnauthorized {
+		return true, response
+	}
+	if response.StatusCode < http.StatusBadRequest || !relay.plugin.HasTaskHook("credentialRejected") {
+		return false, response
+	}
+	head, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	response.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(head), response.Body), response.Body}
+	headers := map[string]string{}
+	for name, values := range response.Header {
+		if len(values) > 0 {
+			headers[http.CanonicalHeaderKey(name)] = values[0]
+		}
+	}
+	view := map[string]any{"baseUrl": baseURL, "path": clientPath, "config": relay.config}
+	if relay.token != nil {
+		view["token"] = relay.token
+	}
+	raw, err := relay.call(ctx, "credentialRejected", view, map[string]any{"status": response.StatusCode, "headers": headers, "body": strings.ToValidUTF8(string(head), "\uFFFD")})
+	return err == nil && bytes.Equal(bytes.TrimSpace(raw), []byte("true")), response
+}
+
+// relayTokens keeps the exchangeKey tokens of relay providers in memory,
+// by provider, key, plugin version, config and address.
+type relayTokens struct {
+	mutex  sync.Mutex
+	tokens map[string]relayToken
+}
+
+type relayToken struct {
+	token   json.RawMessage
+	expires time.Time
+}
+
+// relayTokenMargin renews a token this long before it expires.
+const relayTokenMargin = 30 * time.Second
+
+// exchange gives relay the exchangeKey token of key, exchanging the key
+// when no kept token is good or renew is set. It returns the answer of a
+// key the plugin refused, or the error of an exchange that failed.
+func (host *Host) exchange(ctx context.Context, service contract.Service, relay *relayTarget, base *url.URL, key string, renew bool) (*http.Response, error) {
+	if !relay.plugin.HasTaskHook("exchangeKey") || key == "" {
+		return nil, nil
+	}
+	sum := sha256.Sum256([]byte(key + "\x00" + string(relay.config)))
+	baseURL := ""
+	if base != nil {
+		baseURL = strings.TrimRight(base.String(), "/")
+	}
+	cacheKey := strings.Join([]string{string(service.ID), relay.meta.Version, hex.EncodeToString(sum[:]), baseURL}, "\x00")
+	host.relayTokens.mutex.Lock()
+	defer host.relayTokens.mutex.Unlock()
+	if kept, ok := host.relayTokens.tokens[cacheKey]; ok && !renew && (kept.expires.IsZero() || time.Until(kept.expires) > relayTokenMargin) {
+		relay.token = kept.token
+		return nil, nil
+	}
+	allowed := slices.Clone(relay.meta.AllowedHosts)
+	if base != nil {
+		allowed = append(allowed, strings.ToLower(base.Host))
+	}
+	call, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	raw, _, err := relay.plugin.CallTask(call, "exchangeKey", []any{map[string]any{"baseUrl": baseURL, "config": relay.config, "apiKey": key}}, plugin.CallOptions{
+		NetworkBudget: time.Minute,
+		TaskFetch: &plugin.TaskFetch{
+			Allowed: func(target *url.URL) bool { return slices.Contains(allowed, strings.ToLower(target.Host)) },
+			Client:  &http.Client{}, Post: true,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("exchangeKey: %w", err)
+	}
+	var result struct {
+		Token     json.RawMessage `json:"token"`
+		ExpiresAt int64           `json:"expiresAt"`
+		Error     *struct {
+			Status  int    `json:"status"`
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, errors.New("exchangeKey returned neither {token} nor {error}")
+	}
+	if result.Error != nil {
+		status := result.Error.Status
+		if status < 400 || status > 599 {
+			status = http.StatusInternalServerError
+		}
+		data, _ := json.Marshal(map[string]any{"error": map[string]any{"message": truncateRunes(result.Error.Message, 4096), "type": result.Error.Type, "code": result.Error.Code}})
+		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(data)), ContentLength: int64(len(data))}, nil
+	}
+	if len(result.Token) == 0 || len(result.Token) > 64<<10 {
+		return nil, errors.New("exchangeKey returned no token, or one larger than 64 KiB")
+	}
+	kept := relayToken{token: result.Token}
+	if result.ExpiresAt > 0 {
+		kept.expires = time.Unix(result.ExpiresAt, 0)
+	}
+	if host.relayTokens.tokens == nil {
+		host.relayTokens.tokens = map[string]relayToken{}
+	}
+	host.relayTokens.tokens[cacheKey] = kept
+	relay.token = kept.token
+	return nil, nil
 }
 
 // relayAuth sends key as the route says: the headers it goes in, and the
@@ -551,6 +710,13 @@ func (host *Host) relayModels(ctx context.Context, service contract.Service, tar
 	}
 	query := address.Query()
 	key := serviceKey(service, target.RequestHeaders)
+	if failed, err := host.exchange(ctx, service, relay, base, key, false); failed != nil || err != nil {
+		if err == nil {
+			_ = failed.Body.Close()
+			err = fmt.Errorf("the plugin refused the key with %d", failed.StatusCode)
+		}
+		return nil, false, err
+	}
 	credentials, _ := relayAuth(route, key, query)
 	address.RawQuery = query.Encode()
 	if found.HasTaskHook("signRequest") {

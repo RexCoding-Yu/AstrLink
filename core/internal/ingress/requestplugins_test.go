@@ -285,3 +285,35 @@ func TestRequestRedactionMasksClaudeAndResponsesStreams(t *testing.T) {
 		t.Fatalf("responses stream = %d %q\n%s", response.Code, deltas.String(), body)
 	}
 }
+
+func TestRequestRedactionMasksAGeminiStream(t *testing.T) {
+	gateway := newRequestPluginGateway(t, contract.RequestPluginInstance{
+		ID: "rpi_redact004", Name: "脱敏", Plugin: "request-redact", Enabled: true, Models: []string{}, Config: json.RawMessage(`{"replies":true}`),
+	})
+	gateway.replyType = "text/event-stream"
+	var gemini strings.Builder
+	for index, text := range []string{"Write to jane.d", "oe@example.com", " soon."} {
+		candidate := map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": text}}}}
+		if index == 2 {
+			candidate["finishReason"] = "STOP"
+		}
+		data, _ := json.Marshal(map[string]any{"candidates": []any{candidate}})
+		gemini.WriteString("data: " + string(data) + "\n\n")
+	}
+	gateway.reply = gemini.String()
+	provider := validEndpoint(contract.ProtocolGoogleGenerateContent, true)
+	gateway.handler.resolver = candidateResolver{candidates: []endpoint.Resolved{{Endpoint: provider}}}
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-test:streamGenerateContent?alt=sse", strings.NewReader(`{"contents":[{"role":"user","parts":[{"text":"who?"}]}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	gateway.handler.ServeHTTP(response, request)
+	var text strings.Builder
+	for _, line := range strings.Split(response.Body.String(), "\n") {
+		if data, ok := strings.CutPrefix(line, "data: "); ok {
+			text.WriteString(gjson.Get(data, "candidates.0.content.parts.0.text").String())
+		}
+	}
+	if response.Code != http.StatusOK || text.String() != "Write to *** soon." || !strings.Contains(response.Body.String(), `"finishReason":"STOP"`) {
+		t.Fatalf("gemini stream = %d %q\n%s", response.Code, text.String(), response.Body)
+	}
+}

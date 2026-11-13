@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
@@ -25,6 +26,7 @@ const relayPlugin = `export const meta = {
   ],
 };
 export function convertRequest() {} export function convertResponse() {} export function convertStreamEvent() {}
+export function checkKey(ctx, key) { return key.includes("|") ? undefined : { error: { en: "Write it as AccessKey|SecretKey", "zh-CN": "要写成 AccessKey|SecretKey" } }; }
 `
 
 func TestAProviderPluginOffersARelayProvider(t *testing.T) {
@@ -53,13 +55,19 @@ func TestAProviderPluginOffersARelayProvider(t *testing.T) {
 	// A provider of it takes its capabilities from the routes, whatever the
 	// request says.
 	service := createServiceForTest(t, handler,
-		`{"name":"Vendor","kind":"plugin","plugin":{"key":"vendor","provider":"relay"},"http":{"base_url":"","auth":{"scheme":"bearer"},"credential":{"secret":"sk-test"}},"capabilities":[{"protocol":"openai.images","mode":"native","streaming":false}]}`)
+		`{"name":"Vendor","kind":"plugin","plugin":{"key":"vendor","provider":"relay"},"http":{"base_url":"","auth":{"scheme":"bearer"},"credential":{"secret":"ak|sk"}},"capabilities":[{"protocol":"openai.images","mode":"native","streaming":false}]}`)
 	want := []contract.Capability{
 		{Protocol: contract.ProtocolOpenAIChat, Mode: contract.CapabilityModeNative, Streaming: true},
 		{Protocol: contract.ProtocolAnthropicMessages, Mode: contract.CapabilityModeNative, Streaming: true},
 	}
 	if !slices.Equal(service.Capabilities, want) || service.HTTP.BaseURL != "https://api.vendor.example" || service.HTTP.Auth.Scheme != contract.AuthSchemeBearer {
 		t.Fatalf("service = %+v %+v", service.Capabilities, service.HTTP)
+	}
+	// The plugin checks the form of a key it is given.
+	response := serviceRequestForTest(t, handler, http.MethodPost, ServicesPath, "application/json",
+		`{"name":"Vendor","kind":"plugin","plugin":{"key":"vendor","provider":"relay"},"http":{"base_url":"","auth":{"scheme":"bearer"},"credential":{"secret":"plain"}},"capabilities":[]}`, "")
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "AccessKey|SecretKey") {
+		t.Fatalf("a key the plugin refuses = %d %s", response.Code, response.Body)
 	}
 	if response := serviceRequestForTest(t, handler, http.MethodPost, ServicesPath, "application/json",
 		`{"name":"Vendor","kind":"plugin","plugin":{"key":"vendor","provider":"relay","upstream":"new_api"},"http":{"base_url":"","auth":{"scheme":"none"}},"capabilities":[]}`, ""); response.Code < 400 {

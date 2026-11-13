@@ -1,12 +1,17 @@
 package controlapi
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
 // relayProvider is the provider a new-api plugin's provider part offers on
@@ -121,6 +126,37 @@ func (handler *Handler) applyRelayProvider(service *contract.Service) error {
 		}
 		service.HTTP.Auth = relayServiceAuth(meta)
 		service.HTTP.ModelListPath = ""
+	}
+	return nil
+}
+
+// checkRelayKey runs the checkKey hook of a relay provider's plugin on a
+// key the save gives, and on its settings: the plugin checks the key's form,
+// such as the parts of AccessKey|SecretKey. The message of a key it refuses
+// fails the save.
+func (handler *Handler) checkRelayKey(ctx context.Context, service contract.Service, credential storage.CredentialMutation) error {
+	if service.Plugin == nil || service.Plugin.Provider != contract.PluginProviderRelay || !credential.Present || len(credential.Secret) == 0 || handler.plugins == nil {
+		return nil
+	}
+	target := handler.plugins.Current().Plugin(service.Plugin.Key)
+	if target == nil || target.NewAPI() == nil || !target.HasTaskHook("checkKey") {
+		return nil
+	}
+	view := map[string]any{"baseUrl": "", "config": pluginhost.RelayConfig(target.NewAPI(), service.Plugin.Settings)}
+	if service.HTTP != nil {
+		view["baseUrl"] = strings.TrimRight(service.HTTP.BaseURL, "/")
+	}
+	call, cancel := context.WithTimeout(ctx, validateConfigTime)
+	defer cancel()
+	raw, _, err := target.CallTask(call, "checkKey", []any{view, string(credential.Secret)}, plugin.CallOptions{})
+	if err != nil {
+		return fmt.Errorf("the plugin refused the key: %s", validateConfigMessage(err))
+	}
+	var result struct {
+		Error plugin.LocalizedText `json:"error"`
+	}
+	if json.Unmarshal(raw, &result) == nil && len(result.Error) > 0 {
+		return fmt.Errorf("%s", result.Error.In(handler.pluginPageView().Language))
 	}
 	return nil
 }

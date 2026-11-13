@@ -88,10 +88,13 @@ func (upstream *relayUpstream) last(t *testing.T) (*http.Request, string) {
 }
 
 func newRelayGateway(t *testing.T) (*Handler, *pluginhost.Host, contract.Service, *relayUpstream) {
+	return newRelayGatewayOf(t, vendorRelayPlugin, newRelayUpstream(t))
+}
+
+func newRelayGatewayOf(t *testing.T, source string, upstream *relayUpstream) (*Handler, *pluginhost.Host, contract.Service, *relayUpstream) {
 	t.Helper()
-	upstream := newRelayUpstream(t)
 	manager := plugin.NewManager(plugin.ManagerOptions{
-		Builtin:  fstest.MapFS{"vendor/plugin.js": &fstest.MapFile{Data: []byte(vendorRelayPlugin)}},
+		Builtin:  fstest.MapFS{"vendor/plugin.js": &fstest.MapFile{Data: []byte(source)}},
 		Settings: pluginSettings{"vendor": plugin.Settings{Enabled: true}},
 	})
 	if err := manager.Reload(context.Background()); err != nil {
@@ -189,5 +192,50 @@ func TestARelayProviderListsItsModelsOverItsRoute(t *testing.T) {
 	}
 	if upstream, ok := host.RelayUpstreamProtocol(service, "/v1/chat/completions", "claude-x"); !ok || upstream != contract.ProtocolAnthropicMessages {
 		t.Fatalf("the route of claude-x sends %s %v", upstream, ok)
+	}
+}
+
+// tokenVendorPlugin exchanges the key for a short-lived token, sends it
+// signed, and takes a 403 that says expired for a rejected token.
+const tokenVendorPlugin = `export const meta = {
+  apiVersion: 1, key: "vendor", name: "Vendor", version: "1.0.0", author: { name: "Test" }, baseUrl: "https://api.vendor.example",
+  models: ["vendor-large"],
+  relay: [{ incoming_path: "/v1/chat/completions", upstream_path: "/token/chat", auth: { type: "none" } }],
+};
+export function exchangeKey(ctx) { return { token: { value: ctx.apiKey + ":" + utils.uuid() } }; }
+export function signRequest(ctx, request) { return { headers: { "X-Token": ctx.token.value } }; }
+export function credentialRejected(ctx, response) { return response.status === 403 && response.body.includes("expired"); }
+export function checkKey(ctx, key) { return key.includes("|") ? undefined : { error: { en: "Write it as AccessKey|SecretKey" } }; }
+`
+
+func TestARelayProviderExchangesItsKeyAgainWhenTheTokenIsRejected(t *testing.T) {
+	upstream := &relayUpstream{}
+	tokens := []string{}
+	upstream.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstream.mutex.Lock()
+		tokens = append(tokens, request.Header.Get("X-Token"))
+		first := len(tokens) == 1
+		upstream.mutex.Unlock()
+		writer.Header().Set("Content-Type", "application/json")
+		if first {
+			writer.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(writer, `{"error":"token expired"}`)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"id":"c1","object":"chat.completion","model":"vendor-large","choices":[{"index":0,"message":{"role":"assistant","content":"fresh"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(upstream.server.Close)
+	handler, _, _, _ := newRelayGatewayOf(t, tokenVendorPlugin, upstream)
+	response := relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusOK || gjson.Get(response.Body.String(), "choices.0.message.content").String() != "fresh" {
+		t.Fatalf("answer = %d %s", response.Code, response.Body)
+	}
+	if len(tokens) != 2 || tokens[0] == tokens[1] || !strings.HasPrefix(tokens[0], "plan-key:") || !strings.HasPrefix(tokens[1], "plan-key:") {
+		t.Fatalf("tokens = %v", tokens)
+	}
+	// A later request keeps the token the second exchange gave.
+	_ = relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"again"}]}`)
+	if len(tokens) != 3 || tokens[2] != tokens[1] {
+		t.Fatalf("tokens = %v", tokens)
 	}
 }

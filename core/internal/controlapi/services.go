@@ -423,6 +423,10 @@ func (handler *Handler) createService(writer http.ResponseWriter, request *http.
 			writeError(writer, http.StatusUnprocessableEntity, "invalid_service", err.Error())
 			return
 		}
+		if err := handler.checkRelayKey(request.Context(), service, credential); err != nil {
+			writeError(writer, http.StatusUnprocessableEntity, "invalid_service", err.Error())
+			return
+		}
 	default:
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_service", "service kind is unsupported")
 		return
@@ -483,6 +487,10 @@ func (handler *Handler) patchService(writer http.ResponseWriter, request *http.R
 		return
 	}
 	if _, err := handler.applyTaskProvider(&service); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_service_patch", err.Error())
+		return
+	}
+	if err := handler.checkRelayKey(request.Context(), service, credential); err != nil {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_service_patch", err.Error())
 		return
 	}
