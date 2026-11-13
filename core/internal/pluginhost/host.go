@@ -113,6 +113,8 @@ type Host struct {
 	records      RecordAppender
 	workspaceKey []byte
 	logf         func(string, ...any)
+	// reports runs the report hooks of request processing instances.
+	reports reportQueue
 	// settings are the settings of every plugin, as requests read them.
 	settings atomic.Pointer[contract.PluginHostSettings]
 	// breakers keep a plugin's extension point out of requests after it

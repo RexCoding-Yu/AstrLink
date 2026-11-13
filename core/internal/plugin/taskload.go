@@ -128,7 +128,7 @@ func loadTask(source Source, module *moejs.Module, parsed *syntax.Module, limits
 					}
 				}
 			}
-		case slices.Contains(taskHooks, name) || slices.Contains(relayHooks, name):
+		case slices.Contains(taskHooks, name) || slices.Contains(relayHooks, name) || slices.Contains(requestHooks, name):
 			hook, err := module.Hook(name)
 			if err != nil || !callable(hook) {
 				return nil, &LoadError{Code: CodeNotFunction, File: source.File, Message: fmt.Sprintf("the export %q is not a function", name)}

@@ -465,3 +465,50 @@ func equal(left, right any) bool {
 	}
 	return left == right
 }
+
+// Member returns an object's member, and whether it has it.
+func (object *Object) Member(key string) (any, bool) {
+	value, ok := object.values[key]
+	return value, ok
+}
+
+// Strings calls visit with each string value of the document, in document
+// order: its JSON Pointer and the object that holds it, nil for an array
+// item. A value visit returns with true replaces it.
+func (document *Document) Strings(visit func(pointer string, holder *Object, value string) (string, bool)) {
+	var walk func(pointer string, node any, holder *Object) any
+	walk = func(pointer string, node any, holder *Object) any {
+		switch typed := node.(type) {
+		case string:
+			if replaced, ok := visit(pointer, holder, typed); ok {
+				return replaced
+			}
+		case *Object:
+			for _, key := range typed.keys {
+				typed.values[key] = walk(pointer+"/"+escapeToken(key), typed.values[key], typed)
+			}
+		case []any:
+			for index, item := range typed {
+				typed[index] = walk(pointer+"/"+strconv.Itoa(index), item, nil)
+			}
+		}
+		return node
+	}
+	document.root = walk("", document.root, nil)
+}
+
+// Value is the document's root as Go values: maps keep no order.
+func (document *Document) Value() any { return document.root }
+
+// Replace stores value, a JSON text, at a pointer that exists.
+func (document *Document) Replace(pointer string, value json.RawMessage) error {
+	parsed, err := Parse(value)
+	if err != nil {
+		return err
+	}
+	return document.replace(pointer, parsed.root)
+}
+
+func escapeToken(token string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(token, "~", "~0"), "/", "~1")
+}

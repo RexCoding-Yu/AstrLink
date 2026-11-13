@@ -68,10 +68,20 @@ type TaskMeta struct {
 	// takes, such as a region; KeyHint is shown with its key.
 	ChannelConfig json.RawMessage `json:"channelConfig,omitempty"`
 	KeyHint       LocalizedText   `json:"keyHint,omitempty"`
+	// ConfigSchema is the schema of an instance's config, Optional lets a
+	// request go on without an instance that fails, and Samples are the
+	// requests a dry run offers: the request processing part's.
+	ConfigSchema json.RawMessage `json:"configSchema,omitempty"`
+	Optional     bool            `json:"optional,omitempty"`
+	Samples      json.RawMessage `json:"samples,omitempty"`
 
 	// taskPart is set for a plugin with a task part: one that exports
 	// buildSubmitRequest.
 	taskPart bool
+	// stages are the request processing hooks the plugin exports.
+	stages []string
+	// config is ConfigSchema, read.
+	config *ConfigSchema
 }
 
 // TaskAuthor is who wrote a task plugin, as it says.
@@ -252,6 +262,12 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 		return &LoadError{Code: CodeInvalidMeta, Message: fmt.Sprintf(format, args...)}
 	}
 	meta.taskPart = exported["buildSubmitRequest"]
+	meta.stages = nil
+	for _, hook := range requestHooks {
+		if hook != "validateConfig" && exported[hook] {
+			meta.stages = append(meta.stages, hook)
+		}
+	}
 	switch {
 	case meta.APIVersion != 1:
 		return invalid("meta.apiVersion %d is not supported; task plugins use 1", meta.APIVersion)
@@ -273,8 +289,14 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 		return invalid("meta.author.url must be an absolute http or https URL")
 	case meta.Website != "" && !strings.HasPrefix(strings.ToLower(meta.Website), "https://") || meta.Website != "" && !httpURL(meta.Website, false):
 		return invalid("meta.website must be an absolute https URL")
-	case !meta.taskPart && len(meta.Relay) == 0:
-		return invalid("the plugin has no part this host runs: a task part exports buildSubmitRequest, a provider part lists meta.relay")
+	case !meta.taskPart && len(meta.Relay) == 0 && len(meta.stages) == 0:
+		return invalid("the plugin has no part this host runs: a task part exports buildSubmitRequest, a provider part lists meta.relay, a request processing part exports ingress, request, outbound, egress, reply or report")
+	case len(meta.stages) == 0 && (meta.Optional || len(meta.ConfigSchema) > 0 || len(meta.Samples) > 0):
+		return invalid("optional, configSchema and samples are for a plugin with a request processing part")
+	case exported["validateConfig"] && len(meta.stages) == 0:
+		return invalid("validateConfig needs a request processing hook")
+	case !meta.taskPart && len(meta.Relay) == 0 && (exported["login"] || exported["refresh"] || exported["revoke"] || exported["signRequest"]):
+		return invalid("login, refresh, revoke and signRequest need a task part or meta.relay")
 	case meta.taskPart && meta.FetchMode != "per_task" && meta.FetchMode != "batch":
 		return invalid("meta.fetchMode must be per_task or batch")
 	case meta.taskPart && len(meta.Models) == 0:
@@ -336,6 +358,11 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 	if err := validateProviderPart(meta, exported); err != nil {
 		return invalid("%v", err)
 	}
+	schema, err := ParseConfigSchema(meta.ConfigSchema, false)
+	if err != nil {
+		return invalid("meta.configSchema: %v", err)
+	}
+	meta.config = schema
 	if !meta.taskPart {
 		return nil
 	}
@@ -563,3 +590,21 @@ func normalizeAllowedHost(host string) (string, bool) {
 	}
 	return host, true
 }
+
+// requestHooks are the hooks of the request processing part.
+var requestHooks = []string{"ingress", "request", "outbound", "egress", "reply", "report", "validateConfig"}
+
+// Stages are the request processing hooks the plugin exports: ingress,
+// request, outbound, egress, reply and report.
+func (meta *TaskMeta) Stages() []string { return meta.stages }
+
+// HasStage reports whether the plugin exports the request processing hook.
+func (meta *TaskMeta) HasStage(hook string) bool {
+	return meta != nil && slices.Contains(meta.stages, hook)
+}
+
+// HasRequestPart reports whether the plugin has a request processing part.
+func (meta *TaskMeta) HasRequestPart() bool { return meta != nil && len(meta.stages) > 0 }
+
+// Config is the plugin's configSchema, read; nil without one.
+func (meta *TaskMeta) Config() *ConfigSchema { return meta.config }

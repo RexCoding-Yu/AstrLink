@@ -759,9 +759,6 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 		if listed.Models == nil {
 			listed.Models = []string{}
 		}
-		if entry.Transform {
-			listed.Unsupported = append(listed.Unsupported, contract.PluginPartTransform)
-		}
 		for _, claim := range entry.Protocols {
 			listed.Protocols = append(listed.Protocols, contract.PluginTaskProtocol{Name: claim.Name, Supports: claim.Supports, Models: claim.Models})
 		}

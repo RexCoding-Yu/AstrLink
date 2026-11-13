@@ -113,6 +113,9 @@ type PluginHostSettings struct {
 	// lock file pins, "" for the npm registry; npmmirror is tried when it
 	// fails. The lock file's hashes check whatever it returns.
 	NpmRegistry string `json:"npm_registry,omitempty"`
+	// RequestPlugins are the instances of new-api request processing
+	// plugins, in the order they run.
+	RequestPlugins []RequestPluginInstance `json:"request_plugins,omitempty"`
 }
 
 // The npm registries an install from source fetches packages from.
@@ -149,6 +152,19 @@ func (settings PluginHostSettings) Validate() error {
 	if settings.NpmRegistry != "" && !validRegistry(settings.NpmRegistry) {
 		return fmt.Errorf("npm_registry must be an https address without credentials, query or fragment")
 	}
+	if len(settings.RequestPlugins) > MaxRequestPluginInstances {
+		return fmt.Errorf("request_plugins lists at most %d instances", MaxRequestPluginInstances)
+	}
+	ids := map[string]bool{}
+	for _, instance := range settings.RequestPlugins {
+		if err := instance.Validate(); err != nil {
+			return err
+		}
+		if ids[instance.ID] {
+			return fmt.Errorf("request_plugins lists the instance %s twice", instance.ID)
+		}
+		ids[instance.ID] = true
+	}
 	return nil
 }
 
@@ -171,6 +187,9 @@ type PluginHostSettingsUpdate struct {
 	Order                *[]string `json:"order,omitempty"`
 	WebUI                *bool     `json:"web_ui,omitempty"`
 	NpmRegistry          *string   `json:"npm_registry,omitempty"`
+	// RequestPlugins replaces every request processing instance; one
+	// without an id is new and gets one.
+	RequestPlugins *[]RequestPluginInstance `json:"request_plugins,omitempty"`
 }
 
 // Extension points of apiVersion 2 plugins, by the hook that serves them.
@@ -329,6 +348,9 @@ type PluginSummary struct {
 	// has none.
 	Kind string      `json:"kind,omitempty"`
 	Task *PluginTask `json:"task,omitempty"`
+	// Request describes a new-api plugin's request processing part: the
+	// hooks it exports and the schema of an instance's config.
+	Request *PluginRequestPart `json:"request,omitempty"`
 	// Calls and Failures count the plugin's hook calls since Core started;
 	// Tasks and RunningTasks a task plugin's tasks, and those not yet
 	// finished.

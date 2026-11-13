@@ -90,6 +90,15 @@ func (handler *Handler) pluginHostResource(writer http.ResponseWriter, request *
 		if update.NpmRegistry != nil {
 			merged.NpmRegistry = strings.TrimRight(*update.NpmRegistry, "/")
 		}
+		if update.RequestPlugins != nil {
+			instances := slices.Clone(*update.RequestPlugins)
+			if err := handler.checkRequestPlugins(request.Context(), instances); err != nil {
+				writeError(writer, http.StatusUnprocessableEntity, "invalid_request_plugin", err.Error())
+				return
+			}
+			update.RequestPlugins = &instances
+			merged.RequestPlugins = instances
+		}
 		if err := merged.Validate(); err != nil {
 			writeError(writer, http.StatusUnprocessableEntity, "invalid_plugin_host_settings", err.Error())
 			return

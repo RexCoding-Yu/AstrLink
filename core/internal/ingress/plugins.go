@@ -301,6 +301,7 @@ func (session *recordSession) finishPlugins(ctx context.Context) {
 	if session == nil {
 		return
 	}
+	session.notePlugins(session.requestPlugins.Records(), nil)
 	session.finishExtensions()
 	if session.plugins == nil {
 		return

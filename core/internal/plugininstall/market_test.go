@@ -204,10 +204,9 @@ func TestAMarketListsItsPluginsBeforeIconsThatTakeTooLong(t *testing.T) {
 	if len(listed.Plugins) != 4 {
 		t.Fatalf("listed = %+v", listed)
 	}
-	// A request processing part, which this gateway does not run, is
-	// listed so; a provider part it runs.
+	// The gateway runs every part of new-api's plugins.
 	for _, entry := range listed.Plugins {
-		if want := entry.Key == "kling"; want != slices.Equal(entry.Unsupported, []string{contract.PluginPartTransform}) {
+		if len(entry.Unsupported) > 0 {
 			t.Fatalf("%s unsupported = %v", entry.Key, entry.Unsupported)
 		}
 	}

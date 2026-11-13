@@ -214,13 +214,21 @@ func (handler *Handler) pluginSummary(target *plugin.Plugin, language string) co
 		if target.Enabled() {
 			summary.Providers = append(summary.Providers, taskProvider(meta, language))
 		}
-	} else if target.NewAPI() != nil {
+	} else if meta := target.NewAPI(); meta != nil {
 		summary.Kind = contract.PluginKindProvider
+		if len(meta.Relay) == 0 && meta.HasRequestPart() {
+			summary.Kind = contract.PluginKindRequest
+		}
 	} else if target.Loaded() {
 		summary.Kind = contract.PluginKindExtension
 	}
 	if meta := target.NewAPI(); meta != nil && len(meta.Relay) > 0 && target.Enabled() {
 		summary.Providers = append(summary.Providers, handler.relayProvider(meta, language))
+	}
+	if meta := target.NewAPI(); meta.HasRequestPart() {
+		summary.Request = &contract.PluginRequestPart{
+			Stages: slices.Clone(meta.Stages()), ConfigSchema: meta.ConfigSchema, Optional: meta.Optional, Description: meta.Description.In(language),
+		}
 	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed

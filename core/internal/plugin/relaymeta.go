@@ -403,77 +403,19 @@ func validateRelayAuth(auth *RelayAuth) error {
 	return nil
 }
 
-// channelField is a field of meta.channelConfig, as far as the host checks
-// it here.
-type channelField struct {
-	Type                 string          `json:"type"`
-	Title                LocalizedText   `json:"title"`
-	Description          LocalizedText   `json:"description,omitempty"`
-	Default              json.RawMessage `json:"default,omitempty"`
-	Examples             json.RawMessage `json:"examples,omitempty"`
-	Enum                 json.RawMessage `json:"enum,omitempty"`
-	EnumTitles           json.RawMessage `json:"enumTitles,omitempty"`
-	Minimum              *float64        `json:"minimum,omitempty"`
-	Maximum              *float64        `json:"maximum,omitempty"`
-	Unit                 string          `json:"unit,omitempty"`
-	MinLength            *int            `json:"minLength,omitempty"`
-	MaxLength            *int            `json:"maxLength,omitempty"`
-	Pattern              string          `json:"pattern,omitempty"`
-	Format               string          `json:"format,omitempty"`
-	Items                json.RawMessage `json:"items,omitempty"`
-	MinItems             *int            `json:"minItems,omitempty"`
-	MaxItems             *int            `json:"maxItems,omitempty"`
-	UniqueItems          bool            `json:"uniqueItems,omitempty"`
-	Properties           json.RawMessage `json:"properties,omitempty"`
-	Required             []string        `json:"required,omitempty"`
-	VisibleWhen          json.RawMessage `json:"visibleWhen,omitempty"`
-	AdditionalProperties json.RawMessage `json:"additionalProperties,omitempty"`
-}
-
-// validateChannelConfig checks the shape of meta.channelConfig and returns
-// its top-level url fields.
+// validateChannelConfig checks meta.channelConfig and returns its
+// top-level url fields.
 func validateChannelConfig(raw json.RawMessage) (map[string]bool, error) {
 	urlFields := map[string]bool{}
-	if len(raw) == 0 {
-		return urlFields, nil
+	schema, err := ParseConfigSchema(raw, true)
+	if err != nil {
+		return nil, fmt.Errorf("meta.channelConfig: %w", err)
 	}
-	var schema struct {
-		Type       string                     `json:"type"`
-		Properties map[string]json.RawMessage `json:"properties"`
-		Required   []string                   `json:"required,omitempty"`
-	}
-	if err := strictJSON(raw, &schema); err != nil || schema.Type != "object" {
-		return nil, errors.New("meta.channelConfig is {type: \"object\", properties, required?}")
-	}
-	for name, rawField := range schema.Properties {
-		var field channelField
-		if err := strictJSON(rawField, &field); err != nil {
-			return nil, fmt.Errorf("meta.channelConfig.properties.%s: %v", name, strings.TrimPrefix(err.Error(), "json: "))
-		}
-		switch field.Type {
-		case "string", "number", "integer", "boolean", "array", "object":
-		default:
-			return nil, fmt.Errorf("meta.channelConfig.properties.%s.type %q is not a field type", name, field.Type)
-		}
-		if len(field.Title) == 0 {
-			return nil, fmt.Errorf("meta.channelConfig.properties.%s.title is required", name)
-		}
-		if err := validateLocalized(field.Title, 256, "meta.channelConfig.properties."+name+".title"); err != nil {
-			return nil, err
-		}
-		if len(field.AdditionalProperties) > 0 && (field.Type != "object" || len(field.Properties) > 0) {
-			return nil, fmt.Errorf("meta.channelConfig.properties.%s: additionalProperties holds a value per model, on an object field without properties", name)
-		}
-		if field.Format == "url" {
-			if field.Type != "string" {
-				return nil, fmt.Errorf("meta.channelConfig.properties.%s: format url is for a string", name)
+	if schema != nil {
+		for _, property := range schema.Properties {
+			if property.Field.Format == "url" {
+				urlFields[property.Name] = true
 			}
-			urlFields[name] = true
-		}
-	}
-	for _, name := range schema.Required {
-		if _, ok := schema.Properties[name]; !ok {
-			return nil, fmt.Errorf("meta.channelConfig.required names %q, which it does not declare", name)
 		}
 	}
 	return urlFields, nil

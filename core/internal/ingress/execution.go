@@ -516,6 +516,19 @@ func (handler *Handler) executeCandidatesWithTest(
 		if test == nil && clientClass != accountauth.ClientClassOfficial {
 			records.upstreamExtensions(request.Context(), attemptRequest, candidate, plan.UpstreamProtocol, upstreamModel, candidateIndex)
 		}
+		// The request processing instances check and change what the
+		// attempt sends; one that stops the request answers it here, and
+		// no other provider is tried.
+		if test == nil {
+			if refusal := records.outboundRequestPlugins(request.Context(), attemptRequest, candidate, plan.UpstreamProtocol, upstreamModel, candidateIndex); refusal != nil {
+				finishPrivacy()
+				_ = attemptRequest.Body.Close()
+				records.noteAttemptedService(candidate.Service.ID)
+				writeInferenceError(downstream, refusal.Status, refusal.Code, refusal.Message, false, nil)
+				records.noteFailed(errorSummaryFromInference(refusal.Code, refusal.Message, false))
+				return
+			}
+		}
 		identity := protection.sendsClientIdentity(candidate.Service.Kind, clientClass)
 		var headers http.Header
 		authorizationEndpoint, authorizeErr := candidate.AuthorizationEndpoint()
@@ -658,6 +671,17 @@ func (handler *Handler) executeCandidatesWithTest(
 			pluginWriter = newPluginResponseWriter(request.Context(), outWriter, recordSession.extensions, classified.Protocol, classified.Streaming)
 			recordSession.replyPlugins = pluginWriter
 			outWriter = pluginWriter
+		}
+		// The request processing instances check the answer's text in the
+		// client's protocol, after any conversion.
+		var replyCheck *replyWriter
+		if test == nil && replyChecked(classified.Protocol) {
+			attempt := pluginhost.RequestAttempt{Protocol: plan.UpstreamProtocol, UpstreamModel: upstreamModel, Index: candidateIndex}
+			if check := recordSession.requestPluginRun().Reply(request.Context(), classified.Protocol, classified.Streaming, attempt); check != nil {
+				attemptRequest.Header.Del("Accept-Encoding")
+				replyCheck = newReplyWriter(outWriter, check, classified.Protocol, classified.Streaming)
+				outWriter = replyCheck
+			}
 		}
 		if plan.Type == contract.PlanTypeRelayKit {
 			attemptRequest.Header.Del("Accept-Encoding")
@@ -984,6 +1008,11 @@ func (handler *Handler) executeCandidatesWithTest(
 		}
 		if relayWriter != nil && attemptStarted {
 			recordSession.noteConversionDiagnostics(contract.ConversionDiagnosticPhaseResponse, relayWriter.responseDiagnostics())
+		}
+		if retryHTTP == nil && replyCheck != nil && (forwardErr == nil || classified.Streaming) {
+			if finishErr := replyCheck.Finish(); finishErr != nil && forwardErr == nil {
+				forwardErr = transport.NewResponseError(finishErr)
+			}
 		}
 		if retryHTTP == nil && pluginWriter != nil && (forwardErr == nil || classified.Streaming) {
 			if finishErr := pluginWriter.Finish(); finishErr != nil && forwardErr == nil {

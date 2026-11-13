@@ -240,10 +240,15 @@ type recordSession struct {
 	// replyPlugins is the latest attempt's writer of their response hooks,
 	// which keeps the reply's text for onResponse, and servedName the name
 	// of the provider that served the request.
-	extensions    *pluginhost.Extensions
-	replyPlugins  *pluginResponseWriter
-	servedName    string
-	pluginRecords []contract.RequestPluginRecord
+	extensions *pluginhost.Extensions
+	// requestPlugins runs the request's new-api request processing
+	// instances; requestPluginView shows them its bodies as the privacy
+	// check leaves them.
+	requestPlugins    *pluginhost.RequestRun
+	requestPluginView pluginhost.RequestView
+	replyPlugins      *pluginResponseWriter
+	servedName        string
+	pluginRecords     []contract.RequestPluginRecord
 	// requestExposure is the label of the stored client body; empty until
 	// it is stored.
 	requestExposure storage.AuditExposure

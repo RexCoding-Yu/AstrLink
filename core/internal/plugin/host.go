@@ -188,6 +188,9 @@ type CallOptions struct {
 	// TaskFetch lets a driver hook of a task plugin read upstream data with
 	// utils.fetch; without it utils.fetch throws.
 	TaskFetch *TaskFetch
+	// RequestFiles is what a request processing hook reads of its
+	// request's files and keyword lists; without it those utils throw.
+	RequestFiles *RequestFiles
 }
 
 // CallInfo is what the host observed during a call, for request records and

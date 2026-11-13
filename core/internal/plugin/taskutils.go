@@ -33,6 +33,11 @@ type TaskFetch struct {
 	Allowed func(target *url.URL) bool
 	// Client sends the requests.
 	Client *http.Client
+	// Post lets the hook POST a body, as the request processing hooks
+	// may; Refs turns a file reference of the call into its data URL, for
+	// the JSON string values of a body that name one.
+	Post bool
+	Refs func(ref string) (string, bool)
 }
 
 // Bounds of utils.fetch within one hook call, and of utils.json.clone.
@@ -208,6 +213,9 @@ func (bound *instance) installTask() error {
 			return taskFetch(c, realm, moejs.Arg(args, 0))
 		}),
 	}
+	for name, function := range bound.requestUtils() {
+		utils[name] = function
+	}
 	return runtime.SetGlobal("utils", utils)
 }
 
@@ -306,9 +314,14 @@ func taskFetch(c *call, realm *moejs.Realm, argument moejs.Value) (moejs.Value, 
 		Method       string            `json:"method"`
 		Headers      map[string]string `json:"headers"`
 		ResponseType string            `json:"responseType"`
+		Body         *string           `json:"body"`
 	}
+	post := c.options.TaskFetch.Post
 	for name := range raw {
-		if !slices.Contains([]string{"url", "method", "headers", "responseType"}, name) {
+		if !slices.Contains([]string{"url", "method", "headers", "responseType"}, name) && !(post && name == "body") {
+			if post {
+				return fail("the request has the member %q; it takes url, method, headers, responseType and body", name)
+			}
 			return fail("the request has the member %q; it takes url, method, headers and responseType", name)
 		}
 	}
@@ -320,8 +333,26 @@ func taskFetch(c *call, realm *moejs.Realm, argument moejs.Value) (moejs.Value, 
 	if method == "" {
 		method = http.MethodGet
 	}
-	if method != http.MethodGet && method != http.MethodHead {
+	switch {
+	case post && method != http.MethodGet && method != http.MethodHead && method != http.MethodPost:
+		return fail("the method must be GET, HEAD or POST")
+	case !post && method != http.MethodGet && method != http.MethodHead:
 		return fail("the method must be GET or HEAD")
+	case request.Body != nil && method != http.MethodPost:
+		return fail("only a POST has a body")
+	case request.Body != nil && len(*request.Body) > maxTaskFetchBody:
+		return fail("the body is larger than 1 MiB")
+	}
+	var payload []byte
+	if request.Body != nil {
+		payload = []byte(*request.Body)
+		if refs := c.options.TaskFetch.Refs; refs != nil {
+			replaced, err := withFileRefs(payload, refs)
+			if err != nil {
+				return fail("%v", err)
+			}
+			payload = replaced
+		}
 	}
 	if request.ResponseType != "" && request.ResponseType != "json" && request.ResponseType != "bytes" {
 		return fail("the responseType must be json or bytes")
@@ -357,7 +388,11 @@ func taskFetch(c *call, realm *moejs.Realm, argument moejs.Value) (moejs.Value, 
 	if err := c.wait(func() {
 		ctx, cancel := context.WithTimeout(c.ctx, min(taskFetchTimeout, left))
 		defer cancel()
-		outgoing, err := http.NewRequestWithContext(ctx, method, target.String(), nil)
+		var reader io.Reader
+		if payload != nil {
+			reader = bytes.NewReader(payload)
+		}
+		outgoing, err := http.NewRequestWithContext(ctx, method, target.String(), reader)
 		if err != nil {
 			fetchErr = err
 			return
@@ -430,6 +465,69 @@ func taskFetch(c *call, realm *moejs.Realm, argument moejs.Value) (moejs.Value, 
 		}
 	}
 	return engine.ObjectValue(result), nil
+}
+
+// Bounds of the files a request processing hook sends with utils.fetch.
+const (
+	maxFetchRefs     = 8
+	maxFetchRefBytes = 32 << 20
+)
+
+// withFileRefs replaces each JSON string value of body that is a file
+// reference of the call with the file's data URL. A body that is not JSON
+// goes as it is.
+func withFileRefs(body []byte, refs func(string) (string, bool)) ([]byte, error) {
+	if !bytes.Contains(body, []byte("[media:")) || !json.Valid(body) {
+		return body, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return body, nil
+	}
+	count, size := 0, 0
+	var walk func(any) (any, error)
+	walk = func(node any) (any, error) {
+		switch typed := node.(type) {
+		case string:
+			if !strings.HasPrefix(typed, "[media:") {
+				return typed, nil
+			}
+			data, ok := refs(typed)
+			if !ok {
+				return typed, nil
+			}
+			count++
+			size += len(data)
+			if count > maxFetchRefs || size > maxFetchRefBytes {
+				return nil, fmt.Errorf("a body sends at most %d files and 32 MiB of them", maxFetchRefs)
+			}
+			return data, nil
+		case map[string]any:
+			for key, member := range typed {
+				replaced, err := walk(member)
+				if err != nil {
+					return nil, err
+				}
+				typed[key] = replaced
+			}
+		case []any:
+			for index, item := range typed {
+				replaced, err := walk(item)
+				if err != nil {
+					return nil, err
+				}
+				typed[index] = replaced
+			}
+		}
+		return node, nil
+	}
+	replaced, err := walk(value)
+	if err != nil || count == 0 {
+		return body, err
+	}
+	return json.Marshal(replaced)
 }
 
 // volcSignV4 signs a request for Volcengine's OpenAPI with its HMAC-SHA256

@@ -513,6 +513,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		// Never delay or fail the client response on persistence errors.
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
 		session.pluginsPersisted()
+		session.reportRequestPlugins()
 		if mode := builtinInternalFrom(request.Context()); mode != nil {
 			mode.Status, mode.Error = session.status, session.errorSummary
 		}
@@ -521,6 +522,10 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	// The entry hooks of plugins may refuse the request before routing.
 	if session != nil && classifierInternalFrom(request.Context()) == nil && builtinInternalFrom(request.Context()) == nil {
 		if handler.beginExtensions(outWriter, request, classified, session) {
+			return
+		}
+		var stopped bool
+		if request, classified, stopped = handler.beginRequestPlugins(outWriter, request, classified, session); stopped {
 			return
 		}
 	}
