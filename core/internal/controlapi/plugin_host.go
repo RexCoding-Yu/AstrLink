@@ -11,6 +11,7 @@ import (
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/pluginstats"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
@@ -39,6 +40,9 @@ type PluginHost interface {
 	Breakers(plugin string) map[string]time.Time
 	// UICall answers a call of the plugin's interface code.
 	UICall(ctx context.Context, target *plugin.Plugin, name string, input json.RawMessage) (json.RawMessage, error)
+	// DryRunRequestPlugin runs a request processing instance over a
+	// request without sending it.
+	DryRunRequestPlugin(ctx context.Context, instance contract.RequestPluginInstance, protocol contract.ProtocolID, body json.RawMessage, reply *string) (pluginhost.RequestDryRun, error)
 }
 
 // pluginHostRequiredRole lets observers read the settings of every plugin

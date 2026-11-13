@@ -6326,6 +6326,24 @@
         "egress": "Final check",
         "reply": "Reply check",
         "report": "Report"
+      },
+      "dryRun": "Dry run",
+      "sample": "Plugin samples",
+      "sampleChoose": "Choose a sample",
+      "format": "Request format",
+      "body": "Request (JSON)",
+      "reply": "Model reply",
+      "replyHelp": "With a reply, the reply check runs on it as on a whole answer.",
+      "runDryRun": "Run",
+      "dryRunFailed": "The dry run failed.",
+      "dryRunPassed": "This request goes through.",
+      "replyAfter": "The reply the client gets",
+      "bodyAfter": "The request after the ingress check",
+      "formats": {
+        "openai": "Chat Completions",
+        "openai_responses": "Responses",
+        "claude": "Claude Messages",
+        "gemini": "Gemini"
       }
     }
   },

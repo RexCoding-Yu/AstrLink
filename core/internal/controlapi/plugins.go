@@ -146,6 +146,10 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		}
 	case action == "tasks":
 		handler.pluginTasks(writer, request, target)
+	case action == "request-dry-run":
+		if allowMethods(writer, request, http.MethodPost) {
+			handler.requestPluginDryRun(writer, request, target)
+		}
 	case action == "source" || strings.HasPrefix(action, "source/"):
 		handler.pluginSource(writer, request, target, strings.TrimPrefix(strings.TrimPrefix(action, "source"), "/"))
 	default:
@@ -228,6 +232,7 @@ func (handler *Handler) pluginSummary(target *plugin.Plugin, language string) co
 	if meta := target.NewAPI(); meta.HasRequestPart() {
 		summary.Request = &contract.PluginRequestPart{
 			Stages: slices.Clone(meta.Stages()), ConfigSchema: meta.ConfigSchema, Optional: meta.Optional, Description: meta.Description.In(language),
+			Samples: meta.Samples,
 		}
 	}
 	if !target.Loaded() {

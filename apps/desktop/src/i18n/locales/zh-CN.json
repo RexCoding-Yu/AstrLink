@@ -6326,6 +6326,24 @@
         "egress": "发送前检查",
         "reply": "回复检查",
         "report": "请求上报"
+      },
+      "dryRun": "试运行",
+      "sample": "插件自带的示例",
+      "sampleChoose": "选一个示例",
+      "format": "请求格式",
+      "body": "请求内容（JSON）",
+      "reply": "模型回复",
+      "replyHelp": "填了回复文本时，会按非流式回复跑一次回复检查。",
+      "runDryRun": "试运行",
+      "dryRunFailed": "试运行失败。",
+      "dryRunPassed": "这个请求会放行。",
+      "replyAfter": "客户端会收到的回复",
+      "bodyAfter": "入口检查之后的请求",
+      "formats": {
+        "openai": "Chat Completions",
+        "openai_responses": "Responses",
+        "claude": "Claude Messages",
+        "gemini": "Gemini"
       }
     }
   },

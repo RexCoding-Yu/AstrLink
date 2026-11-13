@@ -4043,6 +4043,12 @@ fn plugin_request(
             format!("{plugin}/dry-run"),
             Some(input.ok_or("the dry run is required")?),
         ),
+        // A request processing instance run over a request, not sent.
+        "request_dry_run" => (
+            Method::POST,
+            format!("{plugin}/request-dry-run"),
+            Some(input.ok_or("the dry run is required")?),
+        ),
         // The plugin's account over its last 1 to 30 days.
         "stats" => {
             let days = input

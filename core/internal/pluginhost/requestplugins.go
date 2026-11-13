@@ -89,9 +89,9 @@ type requestInstance struct {
 // RequestRefusal is how a request processing instance stopped a request:
 // the status, error code and message the client gets.
 type RequestRefusal struct {
-	Status  int
-	Code    string
-	Message string
+	Status  int    `json:"status"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // RequestRun runs the request processing instances of one request. Its
@@ -106,6 +106,9 @@ type RequestRun struct {
 
 	mutex   sync.Mutex
 	records []contract.RequestPluginRecord
+	// failures are the errors of the instances that failed, by stage, for
+	// a dry run to show.
+	failures []string
 	// steps are the entries report hears of, in run order.
 	steps []map[string]any
 }
@@ -200,7 +203,7 @@ func (run *RequestRun) Request(ctx context.Context, protocol contract.ProtocolID
 		edit, result, err := run.call(ctx, current, contract.RequestStageRequest, protocol, attempt, seen.Body, nil)
 		if err != nil {
 			run.note(current, contract.RequestStageRequest, contract.PluginRecordFailed, "", nil, started, nil)
-			run.host.logf("request plugin %s (%s) failed at request: %v", current.instance.ID, current.plugin.Key, err)
+			run.failed(current, contract.RequestStageRequest, err)
 			if current.meta.Optional {
 				continue
 			}
@@ -402,7 +405,7 @@ func (run *RequestRun) stage(ctx context.Context, stage string, protocol contrac
 		}
 		if err != nil {
 			run.note(current, stage, contract.PluginRecordFailed, "", nil, started, nil)
-			run.host.logf("request plugin %s (%s) failed at %s: %v", current.instance.ID, current.plugin.Key, stage, err)
+			run.failed(current, stage, err)
 			if current.meta.Optional {
 				continue
 			}
@@ -720,6 +723,14 @@ func (run *RequestRun) invoke(ctx context.Context, current *requestInstance, hoo
 	}
 	result, _, err := current.plugin.CallTask(ctx, hook, args, options)
 	return result, err
+}
+
+// failed logs an instance's failure, and keeps it for a dry run.
+func (run *RequestRun) failed(current *requestInstance, stage string, err error) {
+	run.host.logf("request plugin %s (%s) failed at %s: %v", current.instance.ID, current.plugin.Key, stage, err)
+	run.mutex.Lock()
+	run.failures = append(run.failures, stage+": "+truncateRunes(err.Error(), 1024))
+	run.mutex.Unlock()
 }
 
 // note adds an instance's entry for a stage to the request record.

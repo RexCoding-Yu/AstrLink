@@ -243,6 +243,25 @@ export interface PluginRequestPart {
   /** A request goes on without an instance of it that fails. */
   optional?: boolean;
   description?: string;
+  /** The requests the plugin offers a dry run: name, format, body and reply. */
+  samples?: RequestPluginSample[];
+}
+
+/** A request a request processing plugin offers a dry run. */
+export interface RequestPluginSample {
+  name?: unknown;
+  format: string;
+  body: unknown;
+  reply?: string;
+}
+
+/** What a dry run of a request processing instance did with a request. */
+export interface RequestPluginDryRun {
+  body?: unknown;
+  stopped?: { status: number; code: string; message: string };
+  reply?: string;
+  records: RequestPluginRecord[];
+  failures: string[];
 }
 
 /** One configured use of a request processing plugin. */
@@ -2030,6 +2049,47 @@ function parseRequestPart(value: unknown, path: string): PluginRequestPart {
     config_schema: part.config_schema,
     optional: plugin.optionalBoolean(part.optional, `${path}.optional`),
     description: plugin.optionalString(part.description, `${path}.description`),
+    samples: Array.isArray(part.samples)
+      ? part.samples.flatMap((item): RequestPluginSample[] => {
+          if (!item || typeof item !== "object") return [];
+          const sample = item as Record<string, unknown>;
+          if (typeof sample.format !== "string" || !sample.body) return [];
+          return [
+            {
+              name: sample.name,
+              format: sample.format,
+              body: sample.body,
+              ...(typeof sample.reply === "string"
+                ? { reply: sample.reply }
+                : {}),
+            },
+          ];
+        })
+      : undefined,
+  });
+}
+
+export function parseRequestPluginDryRun(value: unknown): RequestPluginDryRun {
+  const result = plugin.object(value, "$");
+  const stopped =
+    result.stopped === undefined || result.stopped === null
+      ? undefined
+      : plugin.object(result.stopped, "$.stopped");
+  return defined({
+    body: result.body,
+    stopped: stopped
+      ? {
+          status: plugin.integer(stopped.status, "$.stopped.status"),
+          code: plugin.string(stopped.code, "$.stopped.code"),
+          message: plugin.string(stopped.message, "$.stopped.message"),
+        }
+      : undefined,
+    reply: plugin.optionalString(result.reply, "$.reply"),
+    records: parseRequestPluginRecords(result.records ?? [], "$.records"),
+    failures:
+      result.failures === undefined || result.failures === null
+        ? []
+        : plugin.strings(result.failures, "$.failures"),
   });
 }
 

@@ -88,6 +88,9 @@ type PluginRequestPart struct {
 	ConfigSchema json.RawMessage `json:"config_schema,omitempty"`
 	Optional     bool            `json:"optional,omitempty"`
 	Description  string          `json:"description,omitempty"`
+	// Samples are the requests the plugin offers a dry run, as it wrote
+	// them: name, format, body and reply.
+	Samples json.RawMessage `json:"samples,omitempty"`
 }
 
 // PluginKindRequest is a new-api plugin with a request processing part and

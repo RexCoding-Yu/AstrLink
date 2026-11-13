@@ -6326,6 +6326,24 @@
         "egress": "送信前チェック",
         "reply": "応答チェック",
         "report": "レポート"
+      },
+      "dryRun": "試行",
+      "sample": "プラグインのサンプル",
+      "sampleChoose": "サンプルを選ぶ",
+      "format": "リクエスト形式",
+      "body": "リクエスト（JSON）",
+      "reply": "モデルの応答",
+      "replyHelp": "応答を入力すると、非ストリームの応答として応答チェックを実行します。",
+      "runDryRun": "実行",
+      "dryRunFailed": "試行に失敗しました。",
+      "dryRunPassed": "このリクエストは通過します。",
+      "replyAfter": "クライアントが受け取る応答",
+      "bodyAfter": "入口チェック後のリクエスト",
+      "formats": {
+        "openai": "Chat Completions",
+        "openai_responses": "Responses",
+        "claude": "Claude Messages",
+        "gemini": "Gemini"
       }
     }
   },

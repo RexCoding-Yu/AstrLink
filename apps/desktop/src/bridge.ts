@@ -206,6 +206,7 @@ import {
   parsePluginList,
   parsePluginMarket,
   parsePluginMarketDoc,
+  parseRequestPluginDryRun,
   parsePluginTaskPage,
   parsePluginStats,
   parsePluginStatus,
@@ -240,6 +241,7 @@ import {
   type PluginList,
   type PluginMarket,
   type PluginMarketDoc,
+  type RequestPluginDryRun,
   type PluginTaskPage,
   type PluginSettingsUpdate,
   type PluginStats,
@@ -2039,6 +2041,26 @@ export async function dryRunPlugin(
       action: "dry_run",
       key,
       input: { hook, args },
+    }),
+  );
+}
+
+/** Runs a request processing instance of a plugin over a request, without sending it. */
+export async function dryRunRequestPlugin(
+  key: string,
+  input: {
+    config: Record<string, unknown>;
+    format: string;
+    body: unknown;
+    reply?: string;
+  },
+): Promise<RequestPluginDryRun> {
+  requireNativeBridge();
+  return parseRequestPluginDryRun(
+    await invoke<unknown>("plugin_action", {
+      action: "request_dry_run",
+      key,
+      input,
     }),
   );
 }

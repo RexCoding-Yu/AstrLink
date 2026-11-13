@@ -230,7 +230,7 @@ func (check *ReplyCheck) stage(stage *replyStage, pieces []ReplyPiece, force boo
 	}
 	if err != nil {
 		stage.failed = true
-		check.run.host.logf("request plugin %s (%s) failed at reply: %v", stage.instance.instance.ID, stage.instance.plugin.Key, err)
+		check.run.failed(stage.instance, contract.RequestStageReply, err)
 		if !stage.instance.meta.Optional {
 			return nil, &RequestRefusal{Status: http.StatusInternalServerError, Code: contract.RequestPluginFailedCode, Message: "A request plugin failed"}
 		}

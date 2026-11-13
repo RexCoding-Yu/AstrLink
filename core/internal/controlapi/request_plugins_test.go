@@ -45,6 +45,26 @@ func TestRequestPluginInstancesAreCheckedWhenSaved(t *testing.T) {
 		saved.RequestPlugins[0].Name != "过滤" || saved.RequestPlugins[0].Models[0] != "gpt-4o" {
 		t.Fatalf("saved = %+v", saved)
 	}
+	// A dry run stops what the instance would stop, and shows why.
+	dry := func(body string) pluginhost.RequestDryRun {
+		response := controlRequest(t, handler, http.MethodPost, PluginsPath+"/request-filter/request-dry-run", "application/json", body, "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("dry run = %d %s", response.Code, response.Body)
+		}
+		return decodeBody[pluginhost.RequestDryRun](t, response)
+	}
+	run := dry(`{"config":{"keywords":"secret plan","replies":true},"format":"openai","body":{"model":"gpt-4o","messages":[{"role":"user","content":"the Secret Plan"}]}}`)
+	if run.Stopped == nil || run.Stopped.Code != contract.RequestRejectedCode || len(run.Records) == 0 {
+		t.Fatalf("a request it rejects = %+v", run)
+	}
+	run = dry(`{"config":{"keywords":"secret plan","replies":true},"format":"claude","body":{"model":"claude","messages":[{"role":"user","content":"hello"}]},"reply":"the secret plan is"}`)
+	if run.Stopped == nil || run.Stopped.Code != contract.ResponseRejectedCode {
+		t.Fatalf("a reply it stops = %+v", run)
+	}
+	run = dry(`{"config":{"keywords":"secret plan","replies":true},"format":"openai","body":{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]},"reply":"hi there"}`)
+	if run.Stopped != nil || run.Reply == nil || *run.Reply != "hi there" {
+		t.Fatalf("a request it lets through = %+v", run)
+	}
 	for _, body := range []string{
 		// The schema refuses a value of another type,
 		`{"request_plugins":[{"name":"x","plugin":"request-filter","enabled":true,"config":{"replies":"yes"}}]}`,

@@ -28,13 +28,19 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
-import { getPluginHostSettings, updatePluginHostSettings } from "./bridge";
+import {
+  dryRunRequestPlugin,
+  getPluginHostSettings,
+  updatePluginHostSettings,
+} from "./bridge";
 import { controlErrorMessage } from "./control-error";
 import { useLocale, useT } from "./i18n";
 import type {
   PluginDetail,
   PluginHostSettings,
+  RequestPluginDryRun,
   RequestPluginInstance,
+  RequestPluginSample,
 } from "./plugin-model";
 
 /** A field of a request plugin's configSchema, as far as the form reads it. */
@@ -311,6 +317,8 @@ export function RequestPluginInstances({
           initial={editing.draft}
           isNew={editing.index === null}
           onClose={() => setEditing(null)}
+          pluginKey={detail.key}
+          samples={detail.request?.samples ?? []}
           onSave={async (draft) => {
             const list =
               editing.index === null
@@ -353,6 +361,8 @@ function InstanceEditor({
   isNew,
   onClose,
   onSave,
+  pluginKey,
+  samples,
   saving,
   schema,
 }: {
@@ -360,6 +370,8 @@ function InstanceEditor({
   isNew: boolean;
   onClose: () => void;
   onSave: (draft: RequestPluginInstance) => Promise<string | null>;
+  pluginKey: string;
+  samples: RequestPluginSample[];
   saving: boolean;
   schema: unknown;
 }) {
@@ -456,6 +468,7 @@ function InstanceEditor({
               />
             </section>
           ) : null}
+          <DryRun config={config} pluginKey={pluginKey} samples={samples} />
           {error ? <FormMessage tone="error">{error}</FormMessage> : null}
         </form>
         <DialogFooter>
@@ -682,5 +695,218 @@ function JSONField({
         </FormMessage>
       ) : null}
     </Field>
+  );
+}
+
+/** The formats a dry run's request may be in. */
+const dryRunFormats = ["openai", "openai_responses", "claude", "gemini"];
+
+/**
+ * A dry run of the instance being edited: a request, one of the plugin's
+ * samples or written by hand, and a reply text, run through the instance
+ * without being sent. It shows the request as ingress left it, what
+ * stopped it, the reply the check left, and each step.
+ */
+function DryRun({
+  config,
+  pluginKey,
+  samples,
+}: {
+  config: Record<string, unknown>;
+  pluginKey: string;
+  samples: RequestPluginSample[];
+}) {
+  const t = useT();
+  const locale = useLocale();
+  const id = useId();
+  const first = samples[0];
+  const [format, setFormat] = useState(first?.format ?? "openai");
+  const [body, setBody] = useState(() =>
+    JSON.stringify(
+      first?.body ?? {
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "" }],
+      },
+      null,
+      2,
+    ),
+  );
+  const [reply, setReply] = useState(first?.reply ?? "");
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<RequestPluginDryRun | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      setError(t("plugins.requestPlugins.invalidJSON"));
+      return;
+    }
+    setRunning(true);
+    setError(null);
+    try {
+      setResult(
+        await dryRunRequestPlugin(pluginKey, {
+          config,
+          format,
+          body: parsed,
+          ...(reply.trim() ? { reply } : {}),
+        }),
+      );
+    } catch (cause) {
+      setResult(null);
+      setError(
+        controlErrorMessage(cause, t("plugins.requestPlugins.dryRunFailed")),
+      );
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <section
+      className="grid gap-3 border-t pt-4"
+      data-testid="request-plugin-dry-run"
+    >
+      <h4 className="text-xs font-medium text-muted-foreground">
+        {t("plugins.requestPlugins.dryRun")}
+      </h4>
+      {samples.length > 0 ? (
+        <Field
+          htmlFor={`${id}-sample`}
+          inDialog
+          label={t("plugins.requestPlugins.sample")}
+        >
+          <Select
+            onValueChange={(value) => {
+              const sample = samples[Number(value)];
+              if (!sample) return;
+              setFormat(sample.format);
+              setBody(JSON.stringify(sample.body, null, 2));
+              setReply(sample.reply ?? "");
+              setResult(null);
+            }}
+          >
+            <SelectTrigger className="w-full" id={`${id}-sample`} size="sm">
+              <SelectValue
+                placeholder={t("plugins.requestPlugins.sampleChoose")}
+              />
+            </SelectTrigger>
+            <SelectContent>
+              {samples.map((sample, index) => (
+                <SelectItem key={index} value={String(index)}>
+                  {localized(sample.name, locale) ||
+                    `${sample.format} ${index + 1}`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+      ) : null}
+      <Field
+        htmlFor={`${id}-format`}
+        inDialog
+        label={t("plugins.requestPlugins.format")}
+      >
+        <Select onValueChange={setFormat} value={format}>
+          <SelectTrigger className="w-full" id={`${id}-format`} size="sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {dryRunFormats.map((name) => (
+              <SelectItem key={name} value={name}>
+                {t(`plugins.requestPlugins.formats.${name}`)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      <Field
+        htmlFor={`${id}-body`}
+        inDialog
+        label={t("plugins.requestPlugins.body")}
+      >
+        <Textarea
+          className="min-h-32 font-mono text-xs"
+          id={`${id}-body`}
+          onChange={(event) => setBody(event.target.value)}
+          value={body}
+        />
+      </Field>
+      <Field
+        htmlFor={`${id}-reply`}
+        inDialog
+        label={t("plugins.requestPlugins.reply")}
+        tooltip={t("plugins.requestPlugins.replyHelp")}
+      >
+        <Textarea
+          className="min-h-16 text-xs"
+          id={`${id}-reply`}
+          onChange={(event) => setReply(event.target.value)}
+          value={reply}
+        />
+      </Field>
+      <div>
+        <Button
+          disabled={running}
+          onClick={() => void run()}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {t("plugins.requestPlugins.runDryRun")}
+        </Button>
+      </div>
+      {error ? <FormMessage tone="error">{error}</FormMessage> : null}
+      {result ? (
+        <div
+          className="grid gap-2 text-xs"
+          data-testid="request-plugin-dry-run-result"
+        >
+          {result.stopped ? (
+            <FormMessage tone="error">{result.stopped.message}</FormMessage>
+          ) : (
+            <FormMessage tone="success">
+              {t("plugins.requestPlugins.dryRunPassed")}
+            </FormMessage>
+          )}
+          {result.failures.map((failure, index) => (
+            <FormMessage key={index} tone="warning">
+              {failure}
+            </FormMessage>
+          ))}
+          {result.records.map((record, index) => (
+            <p className="text-muted-foreground" key={index}>
+              {t(`plugins.requestPlugins.stages.${record.hook}`, {
+                defaultValue: record.hook,
+              })}
+              {record.summary ? ` · ${record.summary}` : ""}
+            </p>
+          ))}
+          {result.reply !== undefined ? (
+            <div className="grid gap-1">
+              <span className="font-medium text-muted-foreground">
+                {t("plugins.requestPlugins.replyAfter")}
+              </span>
+              <p className="whitespace-pre-wrap rounded-md border bg-muted/20 p-2">
+                {result.reply}
+              </p>
+            </div>
+          ) : null}
+          {result.body !== undefined && !result.stopped ? (
+            <div className="grid gap-1">
+              <span className="font-medium text-muted-foreground">
+                {t("plugins.requestPlugins.bodyAfter")}
+              </span>
+              <pre className="max-h-48 overflow-auto rounded-md border bg-muted/20 p-2 font-mono text-micro whitespace-pre-wrap">
+                {JSON.stringify(result.body, null, 2)}
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   );
 }

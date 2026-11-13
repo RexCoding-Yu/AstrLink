@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const bridgeMocks = vi.hoisted(() => ({
   getPluginHostSettings: vi.fn(),
   updatePluginHostSettings: vi.fn(),
+  dryRunRequestPlugin: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -174,5 +175,66 @@ describe("RequestPluginInstances", () => {
       panel.querySelectorAll('[data-testid="request-plugin-instance"]'),
     ).toHaveLength(1);
     expect(panel.textContent).toContain("gpt-4o, gpt-4o-mini");
+  });
+
+  it("runs a sample through the instance being edited without sending it", async () => {
+    bridgeMocks.dryRunRequestPlugin.mockResolvedValue({
+      stopped: {
+        status: 400,
+        code: "request_rejected",
+        message: "Not allowed (code: request_filtered)",
+      },
+      records: [
+        {
+          plugin: "request-filter",
+          plugin_version: "1.0.0",
+          hook: "ingress",
+          title: "x",
+          status: "ok",
+          summary: "rejected: request_filtered",
+          elapsed_ms: 1,
+          network: { requests: 0, denied: 0, errors: 0, wait_ms: 0 },
+        },
+      ],
+      failures: [],
+    });
+    const withSamples = {
+      ...detail,
+      request: {
+        ...detail.request,
+        samples: [
+          {
+            name: { zh: "关键词" },
+            format: "claude",
+            body: {
+              model: "claude",
+              messages: [{ role: "user", content: "a b" }],
+            },
+            reply: "ok",
+          },
+        ],
+      },
+    } as unknown as PluginDetail;
+    await act(async () => {
+      root.render(<RequestPluginInstances detail={withSamples} />);
+    });
+    await act(async () => button("添加实例").click());
+    await act(async () => button("试运行").click());
+    expect(bridgeMocks.dryRunRequestPlugin).toHaveBeenCalledWith(
+      "request-filter",
+      {
+        config: { keywords: "", replies: false, mode: "reject" },
+        format: "claude",
+        body: { model: "claude", messages: [{ role: "user", content: "a b" }] },
+        reply: "ok",
+      },
+    );
+    const result = document.querySelector(
+      '[data-testid="request-plugin-dry-run-result"]',
+    ) as HTMLElement;
+    expect(result.textContent).toContain(
+      "Not allowed (code: request_filtered)",
+    );
+    expect(result.textContent).toContain("入口检查");
   });
 });
