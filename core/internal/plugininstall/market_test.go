@@ -247,7 +247,9 @@ func (market *fakeMarket) community(t *testing.T) (guideZh string) {
 		   "changelog": {"path": "docs/changelog-en", "sha256": %q}},
 		  {"version": "1.0.0", "path": "files/%s", "sha256": %q, "kind": "task"}]},
 		 {"key": "someone_relay", "name": "Relay", "code": "20000003", "author": {"login": "someone", "url": "javascript:alert(1)"},
-		  "latest": "1.0.0", "versions": [{"version": "1.0.0", "path": "files/two", "sha256": "00", "kind": "provider"}]}]}`,
+		  "latest": "1.0.0", "versions": [{"version": "1.0.0", "path": "files/two", "sha256": "00", "kind": "provider"}]},
+		 {"key": "someone_realtime", "name": "Realtime", "code": "20000004",
+		  "latest": "1.0.0", "versions": [{"version": "1.0.0", "path": "files/four", "sha256": "00", "kind": "realtime"}]}]}`,
 		revoked, sum(guide), sum(guideZh), sum(notes), revoked, revoked)
 	resolved := `{"indexVersion": 1, "name": "New API Community Plugins", "plugins": [{"key": "other_hidden", "name": "Hidden", "code": "30000003",
 		"latest": "0.1.0", "versions": [{"version": "0.1.0", "path": "files/three", "sha256": "00", "kind": "task"}]}]}`
@@ -276,9 +278,11 @@ func TestTheCommunityMarketListsAuthorsCodesAndTakenDownVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A plugin of only a part this gateway does not run is listed so.
-	if len(listed.Plugins) != 2 || listed.Plugins[1].Key != "someone_relay" || !slices.Equal(listed.Plugins[1].Unsupported, []string{contract.PluginPartProvider}) ||
-		listed.Plugins[1].Author == nil || listed.Plugins[1].Author.URL != "" {
+	// A provider plugin installs; a plugin of only a part this gateway does
+	// not run is listed so.
+	if len(listed.Plugins) != 3 || listed.Plugins[1].Key != "someone_realtime" || !slices.Equal(listed.Plugins[1].Unsupported, []string{"realtime"}) ||
+		listed.Plugins[2].Key != "someone_relay" || len(listed.Plugins[2].Unsupported) != 0 ||
+		listed.Plugins[2].Author == nil || listed.Plugins[2].Author.URL != "" {
 		t.Fatalf("listed = %+v", listed.Plugins)
 	}
 	echo := listed.Plugins[0]

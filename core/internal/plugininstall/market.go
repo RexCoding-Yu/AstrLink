@@ -103,6 +103,10 @@ type marketPlugin struct {
 	Installs30d *int          `json:"installs30d"`
 }
 
+// runnableParts are the kinds of new-api plugin versions this gateway
+// runs.
+var runnableParts = []string{"task", contract.PluginPartProvider, contract.PluginPartTransform}
+
 type marketAuthor struct {
 	Login string `json:"login"`
 	URL   string `json:"url"`
@@ -767,18 +771,11 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 		}
 		for _, version := range entry.Versions {
 			// A version of only a part this gateway does not run is listed
-			// so, and cannot be installed.
-			if version.Version == entry.Latest && version.Kind != "" && version.Kind != "task" {
-				part := version.Kind
-				switch part {
-				case "provider":
-					part = contract.PluginPartProvider
-				case "transform":
-					part = contract.PluginPartTransform
-				}
-				if !slices.Contains(listed.Unsupported, part) {
-					listed.Unsupported = append(listed.Unsupported, part)
-				}
+			// so, and cannot be installed. new-api's task, provider and
+			// request processing (transform) parts all run.
+			if version.Version == entry.Latest && version.Kind != "" && !slices.Contains(runnableParts, version.Kind) &&
+				!slices.Contains(listed.Unsupported, version.Kind) {
+				listed.Unsupported = append(listed.Unsupported, version.Kind)
 			}
 			listed.Versions = append(listed.Versions, contract.PluginMarketVersion{
 				Version: version.Version, MinAPIVersion: version.MinAPIVersion, BaseURL: version.BaseURL,
