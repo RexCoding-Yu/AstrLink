@@ -167,6 +167,7 @@ import { decodeModelEditorValue, encodeModelEditorValue } from "./model-editor";
 import { filterModels } from "./model-groups";
 import { PluginSlot } from "./plugin-ui";
 import { PluginLoginField } from "./PluginLogin";
+import { PluginProviderStateField } from "./PluginProviderState";
 import {
   ConfigSchemaFields,
   schemaProperties,
@@ -4018,6 +4019,13 @@ export function ServiceManager({
                     }
                   />
                 </Field>
+              ) : null}
+              {pluginProvider && draft.plugin && editing?.service.id ? (
+                <PluginProviderStateField
+                  pluginKey={draft.plugin.key}
+                  readsBalance={pluginProvider.balance === true}
+                  serviceId={editing.service.id}
+                />
               ) : null}
               {pluginProvider &&
               schemaProperties(pluginProvider.config_schema).length > 0 ? (

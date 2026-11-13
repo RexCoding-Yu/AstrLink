@@ -383,6 +383,90 @@ export function parsePluginLoginAnswer(value: unknown): PluginLoginAnswer {
   });
 }
 
+/** A text a plugin wrote, one string or one by language. */
+export type PluginText = string | Record<string, string>;
+
+/** A quota window of a provider's account: what is used of the limit. */
+export interface PluginBalanceWindow {
+  name: PluginText;
+  used: number;
+  limit: number;
+  unit?: string;
+  /** Unix seconds. */
+  reset_at?: number;
+}
+
+/** A provider account's balance, as its plugin read it. */
+export interface PluginBalance {
+  amount?: number;
+  currency?: string;
+  unlimited?: boolean;
+  windows?: PluginBalanceWindow[];
+}
+
+/**
+ * What the provider page shows of a plugin's provider: its balance and
+ * when it was read, the last error, and whether the plugin rests it.
+ */
+export interface PluginProviderState {
+  balance?: PluginBalance;
+  updated_at?: string;
+  error?: string;
+  resting?: boolean;
+  notice?: string;
+}
+
+function pluginText(value: unknown, path: string): PluginText {
+  if (typeof value === "string") return value;
+  const texts = plugin.object(value, path);
+  return Object.fromEntries(
+    Object.entries(texts).map(([language, text]) => [
+      language,
+      plugin.string(text, `${path}.${language}`),
+    ]),
+  );
+}
+
+export function parsePluginProviderState(value: unknown): PluginProviderState {
+  const state = plugin.object(value, "$");
+  let balance: PluginBalance | undefined;
+  if (state.balance !== undefined && state.balance !== null) {
+    const raw = plugin.object(state.balance, "$.balance");
+    balance = defined({
+      amount: plugin.optionalNumber(raw.amount, "$.balance.amount"),
+      currency: plugin.optionalString(raw.currency, "$.balance.currency"),
+      unlimited: plugin.optionalBoolean(raw.unlimited, "$.balance.unlimited"),
+      windows:
+        raw.windows === undefined || raw.windows === null
+          ? undefined
+          : plugin
+              .array(raw.windows, "$.balance.windows")
+              .map((item, index) => {
+                const path = `$.balance.windows[${index}]`;
+                const window = plugin.object(item, path);
+                return defined({
+                  name: pluginText(window.name, `${path}.name`),
+                  used: plugin.optionalNumber(window.used, `${path}.used`) ?? 0,
+                  limit:
+                    plugin.optionalNumber(window.limit, `${path}.limit`) ?? 0,
+                  unit: plugin.optionalString(window.unit, `${path}.unit`),
+                  reset_at: plugin.optionalInteger(
+                    window.reset_at,
+                    `${path}.reset_at`,
+                  ),
+                });
+              }),
+    });
+  }
+  return defined({
+    balance,
+    updated_at: plugin.optionalString(state.updated_at, "$.updated_at"),
+    error: plugin.optionalString(state.error, "$.error"),
+    resting: plugin.optionalBoolean(state.resting, "$.resting"),
+    notice: plugin.optionalString(state.notice, "$.notice"),
+  });
+}
+
 /** One configured use of a request processing plugin. */
 export interface RequestPluginInstance {
   /** Absent for a new instance, which Core names. */

@@ -1448,6 +1448,19 @@
       "deviceHint": "打开登录页，输入下面的代码。完成后这里会自动继续。",
       "failed": "登录失败。",
       "retry": "重新开始"
+    },
+    "pluginBalance": {
+      "label": "余额",
+      "status": "状态",
+      "reading": "正在读取…",
+      "unread": "还没读取",
+      "resting": "已暂停",
+      "updated": "{{time}} 更新",
+      "read": "立即读取余额",
+      "unlimited": "不限额",
+      "window": "额度",
+      "resets": "{{time}} 重置",
+      "failed": "读取余额失败。"
     }
   },
   "packages": {

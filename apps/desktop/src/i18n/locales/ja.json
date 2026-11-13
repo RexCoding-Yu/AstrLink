@@ -1448,6 +1448,19 @@
       "deviceHint": "ログインページを開き、下のコードを入力してください。終わると自動で続きます。",
       "failed": "ログインに失敗しました。",
       "retry": "やり直す"
+    },
+    "pluginBalance": {
+      "label": "残高",
+      "status": "状態",
+      "reading": "読み込み中…",
+      "unread": "未取得",
+      "resting": "一時停止中",
+      "updated": "{{time}} 更新",
+      "read": "残高を今すぐ取得",
+      "unlimited": "無制限",
+      "window": "枠",
+      "resets": "{{time}} にリセット",
+      "failed": "残高を取得できませんでした。"
     }
   },
   "packages": {

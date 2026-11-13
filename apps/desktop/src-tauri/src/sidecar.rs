@@ -4050,6 +4050,12 @@ fn plugin_request(
             format!("{plugin}/login"),
             Some(input.ok_or("the login is required")?),
         ),
+        // The balance of a provider of the plugin, and whether it rests.
+        "provider_state" => (
+            Method::POST,
+            format!("{plugin}/provider-state"),
+            Some(input.ok_or("the provider is required")?),
+        ),
         // A request processing instance run over a request, not sent.
         "request_dry_run" => (
             Method::POST,
@@ -7882,6 +7888,24 @@ mod tests {
             )
         );
         assert!(plugin_request("dry_run", Some("notes"), None, None).is_err());
+        // The login, the request processing dry run and the provider state
+        // of a provider plugin each post to their route.
+        for (action, path) in [
+            ("login", "login"),
+            ("request_dry_run", "request-dry-run"),
+            ("provider_state", "provider-state"),
+        ] {
+            let input = serde_json::json!({ "service_id": "svc_1" });
+            assert_eq!(
+                plugin_request(action, Some("vendor"), None, Some(input.clone())).unwrap(),
+                (
+                    Method::POST,
+                    format!("/control/v1/plugins/vendor/{path}"),
+                    Some(input)
+                )
+            );
+            assert!(plugin_request(action, Some("vendor"), None, None).is_err());
+        }
         assert_eq!(
             plugin_request("credits", Some("powercontext"), None, None).unwrap(),
             (

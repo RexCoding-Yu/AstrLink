@@ -578,6 +578,8 @@ const commands: Record<string, Command> = {
         return route(`${plugin}/request-dry-run`, "POST", input)(a);
       case "login":
         return route(`${plugin}/login`, "POST", input)(a);
+      case "provider_state":
+        return route(`${plugin}/provider-state`, "POST", input)(a);
       case "action":
         return route(`${plugin}/actions`, "POST", input)(a);
       case "clear_workspaces":

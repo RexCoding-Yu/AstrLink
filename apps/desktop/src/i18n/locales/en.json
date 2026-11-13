@@ -1448,6 +1448,19 @@
       "deviceHint": "Open the login page and enter the code below. This goes on by itself once you are done.",
       "failed": "The login failed.",
       "retry": "Start again"
+    },
+    "pluginBalance": {
+      "label": "Balance",
+      "status": "Status",
+      "reading": "Reading…",
+      "unread": "Not read yet",
+      "resting": "Paused",
+      "updated": "Updated {{time}}",
+      "read": "Read the balance now",
+      "unlimited": "Unlimited",
+      "window": "Quota",
+      "resets": "resets {{time}}",
+      "failed": "Could not read the balance."
     }
   },
   "packages": {

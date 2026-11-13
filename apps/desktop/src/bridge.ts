@@ -208,6 +208,7 @@ import {
   parsePluginMarketDoc,
   parseRequestPluginDryRun,
   parsePluginLoginAnswer,
+  parsePluginProviderState,
   parsePluginTaskPage,
   parsePluginStats,
   parsePluginStatus,
@@ -230,6 +231,7 @@ import {
   type PluginCreditStars,
   type PluginDetail,
   type PluginDryRunResult,
+  type PluginProviderState,
   type PluginJournal,
   type PluginApproval,
   type PluginApprovalFinished,
@@ -2061,6 +2063,24 @@ export async function pluginLogin(
   return parsePluginLoginAnswer(
     await invoke<unknown>("plugin_action", {
       action: "login",
+      key,
+      input,
+    }),
+  );
+}
+
+/**
+ * The balance of a provider of a plugin, read again when refresh is set or
+ * the one kept is old, and whether the plugin rests the provider.
+ */
+export async function getPluginProviderState(
+  key: string,
+  input: { service_id: string; refresh?: boolean },
+): Promise<PluginProviderState> {
+  requireNativeBridge();
+  return parsePluginProviderState(
+    await invoke<unknown>("plugin_action", {
+      action: "provider_state",
       key,
       input,
     }),

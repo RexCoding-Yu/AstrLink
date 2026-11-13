@@ -61,7 +61,7 @@ interface SchemaField {
 }
 
 /** A text of the plugin's in the page's language, else English. */
-function localized(text: unknown, locale: string): string {
+export function localized(text: unknown, locale: string): string {
   if (typeof text === "string") return text;
   if (!text || typeof text !== "object") return "";
   const texts = text as Record<string, string>;
