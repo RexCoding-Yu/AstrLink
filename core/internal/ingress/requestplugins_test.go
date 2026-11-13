@@ -48,6 +48,35 @@ func newRequestPluginGateway(t *testing.T, instances ...contract.RequestPluginIn
 // by key.
 func newRequestPluginGatewayWith(t *testing.T, extra map[string]string, instances ...contract.RequestPluginInstance) *requestPluginGateway {
 	t.Helper()
+	host := newRequestPluginHost(t, extra, instances...)
+	gateway := &requestPluginGateway{t: t, host: host, store: &memoryRequestRecordStore{},
+		reply: `{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`}
+	provider := validEndpoint(contract.ProtocolOpenAIChat, true)
+	gateway.handler = NewWithDependencies(Dependencies{
+		Resolver:       candidateResolver{candidates: []endpoint.Resolved{{Endpoint: provider}}},
+		RequestRecords: gateway.store,
+		AuditBlobs:     &memoryAuditBlobs{},
+		Plugins:        host,
+		Forwarder: forwarderFunc(func(writer http.ResponseWriter, request *http.Request, _ transport.Target) error {
+			body, _ := io.ReadAll(request.Body)
+			gateway.sent = append(gateway.sent, string(body))
+			contentType := gateway.replyType
+			if contentType == "" {
+				contentType = "application/json"
+			}
+			writer.Header().Set("Content-Type", contentType)
+			writer.WriteHeader(http.StatusOK)
+			_, err := io.WriteString(writer, gateway.reply)
+			return err
+		}),
+	})
+	return gateway
+}
+
+// newRequestPluginHost runs new-api's request processing plugins and the
+// extra ones, by key, with instances of them.
+func newRequestPluginHost(t *testing.T, extra map[string]string, instances ...contract.RequestPluginInstance) *pluginhost.Host {
+	t.Helper()
 	files := fstest.MapFS{}
 	settings := pluginSettings{}
 	for _, name := range []string{"request-redact", "request-filter"} {
@@ -76,28 +105,7 @@ func newRequestPluginGatewayWith(t *testing.T, extra map[string]string, instance
 	if _, err := host.UpdateSettings(context.Background(), contract.PluginHostSettingsUpdate{RequestPlugins: &instances}); err != nil {
 		t.Fatal(err)
 	}
-	gateway := &requestPluginGateway{t: t, host: host, store: &memoryRequestRecordStore{},
-		reply: `{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`}
-	provider := validEndpoint(contract.ProtocolOpenAIChat, true)
-	gateway.handler = NewWithDependencies(Dependencies{
-		Resolver:       candidateResolver{candidates: []endpoint.Resolved{{Endpoint: provider}}},
-		RequestRecords: gateway.store,
-		AuditBlobs:     &memoryAuditBlobs{},
-		Plugins:        host,
-		Forwarder: forwarderFunc(func(writer http.ResponseWriter, request *http.Request, _ transport.Target) error {
-			body, _ := io.ReadAll(request.Body)
-			gateway.sent = append(gateway.sent, string(body))
-			contentType := gateway.replyType
-			if contentType == "" {
-				contentType = "application/json"
-			}
-			writer.Header().Set("Content-Type", contentType)
-			writer.WriteHeader(http.StatusOK)
-			_, err := io.WriteString(writer, gateway.reply)
-			return err
-		}),
-	})
-	return gateway
+	return host
 }
 
 func (gateway *requestPluginGateway) chat(body string) *httptest.ResponseRecorder {
