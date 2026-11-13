@@ -106,7 +106,7 @@ func newRelayGatewayOf(t *testing.T, source string, upstream *relayUpstream) (*H
 	host := pluginhost.New(pluginhost.Options{Plugins: manager, Logf: t.Logf})
 	t.Cleanup(host.Close)
 	service := contract.Service{
-		ID: "service_vendor", Name: "Vendor", Kind: contract.ServiceKindPlugin, Enabled: true, Models: []string{"vendor-large", "claude-x"},
+		ID: "service_vendor", Name: "Vendor", Kind: contract.ServiceKindPlugin, Enabled: true, Models: []string{"vendor-large", "claude-x", "acme-1", "acme-job"},
 		HTTP:         &contract.HTTPConnection{BaseURL: upstream.server.URL + "/base", Auth: contract.ServiceAuth{Scheme: contract.AuthSchemeBearer}, CredentialRef: "local://service/service_vendor"},
 		Plugin:       &contract.ServicePlugin{Key: "vendor", Provider: contract.PluginProviderRelay, Settings: json.RawMessage(`{"region":"eu","stray":1}`)},
 		Capabilities: []contract.Capability{{Protocol: contract.ProtocolOpenAIChat, Mode: contract.CapabilityModeNative, Streaming: true}},
@@ -237,5 +237,83 @@ func TestARelayProviderExchangesItsKeyAgainWhenTheTokenIsRejected(t *testing.T) 
 	_ = relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"again"}]}`)
 	if len(tokens) != 3 || tokens[2] != tokens[1] {
 		t.Fatalf("tokens = %v", tokens)
+	}
+}
+
+// convertingVendorPlugin converts Chat Completions into the vendor's own
+// API: a prompt in, text or a stream of deltas out, and a job API that
+// takes two requests.
+const convertingVendorPlugin = `export const meta = {
+  apiVersion: 1, key: "vendor", name: "Vendor", version: "1.0.0", author: { name: "Test" }, baseUrl: "https://api.vendor.example",
+  models: ["acme-1", "acme-job"],
+  relay: [{ incoming_path: "/v1/chat/completions", upstream_path: "/v2/generate", converter: "plugin" }],
+};
+const reply = (model, text) => ({ id: "c1", object: "chat.completion", model, choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } });
+export function convertRequest(ctx, request) {
+  const prompt = request.body.messages.map((message) => message.content).join("\n");
+  if (request.model === "acme-job") return { body: { prompt }, path: "/v2/jobs", state: { step: "create" } };
+  return { body: { prompt, model: request.model, stream: request.stream } };
+}
+export function convertResponse(ctx, response) {
+  const json = JSON.parse(response.body);
+  if (response.status >= 400) return { error: { status: response.status, message: json.err } };
+  if (ctx.state && ctx.state.step === "create") return { next: { method: "GET", path: "/v2/jobs/" + json.id }, state: { step: "poll" } };
+  return { body: reply("acme-1", json.output) };
+}
+export function convertStreamEvent(ctx, input) {
+  if (input.done) return { events: [{ data: "[DONE]" }] };
+  const json = JSON.parse(input.data);
+  const choice = json.end ? { index: 0, delta: {}, finish_reason: "stop" } : { index: 0, delta: { content: json.delta } };
+  return { events: [{ data: { id: "c1", object: "chat.completion.chunk", choices: [choice] } }] };
+}
+`
+
+func TestARelayProviderConvertsThroughThePluginsHooks(t *testing.T) {
+	upstream := &relayUpstream{}
+	upstream.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		upstream.mutex.Lock()
+		upstream.requests = append(upstream.requests, request.Clone(context.Background()))
+		upstream.bodies = append(upstream.bodies, string(body))
+		upstream.mutex.Unlock()
+		switch {
+		case request.URL.Path == "/base/v2/jobs" && request.Method == http.MethodPost:
+			_, _ = io.WriteString(writer, `{"id":"j1"}`)
+		case request.URL.Path == "/base/v2/jobs/j1" && request.Method == http.MethodGet:
+			_, _ = io.WriteString(writer, `{"output":"job done"}`)
+		case gjson.Get(string(body), "model").String() == "acme-fail":
+			writer.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(writer, `{"err":"slow down"}`)
+		case gjson.Get(string(body), "stream").Bool():
+			writer.Header().Set("Content-Type", "text/event-stream")
+			for _, event := range []string{`{"delta":"he"}`, `{"delta":"llo"}`, `{"end":true}`} {
+				_, _ = io.WriteString(writer, "data: "+event+"\n\n")
+			}
+		default:
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"output":"hello"}`)
+		}
+	}))
+	t.Cleanup(upstream.server.Close)
+	handler, _, _, _ := newRelayGatewayOf(t, convertingVendorPlugin, upstream)
+
+	response := relayChat(t, handler, `{"model":"acme-1","messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusOK || gjson.Get(response.Body.String(), "choices.0.message.content").String() != "hello" {
+		t.Fatalf("whole = %d %s", response.Code, response.Body)
+	}
+	if sent, body := upstream.last(t); sent.URL.Path != "/base/v2/generate" || gjson.Get(body, "prompt").String() != "hi" {
+		t.Fatalf("sent %s %s", sent.URL.Path, body)
+	}
+	response = relayChat(t, handler, `{"model":"acme-1","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if text := streamText(t, response.Body.String()); response.Code != http.StatusOK || text != "hello" || !strings.Contains(response.Body.String(), "[DONE]") {
+		t.Fatalf("stream = %d %q\n%s", response.Code, text, response.Body)
+	}
+	// A job takes two requests: the hooks chain them.
+	response = relayChat(t, handler, `{"model":"acme-job","messages":[{"role":"user","content":"make it"}]}`)
+	if response.Code != http.StatusOK || gjson.Get(response.Body.String(), "choices.0.message.content").String() != "job done" {
+		t.Fatalf("job = %d %s", response.Code, response.Body)
+	}
+	if sent, _ := upstream.last(t); sent.Method != http.MethodGet || sent.URL.Path != "/base/v2/jobs/j1" {
+		t.Fatalf("the chain's last request = %s %s", sent.Method, sent.URL.Path)
 	}
 }

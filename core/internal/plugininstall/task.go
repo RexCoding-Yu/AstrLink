@@ -152,7 +152,7 @@ func (installer *Installer) taskReview(staged *stagedTask, pluginBytes int, reco
 	}
 	review.Description, review.Author = meta.Description.In(language), meta.Author.Name
 	for _, route := range meta.Relay {
-		if route.Plugin() || plugin.RelayProtocol(route.IncomingPath) == "" {
+		if plugin.RelayProtocol(route.IncomingPath) == "" {
 			review.Warnings = append(review.Warnings, contract.PluginInstallWarning{Code: contract.PluginWarningRoute, Detail: route.IncomingPath})
 		}
 	}

@@ -65,7 +65,7 @@ func (handler *Handler) relayCapabilities(meta *plugin.TaskMeta) []contract.Capa
 	}
 	for _, route := range meta.Relay {
 		protocol := plugin.RelayProtocol(route.IncomingPath)
-		if protocol == "" || protocol == contract.ProtocolOpenAIModels || route.Plugin() {
+		if protocol == "" || protocol == contract.ProtocolOpenAIModels {
 			continue
 		}
 		descriptor, known := contract.LookupProtocolDescriptor(protocol)

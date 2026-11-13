@@ -84,8 +84,6 @@ func (host *Host) relayFor(service contract.Service, attempt ProviderAttempt) (*
 	switch {
 	case route == nil:
 		return nil, fmt.Errorf("the plugin's routes do not serve %s for %s", attempt.ClientPath, attempt.Model)
-	case route.Plugin():
-		return nil, fmt.Errorf("the route of %s for %s is converted by the plugin, which AstrLink does not run yet", attempt.ClientPath, attempt.Model)
 	case route.UpstreamProtocol() != attempt.Protocol:
 		return nil, fmt.Errorf("the route of %s for %s sends %s, not %s", attempt.ClientPath, attempt.Model, route.UpstreamProtocol(), attempt.Protocol)
 	}
@@ -106,7 +104,7 @@ func (host *Host) RelayUpstreamProtocol(service contract.Service, clientPath, mo
 		return "", false
 	}
 	route := target.NewAPI().RelayRouteFor(clientPath, model)
-	if route == nil || route.Plugin() {
+	if route == nil {
 		return "", false
 	}
 	return route.UpstreamProtocol(), true
@@ -453,6 +451,14 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 		}
 		return answerRelay(writer, target, failed)
 	}
+	if relay.route.Plugin() {
+		header.Del("Authorization")
+		send := &relaySend{
+			host: host, relay: relay, target: target, roundTrip: roundTrip, root: root, address: address,
+			baseURL: baseURL, key: key, credentials: credentials, query: query, header: header,
+		}
+		return host.forwardConverted(ctx, writer, target, attempt, send, request.Method, body, attempt.Stream, authHeader)
+	}
 	if relay.plugin.HasTaskHook("prepareRequest") && len(body) > 0 {
 		address.RawQuery = query.Encode()
 		prepared, moved, err := relay.prepare(ctx, baseURL, attempt.ClientPath, attempt.Model, attempt.Stream, address, root, body, header, authHeader)
@@ -693,10 +699,11 @@ func (host *Host) relayModels(ctx context.Context, service contract.Service, tar
 			route = &meta.Relay[index]
 		}
 	}
-	if route == nil || route.Plugin() {
+	if route == nil {
 		return slices.Clone(meta.Models), len(meta.Models) > 0, nil
 	}
 	relay := &relayTarget{plugin: found, meta: meta, route: route, config: RelayConfig(meta, service.Plugin.Settings)}
+	var state json.RawMessage
 	var base *url.URL
 	if service.HTTP != nil {
 		base, _ = url.Parse(service.HTTP.BaseURL)
@@ -743,10 +750,61 @@ func (host *Host) relayModels(ctx context.Context, service contract.Service, tar
 	if err != nil {
 		return nil, false, err
 	}
-	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxProviderErrorBytes*8))
+	_ = response.Body.Close()
 	if err != nil {
 		return nil, false, err
+	}
+	// A list the plugin converts may take several pages.
+	for page := 0; route.Plugin(); page++ {
+		if page > maxConvertedRequests {
+			return nil, false, fmt.Errorf("the model list took more than %d requests", maxConvertedRequests)
+		}
+		view := map[string]any{"baseUrl": strings.TrimRight(base.String(), "/"), "path": plugin.RelayModelsPath, "config": relay.config, "state": jsonOrNull(state)}
+		if relay.token != nil {
+			view["token"] = relay.token
+		}
+		input := map[string]any{"status": response.StatusCode, "headers": firstHeaders(response.Header), "body": strings.ToValidUTF8(string(body), "\uFFFD")}
+		raw, err := relay.call(ctx, "convertResponse", view, input)
+		if err != nil {
+			return nil, false, fmt.Errorf("convertResponse: %w", err)
+		}
+		var answer convertedAnswer
+		if err := json.Unmarshal(raw, &answer); err != nil {
+			return nil, false, errors.New("convertResponse returned no model list")
+		}
+		switch {
+		case answer.Error != nil:
+			return nil, false, errors.New(truncateRunes(answer.Error.Message, 512))
+		case answer.Next == nil:
+			body = convertedBody(answer.Body)
+			response.StatusCode = http.StatusOK
+		default:
+			if len(answer.State) > 0 {
+				state = answer.State
+			}
+			send := &relaySend{host: host, relay: relay, target: target, roundTrip: roundTrip, root: base, address: address, baseURL: strings.TrimRight(base.String(), "/"),
+				key: key, credentials: credentials, query: url.Values{}, header: http.Header{}}
+			next := *answer.Next
+			method := strings.ToUpper(next.Method)
+			if method == "" {
+				method = http.MethodGet
+				if len(convertedBody(next.Body)) > 0 {
+					method = http.MethodPost
+				}
+			}
+			response, err = send.send(ctx, method, next, convertedBody(next.Body))
+			if err != nil {
+				return nil, false, err
+			}
+			body, err = io.ReadAll(io.LimitReader(response.Body, maxProviderErrorBytes*8))
+			_ = response.Body.Close()
+			if err != nil {
+				return nil, false, err
+			}
+			continue
+		}
+		break
 	}
 	if response.StatusCode >= 400 {
 		return nil, false, fmt.Errorf("the provider answered %d", response.StatusCode)

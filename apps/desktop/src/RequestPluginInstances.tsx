@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -519,10 +520,7 @@ function ConfigField({
       <Field group inDialog label={label} tooltip={tooltip}>
         <div className="grid gap-1.5 sm:grid-cols-2">
           {items.enum!.map((option, index) => (
-            <label
-              className="flex items-center gap-2 text-sm"
-              key={String(option)}
-            >
+            <Label className="text-sm font-normal" key={String(option)}>
               <Checkbox
                 checked={chosen.includes(option)}
                 onCheckedChange={(checked) =>
@@ -534,7 +532,7 @@ function ConfigField({
                 }
               />
               {localized(items.enumTitles?.[index], locale) || String(option)}
-            </label>
+            </Label>
           ))}
         </div>
       </Field>

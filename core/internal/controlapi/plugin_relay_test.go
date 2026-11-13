@@ -12,8 +12,9 @@ import (
 )
 
 // relayPlugin is a new-api plugin with only a provider part: chat natively
-// for its own models, converted to Claude Messages for the others, and a
-// route the plugin's hooks would convert, which AstrLink leaves out.
+// for its own models, converted to Claude Messages for the others, a route
+// the plugin's hooks convert, and one of a path the gateway does not
+// answer, which AstrLink leaves out.
 const relayPlugin = `export const meta = {
   apiVersion: 1, key: "vendor", name: { en: "Vendor", "zh-CN": "供应商" }, version: "1.0.0", author: { name: "Test" }, baseUrl: "https://api.vendor.example",
   models: ["vendor-large"],
@@ -49,7 +50,7 @@ func TestAProviderPluginOffersARelayProvider(t *testing.T) {
 		protocols = append(protocols, protocol.Protocol)
 	}
 	if offered.ID != contract.PluginProviderRelay || offered.BaseURL != "https://api.vendor.example" || offered.Auth.Scheme != contract.AuthSchemeBearer ||
-		!slices.Equal(protocols, []contract.ProtocolID{contract.ProtocolOpenAIChat, contract.ProtocolAnthropicMessages}) {
+		!slices.Equal(protocols, []contract.ProtocolID{contract.ProtocolOpenAIChat, contract.ProtocolAnthropicMessages, contract.ProtocolOpenAIEmbeddings}) {
 		t.Fatalf("provider = %+v", offered)
 	}
 	// A provider of it takes its capabilities from the routes, whatever the
@@ -59,6 +60,7 @@ func TestAProviderPluginOffersARelayProvider(t *testing.T) {
 	want := []contract.Capability{
 		{Protocol: contract.ProtocolOpenAIChat, Mode: contract.CapabilityModeNative, Streaming: true},
 		{Protocol: contract.ProtocolAnthropicMessages, Mode: contract.CapabilityModeNative, Streaming: true},
+		{Protocol: contract.ProtocolOpenAIEmbeddings, Mode: contract.CapabilityModeNative},
 	}
 	if !slices.Equal(service.Capabilities, want) || service.HTTP.BaseURL != "https://api.vendor.example" || service.HTTP.Auth.Scheme != contract.AuthSchemeBearer {
 		t.Fatalf("service = %+v %+v", service.Capabilities, service.HTTP)
