@@ -1,9 +1,9 @@
-import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Field } from "@/components/Field";
 import { FormMessage } from "@/components/FormMessage";
 import { IconButton } from "@/components/IconButton";
+import { RefreshCw } from "@/components/icons";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
