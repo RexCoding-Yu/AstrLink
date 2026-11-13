@@ -516,7 +516,7 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 	if err != nil {
 		return transport.NewUpstreamError(err)
 	}
-	credentials, authHeader := relay.authFor(key, query)
+	_, authHeader := relay.authFor(key, query)
 	header := request.Header.Clone()
 	if failed, err := host.exchange(ctx, target.Service, relay, base, key, false); failed != nil || err != nil {
 		if err != nil {
@@ -526,11 +526,17 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 	}
 	if relay.route.Plugin() {
 		header.Del("Authorization")
-		send := &relaySend{
-			host: host, relay: relay, target: target, roundTrip: roundTrip, root: root, address: address,
-			baseURL: baseURL, key: key, credentials: credentials, query: query, header: header,
+		plain := url.Values{}
+		for name, values := range query {
+			if !slices.Contains(relay.authQueryNames(), name) {
+				plain[name] = slices.Clone(values)
+			}
 		}
-		return host.forwardConverted(ctx, writer, target, attempt, send, request.Method, body, attempt.Stream, authHeader)
+		send := &relaySend{
+			host: host, relay: relay, target: target, roundTrip: roundTrip, root: root, address: address, base: base,
+			baseURL: baseURL, key: key, query: plain, header: header, authHeader: authHeader,
+		}
+		return host.forwardConverted(ctx, writer, target, attempt, send, request.Method, body, attempt.Stream)
 	}
 	if relay.plugin.HasTaskHook("prepareRequest") && len(body) > 0 {
 		address.RawQuery = query.Encode()
@@ -871,17 +877,21 @@ func (host *Host) relayModels(ctx context.Context, service contract.Service, tar
 			if len(answer.State) > 0 {
 				state = answer.State
 			}
-			send := &relaySend{host: host, relay: relay, target: target, roundTrip: roundTrip, root: base, address: address, baseURL: strings.TrimRight(base.String(), "/"),
-				key: key, credentials: credentials, query: url.Values{}, header: http.Header{}}
+			send := &relaySend{host: host, relay: relay, target: target, roundTrip: roundTrip, root: base, address: address, base: base, baseURL: strings.TrimRight(base.String(), "/"),
+				key: key, query: url.Values{}, header: http.Header{}}
 			next := *answer.Next
+			payload, contentType, err := payloadOf(next, convertedBody(next.Body), nil)
+			if err != nil {
+				return nil, false, err
+			}
 			method := strings.ToUpper(next.Method)
 			if method == "" {
 				method = http.MethodGet
-				if len(convertedBody(next.Body)) > 0 {
+				if len(payload) > 0 {
 					method = http.MethodPost
 				}
 			}
-			response, err = send.send(ctx, method, next, convertedBody(next.Body))
+			response, err = send.send(ctx, method, next, payload, contentType)
 			if err != nil {
 				return nil, false, err
 			}
