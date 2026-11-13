@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -173,16 +174,20 @@ func readTaskMeta(runtime *moejs.Runtime, file string) (*TaskMeta, error) {
 	return &meta, nil
 }
 
+// newAPISourcePattern finds what a new-api plugin's source has: the task
+// part's buildSubmitRequest, meta.relay, or a request processing hook.
+var newAPISourcePattern = regexp.MustCompile(`\bbuildSubmitRequest\b|\brelay\s*:|export\s+(?:async\s+)?function\s+(?:ingress|request|outbound|egress|reply|report)\b`)
+
 // ReadTaskSource reads a new-api plugin from a source directory: a
-// plugin.js that exports buildSubmitRequest or lists meta.relay, with no
-// package.json to build it from. Such a plugin installs and runs as it is,
-// never built.
+// plugin.js that exports buildSubmitRequest or a request processing hook,
+// or lists meta.relay, with no package.json to build it from. Such a plugin
+// installs and runs as it is, never built.
 func ReadTaskSource(dir string) (string, bool) {
 	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
 		return "", false
 	}
 	text, err := os.ReadFile(filepath.Join(dir, "plugin.js"))
-	if err != nil || len(text) > MaxSourceBytes || (!bytes.Contains(text, []byte("buildSubmitRequest")) && !bytes.Contains(text, []byte("relay"))) {
+	if err != nil || len(text) > MaxSourceBytes || !newAPISourcePattern.Match(text) {
 		return "", false
 	}
 	return string(text), true

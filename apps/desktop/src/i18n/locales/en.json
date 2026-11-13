@@ -6069,6 +6069,7 @@
       },
       "taskKind": "Task plugin",
       "providerKind": "Provider plugin",
+      "requestKind": "Request plugin",
       "keyHosts": "Key goes only to",
       "highRisk": "Asks for a high-risk capability: {{capability}}",
       "changelog": "Changelog"
@@ -6296,6 +6297,35 @@
       "times": "{{value}}",
       "window": "Last 30 days: {{requests}} requests handled, {{tasks}} tasks generated",
       "showList": "See every plugin in the list"
+    },
+    "requestPlugins": {
+      "title": "Request processing instances",
+      "add": "Add instance",
+      "addTitle": "Add a request processing instance",
+      "editTitle": "Edit request processing instance",
+      "edit": "Edit",
+      "remove": "Delete",
+      "removeTitle": "Delete this instance?",
+      "removeConfirm": "After “{{name}}” is deleted it no longer checks requests. The plugin stays installed.",
+      "empty": "No instances yet. Add one and it starts checking requests.",
+      "enabled": "Enabled",
+      "name": "Name",
+      "models": "Models",
+      "modelsHelp": "One model per line or separated by commas; the instance runs only for requests to these models. Leave empty for every model. @ modifiers after a model do not matter.",
+      "allModels": "All models",
+      "config": "Settings",
+      "keywords": "One keyword per line",
+      "invalidJSON": "This field takes JSON, and this is not valid JSON.",
+      "loadFailed": "Could not read the request processing instances.",
+      "saveFailed": "Could not save the request processing instances.",
+      "stages": {
+        "ingress": "Ingress check",
+        "request": "Request settings",
+        "outbound": "Outbound rewrite",
+        "egress": "Final check",
+        "reply": "Reply check",
+        "report": "Report"
+      }
     }
   },
   "pluginRecords": {

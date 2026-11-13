@@ -94,6 +94,7 @@ import {
 } from "./plugin-ui";
 import { capabilityLabel } from "./plugin-labels";
 import { PluginOverview } from "./PluginOverview";
+import { RequestPluginInstances } from "./RequestPluginInstances";
 import { PluginSettingsForm, type CredentialInput } from "./PluginSettingsForm";
 import type { PluginProviderChoice } from "./ServiceManager";
 import type { Service } from "./service-model";
@@ -1385,7 +1386,7 @@ function PluginDetailPane({
     ? []
     : task
       ? ["overview", "tasks", "status"]
-      : detail.kind === "provider"
+      : detail.kind === "provider" || detail.kind === "request"
         ? ["overview", "status"]
         : [
             "overview",
@@ -1505,6 +1506,14 @@ function PluginDetailPane({
             ) : (
               <>
                 {source ? <div className="mb-4">{source}</div> : null}
+                {detail.request ? (
+                  <div className="mb-4">
+                    <RequestPluginInstances
+                      detail={detail}
+                      disabled={!detail.enabled}
+                    />
+                  </div>
+                ) : null}
                 <PluginOverview
                   busy={busy}
                   detail={detail}

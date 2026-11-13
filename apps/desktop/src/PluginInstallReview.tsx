@@ -250,6 +250,10 @@ export function PluginInstallReviewView({
               <StatusBadge tone="neutral">
                 {t("plugins.install.providerKind")}
               </StatusBadge>
+            ) : review.kind === "request" ? (
+              <StatusBadge tone="neutral">
+                {t("plugins.install.requestKind")}
+              </StatusBadge>
             ) : null}
           </span>
           {review.description ? (

@@ -221,6 +221,8 @@ export interface PluginSummary {
   kind?: PluginKind;
   /** What a task plugin, written for new-api's task plugin API, declares. */
   task?: PluginTask;
+  /** A new-api plugin's request processing part: its hooks and the schema of an instance's config. */
+  request?: PluginRequestPart;
   /** The plugin's hook calls since the gateway started, and those that failed. */
   calls?: number;
   failures?: number;
@@ -230,7 +232,30 @@ export interface PluginSummary {
 }
 
 /** An extension of requests, or a task or provider plugin of new-api's API. */
-export type PluginKind = "extension" | "task" | "provider";
+export type PluginKind = "extension" | "task" | "provider" | "request";
+
+/** What a new-api plugin's request processing part offers. */
+export interface PluginRequestPart {
+  /** ingress, request, outbound, egress, reply and report, as it exports them. */
+  stages: string[];
+  /** The schema of an instance's config, as the plugin wrote it. */
+  config_schema?: unknown;
+  /** A request goes on without an instance of it that fails. */
+  optional?: boolean;
+  description?: string;
+}
+
+/** One configured use of a request processing plugin. */
+export interface RequestPluginInstance {
+  /** Absent for a new instance, which Core names. */
+  id?: string;
+  name: string;
+  plugin: string;
+  enabled: boolean;
+  /** The models it runs for; every model when empty. */
+  models: string[];
+  config?: Record<string, unknown>;
+}
 
 /** A gateway protocol a task plugin serves. */
 export interface PluginTaskProtocol {
@@ -589,6 +614,8 @@ export interface PluginHostSettings {
   language: PluginLanguage;
   /** Where installs fetch packages; absent for the npm registry. */
   npm_registry?: string;
+  /** The request processing instances, in the order they run. */
+  request_plugins: RequestPluginInstance[];
 }
 
 export const DEFAULT_INJECTION_BUDGET_BYTES = 16 * 1024;
@@ -602,6 +629,8 @@ export interface PluginHostSettingsUpdate {
   injection_budget_bytes?: number;
   language?: PluginLanguage;
   npm_registry?: string;
+  /** Replaces every request processing instance. */
+  request_plugins?: RequestPluginInstance[];
 }
 
 /** The median and the slowest 5% of some durations, in milliseconds. */
@@ -1124,6 +1153,10 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
       summary.task === undefined
         ? undefined
         : parseTask(summary.task, `${path}.task`),
+    request:
+      summary.request === undefined
+        ? undefined
+        : parseRequestPart(summary.request, `${path}.request`),
     calls: plugin.optionalInteger(summary.calls, `${path}.calls`),
     failures: plugin.optionalInteger(summary.failures, `${path}.failures`),
     tasks: plugin.optionalInteger(summary.tasks, `${path}.tasks`),
@@ -1134,7 +1167,7 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
   });
 }
 
-const pluginKinds = ["extension", "task", "provider"] as const;
+const pluginKinds = ["extension", "task", "provider", "request"] as const;
 
 function parseTaskProtocols(
   value: unknown,
@@ -1945,7 +1978,47 @@ export function parsePluginHostSettings(value: unknown): PluginHostSettings {
       : {
           npm_registry: plugin.string(settings.npm_registry, "$.npm_registry"),
         }),
+    request_plugins:
+      settings.request_plugins === undefined
+        ? []
+        : plugin
+            .array(settings.request_plugins, "$.request_plugins")
+            .map((item, index) =>
+              parseRequestPluginInstance(item, `$.request_plugins[${index}]`),
+            ),
   };
+}
+
+function parseRequestPluginInstance(
+  value: unknown,
+  path: string,
+): RequestPluginInstance {
+  const instance = plugin.object(value, path);
+  const config =
+    instance.config === undefined
+      ? undefined
+      : plugin.object(instance.config, `${path}.config`);
+  return defined({
+    id: plugin.string(instance.id, `${path}.id`),
+    name: plugin.string(instance.name, `${path}.name`),
+    plugin: plugin.string(instance.plugin, `${path}.plugin`),
+    enabled: plugin.boolean(instance.enabled, `${path}.enabled`),
+    models:
+      instance.models === undefined || instance.models === null
+        ? []
+        : plugin.strings(instance.models, `${path}.models`),
+    config,
+  });
+}
+
+function parseRequestPart(value: unknown, path: string): PluginRequestPart {
+  const part = plugin.object(value, path);
+  return defined({
+    stages: plugin.strings(part.stages, `${path}.stages`),
+    config_schema: part.config_schema,
+    optional: plugin.optionalBoolean(part.optional, `${path}.optional`),
+    description: plugin.optionalString(part.description, `${path}.description`),
+  });
 }
 
 export function parsePluginActionResult(value: unknown): PluginActionResult {

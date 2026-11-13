@@ -329,7 +329,38 @@ describe("plugin model", () => {
         injection_budget_bytes: 16384,
         language: "ja",
       }),
-    ).toEqual({ paused: true, injection_budget_bytes: 16384, language: "ja" });
+    ).toEqual({
+      paused: true,
+      injection_budget_bytes: 16384,
+      language: "ja",
+      request_plugins: [],
+    });
+    expect(
+      parsePluginHostSettings({
+        paused: false,
+        injection_budget_bytes: 16384,
+        language: "zh-CN",
+        request_plugins: [
+          {
+            id: "rpi_abcdefgh",
+            name: "过滤",
+            plugin: "request-filter",
+            enabled: true,
+            models: ["gpt-4o"],
+            config: { keywords: "a" },
+          },
+        ],
+      }).request_plugins,
+    ).toEqual([
+      {
+        id: "rpi_abcdefgh",
+        name: "过滤",
+        plugin: "request-filter",
+        enabled: true,
+        models: ["gpt-4o"],
+        config: { keywords: "a" },
+      },
+    ]);
     expect(() =>
       parsePluginHostSettings({
         paused: false,

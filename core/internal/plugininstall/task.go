@@ -142,9 +142,12 @@ func (installer *Installer) taskReview(staged *stagedTask, pluginBytes int, reco
 	review := newReview(staged.checked, pluginBytes, 0, record)
 	meta := staged.checked.Task
 	language := installer.language()
-	if meta.HasTaskPart() {
+	switch {
+	case meta.HasTaskPart():
 		review.Kind, review.Task = contract.PluginKindTask, taskplugin.Summary(meta, language)
-	} else {
+	case len(meta.Relay) == 0 && meta.HasRequestPart():
+		review.Kind = contract.PluginKindRequest
+	default:
 		review.Kind = contract.PluginKindProvider
 	}
 	review.Description, review.Author = meta.Description.In(language), meta.Author.Name

@@ -6069,6 +6069,7 @@
       },
       "taskKind": "任务插件",
       "providerKind": "提供商插件",
+      "requestKind": "请求处理插件",
       "keyHosts": "密钥只发往",
       "highRisk": "申请了高风险能力：{{capability}}",
       "changelog": "更新记录"
@@ -6296,6 +6297,35 @@
       "times": "{{value}} 次",
       "window": "近 30 天：处理 {{requests}} 次请求，生成 {{tasks}} 个任务",
       "showList": "在列表中查看全部插件"
+    },
+    "requestPlugins": {
+      "title": "请求处理实例",
+      "add": "添加实例",
+      "addTitle": "添加请求处理实例",
+      "editTitle": "编辑请求处理实例",
+      "edit": "编辑",
+      "remove": "删除",
+      "removeTitle": "删除这个实例？",
+      "removeConfirm": "删除「{{name}}」后，它不再检查请求。插件本身不会卸载。",
+      "empty": "还没有实例。添加一个实例后，它才会检查请求。",
+      "enabled": "启用",
+      "name": "名称",
+      "models": "限定模型",
+      "modelsHelp": "每行或用逗号写一个模型名，只对这些模型的请求生效；留空表示所有模型。模型后面的 @ 参数不影响匹配。",
+      "allModels": "所有模型",
+      "config": "配置",
+      "keywords": "每行一个关键词",
+      "invalidJSON": "这里要填 JSON，格式不对。",
+      "loadFailed": "读取请求处理实例失败。",
+      "saveFailed": "保存请求处理实例失败。",
+      "stages": {
+        "ingress": "入口检查",
+        "request": "请求设置",
+        "outbound": "出站改写",
+        "egress": "发送前检查",
+        "reply": "回复检查",
+        "report": "请求上报"
+      }
     }
   },
   "pluginRecords": {
