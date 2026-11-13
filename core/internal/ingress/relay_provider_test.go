@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
@@ -441,5 +443,73 @@ func TestAPluginLogsAProviderInAndRefreshesItsCredential(t *testing.T) {
 	_ = relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"again"}]}`)
 	if seen[len(seen)-1] != "Bearer refreshed-2" {
 		t.Fatalf("a later request sent %v", seen)
+	}
+}
+
+// accountVendorPlugin reads its account's balance and rests the provider
+// while its quota is used up.
+const accountVendorPlugin = `export const meta = {
+  apiVersion: 1, key: "vendor", name: "Vendor", version: "1.0.0", author: { name: "Test" }, baseUrl: "https://api.vendor.example",
+  models: ["vendor-large"],
+  relay: [{ incoming_path: "/v1/chat/completions", upstream_path: "/account/chat" }],
+};
+export function buildBalanceRequest(ctx) { return { path: "/account/balance", headers: { "X-Key": ctx.apiKey } }; }
+export function parseBalance(ctx, response) {
+  const json = JSON.parse(response.body);
+  if (response.status !== 200) return { error: "the account answered " + response.status };
+  return { amount: json.left, currency: "USD", windows: [{ name: { en: "Daily", "zh-CN": "每日" }, used: json.used, limit: 10, unit: "requests" }] };
+}
+export function scheduled(ctx) {
+  const response = utils.fetch({ url: ctx.baseUrl + "/account/balance", headers: { "X-Key": ctx.apiKey } });
+  if (response.body.used >= 10) return { next: 120, keyStatus: "auto_disabled", notify: { en: "Daily quota used up", "zh-CN": "今天的额度用完了" } };
+  return { next: 120, keyStatus: "enabled", balance: { amount: response.body.left, currency: "USD" } };
+}
+`
+
+func TestAPluginReadsTheBalanceAndRestsAProvider(t *testing.T) {
+	upstream := &relayUpstream{}
+	used := 3
+	chats := 0
+	upstream.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/base/account/balance":
+			if request.Header.Get("X-Key") != "sk-test" {
+				writer.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(writer, `{}`)
+				return
+			}
+			_, _ = io.WriteString(writer, fmt.Sprintf(`{"left":12.5,"used":%d}`, used))
+		default:
+			chats++
+			_, _ = io.WriteString(writer, `{"id":"c1","object":"chat.completion","model":"vendor-large","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+		}
+	}))
+	t.Cleanup(upstream.server.Close)
+	secrets := &relaySecrets{secret: []byte("sk-test")}
+	handler, host, service, _ := newRelayGatewayWithSecrets(t, accountVendorPlugin, upstream, secrets)
+	ctx := context.Background()
+	state, err := host.ProviderBalance(ctx, service)
+	if err != nil || state.Balance == nil || state.Balance.Amount == nil || *state.Balance.Amount != 12.5 || state.Balance.Currency != "USD" ||
+		len(state.Balance.Windows) != 1 || state.Balance.Windows[0].Name.In("zh-CN") != "每日" || state.Balance.Windows[0].Used != 3 {
+		t.Fatalf("balance = %+v %v", state, err)
+	}
+	if next := host.RunScheduled(ctx, service); next != 2*time.Minute || host.ProviderStateOf(service.ID).Resting {
+		t.Fatalf("scheduled with quota left = %v %+v", next, host.ProviderStateOf(service.ID))
+	}
+	// The quota is used up: the plugin rests the provider, which serves no
+	// request until the plugin says it can.
+	used = 10
+	host.RunScheduled(ctx, service)
+	if state := host.ProviderStateOf(service.ID); !state.Resting || state.Notice != "Daily quota used up" {
+		t.Fatalf("a used-up quota = %+v", state)
+	}
+	if response := relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"hi"}]}`); response.Code == http.StatusOK || chats != 0 {
+		t.Fatalf("a resting provider served = %d, chats %d", response.Code, chats)
+	}
+	used = 0
+	host.RunScheduled(ctx, service)
+	if response := relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"hi"}]}`); response.Code != http.StatusOK || chats != 1 {
+		t.Fatalf("after the quota came back = %d, chats %d", response.Code, chats)
 	}
 }

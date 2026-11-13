@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
@@ -271,4 +272,40 @@ func (handler *Handler) pluginLogin(writer http.ResponseWriter, request *http.Re
 		answer.Credential = handler.pluginHost.PluginCredentialOf(ctx, record.Service)
 	}
 	writeJSON(writer, http.StatusOK, answer)
+}
+
+// providerBalanceAge reads a provider's balance again when the one kept is
+// older.
+const providerBalanceAge = time.Hour
+
+// pluginProviderState answers the balance of a provider of the plugin, read
+// again when refresh is set or the one kept is older than an hour, and
+// whether the plugin rests it.
+func (handler *Handler) pluginProviderState(writer http.ResponseWriter, request *http.Request, target *plugin.Plugin) {
+	if handler.pluginHost == nil || handler.serviceStore == nil {
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", "plugins are unavailable")
+		return
+	}
+	var input struct {
+		ServiceID contract.ServiceID `json:"service_id"`
+		Refresh   bool               `json:"refresh"`
+	}
+	if !decodeControlJSON(writer, request, &input) {
+		return
+	}
+	record, err := handler.serviceStore.GetService(request.Context(), input.ServiceID)
+	if err != nil {
+		handler.writeStoreError(writer, err)
+		return
+	}
+	service := record.Service
+	if service.Plugin == nil || service.Plugin.Key != target.Key || service.Plugin.Provider != contract.PluginProviderRelay {
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_provider", "the provider is not one of this plugin's")
+		return
+	}
+	state := handler.pluginHost.ProviderStateOf(service.ID)
+	if target.HasTaskHook("buildBalanceRequest") && (input.Refresh || state.UpdatedAt.IsZero() || time.Since(state.UpdatedAt) > providerBalanceAge) {
+		state, _ = handler.pluginHost.ProviderBalance(request.Context(), service)
+	}
+	writeJSON(writer, http.StatusOK, state)
 }

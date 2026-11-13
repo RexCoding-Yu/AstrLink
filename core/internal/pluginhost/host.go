@@ -31,6 +31,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/injection"
 	"github.com/QuantumNous/astrlink/core/internal/metadata"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 )
 
@@ -84,6 +85,11 @@ type Options struct {
 	// Credentials reads and writes the secret of a provider, for the
 	// credentials plugins log providers in with.
 	Credentials CredentialStore
+	// Send sends the requests plugins make for their providers outside a
+	// request, such as a balance; ProxyCredentials are the providers'
+	// proxy passwords.
+	Send             RoundTrip
+	ProxyCredentials secretstore.SecretStore
 }
 
 // PluginStore keeps what the host stores for plugins; *sqlite.Store
@@ -127,6 +133,11 @@ type Host struct {
 	credentialLocks credentialLocks
 	logins          pluginLogins
 	gatewayAddress  atomic.Value
+	// providers keeps the balance and rest of each plugin's provider; send
+	// sends the balance requests, through each provider's proxy.
+	providers        providerStates
+	send             RoundTrip
+	proxyCredentials secretstore.SecretStore
 	// settings are the settings of every plugin, as requests read them.
 	settings atomic.Pointer[contract.PluginHostSettings]
 	// breakers keep a plugin's extension point out of requests after it
@@ -149,22 +160,24 @@ func New(options Options) *Host {
 		logf = func(string, ...any) {}
 	}
 	host := &Host{
-		plugins:      options.Plugins,
-		metadata:     options.Metadata,
-		bindings:     options.Bindings,
-		store:        options.Store,
-		ledger:       injection.NewLedger(),
-		sessions:     newSessions(),
-		lookups:      newLookups(),
-		observe:      newObserveQueue(logf),
-		after:        newAfterQueue(),
-		held:         newHeldCaptures(),
-		forwardTurns: newForwardTurns(),
-		records:      options.Records,
-		workspaceKey: options.WorkspaceKey,
-		logf:         logf,
-		credentials:  options.Credentials,
-		now:          time.Now,
+		plugins:          options.Plugins,
+		metadata:         options.Metadata,
+		bindings:         options.Bindings,
+		store:            options.Store,
+		ledger:           injection.NewLedger(),
+		sessions:         newSessions(),
+		lookups:          newLookups(),
+		observe:          newObserveQueue(logf),
+		after:            newAfterQueue(),
+		held:             newHeldCaptures(),
+		forwardTurns:     newForwardTurns(),
+		records:          options.Records,
+		workspaceKey:     options.WorkspaceKey,
+		logf:             logf,
+		credentials:      options.Credentials,
+		send:             options.Send,
+		proxyCredentials: options.ProxyCredentials,
+		now:              time.Now,
 	}
 	defaults := contract.DefaultPluginHostSettings()
 	host.settings.Store(&defaults)

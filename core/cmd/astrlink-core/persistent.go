@@ -367,6 +367,26 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	pluginHost := pluginhost.New(pluginhost.Options{
 		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Store: store, Records: store,
 		WorkspaceKey: workspaceKey, Logf: logf, Credentials: serviceCredentials{store: store},
+		Send: transport.New(nil).RoundTrip, ProxyCredentials: store,
+	})
+	// Plugins keep their providers' accounts up while Core runs.
+	pluginHost.StartMaintenance(ctx, func(ctx context.Context) ([]contract.Service, error) {
+		kind := contract.ServiceKindPlugin
+		var services []contract.Service
+		cursor := ""
+		for {
+			page, err := store.ListServices(ctx, storage.ServiceListOptions{Limit: 200, Cursor: cursor, Kind: &kind})
+			if err != nil {
+				return nil, err
+			}
+			for _, record := range page.Items {
+				services = append(services, record.Service)
+			}
+			if page.NextCursor == "" {
+				return services, nil
+			}
+			cursor = page.NextCursor
+		}
 	})
 	if err := pluginHost.LoadSettings(ctx); err != nil {
 		logf("load the settings of the plugins: %v", err)

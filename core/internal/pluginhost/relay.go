@@ -73,6 +73,11 @@ type relayTarget struct {
 // query, else key as the route says. It returns the headers and the header
 // that holds the key.
 func (relay *relayTarget) authFor(key string, query url.Values) (http.Header, string) {
+	if relay.credential == nil && relay.route == nil {
+		// A request outside a route, such as a balance, carries the key as
+		// the plugin writes it.
+		return http.Header{}, ""
+	}
 	if relay.credential == nil {
 		return relayAuth(relay.route, key, query)
 	}
@@ -93,6 +98,9 @@ func (relay *relayTarget) authQueryNames() []string {
 		for name := range relay.credential.Query {
 			names = append(names, name)
 		}
+		return names
+	}
+	if relay.route == nil {
 		return names
 	}
 	if auth := relay.route.Auth; auth != nil && auth.Type == "query" {
@@ -468,6 +476,11 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 	relay, err := host.relayFor(target.Service, attempt)
 	if err != nil {
 		return transport.NewUpstreamError(err)
+	}
+	if resting, notice := host.resting(target.Service.ID); resting {
+		// The plugin said the account cannot serve now: another provider
+		// takes the request until it says it can.
+		return transport.NewUpstreamError(fmt.Errorf("the plugin rests this provider: %s", notice))
 	}
 	base := target.BaseURL
 	if target.Service.HTTP != nil {

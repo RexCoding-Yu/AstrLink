@@ -48,6 +48,9 @@ type PluginHost interface {
 	CancelLogin(id contract.ServiceID)
 	PluginCredentialOf(ctx context.Context, service contract.Service) pluginhost.CredentialView
 	RevokePluginCredential(ctx context.Context, service contract.Service)
+	// The balance of a plugin's provider, and whether the plugin rests it.
+	ProviderBalance(ctx context.Context, service contract.Service) (pluginhost.ProviderState, error)
+	ProviderStateOf(id contract.ServiceID) pluginhost.ProviderState
 	// DryRunRequestPlugin runs a request processing instance over a
 	// request without sending it.
 	DryRunRequestPlugin(ctx context.Context, instance contract.RequestPluginInstance, protocol contract.ProtocolID, body json.RawMessage, reply *string) (pluginhost.RequestDryRun, error)
