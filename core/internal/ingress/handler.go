@@ -414,6 +414,15 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 	}
+	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && handler.plugins != nil &&
+		request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, pluginhost.LoginCallbackPath) {
+		// A vendor sends a plugin login's browser back here, which carries
+		// no access token: the login's state is the capability.
+		if handler.allowLocalCaller(writer, request) {
+			handler.plugins.ServeLoginCallback(writer, request)
+		}
+		return
+	}
 	if builtinInternalFrom(request.Context()) == nil && classifierInternalFrom(request.Context()) == nil && !handler.allowInferenceBoundary(writer, request) {
 		return
 	}

@@ -81,6 +81,9 @@ type Options struct {
 	// session never takes the value its workspace had.
 	WorkspaceKey []byte
 	Logf         func(string, ...any)
+	// Credentials reads and writes the secret of a provider, for the
+	// credentials plugins log providers in with.
+	Credentials CredentialStore
 }
 
 // PluginStore keeps what the host stores for plugins; *sqlite.Store
@@ -117,6 +120,13 @@ type Host struct {
 	reports reportQueue
 	// relayTokens keeps the exchangeKey tokens of relay providers.
 	relayTokens relayTokens
+	// credentials keeps the credentials plugins log providers in with;
+	// logins are the logins in progress, whose vendors send the browser
+	// back to loginBase.
+	credentials     CredentialStore
+	credentialLocks credentialLocks
+	logins          pluginLogins
+	gatewayAddress  atomic.Value
 	// settings are the settings of every plugin, as requests read them.
 	settings atomic.Pointer[contract.PluginHostSettings]
 	// breakers keep a plugin's extension point out of requests after it
@@ -153,6 +163,7 @@ func New(options Options) *Host {
 		records:      options.Records,
 		workspaceKey: options.WorkspaceKey,
 		logf:         logf,
+		credentials:  options.Credentials,
 		now:          time.Now,
 	}
 	defaults := contract.DefaultPluginHostSettings()

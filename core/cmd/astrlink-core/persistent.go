@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -29,8 +30,10 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/privacymodel"
 	"github.com/QuantumNous/astrlink/core/internal/privacyworker"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
+	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/servicemodel"
 	"github.com/QuantumNous/astrlink/core/internal/servicetest"
+	"github.com/QuantumNous/astrlink/core/internal/storage"
 	"github.com/QuantumNous/astrlink/core/internal/storage/sqlite"
 	syncengine "github.com/QuantumNous/astrlink/core/internal/sync"
 	"github.com/QuantumNous/astrlink/core/internal/taskplugin"
@@ -113,6 +116,8 @@ type persistentCore struct {
 	// claudeOfficial serves official Claude accounts; the caller reports the
 	// inference listener to it. Nil when they are unavailable.
 	claudeOfficial *officialClaude
+	// pluginHost learns the inference listener for the logins plugins run.
+	pluginHost     *pluginhost.Host
 	retentionSweep func(context.Context) error
 	// close stops the background monitors, zeroes raw keys, closes the
 	// store and then the privacy worker.
@@ -361,7 +366,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 	gatewayDependencies.Tasks = taskEngine
 	pluginHost := pluginhost.New(pluginhost.Options{
 		Plugins: pluginManager, Metadata: requestMetadata, Bindings: store, Store: store, Records: store,
-		WorkspaceKey: workspaceKey, Logf: logf,
+		WorkspaceKey: workspaceKey, Logf: logf, Credentials: serviceCredentials{store: store},
 	})
 	if err := pluginHost.LoadSettings(ctx); err != nil {
 		logf("load the settings of the plugins: %v", err)
@@ -468,6 +473,7 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 		rawVault:       rawVault,
 		gateway:        gatewayDependencies,
 		serviceTester:  serviceTester,
+		pluginHost:     pluginHost,
 		claudeOfficial: claudeOfficial,
 		retentionSweep: func(ctx context.Context) error {
 			_, err := store.SweepExpiredAuditData(ctx)
@@ -489,4 +495,28 @@ func openPersistentCore(ctx context.Context, options persistentOptions) (*persis
 			return err
 		},
 	}, nil
+}
+
+// serviceCredentials keeps the credentials plugins log providers in with
+// where providers keep their keys.
+type serviceCredentials struct{ store *sqlite.Store }
+
+func (credentials serviceCredentials) ReadServiceSecret(ctx context.Context, service contract.Service) ([]byte, error) {
+	record, err := credentials.store.GetService(ctx, service.ID)
+	if err != nil {
+		return nil, err
+	}
+	if record.Service.HTTP == nil || record.Service.HTTP.CredentialRef == "" {
+		return nil, errors.New("the provider keeps no credential")
+	}
+	return credentials.store.Get(ctx, secretstore.Ref(record.Service.HTTP.CredentialRef))
+}
+
+func (credentials serviceCredentials) WriteServiceSecret(ctx context.Context, id contract.ServiceID, secret []byte) error {
+	record, err := credentials.store.GetService(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = credentials.store.UpdateService(ctx, record.Service, storage.CredentialMutation{Present: true, Secret: secret}, record.ETag)
+	return err
 }

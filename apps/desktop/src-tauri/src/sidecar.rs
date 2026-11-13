@@ -4043,6 +4043,13 @@ fn plugin_request(
             format!("{plugin}/dry-run"),
             Some(input.ok_or("the dry run is required")?),
         ),
+        // The login of a provider of the plugin: start, state, submit,
+        // cancel, or the status of the credential it keeps.
+        "login" => (
+            Method::POST,
+            format!("{plugin}/login"),
+            Some(input.ok_or("the login is required")?),
+        ),
         // A request processing instance run over a request, not sent.
         "request_dry_run" => (
             Method::POST,

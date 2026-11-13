@@ -3,9 +3,11 @@ package ingress
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
+	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/transport"
 	"github.com/tidwall/gjson"
 )
@@ -92,6 +95,39 @@ func newRelayGateway(t *testing.T) (*Handler, *pluginhost.Host, contract.Service
 }
 
 func newRelayGatewayOf(t *testing.T, source string, upstream *relayUpstream) (*Handler, *pluginhost.Host, contract.Service, *relayUpstream) {
+	return newRelayGatewayWithSecrets(t, source, upstream, nil)
+}
+
+// relaySecrets keeps a provider's secret in memory: the key, or the
+// credential a plugin logged it in with.
+type relaySecrets struct {
+	mutex  sync.Mutex
+	secret []byte
+}
+
+func (secrets *relaySecrets) ReadServiceSecret(context.Context, contract.Service) ([]byte, error) {
+	secrets.mutex.Lock()
+	defer secrets.mutex.Unlock()
+	if secrets.secret == nil {
+		return nil, errors.New("no secret")
+	}
+	return slices.Clone(secrets.secret), nil
+}
+
+func (secrets *relaySecrets) WriteServiceSecret(_ context.Context, _ contract.ServiceID, secret []byte) error {
+	secrets.mutex.Lock()
+	defer secrets.mutex.Unlock()
+	secrets.secret = slices.Clone(secret)
+	return nil
+}
+
+func (secrets *relaySecrets) Get(ctx context.Context, _ secretstore.Ref) ([]byte, error) {
+	return secrets.ReadServiceSecret(ctx, contract.Service{})
+}
+func (secrets *relaySecrets) Put(context.Context, secretstore.Ref, []byte) error { return nil }
+func (secrets *relaySecrets) Delete(context.Context, secretstore.Ref) error      { return nil }
+
+func newRelayGatewayWithSecrets(t *testing.T, source string, upstream *relayUpstream, secrets *relaySecrets) (*Handler, *pluginhost.Host, contract.Service, *relayUpstream) {
 	t.Helper()
 	manager := plugin.NewManager(plugin.ManagerOptions{
 		Builtin:  fstest.MapFS{"vendor/plugin.js": &fstest.MapFile{Data: []byte(source)}},
@@ -103,7 +139,12 @@ func newRelayGatewayOf(t *testing.T, source string, upstream *relayUpstream) (*H
 	if loaded := manager.Current().Plugin("vendor"); !loaded.Loaded() || loaded.NewAPI() == nil {
 		t.Fatalf("vendor did not load: %v", loaded.Err)
 	}
-	host := pluginhost.New(pluginhost.Options{Plugins: manager, Logf: t.Logf})
+	options := pluginhost.Options{Plugins: manager, Logf: t.Logf}
+	var keys secretstore.SecretStore = codingPlanCredentials{}
+	if secrets != nil {
+		options.Credentials, keys = secrets, secrets
+	}
+	host := pluginhost.New(options)
 	t.Cleanup(host.Close)
 	service := contract.Service{
 		ID: "service_vendor", Name: "Vendor", Kind: contract.ServiceKindPlugin, Enabled: true, Models: []string{"vendor-large", "claude-x", "acme-1", "acme-job"},
@@ -116,7 +157,7 @@ func newRelayGatewayOf(t *testing.T, source string, upstream *relayUpstream) (*H
 	}
 	handler := NewWithDependencies(Dependencies{
 		Resolver:         candidateResolver{candidates: []endpoint.Resolved{{Service: service, BaseURL: service.HTTP.BaseURL}}},
-		Authorizer:       endpoint.NewServiceAuthorizer(codingPlanCredentials{}, nil),
+		Authorizer:       endpoint.NewServiceAuthorizer(keys, nil),
 		RequestRecords:   &memoryRequestRecordStore{},
 		AuditBlobs:       &memoryAuditBlobs{},
 		Plugins:          host,
@@ -315,5 +356,90 @@ func TestARelayProviderConvertsThroughThePluginsHooks(t *testing.T) {
 	}
 	if sent, _ := upstream.last(t); sent.Method != http.MethodGet || sent.URL.Path != "/base/v2/jobs/j1" {
 		t.Fatalf("the chain's last request = %s %s", sent.Method, sent.URL.Path)
+	}
+}
+
+// loginVendorPlugin logs a provider in: with a token typed into a form, or
+// through the vendor's page, which sends the browser back with a code. Its
+// credential sends a bearer header, and refresh gives a new one.
+const loginVendorPlugin = `export const meta = {
+  apiVersion: 1, key: "vendor", name: "Vendor", version: "1.0.0", author: { name: "Test" }, baseUrl: "https://api.vendor.example",
+  models: ["vendor-large"],
+  relay: [{ incoming_path: "/v1/chat/completions", upstream_path: "/login/chat" }],
+};
+export function login(ctx, input) {
+  if (input === null && ctx.login.session === null) return { step: "redirect", url: "https://vendor.example/auth?state=" + ctx.login.state + "&challenge=" + ctx.login.codeChallenge + "&redirect=" + encodeURIComponent(ctx.login.redirectUri), session: { started: true } };
+  if (input && input.callback) {
+    if (input.callback.code !== "abc") throw new Error("bad code");
+    return { step: "fields", fields: [{ name: "token", label: { en: "Token", "zh-CN": "令牌" }, type: "password", required: true }] };
+  }
+  if (input && input.fields) return { step: "done", credential: { n: 1, verifier: ctx.login.codeVerifier.length }, headers: { Authorization: "Bearer " + input.fields.token }, expiresAt: Math.floor(Date.now() / 1000) + 3600, accountId: "acct-1", label: "Test account" };
+  throw new Error("unexpected input");
+}
+export function refresh(ctx) {
+  return { credential: { n: ctx.credential.n + 1 }, headers: { Authorization: "Bearer refreshed-" + (ctx.credential.n + 1) }, expiresAt: Math.floor(Date.now() / 1000) + 3600 };
+}
+`
+
+func TestAPluginLogsAProviderInAndRefreshesItsCredential(t *testing.T) {
+	upstream := &relayUpstream{}
+	var seen []string
+	upstream.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstream.mutex.Lock()
+		seen = append(seen, request.Header.Get("Authorization"))
+		upstream.mutex.Unlock()
+		if request.Header.Get("Authorization") == "Bearer typed-token" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"c1","object":"chat.completion","model":"vendor-large","choices":[{"index":0,"message":{"role":"assistant","content":"in"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(upstream.server.Close)
+	secrets := &relaySecrets{}
+	handler, host, service, _ := newRelayGatewayWithSecrets(t, loginVendorPlugin, upstream, secrets)
+	host.UseGatewayAddress("0.0.0.0:17891")
+	ctx := context.Background()
+
+	view, err := host.StartLogin(ctx, service)
+	if err != nil || view.Step != "redirect" || !strings.Contains(view.URL, "redirect=http%3A%2F%2F127.0.0.1%3A17891%2Foauth%2Fplugin%2Fvendor%2Fcallback") {
+		t.Fatalf("start = %+v %v", view, err)
+	}
+	state := strings.TrimPrefix(strings.Split(view.URL, "&")[0], "https://vendor.example/auth?state=")
+	// A callback for another login is refused; the right one moves on.
+	callback := func(query string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		host.ServeLoginCallback(response, httptest.NewRequest(http.MethodGet, "/oauth/plugin/vendor/callback?"+query, nil))
+		return response
+	}
+	if response := callback("state=wrong&code=abc"); response.Code != http.StatusNotFound {
+		t.Fatalf("a callback of another state = %d", response.Code)
+	}
+	if response := callback("state=" + state + "&code=abc"); response.Code != http.StatusOK {
+		t.Fatalf("callback = %d %s", response.Code, response.Body)
+	}
+	view, _ = host.Login(ctx, service.ID)
+	if view.Step != "fields" || len(view.Fields) != 1 || view.Fields[0].Label != "Token" {
+		t.Fatalf("after the callback = %+v", view)
+	}
+	if _, err := host.SubmitLogin(ctx, service.ID, pluginhost.LoginInput{Fields: map[string]string{"token": ""}}); err == nil {
+		t.Fatal("a required field left empty was taken")
+	}
+	view, err = host.SubmitLogin(ctx, service.ID, pluginhost.LoginInput{Fields: map[string]string{"token": "typed-token"}})
+	if err != nil || view.Step != "done" || view.Account != "acct-1" || view.Label != "Test account" {
+		t.Fatalf("done = %+v %v", view, err)
+	}
+	if credential := host.PluginCredentialOf(ctx, service); !credential.LoggedIn || credential.AccountID != "acct-1" || credential.NeedsLogin {
+		t.Fatalf("credential = %+v", credential)
+	}
+	// The upstream refuses the logged-in token: the credential is
+	// refreshed, kept, and the request sent again.
+	response := relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"hi"}]}`)
+	if response.Code != http.StatusOK || strings.Join(seen, ",") != "Bearer typed-token,Bearer refreshed-2" {
+		t.Fatalf("answer = %d %s, sent %v", response.Code, response.Body, seen)
+	}
+	_ = relayChat(t, handler, `{"model":"vendor-large","messages":[{"role":"user","content":"again"}]}`)
+	if seen[len(seen)-1] != "Bearer refreshed-2" {
+		t.Fatalf("a later request sent %v", seen)
 	}
 }

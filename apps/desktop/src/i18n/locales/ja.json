@@ -1429,7 +1429,26 @@
     "vertexKeyProject": "キーのプロジェクト: {{project}}",
     "vertexCredentialSaved": "サービスアカウントキーを保存済み",
     "reorderCardKeys": "カードをドラッグして並べ替えます。ハンドルにフォーカスして矢印キーでも移動できます",
-    "pluginSettings": "プラグインの設定"
+    "pluginSettings": "プラグインの設定",
+    "pluginLogin": {
+      "account": "アカウント",
+      "saveFirst": "先にこのプロバイダーを保存してから、アカウントにログインしてください。",
+      "loggedIn": "ログイン済み",
+      "notLoggedIn": "未ログイン",
+      "needsLogin": "再ログインが必要",
+      "login": "ログイン",
+      "loginAgain": "再ログイン",
+      "title": "ログイン",
+      "starting": "ログインを開始しています…",
+      "inBrowser": "ブラウザでログインページを開きました。ログインが終わると自動で続きます。",
+      "openPage": "ログインページを開く",
+      "pasteHint": "ブラウザでログインし、最後に表示されたページのアドレスを下に貼り付けてください。",
+      "pasted": "ブラウザの最後のアドレス",
+      "continue": "続ける",
+      "deviceHint": "ログインページを開き、下のコードを入力してください。終わると自動で続きます。",
+      "failed": "ログインに失敗しました。",
+      "retry": "やり直す"
+    }
   },
   "packages": {
     "subscriptions": "サブスクリプション",

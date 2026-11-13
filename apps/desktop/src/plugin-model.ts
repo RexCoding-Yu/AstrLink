@@ -264,6 +264,125 @@ export interface RequestPluginDryRun {
   failures: string[];
 }
 
+/** A step of a plugin's login of a provider. */
+export interface PluginLoginView {
+  id: string;
+  step: "redirect" | "paste" | "device" | "fields" | "done" | "failed" | "";
+  url?: string;
+  hint?: string;
+  user_code?: string;
+  verification_uri?: string;
+  verification_uri_complete?: string;
+  interval?: number;
+  fields?: {
+    name: string;
+    label: string;
+    type?: string;
+    required?: boolean;
+    placeholder?: string;
+    description?: string;
+  }[];
+  error?: string;
+  account?: string;
+  label?: string;
+}
+
+/** The credential a plugin logged a provider in with, as the page shows it. */
+export interface PluginCredentialView {
+  logged_in: boolean;
+  account_id?: string;
+  label?: string;
+  expires_at?: number;
+  needs_login?: boolean;
+}
+
+export interface PluginLoginAnswer {
+  login?: PluginLoginView;
+  credential: PluginCredentialView;
+}
+
+export function parsePluginLoginAnswer(value: unknown): PluginLoginAnswer {
+  const answer = plugin.object(value, "$");
+  const credential = plugin.object(answer.credential, "$.credential");
+  let login: PluginLoginView | undefined;
+  if (answer.login !== undefined && answer.login !== null) {
+    const raw = plugin.object(answer.login, "$.login");
+    login = defined({
+      id: plugin.string(raw.id, "$.login.id"),
+      step: (plugin.optionalString(raw.step, "$.login.step") ??
+        "") as PluginLoginView["step"],
+      url: plugin.optionalString(raw.url, "$.login.url"),
+      hint: plugin.optionalString(raw.hint, "$.login.hint"),
+      user_code: plugin.optionalString(raw.user_code, "$.login.user_code"),
+      verification_uri: plugin.optionalString(
+        raw.verification_uri,
+        "$.login.verification_uri",
+      ),
+      verification_uri_complete: plugin.optionalString(
+        raw.verification_uri_complete,
+        "$.login.verification_uri_complete",
+      ),
+      interval: plugin.optionalInteger(raw.interval, "$.login.interval"),
+      fields:
+        raw.fields === undefined || raw.fields === null
+          ? undefined
+          : plugin.array(raw.fields, "$.login.fields").map((item, index) => {
+              const field = plugin.object(item, `$.login.fields[${index}]`);
+              return defined({
+                name: plugin.string(
+                  field.name,
+                  `$.login.fields[${index}].name`,
+                ),
+                label:
+                  plugin.optionalString(
+                    field.label,
+                    `$.login.fields[${index}].label`,
+                  ) ??
+                  plugin.string(field.name, `$.login.fields[${index}].name`),
+                type: plugin.optionalString(
+                  field.type,
+                  `$.login.fields[${index}].type`,
+                ),
+                required: plugin.optionalBoolean(
+                  field.required,
+                  `$.login.fields[${index}].required`,
+                ),
+                placeholder: plugin.optionalString(
+                  field.placeholder,
+                  `$.login.fields[${index}].placeholder`,
+                ),
+                description: plugin.optionalString(
+                  field.description,
+                  `$.login.fields[${index}].description`,
+                ),
+              });
+            }),
+      error: plugin.optionalString(raw.error, "$.login.error"),
+      account: plugin.optionalString(raw.account, "$.login.account"),
+      label: plugin.optionalString(raw.label, "$.login.label"),
+    });
+  }
+  return defined({
+    login,
+    credential: defined({
+      logged_in: plugin.boolean(credential.logged_in, "$.credential.logged_in"),
+      account_id: plugin.optionalString(
+        credential.account_id,
+        "$.credential.account_id",
+      ),
+      label: plugin.optionalString(credential.label, "$.credential.label"),
+      expires_at: plugin.optionalInteger(
+        credential.expires_at,
+        "$.credential.expires_at",
+      ),
+      needs_login: plugin.optionalBoolean(
+        credential.needs_login,
+        "$.credential.needs_login",
+      ),
+    }),
+  });
+}
+
 /** One configured use of a request processing plugin. */
 export interface RequestPluginInstance {
   /** Absent for a new instance, which Core names. */

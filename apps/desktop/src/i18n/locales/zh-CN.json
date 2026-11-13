@@ -1429,7 +1429,26 @@
     "vertexKeyProject": "密钥项目 {{project}}",
     "vertexCredentialSaved": "已保存服务账号密钥",
     "reorderCardKeys": "拖动卡片排序；聚焦手柄后也可按方向键移动",
-    "pluginSettings": "插件设置"
+    "pluginSettings": "插件设置",
+    "pluginLogin": {
+      "account": "账号",
+      "saveFirst": "先保存这个提供商，再登录账号。",
+      "loggedIn": "已登录",
+      "notLoggedIn": "未登录",
+      "needsLogin": "需要重新登录",
+      "login": "登录",
+      "loginAgain": "重新登录",
+      "title": "登录账号",
+      "starting": "正在开始登录…",
+      "inBrowser": "已在浏览器中打开登录页，登录完成后这里会自动继续。",
+      "openPage": "打开登录页",
+      "pasteHint": "在浏览器里登录，然后把浏览器最后停留的页面地址复制到下面。",
+      "pasted": "浏览器最后停留的地址",
+      "continue": "继续",
+      "deviceHint": "打开登录页，输入下面的代码。完成后这里会自动继续。",
+      "failed": "登录失败。",
+      "retry": "重新开始"
+    }
   },
   "packages": {
     "subscriptions": "订阅套餐",

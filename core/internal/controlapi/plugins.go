@@ -146,6 +146,10 @@ func (handler *Handler) pluginsResource(writer http.ResponseWriter, request *htt
 		}
 	case action == "tasks":
 		handler.pluginTasks(writer, request, target)
+	case action == "login":
+		if allowMethods(writer, request, http.MethodPost) {
+			handler.pluginLogin(writer, request, target)
+		}
 	case action == "request-dry-run":
 		if allowMethods(writer, request, http.MethodPost) {
 			handler.requestPluginDryRun(writer, request, target)

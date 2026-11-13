@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -201,4 +202,73 @@ func relaySettings(meta *plugin.TaskMeta, settings json.RawMessage) (json.RawMes
 		return nil, nil
 	}
 	return encoded, nil
+}
+
+// pluginLoginInput drives the login of a provider of the plugin: start,
+// state, submit (with what a paste or fields step asks), cancel, or the
+// status of the credential it keeps.
+type pluginLoginInput struct {
+	ServiceID contract.ServiceID `json:"service_id"`
+	Action    string             `json:"action"`
+	pluginhost.LoginInput
+}
+
+// pluginLoginAnswer is a login's state and the provider's credential.
+type pluginLoginAnswer struct {
+	Login      *pluginhost.LoginView     `json:"login,omitempty"`
+	Credential pluginhost.CredentialView `json:"credential"`
+}
+
+// pluginLogin serves the logins of the plugin's providers.
+func (handler *Handler) pluginLogin(writer http.ResponseWriter, request *http.Request, target *plugin.Plugin) {
+	if handler.pluginHost == nil || handler.serviceStore == nil {
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", "plugins are unavailable")
+		return
+	}
+	var input pluginLoginInput
+	if !decodeControlJSON(writer, request, &input) {
+		return
+	}
+	record, err := handler.serviceStore.GetService(request.Context(), input.ServiceID)
+	if err != nil {
+		handler.writeStoreError(writer, err)
+		return
+	}
+	service := record.Service
+	if service.Plugin == nil || service.Plugin.Key != target.Key || service.Plugin.Provider != contract.PluginProviderRelay {
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_login", "the provider is not one of this plugin's")
+		return
+	}
+	ctx := request.Context()
+	answer := pluginLoginAnswer{}
+	switch input.Action {
+	case "start":
+		view, err := handler.pluginHost.StartLogin(ctx, service)
+		if err != nil {
+			writeError(writer, http.StatusUnprocessableEntity, "login_failed", err.Error())
+			return
+		}
+		answer.Login = &view
+	case "state":
+		if view, ok := handler.pluginHost.Login(ctx, service.ID); ok {
+			answer.Login = &view
+		}
+	case "submit":
+		view, err := handler.pluginHost.SubmitLogin(ctx, service.ID, input.LoginInput)
+		if err != nil {
+			writeError(writer, http.StatusUnprocessableEntity, "login_failed", err.Error())
+			return
+		}
+		answer.Login = &view
+	case "cancel":
+		handler.pluginHost.CancelLogin(service.ID)
+	case "status":
+	default:
+		writeError(writer, http.StatusUnprocessableEntity, "invalid_login", "action is start, state, submit, cancel or status")
+		return
+	}
+	if record, err := handler.serviceStore.GetService(ctx, service.ID); err == nil {
+		answer.Credential = handler.pluginHost.PluginCredentialOf(ctx, record.Service)
+	}
+	writeJSON(writer, http.StatusOK, answer)
 }

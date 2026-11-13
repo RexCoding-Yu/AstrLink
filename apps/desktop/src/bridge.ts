@@ -207,6 +207,7 @@ import {
   parsePluginMarket,
   parsePluginMarketDoc,
   parseRequestPluginDryRun,
+  parsePluginLoginAnswer,
   parsePluginTaskPage,
   parsePluginStats,
   parsePluginStatus,
@@ -242,6 +243,7 @@ import {
   type PluginMarket,
   type PluginMarketDoc,
   type RequestPluginDryRun,
+  type PluginLoginAnswer,
   type PluginTaskPage,
   type PluginSettingsUpdate,
   type PluginStats,
@@ -2041,6 +2043,26 @@ export async function dryRunPlugin(
       action: "dry_run",
       key,
       input: { hook, args },
+    }),
+  );
+}
+
+/** Drives the login a plugin logs one of its providers in with. */
+export async function pluginLogin(
+  key: string,
+  input: {
+    service_id: string;
+    action: "start" | "state" | "submit" | "cancel" | "status";
+    pasted?: string;
+    fields?: Record<string, string>;
+  },
+): Promise<PluginLoginAnswer> {
+  requireNativeBridge();
+  return parsePluginLoginAnswer(
+    await invoke<unknown>("plugin_action", {
+      action: "login",
+      key,
+      input,
     }),
   );
 }

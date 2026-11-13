@@ -529,6 +529,11 @@ func (handler *Handler) deleteService(writer http.ResponseWriter, request *http.
 			return
 		}
 	}
+	if handler.pluginHost != nil {
+		// A credential a plugin logged the provider in with is revoked
+		// before it goes.
+		handler.pluginHost.RevokePluginCredential(request.Context(), current.Service)
+	}
 	if err := handler.serviceStore.DeleteService(request.Context(), id, expectedETag); err != nil {
 		handler.writeStoreError(writer, err)
 		return

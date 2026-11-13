@@ -1429,7 +1429,26 @@
     "vertexKeyProject": "Key project: {{project}}",
     "vertexCredentialSaved": "Saved service account key",
     "reorderCardKeys": "Drag cards to reorder; or focus the handle and use the arrow keys",
-    "pluginSettings": "Plugin settings"
+    "pluginSettings": "Plugin settings",
+    "pluginLogin": {
+      "account": "Account",
+      "saveFirst": "Save this provider first, then log in to its account.",
+      "loggedIn": "Logged in",
+      "notLoggedIn": "Not logged in",
+      "needsLogin": "Needs a new login",
+      "login": "Log in",
+      "loginAgain": "Log in again",
+      "title": "Log in",
+      "starting": "Starting the login…",
+      "inBrowser": "The login page opened in your browser. This goes on by itself once you log in.",
+      "openPage": "Open the login page",
+      "pasteHint": "Log in in your browser, then copy the address of the page it ends on below.",
+      "pasted": "Address the browser ended on",
+      "continue": "Continue",
+      "deviceHint": "Open the login page and enter the code below. This goes on by itself once you are done.",
+      "failed": "The login failed.",
+      "retry": "Start again"
+    }
   },
   "packages": {
     "subscriptions": "Subscriptions",

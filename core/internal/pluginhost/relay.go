@@ -63,8 +63,61 @@ type relayTarget struct {
 	route  *plugin.RelayRoute
 	config json.RawMessage
 	// token is the exchangeKey token of the provider's key, nil without
-	// one.
-	token json.RawMessage
+	// one; credential is the credential the plugin logged the provider in
+	// with, nil for a key.
+	token      json.RawMessage
+	credential *PluginCredential
+}
+
+// authFor sends what authenticates a request: the credential's headers and
+// query, else key as the route says. It returns the headers and the header
+// that holds the key.
+func (relay *relayTarget) authFor(key string, query url.Values) (http.Header, string) {
+	if relay.credential == nil {
+		return relayAuth(relay.route, key, query)
+	}
+	headers := http.Header{}
+	for name, value := range relay.credential.Headers {
+		headers.Set(name, value)
+	}
+	for name, value := range relay.credential.Query {
+		query.Set(name, value)
+	}
+	return headers, ""
+}
+
+// authQueryNames are the query parameters authFor sets.
+func (relay *relayTarget) authQueryNames() []string {
+	var names []string
+	if relay.credential != nil {
+		for name := range relay.credential.Query {
+			names = append(names, name)
+		}
+		return names
+	}
+	if auth := relay.route.Auth; auth != nil && auth.Type == "query" {
+		names = append(names, auth.Name)
+	}
+	return names
+}
+
+// useCredential takes the provider's credential when its secret is one,
+// refreshed first when it expires soon or force is set. It returns the key
+// requests send, "" for a credential.
+func (host *Host) useCredential(ctx context.Context, service contract.Service, relay *relayTarget, baseURL, key string, force bool) (string, error) {
+	credential, ok := decodeCredential(key)
+	if relay.credential != nil {
+		credential, ok = *relay.credential, true
+	}
+	if !ok {
+		return key, nil
+	}
+	live, err := host.liveCredential(ctx, service, relay, baseURL, credential, force)
+	if err != nil {
+		return "", err
+	}
+	relay.credential = &live
+	return "", nil
 }
 
 // relayFor finds the route of the service's plugin that serves the attempt.
@@ -371,7 +424,11 @@ func (relay *relayTarget) sign(ctx context.Context, baseURL, key, method string,
 			headers[http.CanonicalHeaderKey(name)] = values[0]
 		}
 	}
-	view := map[string]any{"baseUrl": baseURL, "credential": nil, "apiKey": key, "config": relay.config}
+	var credential any
+	if relay.credential != nil {
+		credential = jsonOrNull(relay.credential.Data)
+	}
+	view := map[string]any{"baseUrl": baseURL, "credential": credential, "apiKey": key, "config": relay.config}
 	if relay.token != nil {
 		view["token"] = relay.token
 	}
@@ -441,10 +498,13 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 	if base != nil {
 		baseURL = strings.TrimRight(base.String(), "/")
 	}
-	key := serviceKey(target.Service, target.RequestHeaders)
-	credentials, authHeader := relayAuth(relay.route, key, query)
-	header := request.Header.Clone()
 	ctx := request.Context()
+	key, err := host.useCredential(ctx, target.Service, relay, baseURL, serviceKey(target.Service, target.RequestHeaders), false)
+	if err != nil {
+		return transport.NewUpstreamError(err)
+	}
+	credentials, authHeader := relay.authFor(key, query)
+	header := request.Header.Clone()
 	if failed, err := host.exchange(ctx, target.Service, relay, base, key, false); failed != nil || err != nil {
 		if err != nil {
 			return transport.NewUpstreamError(err)
@@ -481,13 +541,18 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 		body, address = prepared, moved
 	}
 	header.Del("Authorization")
-	unsigned := query
+	unauthenticated := url.Values{}
+	for name, values := range query {
+		if !slices.Contains(relay.authQueryNames(), name) {
+			unauthenticated[name] = slices.Clone(values)
+		}
+	}
 	for resend := false; ; resend = true {
 		query := url.Values{}
-		for name, values := range unsigned {
+		for name, values := range unauthenticated {
 			query[name] = slices.Clone(values)
 		}
-		sentCredentials := credentials.Clone()
+		sentCredentials, _ := relay.authFor(key, query)
 		address.RawQuery = query.Encode()
 		if relay.plugin.HasTaskHook("signRequest") {
 			final := header.Clone()
@@ -520,13 +585,20 @@ func (host *Host) forwardRelay(writer http.ResponseWriter, request *http.Request
 		if err != nil {
 			return err
 		}
-		if !resend && relay.plugin.HasTaskHook("exchangeKey") {
+		refreshes := relay.credential != nil && relay.plugin.HasTaskHook("refresh")
+		if !resend && (relay.plugin.HasTaskHook("exchangeKey") || refreshes) {
 			rejected, kept := relay.rejected(ctx, baseURL, attempt.ClientPath, response)
 			response = kept
 			if rejected {
-				// The token is no longer good: the key is exchanged again
-				// and the same request sent once more.
+				// The credential or token is no longer good: it is
+				// renewed and the same request sent once more.
 				_ = response.Body.Close()
+				if refreshes {
+					if _, err := host.useCredential(ctx, target.Service, relay, baseURL, "", true); err != nil {
+						return transport.NewUpstreamError(err)
+					}
+					continue
+				}
 				if failed, err := host.exchange(ctx, target.Service, relay, base, key, true); failed != nil || err != nil {
 					if err != nil {
 						return transport.NewUpstreamError(err)
@@ -716,7 +788,10 @@ func (host *Host) relayModels(ctx context.Context, service contract.Service, tar
 		return nil, false, err
 	}
 	query := address.Query()
-	key := serviceKey(service, target.RequestHeaders)
+	key, err := host.useCredential(ctx, service, relay, strings.TrimRight(base.String(), "/"), serviceKey(service, target.RequestHeaders), false)
+	if err != nil {
+		return nil, false, err
+	}
 	if failed, err := host.exchange(ctx, service, relay, base, key, false); failed != nil || err != nil {
 		if err == nil {
 			_ = failed.Body.Close()
@@ -724,7 +799,7 @@ func (host *Host) relayModels(ctx context.Context, service contract.Service, tar
 		}
 		return nil, false, err
 	}
-	credentials, _ := relayAuth(route, key, query)
+	credentials, _ := relay.authFor(key, query)
 	address.RawQuery = query.Encode()
 	if found.HasTaskHook("signRequest") {
 		headers, extra, err := relay.sign(ctx, strings.TrimRight(base.String(), "/"), key, http.MethodGet, address, credentials.Clone(), nil)

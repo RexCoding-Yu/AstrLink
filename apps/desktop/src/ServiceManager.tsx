@@ -166,6 +166,7 @@ import {
 import { decodeModelEditorValue, encodeModelEditorValue } from "./model-editor";
 import { filterModels } from "./model-groups";
 import { PluginSlot } from "./plugin-ui";
+import { PluginLoginField } from "./PluginLogin";
 import {
   ConfigSchemaFields,
   schemaProperties,
@@ -3963,6 +3964,11 @@ export function ServiceManager({
                     }}
                   />
                 </Field>
+              ) : pluginProvider?.login && draft.plugin ? (
+                <PluginLoginField
+                  pluginKey={draft.plugin.key}
+                  serviceId={editing?.service.id}
+                />
               ) : draft.authScheme !== "none" ? (
                 <Field
                   label={
