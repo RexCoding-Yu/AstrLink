@@ -60,6 +60,9 @@ type Submission struct {
 	// Request is what the protocol's answers echo of the request.
 	Request   json.RawMessage
 	RequestID string
+	// Egress checks the JSON body buildSubmitRequest built before it is
+	// sent; an error stops the submission on every provider.
+	Egress func(ctx context.Context, body json.RawMessage) error
 }
 
 // Candidate is a provider a submission may run on: the service and the
@@ -329,6 +332,11 @@ func (engine *Engine) submitOn(ctx context.Context, target *plugin.Plugin, meta 
 	}
 	if desc.Action != "" {
 		driver.Action = desc.Action
+	}
+	if submission.Egress != nil && desc.BodyType != "multipart" && json.Valid(desc.Body) {
+		if err := submission.Egress(ctx, desc.Body); err != nil {
+			return nil, 0, err
+		}
 	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

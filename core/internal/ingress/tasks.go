@@ -243,9 +243,58 @@ func (handler *Handler) startTaskRecord(writer http.ResponseWriter, request *htt
 		if request.Context().Err() != nil {
 			session.noteCancelled()
 		}
+		session.notePlugins(session.requestPlugins.Records(), nil)
 		session.finish(context.Background(), handler.requestRecords, handler.auditBlobs, handler.recordLogger)
+		session.reportRequestPlugins()
 	}
 	return current, finish
+}
+
+// ingressPlugins runs the request processing instances' ingress over a
+// submission's JSON body, before the task plugin decodes it: the changed
+// body is what the plugin decodes and sends. A form body goes unchecked.
+// It reports true when an instance stopped the submission, which then has
+// its answer. A task submission is not under the privacy policy, so the
+// plugins read the body the vendor gets.
+func (current *taskRequest) ingressPlugins(model string) bool {
+	run := current.handler.plugins.RequestPlugins(model, current.request.URL.Path)
+	if run == nil || current.body == nil {
+		return false
+	}
+	current.session.requestPlugins = run
+	if current.body.Kind != taskplugin.BodyJSON {
+		fields, refusal := run.IngressForm(current.request.Context(), current.protocol, current.body.FieldNames(), current.body.Fields)
+		if refusal != nil {
+			writeInferenceError(current.writer, refusal.Status, refusal.Code, refusal.Message, false, nil)
+			current.session.noteFailed(errorSummaryFromInference(refusal.Code, refusal.Message, false))
+			return true
+		}
+		current.body.Fields = fields
+		return false
+	}
+	body, refusal := run.Ingress(current.request.Context(), current.protocol, current.body.JSON, nil)
+	if refusal != nil {
+		writeInferenceError(current.writer, refusal.Status, refusal.Code, refusal.Message, false, nil)
+		current.session.noteFailed(errorSummaryFromInference(refusal.Code, refusal.Message, false))
+		return true
+	}
+	current.body.JSON = body
+	return false
+}
+
+// egressPlugins is the check of the body a task plugin built for the
+// vendor, before it is sent: nil without request processing.
+func (current *taskRequest) egressPlugins() func(ctx context.Context, body json.RawMessage) error {
+	run := current.session.requestPluginRun()
+	if !run.Serves(contract.RequestStageEgress) {
+		return nil
+	}
+	return func(ctx context.Context, body json.RawMessage) error {
+		if refusal := run.Egress(ctx, contract.ProtocolPluginNative, body); refusal != nil {
+			return &taskplugin.Error{Status: refusal.Status, Code: refusal.Code, Message: refusal.Message}
+		}
+		return nil
+	}
 }
 
 // fail answers the submission with err and records it.
@@ -350,7 +399,7 @@ func (current *taskRequest) submit(candidates []endpoint.Resolved, surface, oper
 		submitted, err := current.handler.tasks.Submit(current.request.Context(), taskplugin.Submission{
 			PluginKey: key, Surface: surface, Operation: operation, Intent: intent, Body: current.body,
 			RequestHeaders: current.request.Header, Owner: ownerOf(current.request), Retain: retain, Request: echo,
-			RequestID: string(current.session.requestID()),
+			RequestID: string(current.session.requestID()), Egress: current.egressPlugins(),
 		}, []taskplugin.Candidate{{Service: service, UpstreamModel: candidate.UpstreamModel}})
 		if err == nil {
 			// The record holds a plan as the planner makes one: a native plan
@@ -411,6 +460,9 @@ func (handler *Handler) runTaskProtocol(writer http.ResponseWriter, request *htt
 	}
 	if model == "" {
 		current.fail(&taskplugin.Error{Status: http.StatusBadRequest, Code: "invalid_request", Message: "the request names no model"})
+		return
+	}
+	if current.ingressPlugins(model) {
 		return
 	}
 	mode := ""
@@ -808,6 +860,9 @@ func (handler *Handler) remixVideo(writer http.ResponseWriter, request *http.Req
 		current.fail(err)
 		return
 	}
+	if current.ingressPlugins(origin.Model) {
+		return
+	}
 	if current.body.Kind != taskplugin.BodyJSON {
 		current.fail(&taskplugin.Error{Status: http.StatusBadRequest, Code: "invalid_request", Message: "a remix takes a JSON body"})
 		return
@@ -910,6 +965,15 @@ func (handler *Handler) submitTaskIntent(writer http.ResponseWriter, request *ht
 	if current.body, err = taskplugin.ReadBody(request, maxTaskBody); err != nil {
 		current.fail(err)
 		return
+	}
+	if current.body.Kind == taskplugin.BodyJSON {
+		var named struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(current.body.JSON, &named)
+		if current.ingressPlugins(named.Model) {
+			return
+		}
 	}
 	var intent struct {
 		Model         string          `json:"model"`
@@ -1038,6 +1102,9 @@ func (handler *Handler) serveNativeRoute(writer http.ResponseWriter, request *ht
 	request = current.request
 	if current.body, err = taskplugin.ReadBody(request, maxTaskBody); err != nil {
 		current.fail(err)
+		return
+	}
+	if current.ingressPlugins(intent.Model) {
 		return
 	}
 	native.Body = current.body

@@ -20,6 +20,11 @@ func (handler *Handler) relayProvider(meta *plugin.TaskMeta, language string) co
 	provider := contract.PluginProvider{
 		ID: contract.PluginProviderRelay, Name: meta.Name.In(language), BaseURL: meta.BaseURL, Auth: relayServiceAuth(meta),
 		Models: slices.Clone(meta.Models), Protocols: []contract.PluginProviderProtocol{},
+		ConfigSchema: meta.ChannelConfig, KeyHint: meta.KeyHint.In(language),
+	}
+	if target := handler.plugins.Current().Plugin(meta.Key); target != nil {
+		provider.Login = target.HasTaskHook("login")
+		provider.Balance = target.HasTaskHook("buildBalanceRequest")
 	}
 	for _, capability := range handler.relayCapabilities(meta) {
 		if capability.ConvertTo == "" {
@@ -120,6 +125,11 @@ func (handler *Handler) applyRelayProvider(service *contract.Service) error {
 	if len(service.Capabilities) == 0 {
 		return fmt.Errorf("none of the routes of %s is one AstrLink serves yet", meta.Key)
 	}
+	settings, err := relaySettings(meta, service.Plugin.Settings)
+	if err != nil {
+		return err
+	}
+	service.Plugin.Settings = settings
 	if service.HTTP != nil {
 		if service.HTTP.BaseURL == "" {
 			service.HTTP.BaseURL = meta.BaseURL
@@ -159,4 +169,36 @@ func (handler *Handler) checkRelayKey(ctx context.Context, service contract.Serv
 		return fmt.Errorf("%s", result.Error.In(handler.pluginPageView().Language))
 	}
 	return nil
+}
+
+// relaySettings checks a relay provider's settings against its plugin's
+// channelConfig: members the schema does not declare are dropped, and a
+// value it refuses fails the save, naming the field. Without a schema the
+// provider keeps none.
+func relaySettings(meta *plugin.TaskMeta, settings json.RawMessage) (json.RawMessage, error) {
+	if len(settings) == 0 {
+		return nil, nil
+	}
+	schema, err := plugin.ParseConfigSchema(meta.ChannelConfig, true)
+	if err != nil || schema == nil {
+		return nil, nil
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(settings, &members); err != nil {
+		return nil, errors.New("plugin.settings must be a JSON object")
+	}
+	kept := map[string]json.RawMessage{}
+	for _, property := range schema.Properties {
+		if value, ok := members[property.Name]; ok && string(value) != "null" {
+			kept[property.Name] = value
+		}
+	}
+	encoded, _ := json.Marshal(kept)
+	if _, err := schema.CheckConfig(encoded); err != nil {
+		return nil, fmt.Errorf("the provider's settings: %v", err)
+	}
+	if len(kept) == 0 {
+		return nil, nil
+	}
+	return encoded, nil
 }

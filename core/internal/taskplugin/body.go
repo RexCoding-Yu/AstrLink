@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 )
@@ -54,6 +55,22 @@ type Body struct {
 	JSON   json.RawMessage
 	Fields map[string][]string
 	Files  []Upload
+	// order is the fields' names in the order they first appear.
+	order []string
+}
+
+// FieldNames are the names of a form body's text fields, in the order they
+// first appear.
+func (body *Body) FieldNames() []string {
+	if len(body.order) > 0 {
+		return slices.Clone(body.order)
+	}
+	names := make([]string, 0, len(body.Fields))
+	for name := range body.Fields {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // ReadBody reads a request body by its media type. limit bounds a JSON or
@@ -132,6 +149,9 @@ func readMultipart(body io.Reader, boundary string) (*Body, error) {
 			fieldBytes += int64(len(value))
 			if err != nil || fieldBytes > maxFieldsBytes {
 				return nil, failure(http.StatusRequestEntityTooLarge, "request_too_large", "the form fields are larger than 1 MiB")
+			}
+			if _, seen := result.Fields[name]; !seen {
+				result.order = append(result.order, name)
 			}
 			result.Fields[name] = append(result.Fields[name], string(value))
 			continue

@@ -2,12 +2,14 @@ package controlapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
 )
 
@@ -74,5 +76,21 @@ func TestAProviderPluginOffersARelayProvider(t *testing.T) {
 	if response := serviceRequestForTest(t, handler, http.MethodPost, ServicesPath, "application/json",
 		`{"name":"Vendor","kind":"plugin","plugin":{"key":"vendor","provider":"relay","upstream":"new_api"},"http":{"base_url":"","auth":{"scheme":"none"}},"capabilities":[]}`, ""); response.Code < 400 {
 		t.Fatalf("a relay provider through another gateway = %d", response.Code)
+	}
+}
+
+func TestRelaySettingsKeepWhatTheSchemaDeclares(t *testing.T) {
+	checked, err := plugin.Check(plugin.Source{File: "plugin.js", Text: `export const meta = { apiVersion: 1, key: "vendor", name: "Vendor", version: "1.0.0", author: { name: "Test" },
+  channelConfig: { type: "object", properties: { region: { type: "string", title: "Region", enum: ["us", "eu"], default: "us" } } },
+  relay: [{ incoming_path: "/v1/chat/completions", upstream_path: "/v1/chat/completions" }] };`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := relaySettings(checked.Task, json.RawMessage(`{"region":"eu","stray":1}`))
+	if err != nil || string(settings) != `{"region":"eu"}` {
+		t.Fatalf("settings = %s, %v", settings, err)
+	}
+	if _, err := relaySettings(checked.Task, json.RawMessage(`{"region":"mars"}`)); err == nil || !strings.Contains(err.Error(), "region") {
+		t.Fatalf("a value the schema refuses = %v", err)
 	}
 }

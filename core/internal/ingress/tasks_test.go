@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/astrlink/core/contract"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
 	"github.com/QuantumNous/astrlink/core/internal/plugin"
+	"github.com/QuantumNous/astrlink/core/internal/pluginhost"
 	"github.com/QuantumNous/astrlink/core/internal/secretstore"
 	"github.com/QuantumNous/astrlink/core/internal/storage"
 	"github.com/QuantumNous/astrlink/core/internal/taskplugin"
@@ -209,10 +210,14 @@ func newTaskGatewayOf(t *testing.T, vendor http.Handler, providers func(taskProv
 	})
 	records := &taskRecords{}
 	return &taskGateway{
-		handler: NewWithDependencies(Dependencies{Resolver: resolver, Tasks: engine, RequestRecords: records}),
+		handler: NewWithDependencies(Dependencies{Resolver: resolver, Tasks: engine, RequestRecords: records, Plugins: taskRequestPlugins}),
 		engine:  engine, store: store, records: records, services: services,
 	}
 }
+
+// taskRequestPlugins, when a test sets it, runs request processing
+// instances in front of the task gateways it makes.
+var taskRequestPlugins *pluginhost.Host
 
 func (gateway *taskGateway) do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()

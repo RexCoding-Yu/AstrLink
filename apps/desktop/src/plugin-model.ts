@@ -409,6 +409,14 @@ export interface PluginProvider {
   protocols: { protocol: string; stream: boolean; sync: boolean }[];
   convert?: boolean;
   models?: string[];
+  /** The schema of a new-api provider plugin's settings, as it wrote it. */
+  config_schema?: unknown;
+  /** Shown with the provider's key as its hint. */
+  key_hint?: string;
+  /** The plugin logs in to an account instead of taking a key. */
+  login?: boolean;
+  /** The plugin reads the account's balance. */
+  balance?: boolean;
 }
 
 /** The project a development build comes from. */
@@ -1393,6 +1401,10 @@ function parseProvider(value: unknown, path: string): PluginProvider {
   const provider = plugin.object(value, path);
   const auth = plugin.object(provider.auth, `${path}.auth`);
   return defined({
+    config_schema: provider.config_schema,
+    key_hint: plugin.optionalString(provider.key_hint, `${path}.key_hint`),
+    login: plugin.optionalBoolean(provider.login, `${path}.login`),
+    balance: plugin.optionalBoolean(provider.balance, `${path}.balance`),
     id: plugin.string(provider.id, `${path}.id`),
     name: plugin.string(provider.name, `${path}.name`),
     base_url: plugin.optionalString(provider.base_url, `${path}.base_url`),

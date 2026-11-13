@@ -10,6 +10,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -385,5 +386,73 @@ func TestARequestPluginSetsTheEffortAndShrinksImages(t *testing.T) {
 	_ = gateway.chat(string(body))
 	if effort := gjson.Get(gateway.sent[1], "reasoning_effort").String(); effort != "low" {
 		t.Fatalf("the client's effort became %q", effort)
+	}
+}
+
+// promptGuard rejects a submission whose prompt names a word, at ingress,
+// and checks the body the task plugin built, at egress.
+const promptGuard = `export const meta = { apiVersion: 1, key: "prompt-guard", name: "Prompt guard", version: "1.0.0", author: { name: "Test" } };
+export function ingress(ctx, req) {
+  if (ctx.format !== "task" || !req.body.prompt) return { action: "continue" };
+  if (req.body.prompt.includes("forbidden")) return { action: "reject", code: "prompt.blocked", message: "Not this prompt" };
+  return { action: "continue", effects: [{ type: "json.patch", ops: [{ op: "replace", path: "/prompt", value: req.body.prompt + ", watercolor" }] }] };
+}
+export function egress(ctx, req) {
+  if (JSON.stringify(req.body).includes("secret")) return { action: "reject", code: "egress.blocked" };
+  return { action: "continue" };
+}
+`
+
+func TestRequestPluginsCheckTaskSubmissions(t *testing.T) {
+	manager := plugin.NewManager(plugin.ManagerOptions{
+		Builtin:  fstest.MapFS{"prompt-guard/plugin.js": &fstest.MapFile{Data: []byte(promptGuard)}},
+		Settings: pluginSettings{"prompt-guard": plugin.Settings{Enabled: true}},
+	})
+	if err := manager.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	host := pluginhost.New(pluginhost.Options{Plugins: manager, Logf: t.Logf})
+	t.Cleanup(host.Close)
+	instances := []contract.RequestPluginInstance{{ID: "rpi_guard0001", Name: "Guard", Plugin: "prompt-guard", Enabled: true, Models: []string{}}}
+	if _, err := host.UpdateSettings(context.Background(), contract.PluginHostSettingsUpdate{RequestPlugins: &instances}); err != nil {
+		t.Fatal(err)
+	}
+	taskRequestPlugins = host
+	t.Cleanup(func() { taskRequestPlugins = nil })
+	var sent []string
+	vendor := soraVendor(t)
+	gateway := newTaskGateway(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			body, _ := io.ReadAll(request.Body)
+			sent = append(sent, string(body))
+			request.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		vendor.ServeHTTP(writer, request)
+	}))
+	created := gateway.do(t, http.MethodPost, "/v1/videos", `{"model":"sora-2","prompt":"a paper boat","seconds":"4"}`)
+	if created.Code != http.StatusOK || len(sent) != 1 || !strings.Contains(sent[0], "a paper boat, watercolor") {
+		t.Fatalf("create = %d %s, sent %v", created.Code, created.Body, sent)
+	}
+	refused := gateway.do(t, http.MethodPost, "/v1/videos", `{"model":"sora-2","prompt":"a forbidden boat","seconds":"4"}`)
+	if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), "Not this prompt (code: prompt.blocked)") || len(sent) != 1 {
+		t.Fatalf("refused = %d %s", refused.Code, refused.Body)
+	}
+	stopped := gateway.do(t, http.MethodPost, "/v1/videos", `{"model":"sora-2","prompt":"a secret boat","seconds":"4"}`)
+	if stopped.Code != http.StatusBadRequest || !strings.Contains(stopped.Body.String(), "egress.blocked") || len(sent) != 1 {
+		t.Fatalf("stopped at egress = %d %s, sent %d", stopped.Code, stopped.Body, len(sent))
+	}
+	// A form body's text fields take the same change.
+	var form bytes.Buffer
+	writer := multipart.NewWriter(&form)
+	_ = writer.WriteField("model", "sora-2")
+	_ = writer.WriteField("prompt", "a paper crane")
+	_ = writer.WriteField("seconds", "4")
+	_ = writer.Close()
+	request := httptest.NewRequest(http.MethodPost, "/v1/videos", &form)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	gateway.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || len(sent) != 2 || !strings.Contains(sent[1], "a paper crane, watercolor") {
+		t.Fatalf("form = %d %s, sent %v", response.Code, response.Body, sent)
 	}
 }

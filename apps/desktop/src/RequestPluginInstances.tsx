@@ -70,7 +70,7 @@ function localized(text: unknown, locale: string): string {
   );
 }
 
-function schemaProperties(schema: unknown): [string, SchemaField][] {
+export function schemaProperties(schema: unknown): [string, SchemaField][] {
   if (!schema || typeof schema !== "object") return [];
   const properties = (schema as { properties?: Record<string, SchemaField> })
     .properties;
@@ -78,7 +78,7 @@ function schemaProperties(schema: unknown): [string, SchemaField][] {
 }
 
 /** The config an editor starts from: each default, then what is saved. */
-function startingConfig(
+export function startingConfig(
   schema: unknown,
   saved: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
@@ -87,6 +87,41 @@ function startingConfig(
     if (field.default !== undefined) config[name] = field.default;
   }
   return { ...config, ...saved };
+}
+
+/**
+ * The fields of a plugin's config schema, those visibleWhen shows, each
+ * by its type and format.
+ */
+export function ConfigSchemaFields({
+  idPrefix,
+  onChange,
+  onInvalid,
+  schema,
+  value,
+}: {
+  idPrefix: string;
+  onChange: (key: string, value: unknown) => void;
+  onInvalid?: (key: string, invalid: boolean) => void;
+  schema: unknown;
+  value: Record<string, unknown>;
+}) {
+  return (
+    <>
+      {schemaProperties(schema)
+        .filter(([, field]) => visible(field, value))
+        .map(([key, field]) => (
+          <ConfigField
+            field={field}
+            id={`${idPrefix}-${key}`}
+            key={key}
+            onChange={(next) => onChange(key, next)}
+            onInvalid={(bad) => onInvalid?.(key, bad)}
+            value={value[key]}
+          />
+        ))}
+    </>
+  );
 }
 
 /** Whether a field shows: every sibling it names holds one of its values. */
@@ -408,22 +443,17 @@ function InstanceEditor({
               <h4 className="text-xs font-medium text-muted-foreground">
                 {t("plugins.requestPlugins.config")}
               </h4>
-              {fields
-                .filter(([, field]) => visible(field, config))
-                .map(([key, field]) => (
-                  <ConfigField
-                    field={field}
-                    id={`${id}-${key}`}
-                    key={key}
-                    onChange={(value) =>
-                      setConfig((current) => ({ ...current, [key]: value }))
-                    }
-                    onInvalid={(bad) =>
-                      setInvalid((current) => ({ ...current, [key]: bad }))
-                    }
-                    value={config[key]}
-                  />
-                ))}
+              <ConfigSchemaFields
+                idPrefix={id}
+                onChange={(key, value) =>
+                  setConfig((current) => ({ ...current, [key]: value }))
+                }
+                onInvalid={(key, bad) =>
+                  setInvalid((current) => ({ ...current, [key]: bad }))
+                }
+                schema={schema}
+                value={config}
+              />
             </section>
           ) : null}
           {error ? <FormMessage tone="error">{error}</FormMessage> : null}

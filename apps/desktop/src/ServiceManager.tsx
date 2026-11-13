@@ -167,6 +167,11 @@ import { decodeModelEditorValue, encodeModelEditorValue } from "./model-editor";
 import { filterModels } from "./model-groups";
 import { PluginSlot } from "./plugin-ui";
 import {
+  ConfigSchemaFields,
+  schemaProperties,
+  startingConfig,
+} from "./RequestPluginInstances";
+import {
   ServiceModelsEditor,
   type UpstreamModelSnapshot,
 } from "./ServiceModelsEditor";
@@ -1298,6 +1303,7 @@ export function ServiceManager({
     draftForKind("codex_subscription", protocols),
   );
   const [editing, setEditing] = useState<ServiceRecord | null>(null);
+  const pluginProvider = usePluginProvider(draft.plugin);
   const [baseline, setBaseline] = useState<string | null>(null);
   // A preset address stays read-only until the user asks to type their own.
   const [customSite, setCustomSite] = useState(false);
@@ -3993,7 +3999,8 @@ export function ServiceManager({
                               hint: savedKeyHint,
                             })
                           : t("services.apiKeySaved")
-                        : t("services.apiKeyPaste")
+                        : (pluginProvider?.key_hint ??
+                          t("services.apiKeyPaste"))
                     }
                     type="password"
                     value={draft.secret}
@@ -4005,6 +4012,44 @@ export function ServiceManager({
                     }
                   />
                 </Field>
+              ) : null}
+              {pluginProvider &&
+              schemaProperties(pluginProvider.config_schema).length > 0 ? (
+                <section
+                  className="grid gap-4 border-t pt-4"
+                  data-testid="plugin-provider-settings"
+                >
+                  <h4 className="text-xs font-medium text-muted-foreground">
+                    {t("services.pluginSettings")}
+                  </h4>
+                  <ConfigSchemaFields
+                    idPrefix="plugin-provider-settings"
+                    onChange={(key, value) =>
+                      setDraft((current) =>
+                        current.plugin
+                          ? {
+                              ...current,
+                              plugin: {
+                                ...current.plugin,
+                                settings: {
+                                  ...startingConfig(
+                                    pluginProvider.config_schema,
+                                    current.plugin.settings,
+                                  ),
+                                  [key]: value,
+                                },
+                              },
+                            }
+                          : current,
+                      )
+                    }
+                    schema={pluginProvider.config_schema}
+                    value={startingConfig(
+                      pluginProvider.config_schema,
+                      draft.plugin?.settings,
+                    )}
+                  />
+                </section>
               ) : null}
               {editing?.service.http?.credential_ref ? (
                 <Label className="flex items-start gap-2 border-t pt-4 text-xs font-normal text-muted-foreground">
@@ -4425,4 +4470,38 @@ export function ServiceManager({
       ) : null}
     </section>
   );
+}
+
+/**
+ * The provider a plugin offers for a provider of kind plugin, as the
+ * plugin describes it now: its settings' schema, key hint, and whether it
+ * logs in or reads a balance. null until it is read, and for any other
+ * provider.
+ */
+function usePluginProvider(
+  plugin: ServicePlugin | undefined,
+): PluginProvider | null {
+  const [provider, setProvider] = useState<PluginProvider | null>(null);
+  const key = plugin?.key;
+  const id = plugin?.provider;
+  useEffect(() => {
+    setProvider(null);
+    if (!key || !id || id === "task") return;
+    let current = true;
+    void Promise.resolve()
+      .then(() => listPlugins())
+      .then((list) => {
+        const found = list.plugins
+          .find((candidate) => candidate.key === key)
+          ?.providers?.find((candidate) => candidate.id === id);
+        if (current) setProvider(found ?? null);
+      })
+      .catch(() => {
+        if (current) setProvider(null);
+      });
+    return () => {
+      current = false;
+    };
+  }, [key, id]);
+  return provider;
 }

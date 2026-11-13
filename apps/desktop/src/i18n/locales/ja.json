@@ -1428,7 +1428,8 @@
     "keyFileReplace": "変更",
     "vertexKeyProject": "キーのプロジェクト: {{project}}",
     "vertexCredentialSaved": "サービスアカウントキーを保存済み",
-    "reorderCardKeys": "カードをドラッグして並べ替えます。ハンドルにフォーカスして矢印キーでも移動できます"
+    "reorderCardKeys": "カードをドラッグして並べ替えます。ハンドルにフォーカスして矢印キーでも移動できます",
+    "pluginSettings": "プラグインの設定"
   },
   "packages": {
     "subscriptions": "サブスクリプション",

@@ -119,6 +119,54 @@ type RequestAttempt struct {
 	// messageCount, toolCount, lastUserTextLength, totalTextLength,
 	// hasImages and reasoningEffort.
 	Summary map[string]any
+	// Form marks the text fields of a form body, which take only replaces
+	// of a field with a string.
+	Form bool
+}
+
+// IngressForm runs the ingress hooks over the text fields of a form body:
+// each field with its value, or its values for a repeated one. A hook may
+// only replace a field's value, or one value of a repeated field, with a
+// string; the files stay as they are.
+func (run *RequestRun) IngressForm(ctx context.Context, protocol contract.ProtocolID, names []string, fields map[string][]string) (map[string][]string, *RequestRefusal) {
+	if !run.Serves(contract.RequestStageIngress) {
+		return fields, nil
+	}
+	object := map[string]any{}
+	for _, name := range names {
+		values := fields[name]
+		if len(values) == 1 {
+			object[name] = values[0]
+		} else {
+			object[name] = values
+		}
+	}
+	body, _ := json.Marshal(object)
+	changed, refusal := run.stage(ctx, contract.RequestStageIngress, protocol, RequestAttempt{Form: true}, body, nil, nil)
+	if refusal != nil || bytes.Equal(changed, body) {
+		return fields, refusal
+	}
+	var written map[string]any
+	if json.Unmarshal(changed, &written) != nil {
+		return fields, nil
+	}
+	result := map[string][]string{}
+	for name, values := range fields {
+		result[name] = slices.Clone(values)
+	}
+	for name, value := range written {
+		switch typed := value.(type) {
+		case string:
+			result[name] = []string{typed}
+		case []any:
+			for index, item := range typed {
+				if text, ok := item.(string); ok && index < len(result[name]) {
+					result[name][index] = text
+				}
+			}
+		}
+	}
+	return result, nil
 }
 
 // Reasoning is the effort the request stage's reasoning.set gave, and
@@ -307,6 +355,16 @@ func (run *RequestRun) Outbound(ctx context.Context, attempt RequestAttempt, bod
 	return body, nil
 }
 
+// Egress runs the egress hooks alone over a body, as a task submission's
+// attempt does on the body its task plugin built.
+func (run *RequestRun) Egress(ctx context.Context, protocol contract.ProtocolID, body []byte) *RequestRefusal {
+	if !run.Serves(contract.RequestStageEgress) {
+		return nil
+	}
+	_, refusal := run.stage(ctx, contract.RequestStageEgress, protocol, RequestAttempt{Protocol: protocol}, body, nil, nil)
+	return refusal
+}
+
 // stage runs one stage's hooks in order, each on what the one before left.
 func (run *RequestRun) stage(ctx context.Context, stage string, protocol contract.ProtocolID, attempt RequestAttempt, body []byte, header http.Header, view RequestView) ([]byte, *RequestRefusal) {
 	setHeaders := map[string]string{}
@@ -407,6 +465,9 @@ func (run *RequestRun) call(ctx context.Context, current *requestInstance, stage
 		view["upstreamModel"] = attempt.UpstreamModel
 	}
 	request := map[string]any{"body": json.RawMessage(shown), "media": mediaView(media)}
+	if attempt.Form {
+		request["form"] = true
+	}
 	if stage == contract.RequestStageRequest && attempt.Summary != nil {
 		request["summary"] = attempt.Summary
 	}
@@ -443,8 +504,17 @@ func (run *RequestRun) call(ctx context.Context, current *requestInstance, stage
 		if !slices.Contains(allowed, effect.Type) {
 			return stageEdit{}, stageResult{}, fmt.Errorf("effect %d: %s does not take %q", index, stage, effect.Type)
 		}
+		if attempt.Form && effect.Type != "json.patch" && effect.Type != "media.text" {
+			return stageEdit{}, stageResult{}, fmt.Errorf("effect %d: a form body takes json.patch replaces alone", index)
+		}
 		switch effect.Type {
 		case "json.patch":
+			for _, operation := range effect.Ops {
+				var text string
+				if attempt.Form && (operation.Op != "replace" || json.Unmarshal(operation.Value, &text) != nil) {
+					return stageEdit{}, stageResult{}, errors.New("a form body takes replaces of a text field with a string alone")
+				}
+			}
 			operations += len(effect.Ops)
 			if operations > maxRelayOperations {
 				return stageEdit{}, stageResult{}, fmt.Errorf("the effects hold more than %d operations", maxRelayOperations)

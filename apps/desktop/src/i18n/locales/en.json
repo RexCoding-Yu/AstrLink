@@ -1428,7 +1428,8 @@
     "keyFileReplace": "Replace",
     "vertexKeyProject": "Key project: {{project}}",
     "vertexCredentialSaved": "Saved service account key",
-    "reorderCardKeys": "Drag cards to reorder; or focus the handle and use the arrow keys"
+    "reorderCardKeys": "Drag cards to reorder; or focus the handle and use the arrow keys",
+    "pluginSettings": "Plugin settings"
   },
   "packages": {
     "subscriptions": "Subscriptions",

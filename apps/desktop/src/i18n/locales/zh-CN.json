@@ -1428,7 +1428,8 @@
     "keyFileReplace": "更换",
     "vertexKeyProject": "密钥项目 {{project}}",
     "vertexCredentialSaved": "已保存服务账号密钥",
-    "reorderCardKeys": "拖动卡片排序；聚焦手柄后也可按方向键移动"
+    "reorderCardKeys": "拖动卡片排序；聚焦手柄后也可按方向键移动",
+    "pluginSettings": "插件设置"
   },
   "packages": {
     "subscriptions": "订阅套餐",

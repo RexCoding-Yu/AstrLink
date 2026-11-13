@@ -61,6 +61,14 @@ type PluginProvider struct {
 	Protocols []PluginProviderProtocol `json:"protocols"`
 	Convert   bool                     `json:"convert,omitempty"`
 	Models    []string                 `json:"models,omitempty"`
+	// ConfigSchema is the schema of the provider's settings, as the plugin
+	// wrote it; KeyHint is shown with its key. Login says the plugin logs
+	// in to an account instead of taking a key, and Balance that it reads
+	// the account's balance.
+	ConfigSchema json.RawMessage `json:"config_schema,omitempty"`
+	KeyHint      string          `json:"key_hint,omitempty"`
+	Login        bool            `json:"login,omitempty"`
+	Balance      bool            `json:"balance,omitempty"`
 }
 
 // PluginProviderProtocol is what a plugin serves of one protocol.
