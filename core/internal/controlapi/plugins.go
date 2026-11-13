@@ -167,14 +167,14 @@ func (handler *Handler) writePluginList(writer http.ResponseWriter) {
 	summaries := make([]contract.PluginSummary, 0, len(plugins))
 	language := handler.pluginPageView().Language
 	for _, target := range plugins {
-		summary := pluginSummary(target, language)
+		summary := handler.pluginSummary(target, language)
 		handler.countTasks(context.Background(), target, &summary)
 		summaries = append(summaries, summary)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"directory": handler.plugins.Dir(), "plugins": summaries})
 }
 
-func pluginSummary(target *plugin.Plugin, language string) contract.PluginSummary {
+func (handler *Handler) pluginSummary(target *plugin.Plugin, language string) contract.PluginSummary {
 	summary := contract.PluginSummary{
 		Key:                   target.Key,
 		Name:                  target.Key,
@@ -214,8 +214,13 @@ func pluginSummary(target *plugin.Plugin, language string) contract.PluginSummar
 		if target.Enabled() {
 			summary.Providers = append(summary.Providers, taskProvider(meta, language))
 		}
+	} else if target.NewAPI() != nil {
+		summary.Kind = contract.PluginKindProvider
 	} else if target.Loaded() {
 		summary.Kind = contract.PluginKindExtension
+	}
+	if meta := target.NewAPI(); meta != nil && len(meta.Relay) > 0 && target.Enabled() {
+		summary.Providers = append(summary.Providers, handler.relayProvider(meta, language))
 	}
 	if !target.Loaded() {
 		summary.State = contract.PluginStateFailed
@@ -288,7 +293,7 @@ func (handler *Handler) writePluginDetail(writer http.ResponseWriter, ctx contex
 }
 
 func (handler *Handler) pluginDetail(ctx context.Context, target *plugin.Plugin) (contract.PluginDetail, error) {
-	summary := pluginSummary(target, handler.pluginPageView().Language)
+	summary := handler.pluginSummary(target, handler.pluginPageView().Language)
 	handler.countTasks(ctx, target, &summary)
 	detail := contract.PluginDetail{
 		PluginSummary:  summary,

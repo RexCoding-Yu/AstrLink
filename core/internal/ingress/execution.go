@@ -212,6 +212,7 @@ func (handler *Handler) executeCandidatesWithTest(
 		var plan contract.ExecutionPlan
 		var planErr error
 		convertTo := declaredConvertTo(candidate.Service, classified.Protocol, mode)
+		routed := false
 		upstreamModel := candidate.UpstreamModel
 		if upstreamModel == "" {
 			upstreamModel = classified.routingModel()
@@ -221,6 +222,13 @@ func (handler *Handler) executeCandidatesWithTest(
 			convertTo = ""
 			if format != classified.Protocol {
 				convertTo = format
+			}
+		} else if upstream, ok := handler.plugins.RelayUpstreamProtocol(candidate.Service, request.URL.Path, upstreamModel); ok {
+			// The route of the plugin that serves the model says whether
+			// the request is converted, and into what.
+			convertTo, routed = "", true
+			if upstream != classified.Protocol {
+				convertTo = upstream
 			}
 		}
 		if test != nil {
@@ -240,7 +248,7 @@ func (handler *Handler) executeCandidatesWithTest(
 			plan, planErr = planner.BuildRelayKit(planner.RelayKitInput{
 				Service: candidate.Service, InputProtocol: classified.Protocol,
 				UpstreamProtocol: upstreamProtocol, UpstreamModel: upstreamModel, Streaming: classified.Streaming,
-				Edges: handler.conversionEngine.Edges(),
+				Edges: handler.conversionEngine.Edges(), Routed: routed,
 			})
 		} else {
 			plan, planErr = planner.BuildAlpha(planner.AlphaInput{
@@ -929,6 +937,7 @@ func (handler *Handler) executeCandidatesWithTest(
 			// and turns the answer into the attempt's protocol.
 			forwardErr = handler.plugins.ForwardProvider(startWriter, attemptRequest, forwardTarget, pluginhost.ProviderAttempt{
 				Protocol: plan.UpstreamProtocol, Model: upstreamModel, Stream: classified.Streaming, Index: candidateIndex,
+				ClientPath: request.URL.Path,
 			}, handler.providerTransport.RoundTrip)
 		} else if turn := responsesWSTurnFromContext(request.Context()); turn != nil {
 			forwardErr = turn.forward(startWriter, attemptRequest, forwardTarget, candidate, upstreamModel)

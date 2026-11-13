@@ -29,6 +29,24 @@ func isTaskModule(module *moejs.Module) bool {
 	return slices.Contains(module.Exports(), "buildSubmitRequest")
 }
 
+// isNewAPIMeta reports whether the manifest a plugin's top level exported
+// is new-api's: one with meta.relay or meta.author, which AstrLink's own
+// manifest does not have. A new-api plugin with only a provider part
+// exports no task hook to tell it by.
+func isNewAPIMeta(runtime *moejs.Runtime) bool {
+	value, ok := runtime.Export("meta")
+	if !ok {
+		return false
+	}
+	var members map[string]json.RawMessage
+	if err := runtime.UnmarshalWith(value, &members, moejs.DecodeOptions{MaxBytes: 1 << 20, MaxNodes: 1 << 16}); err != nil {
+		return false
+	}
+	_, relay := members["relay"]
+	_, author := members["author"]
+	return relay || author
+}
+
 // taskLimits are the limits of a task plugin's hooks: conversions of whole
 // media requests and responses take more time, memory and result than the
 // hooks of a turn.
@@ -110,7 +128,7 @@ func loadTask(source Source, module *moejs.Module, parsed *syntax.Module, limits
 					}
 				}
 			}
-		case slices.Contains(taskHooks, name):
+		case slices.Contains(taskHooks, name) || slices.Contains(relayHooks, name):
 			hook, err := module.Hook(name)
 			if err != nil || !callable(hook) {
 				return nil, &LoadError{Code: CodeNotFunction, File: source.File, Message: fmt.Sprintf("the export %q is not a function", name)}
@@ -155,28 +173,42 @@ func readTaskMeta(runtime *moejs.Runtime, file string) (*TaskMeta, error) {
 	return &meta, nil
 }
 
-// ReadTaskSource reads a task plugin from a source directory: a plugin.js
-// that exports buildSubmitRequest, with no package.json to build it from.
-// Such a plugin installs and runs as it is, never built.
+// ReadTaskSource reads a new-api plugin from a source directory: a
+// plugin.js that exports buildSubmitRequest or lists meta.relay, with no
+// package.json to build it from. Such a plugin installs and runs as it is,
+// never built.
 func ReadTaskSource(dir string) (string, bool) {
 	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
 		return "", false
 	}
 	text, err := os.ReadFile(filepath.Join(dir, "plugin.js"))
-	if err != nil || len(text) > MaxSourceBytes || !bytes.Contains(text, []byte("buildSubmitRequest")) {
+	if err != nil || len(text) > MaxSourceBytes || (!bytes.Contains(text, []byte("buildSubmitRequest")) && !bytes.Contains(text, []byte("relay"))) {
 		return "", false
 	}
 	return string(text), true
 }
 
-// Task returns the manifest of a task plugin, nil for any other plugin and
-// for one that did not load.
+// Task returns the manifest of a plugin with a task part, nil for any
+// other plugin and for one that did not load.
 func (plugin *Plugin) Task() *TaskMeta {
+	if plugin.program == nil || plugin.program.task == nil || !plugin.program.task.taskPart {
+		return nil
+	}
+	return plugin.program.task
+}
+
+// NewAPI returns the manifest of a plugin written for new-api's plugin API
+// v1, whatever its parts, nil for any other plugin and for one that did not
+// load.
+func (plugin *Plugin) NewAPI() *TaskMeta {
 	if plugin.program == nil {
 		return nil
 	}
 	return plugin.program.task
 }
+
+// HasTaskPart reports whether a new-api plugin's manifest has a task part.
+func (meta *TaskMeta) HasTaskPart() bool { return meta != nil && meta.taskPart }
 
 // HasTaskHook reports whether a task plugin exports the hook at path.
 func (plugin *Plugin) HasTaskHook(path string) bool {

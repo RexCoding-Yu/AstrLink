@@ -50,7 +50,7 @@ func newFakeMarket(t *testing.T) *fakeMarket {
 	index := fmt.Sprintf(`{"indexVersion": 1, "name": "New API Official Plugins", "plugins": [
 		{"key": "incho", "name": "Incho", "icon": "text", "iconFile": {"path": "incho/1.0.2/icon.svg", "sha256": %q},
 		 "latest": "1.0.2", "versions": [{"version": "1.0.2", "path": "incho/1.0.2/plugin.js", "sha256": "00"}], "models": ["incho-1"]},
-		{"key": "kling", "name": "Kling", "icon": "Kling.Color", "task": true, "provider": true, "transform": false,
+		{"key": "kling", "name": "Kling", "icon": "Kling.Color", "task": true, "provider": true, "transform": true,
 		 "latest": "1.1.1", "versions": [{"version": "1.1.1", "path": "kling/1.1.1/plugin.js", "sha256": "00"}]},
 		{"key": "sora", "name": "Sora", "icon": "Sora.Color", "code": "10000001",
 		 "latest": "1.1.0", "versions": [{"version": "1.1.0", "path": "sora/1.1.0/plugin.js", "sha256": "00"}]},
@@ -204,9 +204,10 @@ func TestAMarketListsItsPluginsBeforeIconsThatTakeTooLong(t *testing.T) {
 	if len(listed.Plugins) != 4 {
 		t.Fatalf("listed = %+v", listed)
 	}
-	// A provider part, which this gateway does not run, is listed so.
+	// A request processing part, which this gateway does not run, is
+	// listed so; a provider part it runs.
 	for _, entry := range listed.Plugins {
-		if want := entry.Key == "kling"; want != slices.Equal(entry.Unsupported, []string{contract.PluginPartProvider}) {
+		if want := entry.Key == "kling"; want != slices.Equal(entry.Unsupported, []string{contract.PluginPartTransform}) {
 			t.Fatalf("%s unsupported = %v", entry.Key, entry.Unsupported)
 		}
 	}

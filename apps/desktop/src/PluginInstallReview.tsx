@@ -246,6 +246,10 @@ export function PluginInstallReviewView({
               <StatusBadge tone="neutral">
                 {t("plugins.install.taskKind")}
               </StatusBadge>
+            ) : review.kind === "provider" ? (
+              <StatusBadge tone="neutral">
+                {t("plugins.install.providerKind")}
+              </StatusBadge>
             ) : null}
           </span>
           {review.description ? (

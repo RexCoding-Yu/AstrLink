@@ -61,6 +61,17 @@ type TaskMeta struct {
 	UsageExamples        json.RawMessage     `json:"usageExamples,omitempty"`
 	UsageProfiles        json.RawMessage     `json:"usageProfiles,omitempty"`
 	Auth                 TaskAuth            `json:"auth,omitempty"`
+	// Relay are the routes of the provider part: the API requests a
+	// provider of the plugin serves, and where they go upstream.
+	Relay []RelayRoute `json:"relay,omitempty"`
+	// ChannelConfig is the schema of the settings a provider of the plugin
+	// takes, such as a region; KeyHint is shown with its key.
+	ChannelConfig json.RawMessage `json:"channelConfig,omitempty"`
+	KeyHint       LocalizedText   `json:"keyHint,omitempty"`
+
+	// taskPart is set for a plugin with a task part: one that exports
+	// buildSubmitRequest.
+	taskPart bool
 }
 
 // TaskAuthor is who wrote a task plugin, as it says.
@@ -232,13 +243,15 @@ var (
 	routeParamPattern  = regexp.MustCompile(`^:[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
-// validateTaskMeta checks a task plugin's manifest against key, the name it
-// was found under, as new-api's v1 contract does, and the exports against
-// what the manifest declares.
+// validateTaskMeta checks a new-api plugin's manifest against key, the
+// name it was found under, as new-api's v1 contract does, and the exports
+// against what the manifest declares: the task part's when it exports
+// buildSubmitRequest, the provider part's when meta.relay is not empty.
 func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) error {
 	invalid := func(format string, args ...any) error {
 		return &LoadError{Code: CodeInvalidMeta, Message: fmt.Sprintf(format, args...)}
 	}
+	meta.taskPart = exported["buildSubmitRequest"]
 	switch {
 	case meta.APIVersion != 1:
 		return invalid("meta.apiVersion %d is not supported; task plugins use 1", meta.APIVersion)
@@ -260,10 +273,15 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 		return invalid("meta.author.url must be an absolute http or https URL")
 	case meta.Website != "" && !strings.HasPrefix(strings.ToLower(meta.Website), "https://") || meta.Website != "" && !httpURL(meta.Website, false):
 		return invalid("meta.website must be an absolute https URL")
-	case meta.FetchMode != "per_task" && meta.FetchMode != "batch":
+	case !meta.taskPart && len(meta.Relay) == 0:
+		return invalid("the plugin has no part this host runs: a task part exports buildSubmitRequest, a provider part lists meta.relay")
+	case meta.taskPart && meta.FetchMode != "per_task" && meta.FetchMode != "batch":
 		return invalid("meta.fetchMode must be per_task or batch")
-	case len(meta.Models) == 0:
+	case meta.taskPart && len(meta.Models) == 0:
 		return invalid("meta.models must list at least one model")
+	case !meta.taskPart && (len(meta.Routes) > 0 || len(meta.Protocols) > 0 || meta.FetchMode != "" || len(meta.SubmitResponseTypes) > 0 ||
+		len(meta.UsageSchema) > 0 || len(meta.UsageExamples) > 0 || len(meta.UsageProfiles) > 0 || meta.Auth != "" || len(meta.ChannelTypes) > 0 || len(meta.Upstreams) > 0):
+		return invalid("a plugin without a task part does not declare routes, protocols, fetchMode, submitResponseTypes, usageSchema, usageExamples, usageProfiles, auth, channelTypes or upstreams")
 	}
 	if err := validateLocalized(meta.Name, 128, "meta.name"); err != nil {
 		return invalid("%s", err.Error())
@@ -314,6 +332,12 @@ func validateTaskMeta(meta *TaskMeta, key string, exported map[string]bool) erro
 		if kind != "json" && kind != "sse" {
 			return invalid("meta.submitResponseTypes may hold json and sse, not %q", kind)
 		}
+	}
+	if err := validateProviderPart(meta, exported); err != nil {
+		return invalid("%v", err)
+	}
+	if !meta.taskPart {
+		return nil
 	}
 	if meta.SubmitsSSE() && !exported["parseSubmitEvent"] && !exported["parseSubmitEventDelta"] {
 		return invalid("a plugin that reads submissions as SSE exports parseSubmitEvent or parseSubmitEventDelta")

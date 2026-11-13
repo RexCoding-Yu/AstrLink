@@ -2215,7 +2215,7 @@ describe("PluginManager", () => {
             key: "relay",
             name: "Relay",
             installed: undefined,
-            unsupported: ["provider"],
+            unsupported: ["transform"],
             link: market.index + "#relay@1.0.0",
           },
         ],
@@ -2230,7 +2230,7 @@ describe("PluginManager", () => {
       const badge = card.querySelector<HTMLElement>("[data-tone]")!;
       expect(badge.textContent).toBe("不兼容");
       expect(badge.title).toBe(
-        "需要 new-api 的提供商插件，AstrLink 还不能运行。",
+        "需要 new-api 的请求处理插件，AstrLink 还不能运行。",
       );
       expect(card.querySelector("button")).toBeNull();
       await click(card);

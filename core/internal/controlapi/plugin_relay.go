@@ -1,0 +1,126 @@
+package controlapi
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+
+	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/plugin"
+)
+
+// relayProvider is the provider a new-api plugin's provider part offers on
+// the providers page, named in language.
+func (handler *Handler) relayProvider(meta *plugin.TaskMeta, language string) contract.PluginProvider {
+	provider := contract.PluginProvider{
+		ID: contract.PluginProviderRelay, Name: meta.Name.In(language), BaseURL: meta.BaseURL, Auth: relayServiceAuth(meta),
+		Models: slices.Clone(meta.Models), Protocols: []contract.PluginProviderProtocol{},
+	}
+	for _, capability := range handler.relayCapabilities(meta) {
+		if capability.ConvertTo == "" {
+			provider.Protocols = append(provider.Protocols, contract.PluginProviderProtocol{Protocol: capability.Protocol, Stream: capability.Streaming, Sync: true})
+		}
+	}
+	return provider
+}
+
+// relayServiceAuth is how a relay provider keeps its key: as a bearer
+// token, which each route then sends as it says, or none when no route
+// sends one.
+func relayServiceAuth(meta *plugin.TaskMeta) contract.ServiceAuth {
+	for _, route := range meta.Relay {
+		if route.Auth == nil || route.Auth.Type != "none" {
+			return contract.ServiceAuth{Scheme: contract.AuthSchemeBearer}
+		}
+	}
+	return contract.ServiceAuth{Scheme: contract.AuthSchemeNone}
+}
+
+// relayCapabilities are what routing reads of a relay provider: one per
+// protocol of the routes the gateway answers, native when a route sends it
+// as it came, else converted as the first route's relaykit converter
+// does, when the gateway has it. An attempt then goes the way the route of
+// its model says. Routes the plugin's own hooks convert, and those of
+// paths the gateway does not answer, are left out.
+func (handler *Handler) relayCapabilities(meta *plugin.TaskMeta) []contract.Capability {
+	var capabilities []contract.Capability
+	add := func(capability contract.Capability) {
+		for index, have := range capabilities {
+			if have.Protocol != capability.Protocol {
+				continue
+			}
+			if have.ConvertTo != "" && capability.ConvertTo == "" {
+				capabilities[index] = capability
+			} else if have.ConvertTo == capability.ConvertTo {
+				capabilities[index].Streaming = have.Streaming || capability.Streaming
+			}
+			return
+		}
+		capabilities = append(capabilities, capability)
+	}
+	for _, route := range meta.Relay {
+		protocol := plugin.RelayProtocol(route.IncomingPath)
+		if protocol == "" || protocol == contract.ProtocolOpenAIModels || route.Plugin() {
+			continue
+		}
+		descriptor, known := contract.LookupProtocolDescriptor(protocol)
+		streaming := known && descriptor.Streaming
+		upstream := route.UpstreamProtocol()
+		if upstream == protocol {
+			if route.Relaykit() == "" {
+				add(contract.Capability{Protocol: protocol, Mode: contract.CapabilityModeNative, Streaming: streaming})
+			}
+			continue
+		}
+		edge, ok := handler.conversionEdge(protocol, upstream)
+		if !ok {
+			continue
+		}
+		add(contract.Capability{Protocol: protocol, Mode: contract.CapabilityModeNative, Streaming: streaming && edge.Streaming, ConvertTo: upstream})
+	}
+	return capabilities
+}
+
+// conversionEdge is the gateway's conversion from one protocol to another,
+// when it has one.
+func (handler *Handler) conversionEdge(from, to contract.ProtocolID) (contract.ConversionEdge, bool) {
+	engine := handler.capabilities.ConversionEngine
+	if !engine.Available {
+		return contract.ConversionEdge{}, false
+	}
+	for _, edge := range engine.Edges {
+		if edge.From == from && edge.To == to {
+			return edge, true
+		}
+	}
+	return contract.ConversionEdge{}, false
+}
+
+// applyRelayProvider fills in what a provider of a new-api plugin's
+// provider part takes from the plugin: its capabilities, how it keeps its
+// key, its address when the user named none, and its model list path.
+func (handler *Handler) applyRelayProvider(service *contract.Service) error {
+	if handler.plugins == nil {
+		return errors.New("plugins are unavailable")
+	}
+	target := handler.plugins.Current().Plugin(service.Plugin.Key)
+	if target == nil || target.NewAPI() == nil || len(target.NewAPI().Relay) == 0 {
+		return fmt.Errorf("plugin %q is not an installed plugin with a provider part", service.Plugin.Key)
+	}
+	meta := target.NewAPI()
+	if service.Plugin.Upstream != "" {
+		return errors.New("plugin.upstream is for the provider of a task plugin")
+	}
+	service.Capabilities = handler.relayCapabilities(meta)
+	if len(service.Capabilities) == 0 {
+		return fmt.Errorf("none of the routes of %s is one AstrLink serves yet", meta.Key)
+	}
+	if service.HTTP != nil {
+		if service.HTTP.BaseURL == "" {
+			service.HTTP.BaseURL = meta.BaseURL
+		}
+		service.HTTP.Auth = relayServiceAuth(meta)
+		service.HTTP.ModelListPath = ""
+	}
+	return nil
+}

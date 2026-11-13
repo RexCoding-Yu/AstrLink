@@ -6030,7 +6030,8 @@
       "scripts": "次の依存のインストールスクリプトは実行していません：{{packages}}",
       "warnings": {
         "version_mismatch": "package.json とプラグインの宣言でバージョンが違います（{{detail}}）。",
-        "build_warning": "ビルドの注意：{{detail}}"
+        "build_warning": "ビルドの注意：{{detail}}",
+        "route_unsupported": "ルート {{detail}} は AstrLink ではまだ中継できません（プラグイン自身の変換が必要か、AstrLink が受け付けないエンドポイントです）。インストール後もこのルートは無効です。"
       },
       "failures": {
         "invalid_link": "読み取れる GitHub リポジトリのリンクではありません。",
@@ -6067,6 +6068,7 @@
         "risks": "リスク"
       },
       "taskKind": "タスクプラグイン",
+      "providerKind": "プロバイダープラグイン",
       "keyHosts": "キーの送信先",
       "highRisk": "高リスクの権限を要求：{{capability}}",
       "changelog": "更新履歴"

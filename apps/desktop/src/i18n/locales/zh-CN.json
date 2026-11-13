@@ -6030,7 +6030,8 @@
       "scripts": "这些依赖带安装脚本，没有运行：{{packages}}",
       "warnings": {
         "version_mismatch": "package.json 和插件声明的版本不一致（{{detail}}）。",
-        "build_warning": "构建提示：{{detail}}"
+        "build_warning": "构建提示：{{detail}}",
+        "route_unsupported": "{{detail}} 这条路由 AstrLink 暂时不能转发（需要插件自己转换，或者不是 AstrLink 接收的接口），装上后这条路由不生效。"
       },
       "failures": {
         "invalid_link": "这不是能识别的 GitHub 仓库链接。",
@@ -6067,6 +6068,7 @@
         "risks": "风险"
       },
       "taskKind": "任务插件",
+      "providerKind": "提供商插件",
       "keyHosts": "密钥只发往",
       "highRisk": "申请了高风险能力：{{capability}}",
       "changelog": "更新记录"

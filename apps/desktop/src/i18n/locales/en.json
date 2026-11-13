@@ -6030,7 +6030,8 @@
       "scripts": "Install scripts of these dependencies did not run: {{packages}}",
       "warnings": {
         "version_mismatch": "package.json and the plugin declare different versions ({{detail}}).",
-        "build_warning": "Build note: {{detail}}"
+        "build_warning": "Build note: {{detail}}",
+        "route_unsupported": "AstrLink cannot relay the route {{detail}} yet (the plugin converts it itself, or AstrLink does not serve that endpoint). It stays inactive after install."
       },
       "failures": {
         "invalid_link": "This is not a GitHub repository link AstrLink can read.",
@@ -6067,6 +6068,7 @@
         "risks": "Risks"
       },
       "taskKind": "Task plugin",
+      "providerKind": "Provider plugin",
       "keyHosts": "Key goes only to",
       "highRisk": "Asks for a high-risk capability: {{capability}}",
       "changelog": "Changelog"

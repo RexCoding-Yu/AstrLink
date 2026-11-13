@@ -88,7 +88,7 @@ func (installer *Installer) stageTask(ctx context.Context, text string, files ta
 		return nil, &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallInvalidPlugin, Messages: []string{err.Error()}}}
 	}
 	if checked.Task == nil {
-		return nil, &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallInvalidPlugin, Messages: []string{"plugin.js is not a task plugin"}}}
+		return nil, &Failure{contract.PluginInstallFailure{Reason: contract.PluginInstallInvalidPlugin, Messages: []string{"plugin.js is not a new-api plugin"}}}
 	}
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
@@ -142,8 +142,17 @@ func (installer *Installer) taskReview(staged *stagedTask, pluginBytes int, reco
 	review := newReview(staged.checked, pluginBytes, 0, record)
 	meta := staged.checked.Task
 	language := installer.language()
-	review.Kind, review.Task = contract.PluginKindTask, taskplugin.Summary(meta, language)
+	if meta.HasTaskPart() {
+		review.Kind, review.Task = contract.PluginKindTask, taskplugin.Summary(meta, language)
+	} else {
+		review.Kind = contract.PluginKindProvider
+	}
 	review.Description, review.Author = meta.Description.In(language), meta.Author.Name
+	for _, route := range meta.Relay {
+		if route.Plugin() || plugin.RelayProtocol(route.IncomingPath) == "" {
+			review.Warnings = append(review.Warnings, contract.PluginInstallWarning{Code: contract.PluginWarningRoute, Detail: route.IncomingPath})
+		}
+	}
 	review.Icon = staged.icon
 	review.Changelog = changelogIn(files.changelogs, language)
 	review.Warnings = append(review.Warnings, staged.warnings...)

@@ -144,6 +144,10 @@ const (
 	PluginWarningBuild = "build_warning"
 	// PluginWarningIcon: the plugin's icon could not be fetched.
 	PluginWarningIcon = "icon_unavailable"
+	// PluginWarningRoute is a route of a new-api plugin's provider part
+	// AstrLink does not serve yet: one the plugin's hooks convert, or of a
+	// path the gateway does not answer. Detail names its path.
+	PluginWarningRoute = "route_unsupported"
 )
 
 // PluginInstallWarning is something the review points out that does not

@@ -12,6 +12,10 @@ const ProtocolPluginNative ProtocolID = "plugin.native"
 // API.
 const PluginProviderTask = "task"
 
+// PluginProviderRelay is the provider a new-api plugin's provider part
+// offers: API requests relayed over its meta.relay routes.
+const PluginProviderRelay = "relay"
+
 // PluginUpstreamNewAPI marks a task plugin's provider that is another
 // new-api gateway with the same plugin installed, rather than the vendor.
 const PluginUpstreamNewAPI = "new_api"
@@ -20,6 +24,9 @@ const PluginUpstreamNewAPI = "new_api"
 const (
 	PluginKindExtension = "extension"
 	PluginKindTask      = "task"
+	// PluginKindProvider is a new-api plugin with a provider part and no
+	// task part.
+	PluginKindProvider = "provider"
 )
 
 // PluginTask is what a task plugin, written for new-api's task plugin API,

@@ -92,7 +92,7 @@ describe("plugin model", () => {
     expect(() =>
       parsePluginList({
         directory: "/data/plugins",
-        plugins: [{ ...summary, kind: "provider" }],
+        plugins: [{ ...summary, kind: "transform" }],
       }),
     ).toThrow();
 

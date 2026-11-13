@@ -84,6 +84,9 @@ func load(source Source, limits Limits, dirs *pluginDirs) (*program, error) {
 	defer instance.close()
 	stop := interruptAfter(instance.interrupt, loadTime, errLoadTime)
 	defer stop()
+	if isNewAPIMeta(instance.runtime) {
+		return loadTask(source, module, parsed, limits, dirs)
+	}
 	meta, err := readMeta(instance.runtime, source.File)
 	if err != nil {
 		return nil, err

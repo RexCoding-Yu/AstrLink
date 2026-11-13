@@ -94,10 +94,12 @@ export function pluginMatches(
   ].some((text) => text.toLowerCase().includes(needle));
 }
 
-/** Whether a plugin offers providers: a task plugin, or a provider adapter. */
+/** Whether a plugin offers providers: a new-api task or provider plugin, or a provider adapter. */
 export function offersProviders(plugin: PluginSummary): boolean {
   return (
-    plugin.kind === "task" || plugin.requested_capabilities.includes("provider")
+    plugin.kind === "task" ||
+    plugin.kind === "provider" ||
+    plugin.requested_capabilities.includes("provider")
   );
 }
 

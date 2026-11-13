@@ -64,6 +64,9 @@ func taskCapabilities(meta *plugin.TaskMeta) []contract.Capability {
 // the plugin: its capabilities, and its address when the user named none.
 // It reports false for a provider of any other kind.
 func (handler *Handler) applyTaskProvider(service *contract.Service) (bool, error) {
+	if service.Kind == contract.ServiceKindPlugin && service.Plugin != nil && service.Plugin.Provider == contract.PluginProviderRelay {
+		return true, handler.applyRelayProvider(service)
+	}
 	if service.Kind != contract.ServiceKindPlugin || service.Plugin == nil || service.Plugin.Provider != contract.PluginProviderTask {
 		return false, nil
 	}
@@ -89,7 +92,8 @@ func (handler *Handler) applyTaskProvider(service *contract.Service) (bool, erro
 }
 
 // syncTaskProviders brings the capabilities of every provider of a task
-// plugin in line with the plugin as it now is, after an install or reload.
+// plugin or of a new-api plugin's provider part in line with the plugin as
+// it now is, after an install or reload.
 func (handler *Handler) syncTaskProviders(ctx context.Context) {
 	if handler.serviceStore == nil || handler.plugins == nil {
 		return
@@ -103,14 +107,22 @@ func (handler *Handler) syncTaskProviders(ctx context.Context) {
 		}
 		for _, record := range page.Items {
 			service := record.Service
-			if service.Plugin == nil || service.Plugin.Provider != contract.PluginProviderTask {
+			if service.Plugin == nil || (service.Plugin.Provider != contract.PluginProviderTask && service.Plugin.Provider != contract.PluginProviderRelay) {
 				continue
 			}
 			target := handler.plugins.Current().Plugin(service.Plugin.Key)
-			if target == nil || target.Task() == nil {
+			var capabilities []contract.Capability
+			switch {
+			case service.Plugin.Provider == contract.PluginProviderRelay && target != nil && target.NewAPI() != nil:
+				capabilities = handler.relayCapabilities(target.NewAPI())
+			case service.Plugin.Provider == contract.PluginProviderTask && target != nil && target.Task() != nil:
+				capabilities = taskCapabilities(target.Task())
+			default:
 				continue
 			}
-			capabilities := taskCapabilities(target.Task())
+			if len(capabilities) == 0 {
+				continue
+			}
 			if slices.Equal(capabilities, service.Capabilities) {
 				continue
 			}

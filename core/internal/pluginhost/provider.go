@@ -32,6 +32,9 @@ type ProviderAttempt struct {
 	Stream   bool
 	// Index counts the attempts of the request, from 0.
 	Index int
+	// ClientPath is the path the client asked, which picks the route of a
+	// new-api plugin's provider part.
+	ClientPath string
 }
 
 // Bounds of what a provider adapter reads of an upstream answer.
@@ -223,6 +226,9 @@ func upstreamView(response *http.Response, body []byte) map[string]any {
 // conversion back to the client's protocol, the privacy restore, the
 // records and the price, sees that response as any upstream's.
 func (host *Host) ForwardProvider(writer http.ResponseWriter, request *http.Request, target transport.Target, attempt ProviderAttempt, roundTrip RoundTrip) error {
+	if target.Service.Plugin != nil && target.Service.Plugin.Provider == contract.PluginProviderRelay {
+		return host.forwardRelay(writer, request, target, attempt, roundTrip)
+	}
 	adapter, err := host.providerFor(target.Service)
 	if err != nil {
 		return transport.NewUpstreamError(err)
@@ -581,6 +587,9 @@ func writeServerSentEvent(out io.Writer, name string, data json.RawMessage) erro
 // "models", and parseResponse returns { models }. ok is false when the
 // plugin lists none.
 func (host *Host) ProviderModels(ctx context.Context, service contract.Service, target transport.Target, roundTrip RoundTrip) (models []string, ok bool, err error) {
+	if service.Plugin != nil && service.Plugin.Provider == contract.PluginProviderRelay {
+		return host.relayModels(ctx, service, target, roundTrip)
+	}
 	adapter, err := host.providerFor(service)
 	if err != nil {
 		return nil, false, err

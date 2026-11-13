@@ -229,8 +229,8 @@ export interface PluginSummary {
   running_tasks?: number;
 }
 
-/** An extension of requests, or a task plugin of new-api's API. */
-export type PluginKind = "extension" | "task";
+/** An extension of requests, or a task or provider plugin of new-api's API. */
+export type PluginKind = "extension" | "task" | "provider";
 
 /** A gateway protocol a task plugin serves. */
 export interface PluginTaskProtocol {
@@ -1134,7 +1134,7 @@ function parseSummaryAt(value: unknown, path: string): PluginSummary {
   });
 }
 
-const pluginKinds = ["extension", "task"] as const;
+const pluginKinds = ["extension", "task", "provider"] as const;
 
 function parseTaskProtocols(
   value: unknown,

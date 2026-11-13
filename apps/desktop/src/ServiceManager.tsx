@@ -250,6 +250,7 @@ export function pluginProviderChoices(
   return list.plugins.flatMap((plugin) =>
     plugin.enabled &&
     (plugin.kind === "task" ||
+      plugin.kind === "provider" ||
       plugin.granted_capabilities.includes("provider")) &&
     plugin.providers
       ? plugin.providers.map((provider) => ({

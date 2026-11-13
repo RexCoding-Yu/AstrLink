@@ -759,9 +759,6 @@ func (installer *Installer) readMarket(ctx context.Context, address string) (mar
 		if listed.Models == nil {
 			listed.Models = []string{}
 		}
-		if entry.Provider {
-			listed.Unsupported = append(listed.Unsupported, contract.PluginPartProvider)
-		}
 		if entry.Transform {
 			listed.Unsupported = append(listed.Unsupported, contract.PluginPartTransform)
 		}

@@ -1385,13 +1385,15 @@ function PluginDetailPane({
     ? []
     : task
       ? ["overview", "tasks", "status"]
-      : [
-          "overview",
-          "settings",
-          "status",
-          "develop",
-          ...pluginTabs.map((entry) => `plugin:${entry.id}` as const),
-        ];
+      : detail.kind === "provider"
+        ? ["overview", "status"]
+        : [
+            "overview",
+            "settings",
+            "status",
+            "develop",
+            ...pluginTabs.map((entry) => `plugin:${entry.id}` as const),
+          ];
   const current = tabs.includes(tab) ? tab : "overview";
   const source = detail.installed ? (
     <PluginSourceCard
